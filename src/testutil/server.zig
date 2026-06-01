@@ -1489,6 +1489,147 @@ test "td1: POST /machine/td1/reboot without serial returns error envelope" {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Printer (printer.*) integration tests — full socket path. With no Klippy
+// connection every printer endpoint returns Moonraker's 503 disconnected error.
+// ---------------------------------------------------------------------------
+
+test "printer: every print/restart endpoint returns Klippy Host not connected" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const paths = [_][]const u8{
+        "/printer/print/start",
+        "/printer/print/pause",
+        "/printer/print/resume",
+        "/printer/print/cancel",
+        "/printer/restart",
+        "/printer/firmware_restart",
+    };
+    for (paths) |path| {
+        const body = try ts.postJson(alloc, path, "{}");
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        const err = p.value.object.get("error").?.object;
+        try std.testing.expectEqual(@as(i64, 503), err.get("code").?.integer);
+        try std.testing.expectEqualStrings("Klippy Host not connected", err.get("message").?.string);
+    }
+}
+
+test "printer: JSON-RPC printer.print.start returns code 503 with exact message" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/jsonrpc",
+        \\{"jsonrpc":"2.0","method":"printer.print.start","params":{"filename":"a.gcode"},"id":9}
+    );
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const err = p.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 503), err.get("code").?.integer);
+    try std.testing.expectEqualStrings("Klippy Host not connected", err.get("message").?.string);
+    try std.testing.expectEqual(@as(i64, 9), p.value.object.get("id").?.integer);
+}
+
+// ---------------------------------------------------------------------------
+// /server/redirect (CORS redirect router route) integration tests.
+// ---------------------------------------------------------------------------
+
+test "redirect: no url argument returns 400 'No url argument provided'" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/redirect");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const err = p.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 400), err.get("code").?.integer);
+    try std.testing.expectEqualStrings("No url argument provided", err.get("message").?.string);
+}
+
+test "redirect: url present is rejected (no CORS configured)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/redirect?url=http://example.com");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const err = p.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 400), err.get("code").?.integer);
+    try std.testing.expect(std.mem.indexOf(u8, err.get("message").?.string, "Unauthorized URL redirect") != null);
+}
+
+// ---------------------------------------------------------------------------
+// OctoPrint compatibility (/api/*) integration tests.
+// ---------------------------------------------------------------------------
+
+test "octoprint: GET /api/version returns server/api/text (unwrapped)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/api/version");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    // wrap_result=false → the object is the body directly (no "result" key).
+    try std.testing.expect(p.value.object.get("result") == null);
+    try std.testing.expectEqualStrings("1.5.0", p.value.object.get("server").?.string);
+    try std.testing.expectEqualStrings("0.1", p.value.object.get("api").?.string);
+}
+
+test "octoprint: GET /api/printer reports Offline state flags" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/api/printer");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const state = p.value.object.get("state").?.object;
+    try std.testing.expectEqualStrings("Offline", state.get("text").?.string);
+    try std.testing.expectEqual(false, state.get("flags").?.object.get("operational").?.bool);
+    try std.testing.expectEqual(true, state.get("flags").?.object.get("closedOrError").?.bool);
+}
+
+test "octoprint: POST /api/login returns the _api user" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/api/login", "{}");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expectEqualStrings("_api", p.value.object.get("name").?.string);
+}
+
+// ---------------------------------------------------------------------------
+// Zeroconf SSDP integration test.
+// ---------------------------------------------------------------------------
+
+test "zeroconf: GET /server/zeroconf/ssdp returns 404 (device not registered)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/zeroconf/ssdp");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("error") != null);
+    try std.testing.expectEqual(@as(i64, 404), p.value.object.get("error").?.object.get("code").?.integer);
+}
+
 test "files: notify_filelist_changed emitted on upload with correct payload" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

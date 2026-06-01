@@ -116,8 +116,10 @@ pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io) ![]u8 {
     for (notify.all_names) |n| try notif_names.append(alloc, n);
     std.mem.sort([]const u8, notif_names.items, {}, strLt);
 
-    // Transport routes phobos serves (sorted).
-    const router_routes = [_][]const u8{ "/server/jsonrpc", "/websocket" };
+    // Transport routes phobos serves (sorted). These are the non-register_endpoint
+    // Tornado routes (api/api_surface.json router_routes): the JSON-RPC bridge,
+    // the client websocket, the Klippy bridge socket, and the CORS redirect.
+    const router_routes = [_][]const u8{ "/klippysocket", "/server/jsonrpc", "/server/redirect", "/websocket" };
 
     // Serialize.
     var aw: std.Io.Writer.Allocating = .init(alloc);
@@ -247,7 +249,7 @@ test "dumpApi: output contains 27 notifications" {
     try std.testing.expectEqual(@as(usize, 27), notifs.items.len);
 }
 
-test "dumpApi: output contains /server/jsonrpc and /websocket router routes" {
+test "dumpApi: output contains all four router routes" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -258,6 +260,13 @@ test "dumpApi: output contains /server/jsonrpc and /websocket router routes" {
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"/server/jsonrpc\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"/websocket\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"/klippysocket\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"/server/redirect\"") != null);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out, .{});
+    defer parsed.deinit();
+    const routes = parsed.value.object.get("router_routes").?.array;
+    try std.testing.expectEqual(@as(usize, 4), routes.items.len);
 }
 
 test "dumpApi: output is valid JSON with all required top-level keys" {

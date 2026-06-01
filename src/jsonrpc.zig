@@ -100,8 +100,20 @@ pub const Dispatcher = struct {
         // Call handler
         const result = entry.handler(entry.ctx, params, alloc) catch |err| {
             if (is_notification) return try alloc.dupe(u8, &.{});
-            const code: i64 = if (err == error.InvalidParams) -32602 else -32603;
-            const msg: []const u8 = if (err == error.InvalidParams) "Invalid params" else "Internal error";
+            // Moonraker's JsonRPC.execute_method maps a ServerError to its
+            // status_code verbatim (except 404→-32601, 401→-32602). The
+            // Klippy-disconnected error is ServerError("Klippy Host not
+            // connected", 503), so it surfaces as code 503 with that message.
+            const code: i64 = switch (err) {
+                error.InvalidParams => -32602,
+                error.KlippyDisconnected => 503,
+                else => -32603,
+            };
+            const msg: []const u8 = switch (err) {
+                error.InvalidParams => "Invalid params",
+                error.KlippyDisconnected => "Klippy Host not connected",
+                else => "Internal error",
+            };
             return jv.errorResponse(alloc, id, code, msg);
         };
 

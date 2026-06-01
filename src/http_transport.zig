@@ -165,6 +165,42 @@ fn wrapResult(alloc: std.mem.Allocator, result: std.json.Value) ![]const u8 {
     return aw.toOwnedSlice();
 }
 
+/// Handle GET /server/redirect. Mirrors Moonraker's RedirectHandler under the
+/// default configuration (no CORS domains): the URL is taken from `?url=` or a
+/// JSON body `{"url": ...}`, and — because no origin can pass the CORS check —
+/// the request is always rejected with a 400 error envelope. The two distinct
+/// messages ("No url argument provided" vs "Unauthorized URL redirect: <url>")
+/// match Moonraker exactly so clients see identical behavior.
+pub fn handleRedirect(target: []const u8, body: []const u8, alloc: std.mem.Allocator) !Response {
+    // Resolve the url: query string takes precedence, then JSON body.
+    var url: ?[]const u8 = null;
+    const qp = try queryParams(alloc, target);
+    if (qp == .object) {
+        if (qp.object.get("url")) |v| switch (v) {
+            .string => |s| url = s,
+            else => {},
+        };
+    }
+    if (url == null and body.len > 0) {
+        if (std.json.parseFromSlice(std.json.Value, alloc, body, .{})) |p| {
+            if (p.value == .object) {
+                if (p.value.object.get("url")) |v| switch (v) {
+                    .string => |s| url = try alloc.dupe(u8, s),
+                    else => {},
+                };
+            }
+        } else |_| {}
+    }
+
+    if (url) |u| {
+        const msg = try std.fmt.allocPrint(alloc, "Unauthorized URL redirect: {s}", .{u});
+        const b = try errorBody(alloc, 400, msg);
+        return .{ .status = .bad_request, .body = b };
+    }
+    const b = try errorBody(alloc, 400, "No url argument provided");
+    return .{ .status = .bad_request, .body = b };
+}
+
 /// Core request handling, independent of sockets, so it can be unit- and
 /// fuzz-tested directly. Produces the response body + status for a parsed
 /// request. `alloc` should be a per-request arena.
@@ -203,6 +239,18 @@ pub fn handleParsedAuth(
         // empty object to keep the body valid JSON.
         const out = if (bytes.len == 0) try alloc.dupe(u8, "{}") else bytes;
         return .{ .status = .ok, .body = out };
+    }
+
+    // CORS redirect: GET /server/redirect (a Tornado router route, not a
+    // register_endpoint). Moonraker's RedirectHandler reads `?url=` (or a JSON
+    // body `url`), validates the origin via the authorization component's CORS
+    // check, then issues an HTTP redirect to it. With no CORS domains configured
+    // (phobos's default — there is no cors check wired) every candidate URL is
+    // rejected, so the faithful behavior is:
+    //   * missing url       → 400 "No url argument provided"
+    //   * url present        → 400 "Unauthorized URL redirect: <url>"
+    if (method == .GET and std.mem.eql(u8, path, "/server/redirect")) {
+        return handleRedirect(target, body, alloc);
     }
 
     // File manager upload: POST /server/files/upload (multipart form body).
@@ -304,22 +352,29 @@ pub fn handleParsedAuth(
     // comptime-known function, so dispatch the runtime handler pointer through a
     // fixed trampoline.
     const result = srv.core.run(srv.io, callHandler, .{ route.handler, route.ctx, params, alloc }) catch |err| {
+        // `error.KlippyDisconnected` mirrors Moonraker's
+        // ServerError("Klippy Host not connected", 503): a 503 whose body carries
+        // both the 503 code and the exact message (AuthorizedRequestHandler
+        // .write_error → {"code": status, "message": reason}).
         const code: i64 = switch (err) {
             error.InvalidParams => 400,
             error.Forbidden => 403,
             error.NotFound => 404,
+            error.KlippyDisconnected => 503,
             else => 500,
         };
         const msg: []const u8 = switch (err) {
             error.InvalidParams => "Bad Request",
             error.Forbidden => "Forbidden",
             error.NotFound => "Not Found",
+            error.KlippyDisconnected => @import("components/printer.zig").klippy_disconnected_message,
             else => "Internal Server Error",
         };
         const status: std.http.Status = switch (err) {
             error.InvalidParams => .bad_request,
             error.Forbidden => .forbidden,
             error.NotFound => .not_found,
+            error.KlippyDisconnected => .service_unavailable,
             else => .internal_server_error,
         };
         const b = try errorBody(alloc, code, msg);
@@ -368,6 +423,16 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         // returned WebSocket borrows the HTTP reader/writer buffers above.
         switch (req.upgradeRequested()) {
             .websocket => |key| {
+                const upgrade_path = pathOf(req.head.target);
+
+                // /klippysocket = Moonraker's BridgeSocket. Accept the upgrade
+                // then close 1001 "Klippy Disconnected" (no Klippy to bridge).
+                if (std.mem.eql(u8, upgrade_path, "/klippysocket")) {
+                    var bridge = req.respondWebSocket(.{ .key = key orelse "" }) catch return;
+                    ws.serveBridge(io, &bridge);
+                    return;
+                }
+
                 const conns = srv.conns orelse {
                     req.respond("{\"error\":{\"code\":400,\"message\":\"WebSocket unsupported\"}}", .{
                         .status = .bad_request,

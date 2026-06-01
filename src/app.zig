@@ -39,6 +39,9 @@ const update_manager_component = @import("components/update_manager.zig");
 const power_component = @import("components/power.zig");
 const wled_component = @import("components/wled.zig");
 const td1_component = @import("components/td1.zig");
+const printer_component = @import("components/printer.zig");
+const octoprint_component = @import("components/octoprint_compat.zig");
+const zeroconf_component = @import("components/zeroconf.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -68,6 +71,9 @@ const UpdateSource = update_manager_component.Source;
 const PowerCtx = power_component.PowerCtx;
 const WledCtx = wled_component.WledCtx;
 const Td1Ctx = td1_component.Td1Ctx;
+const PrinterCtx = printer_component.PrinterCtx;
+const OctoPrintCtx = octoprint_component.OctoPrintCtx;
+const ZeroconfCtx = zeroconf_component.ZeroconfCtx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -154,6 +160,9 @@ pub const App = struct {
     power_ctx: *PowerCtx,
     wled_ctx: *WledCtx,
     td1_ctx: *Td1Ctx,
+    printer_ctx: *PrinterCtx,
+    octoprint_ctx: *OctoPrintCtx,
+    zeroconf_ctx: *ZeroconfCtx,
     /// Absolute datadir whose subfolders back the file_manager roots. Owned and
     /// freed in deinit. The root paths in `file_roots` point into the joined
     /// strings owned alongside it.
@@ -366,6 +375,21 @@ pub const App = struct {
         errdefer alloc.destroy(td1_ctx);
         td1_ctx.* = .{};
 
+        // --- Printer context (printer.* — Klippy-disconnected stubs) ---
+        const printer_ctx = try alloc.create(PrinterCtx);
+        errdefer alloc.destroy(printer_ctx);
+        printer_ctx.* = .{};
+
+        // --- OctoPrint compatibility context (/api/*) ---
+        const octoprint_ctx = try alloc.create(OctoPrintCtx);
+        errdefer alloc.destroy(octoprint_ctx);
+        octoprint_ctx.* = .{};
+
+        // --- Zeroconf/SSDP context (/server/zeroconf/ssdp) ---
+        const zeroconf_ctx = try alloc.create(ZeroconfCtx);
+        errdefer alloc.destroy(zeroconf_ctx);
+        zeroconf_ctx.* = .{};
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -394,6 +418,9 @@ pub const App = struct {
             .power_ctx = power_ctx,
             .wled_ctx = wled_ctx,
             .td1_ctx = td1_ctx,
+            .printer_ctx = printer_ctx,
+            .octoprint_ctx = octoprint_ctx,
+            .zeroconf_ctx = zeroconf_ctx,
             .datadir = datadir,
             .file_roots = file_roots,
             .lmdb_store_ptr = lmdb_ptr,
@@ -428,6 +455,9 @@ pub const App = struct {
         self.wled_ctx.deinit();
         self.alloc.destroy(self.wled_ctx);
         self.alloc.destroy(self.td1_ctx);
+        self.alloc.destroy(self.printer_ctx);
+        self.alloc.destroy(self.octoprint_ctx);
+        self.alloc.destroy(self.zeroconf_ctx);
         self.alloc.destroy(self.analysis_ctx);
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
@@ -526,20 +556,38 @@ pub const App = struct {
         // TD-1 component: machine.td1.* endpoints.
         try td1_component.registerTd1(self.reg, self.td1_ctx);
 
-        // WS-only methods (server.connection.identify, server.websocket.id)
-        // are handled inside the WS transport layer per-connection (they need
-        // the live *Connection). Register them in the dispatcher so the
-        // --dump-api reflection sees them, pointing at a no-op ctx for now.
-        try self.dispatcher.register(
-            ws.identify_method,
+        // Printer component: printer.* endpoints (proxied to Klippy). With no
+        // Klippy connection every handler returns the 503 disconnected error.
+        try printer_component.registerPrinter(self.reg, self.printer_ctx);
+
+        // OctoPrint compatibility shim: /api/* (HTTP-only, no JSON-RPC).
+        try octoprint_component.registerOctoPrint(self.reg, self.octoprint_ctx);
+
+        // Zeroconf/SSDP discovery: /server/zeroconf/ssdp (HTTP-only).
+        try zeroconf_component.registerZeroconf(self.reg, self.zeroconf_ctx);
+
+        // WS-only endpoints (server.connection.identify, server.websocket.id):
+        // handled inside the WS transport layer per-connection (they need the
+        // live *Connection). Register them as WEBSOCKET-only endpoints so they
+        // appear in the API surface (both as endpoints and JSON-RPC methods);
+        // the derived dispatcher entry points at a no-op stub the WS layer
+        // intercepts before the dispatcher is consulted.
+        try self.reg.registerEndpoint(
+            .{ .path = "/server/connection/identify", .methods = &.{.POST}, .transports = &.{.WEBSOCKET}, .auth_required = false },
             @ptrCast(self.info),
             wsStubHandler,
         );
-        try self.dispatcher.register(
-            ws.websocket_id_method,
+        try self.reg.registerEndpoint(
+            .{ .path = "/server/websocket/id", .methods = &.{.GET}, .transports = &.{.WEBSOCKET} },
             @ptrCast(self.info),
             wsStubHandler,
         );
+        // Guard: the registry-derived names must match the WS layer constants,
+        // or the WS interception in transport/ws.zig would never fire.
+        comptime {
+            std.debug.assert(std.mem.eql(u8, ws.identify_method, "server.connection.identify"));
+            std.debug.assert(std.mem.eql(u8, ws.websocket_id_method, "server.websocket.id"));
+        }
     }
 
     /// Returns the HTTP transport Server configured with this App's components.
@@ -755,6 +803,13 @@ test "App.init: dispatcher has exactly the expected methods" {
         // TD-1 (machine.td1.*)
         "machine.td1.data",
         "machine.td1.reboot",
+        // Printer (printer.* — Klippy-proxied)
+        "printer.print.start",
+        "printer.print.pause",
+        "printer.print.resume",
+        "printer.print.cancel",
+        "printer.restart",
+        "printer.firmware_restart",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",
