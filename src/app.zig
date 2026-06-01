@@ -20,6 +20,9 @@ const methods = @import("core/methods.zig");
 const ws = @import("transport/ws.zig");
 const http_transport = @import("http_transport.zig");
 const db_component = @import("components/database.zig");
+const history_component = @import("components/history.zig");
+const job_queue_component = @import("components/job_queue.zig");
+const announcements_component = @import("components/announcements.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -28,6 +31,9 @@ const Connections = connections.Connections;
 const NotifyBus = notify.NotifyBus;
 const ServerInfo = methods.ServerInfo;
 const DbCtx = db_component.DbCtx;
+const HistoryCtx = history_component.HistoryCtx;
+const JobQueueCtx = job_queue_component.JobQueueCtx;
+const AnnouncementsCtx = announcements_component.AnnouncementsCtx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -86,6 +92,9 @@ pub const App = struct {
     conns: *Connections,
     bus: *NotifyBus,
     db_ctx: *DbCtx,
+    history_ctx: *HistoryCtx,
+    job_queue_ctx: *JobQueueCtx,
+    announcements_ctx: *AnnouncementsCtx,
     /// Owns the LMDB environment when with_lmdb=true; void otherwise.
     lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
 
@@ -147,6 +156,24 @@ pub const App = struct {
             db_ctx.* = .{ .store = NullStore.dataStore() };
         }
 
+        // --- History context ---
+        const history_ctx = try alloc.create(HistoryCtx);
+        errdefer alloc.destroy(history_ctx);
+        history_ctx.* = HistoryCtx{
+            .store = db_ctx.store,
+            .bus = bus,
+        };
+
+        // --- Job queue context ---
+        const job_queue_ctx = try alloc.create(JobQueueCtx);
+        errdefer alloc.destroy(job_queue_ctx);
+        job_queue_ctx.* = try JobQueueCtx.init(alloc, db_ctx.store, bus);
+
+        // --- Announcements context ---
+        const announcements_ctx = try alloc.create(AnnouncementsCtx);
+        errdefer alloc.destroy(announcements_ctx);
+        announcements_ctx.* = try AnnouncementsCtx.init(alloc, db_ctx.store, bus);
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -156,6 +183,9 @@ pub const App = struct {
             .conns = conns,
             .bus = bus,
             .db_ctx = db_ctx,
+            .history_ctx = history_ctx,
+            .job_queue_ctx = job_queue_ctx,
+            .announcements_ctx = announcements_ctx,
             .lmdb_store_ptr = lmdb_ptr,
         };
 
@@ -174,6 +204,11 @@ pub const App = struct {
             self.lmdb_store_ptr.close();
             self.alloc.destroy(self.lmdb_store_ptr);
         }
+        self.announcements_ctx.deinit();
+        self.alloc.destroy(self.announcements_ctx);
+        self.job_queue_ctx.deinit();
+        self.alloc.destroy(self.job_queue_ctx);
+        self.alloc.destroy(self.history_ctx);
         self.alloc.destroy(self.bus);
         self.alloc.destroy(self.conns);
         self.alloc.destroy(self.info);
@@ -192,6 +227,15 @@ pub const App = struct {
 
         // Database component: server.database.* endpoints.
         try db_component.registerDatabase(self.reg, self.db_ctx);
+
+        // History component: server.history.* endpoints.
+        try history_component.registerHistory(self.reg, self.history_ctx);
+
+        // Job queue component: server.job_queue.* endpoints.
+        try job_queue_component.registerJobQueue(self.reg, self.job_queue_ctx);
+
+        // Announcements component: server.announcements.* endpoints.
+        try announcements_component.registerAnnouncements(self.reg, self.announcements_ctx);
 
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
@@ -287,6 +331,26 @@ test "App.init: dispatcher has exactly the expected methods" {
         "debug.database.list",
         "debug.database.item",
         "debug.database.table",
+        // History
+        "server.history.list",
+        "server.history.totals",
+        "server.history.reset_totals",
+        "server.history.get_job",
+        "server.history.delete_job",
+        // Job queue
+        "server.job_queue.status",
+        "server.job_queue.pause",
+        "server.job_queue.start",
+        "server.job_queue.jump",
+        "server.job_queue.post_job",
+        "server.job_queue.delete_job",
+        // Announcements
+        "server.announcements.list",
+        "server.announcements.dismiss",
+        "server.announcements.update",
+        "server.announcements.post_feed",
+        "server.announcements.delete_feed",
+        "server.announcements.feeds",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",
