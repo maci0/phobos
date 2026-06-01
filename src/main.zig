@@ -1,5 +1,7 @@
 const std = @import("std");
 pub const arena = @import("util/arena.zig");
+pub const config_backend = @import("config/backend.zig");
+pub const config = @import("config/confighelper.zig");
 pub const io = @import("io.zig");
 pub const core = @import("server/core.zig");
 pub const jsonrpc = @import("jsonrpc.zig");
