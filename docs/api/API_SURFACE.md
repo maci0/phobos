@@ -1,0 +1,627 @@
+# Moonraker API Surface Inventory
+
+Complete, code-derived inventory of Moonraker's externally observable API,
+intended as the spec a Zig reimplementation must match identically.
+
+- Source analyzed: `vendor/moonraker` (`__version__ = 0.10.1.dev20`, `API_VERSION = (1, 5, 0)`).
+- Cross-checked against `vendor/moonraker/docs/external_api/*.md`.
+- Read-only analysis; no source was modified.
+
+---
+
+## 1. Core concepts
+
+### 1.1 Endpoint registration → HTTP path + JSON-RPC method
+
+Every API is registered through `Server.register_endpoint` (alias of
+`MoonrakerApp.register_endpoint` in `moonraker/components/application.py`).
+Signature:
+
+```
+register_endpoint(endpoint, request_types, callback,
+                  transports=TransportType.all(), wrap_result=True,
+                  content_type=None, auth_required=True, is_remote=False)
+```
+
+The same registration produces **both** an HTTP route and a JSON-RPC method (over
+WebSocket / MQTT / Unix-socket), unless `transports` restricts it.
+
+- `RequestType` (HTTP "method"): `GET`, `POST`, `DELETE`. `RequestType.all()` = GET|POST|DELETE.
+- `TransportType`: `HTTP`, `WEBSOCKET`, `MQTT`, `INTERNAL`. `TransportType.all()` = all four.
+- HTTP path is the `endpoint` string verbatim. Its first segment must be one of
+  `ENDPOINT_PREFIXES = ["printer", "server", "machine", "access", "api", "debug"]`
+  (validated only when HTTP transport is enabled).
+
+**JSON-RPC method-name derivation** (`APIDefinition.create` in `moonraker/common.py`):
+
+- Drop leading `/`, replace `/` with `.` → e.g. `/server/files/list` → `server.files.list`.
+- If the endpoint has **more than one** `RequestType`, the *last* path segment is
+  prefixed per request type: `get_`/`post_`/`delete_`. One method per request type.
+  - e.g. `/server/files/directory` with `RequestType.all()` →
+    `server.files.get_directory`, `server.files.post_directory`,
+    `server.files.delete_directory`.
+  - e.g. `/access/api_key` with GET|POST → `access.get_api_key`, `access.post_api_key`.
+- If the endpoint has exactly one request type, the name is the plain dotted path
+  (no prefix), e.g. `/server/files/list` → `server.files.list`.
+- `is_remote=True` (Klipper-proxied) endpoints are forced to `/printer/...`, accept
+  GET|POST, and map to a single dotted method (no `get_`/`post_` prefixing).
+
+### 1.2 Response shape
+
+HTTP responses (`DynamicRequestHandler`):
+
+- `wrap_result=True` (default): body = `{"result": <handler return value>}`.
+- `wrap_result=False`: body = `<handler return value>` serialized directly (used by
+  octoprint-compat and zeroconf endpoints).
+- Errors: HTTP status + body `{"error": {"code": <int>, "message": <str>, ...}}`.
+
+JSON-RPC responses (`JsonRPC` in `moonraker/common.py`):
+
+- Success: `{"jsonrpc":"2.0","result":<value>,"id":<id>}`.
+- Error: `{"jsonrpc":"2.0","error":{"code":<int>,"message":<str>},"id":<id>}`.
+- Standard JSON-RPC error codes used: `-32600` Invalid Request, `-32601` Method not
+  found, `-32602` Invalid params, `-32700` parse error, plus passthrough of internal
+  status codes (e.g. 400, 401, 404, 500).
+
+### 1.3 Fixed (non-`register_endpoint`) HTTP routes
+
+Registered directly on the router in `application.py` / `websockets.py`:
+
+| Path                       | Handler                | Notes |
+|----------------------------|------------------------|-------|
+| `/` (or `/<route_prefix>/?`) | `WelcomeHandler`     | HTML welcome page (GET) |
+| `/server/redirect`         | `RedirectHandler`      | GET, redirects to a configured URL |
+| `/server/jsonrpc`          | `RPCHandler`           | POST: JSON-RPC over plain HTTP |
+| `/websocket`               | `WebSocket`            | Primary JSON-RPC WebSocket endpoint |
+| `/klippysocket`            | `BridgeSocket`         | Raw bridge to Klippy's Unix socket |
+| `/server/files/upload`     | `FileUploadHandler`    | multipart file upload (POST) |
+| `/server/files/<root>/...` | `FileRequestHandler`   | static download of gcodes/config/logs |
+| `moonraker.log`,`klippy.log` | `FileRequestHandler` | static log download (`/server/files/...`) |
+
+`route_prefix` (optional config) is prepended to every path; default empty.
+
+---
+
+## 2. Summary table — all `register_endpoint` APIs
+
+Auth column: `yes` = `auth_required=True` (default); `no` = explicitly `auth_required=False`.
+Transports default to ALL (HTTP+WebSocket+MQTT+Internal) unless noted.
+
+| HTTP path | HTTP methods | JSON-RPC method(s) | Component (file) | Auth | Transports |
+|-----------|--------------|--------------------|------------------|------|------------|
+| `/server/info` | GET | `server.info` | server.py | yes | all |
+| `/server/config` | GET | `server.config` | server.py | yes | all |
+| `/server/restart` | POST | `server.restart` | server.py | yes | all |
+| `/server/logs/rollover` | POST | `server.logs.rollover` | loghelper.py | yes | all |
+| `/server/websocket/id` | GET | `server.websocket.id` | websockets.py | yes | WEBSOCKET only |
+| `/server/connection/identify` | POST | `server.connection.identify` | websockets.py | **no** | WEBSOCKET only |
+| `/server/temperature_store` | GET | `server.temperature_store` | data_store.py | yes | all |
+| `/server/gcode_store` | GET | `server.gcode_store` | data_store.py | yes | all |
+| `/server/files/list` | GET | `server.files.list` | file_manager | yes | all |
+| `/server/files/metadata` | GET | `server.files.metadata` | file_manager | yes | all |
+| `/server/files/metascan` | POST | `server.files.metascan` | file_manager | yes | all |
+| `/server/files/thumbnails` | GET | `server.files.thumbnails` | file_manager | yes | all |
+| `/server/files/roots` | GET | `server.files.roots` | file_manager | yes | all |
+| `/server/files/directory` | GET/POST/DELETE | `server.files.get_directory`, `server.files.post_directory`, `server.files.delete_directory` | file_manager | yes | all |
+| `/server/files/move` | POST | `server.files.move` | file_manager | yes | all |
+| `/server/files/copy` | POST | `server.files.copy` | file_manager | yes | all |
+| `/server/files/zip` | POST | `server.files.zip` | file_manager | yes | all |
+| `/server/files/delete_file` | DELETE | `server.files.delete_file` | file_manager | yes | **WEBSOCKET only** |
+| `/server/files/upload` | POST | (upload handler, no JSON-RPC) | application.py | yes | HTTP only |
+| `/server/database/list` | GET | `server.database.list` | database.py | yes | all |
+| `/server/database/item` | GET/POST/DELETE | `server.database.get_item`, `server.database.post_item`, `server.database.delete_item` | database.py | yes | all |
+| `/server/database/backup` | POST/DELETE | `server.database.post_backup`, `server.database.delete_backup` | database.py | yes | all |
+| `/server/database/restore` | POST | `server.database.restore` | database.py | yes | all |
+| `/server/database/compact` | POST | `server.database.compact` | database.py | yes | all |
+| `/debug/database/list` | GET | `debug.database.list` | database.py | yes | all (debug only) |
+| `/debug/database/item` | GET/POST/DELETE | `debug.database.get_item`, `debug.database.post_item`, `debug.database.delete_item` | database.py | yes | all (debug only) |
+| `/debug/database/table` | (see note) | `debug.database.table` | database.py | yes | all (debug only) |
+| `/server/history/job` | GET/DELETE | `server.history.get_job`, `server.history.delete_job` | history.py | yes | all |
+| `/server/history/list` | GET | `server.history.list` | history.py | yes | all |
+| `/server/history/totals` | GET | `server.history.totals` | history.py | yes | all |
+| `/server/history/reset_totals` | POST | `server.history.reset_totals` | history.py | yes | all |
+| `/server/job_queue/job` | POST/DELETE | `server.job_queue.post_job`, `server.job_queue.delete_job` | job_queue.py | yes | all |
+| `/server/job_queue/pause` | POST | `server.job_queue.pause` | job_queue.py | yes | all |
+| `/server/job_queue/start` | POST | `server.job_queue.start` | job_queue.py | yes | all |
+| `/server/job_queue/status` | GET | `server.job_queue.status` | job_queue.py | yes | all |
+| `/server/job_queue/jump` | POST | `server.job_queue.jump` | job_queue.py | yes | all |
+| `/server/announcements/list` | GET | `server.announcements.list` | announcements.py | yes | all |
+| `/server/announcements/dismiss` | POST | `server.announcements.dismiss` | announcements.py | yes | all |
+| `/server/announcements/update` | POST | `server.announcements.update` | announcements.py | yes | all |
+| `/server/announcements/feed` | POST/DELETE | `server.announcements.post_feed`, `server.announcements.delete_feed` | announcements.py | yes | all |
+| `/server/announcements/feeds` | GET | `server.announcements.feeds` | announcements.py | yes | all |
+| `/server/webcams/list` | GET | `server.webcams.list` | webcam.py | yes | all |
+| `/server/webcams/item` | GET/POST/DELETE | `server.webcams.get_item`, `server.webcams.post_item`, `server.webcams.delete_item` | webcam.py | yes | all |
+| `/server/webcams/test` | POST | `server.webcams.test` | webcam.py | yes | all |
+| `/server/notifiers/list` | GET | `server.notifiers.list` | notifier.py | yes | all |
+| `/debug/notifiers/test` | POST | `debug.notifiers.test` | notifier.py | yes | all (debug only) |
+| `/server/sensors/list` | GET | `server.sensors.list` | sensor.py | yes | all |
+| `/server/sensors/info` | GET | `server.sensors.info` | sensor.py | yes | all |
+| `/server/sensors/measurements` | GET | `server.sensors.measurements` | sensor.py | yes | all |
+| `/server/spoolman/spool_id` | GET/POST | `server.spoolman.get_spool_id`, `server.spoolman.post_spool_id` | spoolman.py | yes | all |
+| `/server/spoolman/proxy` | POST | `server.spoolman.proxy` | spoolman.py | yes | all |
+| `/server/spoolman/status` | GET | `server.spoolman.status` | spoolman.py | yes | all |
+| `/server/analysis/status` | GET | `server.analysis.status` | analysis.py | yes | all |
+| `/server/analysis/estimate` | POST | `server.analysis.estimate` | analysis.py | yes | all |
+| `/server/analysis/process` | POST | `server.analysis.process` | analysis.py | yes | all |
+| `/server/analysis/dump_config` | POST | `server.analysis.dump_config` | analysis.py | yes | all |
+| `/server/extensions/list` | GET | `server.extensions.list` | extensions.py | yes | all |
+| `/server/extensions/request` | POST | `server.extensions.request` | extensions.py | yes | all |
+| `/connection/register_remote_method` | POST | `connection.register_remote_method` | extensions.py | yes | **WEBSOCKET only** |
+| `/connection/send_event` | POST | `connection.send_event` | extensions.py | yes | **WEBSOCKET only** |
+| `/server/mqtt/publish` | POST | `server.mqtt.publish` | mqtt.py | yes | all **except MQTT** |
+| `/server/mqtt/subscribe` | POST | `server.mqtt.subscribe` | mqtt.py | yes | all **except MQTT** |
+| `/server/zeroconf/ssdp` | GET | (HTTP only, XML) | zeroconf.py | **no** | HTTP only, `content_type=application/xml`, `wrap_result=False` |
+| `/printer/print/pause` | POST | `printer.print.pause` | klippy_apis.py | yes | all |
+| `/printer/print/resume` | POST | `printer.print.resume` | klippy_apis.py | yes | all |
+| `/printer/print/cancel` | POST | `printer.print.cancel` | klippy_apis.py | yes | all |
+| `/printer/print/start` | POST | `printer.print.start` | klippy_apis.py | yes | all |
+| `/printer/restart` | POST | `printer.restart` | klippy_apis.py | yes | all |
+| `/printer/firmware_restart` | POST | `printer.firmware_restart` | klippy_apis.py | yes | all |
+| `/machine/reboot` | POST | `machine.reboot` | machine.py | yes | all |
+| `/machine/shutdown` | POST | `machine.shutdown` | machine.py | yes | all |
+| `/machine/services/restart` | POST | `machine.services.restart` | machine.py | yes | all |
+| `/machine/services/stop` | POST | `machine.services.stop` | machine.py | yes | all |
+| `/machine/services/start` | POST | `machine.services.start` | machine.py | yes | all |
+| `/machine/system_info` | GET | `machine.system_info` | machine.py | yes | all |
+| `/machine/sudo/info` | GET | `machine.sudo.info` | machine.py | yes | all |
+| `/machine/sudo/password` | POST | `machine.sudo.password` | machine.py | yes | all |
+| `/machine/peripherals/serial` | GET | `machine.peripherals.serial` | machine.py | yes | all |
+| `/machine/peripherals/usb` | GET | `machine.peripherals.usb` | machine.py | yes | all |
+| `/machine/peripherals/canbus` | GET | `machine.peripherals.canbus` | machine.py | yes | all |
+| `/machine/peripherals/video` | GET | `machine.peripherals.video` | machine.py | yes | all |
+| `/machine/proc_stats` | GET | `machine.proc_stats` | proc_stats.py | yes | all |
+| `/machine/update/moonraker` | POST | `machine.update.moonraker` | update_manager | yes | all |
+| `/machine/update/klipper` | POST | `machine.update.klipper` | update_manager | yes | all |
+| `/machine/update/system` | POST | `machine.update.system` | update_manager | yes | all |
+| `/machine/update/client` | POST | `machine.update.client` | update_manager | yes | all |
+| `/machine/update/full` | POST | `machine.update.full` | update_manager | yes | all |
+| `/machine/update/upgrade` | POST | `machine.update.upgrade` | update_manager | yes | all |
+| `/machine/update/status` | GET | `machine.update.status` | update_manager | yes | all |
+| `/machine/update/refresh` | POST | `machine.update.refresh` | update_manager | yes | all |
+| `/machine/update/recover` | POST | `machine.update.recover` | update_manager | yes | all |
+| `/machine/update/rollback` | POST | `machine.update.rollback` | update_manager | yes | all |
+| `/machine/device_power/devices` | GET | `machine.device_power.devices` | power.py | yes | all |
+| `/machine/device_power/status` | GET | `machine.device_power.status` | power.py | yes | all |
+| `/machine/device_power/on` | POST | `machine.device_power.on` | power.py | yes | all |
+| `/machine/device_power/off` | POST | `machine.device_power.off` | power.py | yes | all |
+| `/machine/device_power/device` | GET/POST | `machine.device_power.get_device`, `machine.device_power.post_device` | power.py | yes | all |
+| `/machine/wled/strips` | GET | `machine.wled.strips` | wled.py | yes | all |
+| `/machine/wled/status` | GET | `machine.wled.status` | wled.py | yes | all |
+| `/machine/wled/on` | POST | `machine.wled.on` | wled.py | yes | all |
+| `/machine/wled/off` | POST | `machine.wled.off` | wled.py | yes | all |
+| `/machine/wled/toggle` | POST | `machine.wled.toggle` | wled.py | yes | all |
+| `/machine/wled/strip` | GET/POST | `machine.wled.get_strip`, `machine.wled.post_strip` | wled.py | yes | all |
+| `/machine/td1/data` | GET | `machine.td1.data` | td1.py | yes | all |
+| `/machine/td1/reboot` | POST | `machine.td1.reboot` | td1.py | yes | all |
+| `/access/login` | POST | `access.login` | authorization.py | **no** | HTTP+WEBSOCKET |
+| `/access/logout` | POST | `access.logout` | authorization.py | yes | HTTP+WEBSOCKET |
+| `/access/refresh_jwt` | POST | `access.refresh_jwt` | authorization.py | **no** | HTTP+WEBSOCKET |
+| `/access/user` | GET/POST/DELETE | `access.get_user`, `access.post_user`, `access.delete_user` | authorization.py | yes | HTTP+WEBSOCKET |
+| `/access/users/list` | GET | `access.users.list` | authorization.py | yes | HTTP+WEBSOCKET |
+| `/access/user/password` | POST | `access.user.password` | authorization.py | yes | HTTP+WEBSOCKET |
+| `/access/api_key` | GET/POST | `access.get_api_key`, `access.post_api_key` | authorization.py | yes | HTTP+WEBSOCKET |
+| `/access/oneshot_token` | GET | `access.oneshot_token` | authorization.py | yes | HTTP+WEBSOCKET |
+| `/access/info` | GET | `access.info` | authorization.py | **no** | HTTP+WEBSOCKET |
+| `/api/version` | GET | (OctoPrint compat, no JSON-RPC) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/server` | GET | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/login` | POST | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/currentuser` | GET | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/settings` | GET | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/job` | GET | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/printer` | GET | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/printer/command` | POST | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/printerprofiles` | GET | (OctoPrint compat) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+| `/api/files/local` | POST | (OctoPrint upload handler) | octoprint_compat | yes | HTTP only |
+| `/api/files/moonraker/(?P<relative_path>.+)` | POST | (OctoPrint select-file) | octoprint_compat | yes | HTTP only, `wrap_result=False` |
+
+**Dynamic Klipper-proxied endpoints** (registered at runtime from Klipper's endpoint
+list, `klippy_connection.py::_request_endpoints`, `is_remote=True`): each becomes
+`/printer/<endpoint>` (GET|POST) and JSON-RPC `printer.<dotted endpoint>`. The
+standard documented set (`docs/external_api/printer.md`) includes:
+
+| JSON-RPC method | HTTP path |
+|-----------------|-----------|
+| `printer.info` | `/printer/info` |
+| `printer.emergency_stop` | `/printer/emergency_stop` |
+| `printer.objects.list` | `/printer/objects/list` |
+| `printer.objects.query` | `/printer/objects/query` |
+| `printer.objects.subscribe` | `/printer/objects/subscribe` |
+| `printer.query_endstops.status` | `/printer/query_endstops/status` |
+| `printer.gcode.script` | `/printer/gcode/script` |
+| `printer.gcode.help` | `/printer/gcode/help` |
+
+(`RESERVED_ENDPOINTS` are skipped so Moonraker's own `/printer/print/*` and
+`/printer/restart` overrides take precedence.)
+
+---
+
+## 3. Per-component detail
+
+For brevity, request params and response shapes below summarize the documented
+contract (`docs/external_api/*.md`) plus the handler signatures. Field-level detail
+lives in those docs; this section captures the load-bearing parameters per method.
+
+### 3.1 server (server.py, loghelper.py, data_store.py)
+
+- `server.info` — GET. No params. Returns klippy_connected, klippy_state,
+  components[], failed_components[], registered_directories[], warnings[],
+  websocket_count, moonraker_version, api_version (tuple), api_version_string, type.
+- `server.config` — GET. Returns the full server config dict + orig/file sections.
+- `server.restart` — POST. Restarts the Moonraker service. Returns "ok".
+- `server.logs.rollover` — POST. Params: optional `application` (moonraker|klipper).
+  Rolls over the named log file(s). Cannot roll over while printing.
+- `server.temperature_store` — GET. Params: `include_monitors` (bool). Returns
+  per-sensor temperature/target/power history arrays.
+- `server.gcode_store` — GET. Params: `count` (int). Returns recent gcode_store
+  entries (message, time, type).
+
+### 3.2 file_manager (file_manager/file_manager.py)
+
+- `server.files.list` — GET. Params: `root` (default "gcodes"). Returns flat file list.
+- `server.files.metadata` — GET. Params: `filename`. Returns gcode metadata.
+- `server.files.metascan` — POST. Params: `filename`. Forces a metadata scan.
+- `server.files.thumbnails` — GET. Params: `filename`. Returns thumbnail descriptors.
+- `server.files.roots` — GET. Returns registered roots and their permissions.
+- `server.files.get_directory` / `post_directory` / `delete_directory` — Params:
+  `path` (root-relative), `extended` (GET), `force` (DELETE). list/create/delete dir.
+- `server.files.move` — POST. Params: `source`, `dest`.
+- `server.files.copy` — POST. Params: `source`, `dest`.
+- `server.files.zip` — POST. Params: `dest`, `items[]`, `store_only`.
+- `server.files.delete_file` — DELETE, **WebSocket transport only**. Params: `path`.
+- File **upload**: `POST /server/files/upload` (multipart, HTTP only). Fields: `file`,
+  `root`, `path`, `checksum`, `print` (auto-start). Returns item + print_started.
+- Static download: `GET /server/files/<root>/<path>` via `FileRequestHandler`
+  (registered per-root via `register_static_file_handler`).
+
+### 3.3 database (database.py)
+
+- `server.database.list` — GET. Returns namespace list.
+- `server.database.get_item` / `post_item` / `delete_item` — Params: `namespace`,
+  `key`, `value` (post). Read/write/delete a DB entry.
+- `server.database.post_backup` / `delete_backup` — Params: `filename`. Backup mgmt.
+- `server.database.restore` — POST. Params: `filename`. Restore from backup.
+- `server.database.compact` — POST. Compacts the LMDB database.
+- Debug (only when `--debug` enabled): `debug.database.list`, `debug.database.get_item`,
+  `debug.database.post_item`, `debug.database.delete_item`, `debug.database.table`
+  (allows access to protected/forbidden namespaces).
+
+### 3.4 history (history.py)
+
+- `server.history.get_job` / `delete_job` — Params: `uid` (or `all` for delete).
+- `server.history.list` — GET. Params: `limit`, `start`, `since`, `before`, `order`.
+- `server.history.totals` — GET. Returns aggregate job totals.
+- `server.history.reset_totals` — POST. Resets totals; returns previous totals.
+
+### 3.5 job_queue (job_queue.py)
+
+- `server.job_queue.post_job` / `delete_job` — Params: `filenames[]` (post),
+  `job_ids[]` or `all` (delete).
+- `server.job_queue.pause` / `start` — POST. Pause/resume queue processing.
+- `server.job_queue.status` — GET. Returns queued_jobs[] and queue_state.
+- `server.job_queue.jump` — POST. Params: `job_id`. Move a job to front.
+
+### 3.6 machine (machine.py)
+
+- `machine.reboot`, `machine.shutdown` — POST.
+- `machine.services.restart` / `stop` / `start` — POST. Params: `service`.
+- `machine.system_info` — GET. Returns system_info (cpu, distro, network, etc).
+- `machine.sudo.info` — GET; `machine.sudo.password` — POST (params: `password`).
+- `machine.peripherals.serial` / `usb` / `canbus` (params: `interface`) / `video` — GET.
+- Remote methods exposed to Klipper: `shutdown_machine`, `reboot_machine`.
+
+### 3.7 power (power.py)
+
+- `machine.device_power.devices` — GET. Lists configured power devices.
+- `machine.device_power.status` — GET. Params: device names as keys. Returns states.
+- `machine.device_power.on` / `off` — POST. Params: device names as keys.
+- `machine.device_power.get_device` / `post_device` — Params: `device`, `action`
+  (post: on|off|toggle).
+
+### 3.8 update_manager (update_manager/update_manager.py)
+
+- `machine.update.status` — GET. Params: `refresh`. Returns version_info per item.
+- `machine.update.moonraker|klipper|system|client` — POST (client params: `name`).
+- `machine.update.full` — POST. Update all.
+- `machine.update.upgrade` — POST. Params: `name` (apt upgrade variant).
+- `machine.update.refresh` — POST. Params: `name`.
+- `machine.update.recover` — POST. Params: `name`, `hard`.
+- `machine.update.rollback` — POST. Params: `name`.
+
+### 3.9 announcements (announcements.py)
+
+- `server.announcements.list` — GET. Params: `include_dismissed`.
+- `server.announcements.dismiss` — POST. Params: `entry_id`, `wake_time`.
+- `server.announcements.update` — POST. Force-refresh feeds.
+- `server.announcements.post_feed` / `delete_feed` — Params: `name`.
+- `server.announcements.feeds` — GET. List configured feeds.
+
+### 3.10 webcam (webcam.py)
+
+- `server.webcams.list` — GET.
+- `server.webcams.get_item` / `post_item` / `delete_item` — Params: `name`/`uid`
+  (+ webcam fields on post).
+- `server.webcams.test` — POST. Params: `name`/`uid`. Tests stream/snapshot URLs.
+
+### 3.11 notifier (notifier.py)
+
+- `server.notifiers.list` — GET.
+- `debug.notifiers.test` — POST (debug only). Params: `name`.
+
+### 3.12 sensor (sensor.py)
+
+- `server.sensors.list` — GET. Params: `extended`.
+- `server.sensors.info` — GET. Params: `sensor`.
+- `server.sensors.measurements` — GET. Params: `sensor` (optional).
+
+### 3.13 spoolman (spoolman.py)
+
+- `server.spoolman.get_spool_id` / `post_spool_id` — Params: `spool_id` (post).
+- `server.spoolman.proxy` — POST. Params: `request_method`, `path`, `query`, `body`,
+  `use_v2_response`. Proxies to the Spoolman server.
+- `server.spoolman.status` — GET. Returns connection status.
+
+### 3.14 analysis (analysis.py)
+
+- `server.analysis.status` — GET.
+- `server.analysis.estimate` — POST. Params: `filename`, `update_metadata`.
+- `server.analysis.process` — POST. Params: `filename`, `force`, `estimator_config`.
+- `server.analysis.dump_config` — POST. Params: `dest_config`.
+
+### 3.15 extensions (extensions.py)
+
+- `server.extensions.list` — GET. Lists connected agents.
+- `server.extensions.request` — POST. Params: `agent`, `method`, `arguments`.
+  Forwards a method call to a connected agent.
+- `connection.register_remote_method` — POST, **WebSocket only**. Params: `method_name`.
+  An agent registers a method callable by Klipper.
+- `connection.send_event` — POST, **WebSocket only**. Params: `event_name`, `data`.
+  An agent emits `agent_event`.
+
+### 3.16 klippy_apis (klippy_apis.py) — Moonraker-side print control
+
+- `printer.print.pause|resume|cancel` — POST.
+- `printer.print.start` — POST. Params: `filename`.
+- `printer.restart`, `printer.firmware_restart` — POST.
+
+(These override / supplement the Klipper-proxied `/printer/*` endpoints.)
+
+### 3.17 authorization (authorization.py) — see §5.
+
+### 3.18 mqtt (mqtt.py) — see §6.
+
+### 3.19 zeroconf (zeroconf.py)
+
+- `GET /server/zeroconf/ssdp` — HTTP only, XML response, no auth. SSDP discovery doc.
+
+### 3.20 td1 (td1.py)
+
+- `machine.td1.data` — GET; `machine.td1.reboot` — POST. TD-1 filament sensor device.
+
+### 3.21 octoprint_compat (octoprint_compat.py)
+
+HTTP-only OctoPrint-compatible shims (no JSON-RPC, `wrap_result=False`):
+`/api/version`, `/api/server`, `/api/login`, `/api/currentuser`, `/api/settings`,
+`/api/job`, `/api/printer`, `/api/printer/command`, `/api/printerprofiles`,
+`/api/files/local` (upload), `/api/files/moonraker/<relative_path>` (select).
+
+---
+
+## 4. Server-push notifications (JSON-RPC, server → client)
+
+Notifications are JSON-RPC requests with no `id`: `{"jsonrpc":"2.0","method":"notify_<name>","params":[...]}`.
+Pushed to all authenticated WebSocket/MQTT clients via
+`WebsocketManager.notify_clients(name, data)` → method `"notify_" + name`.
+Registered via `Server.register_notification(event_name, notify_name=None)`; if
+`notify_name` is omitted it is the substring after the last `:` of `event_name`.
+
+| notify_ method | Source event | Component |
+|----------------|--------------|-----------|
+| `notify_klippy_ready` | `server:klippy_ready` | server.py |
+| `notify_klippy_shutdown` | `server:klippy_shutdown` | server.py |
+| `notify_klippy_disconnected` | `server:klippy_disconnect` (override) | server.py |
+| `notify_gcode_response` | `server:gcode_response` | server.py |
+| `notify_status_update` | printer object subscription updates | klippy_connection / data_store |
+| `notify_filelist_changed` | `file_manager:filelist_changed` | file_manager |
+| `notify_history_changed` | `history:history_changed` | history.py |
+| `notify_job_queue_changed` | `job_queue:job_queue_changed` | job_queue.py |
+| `notify_update_response` | `update_manager:update_response` | update_manager |
+| `notify_update_refreshed` | `update_manager:update_refreshed` | update_manager |
+| `notify_cpu_throttled` | `proc_stats:cpu_throttled` | proc_stats.py |
+| `notify_proc_stat_update` | `proc_stats:proc_stat_update` | proc_stats.py |
+| `notify_button_event` | `button:button_event` | (gpio buttons) |
+| `notify_power_changed` | `power:power_changed` | power.py |
+| `notify_webcams_changed` | `webcam:webcams_changed` | webcam.py |
+| `notify_sensor_update` | `sensors:sensor_update` | sensor.py |
+| `notify_active_spool_set` | `spoolman:active_spool_set` | spoolman.py |
+| `notify_spoolman_status_changed` | `spoolman:spoolman_status_changed` | spoolman.py |
+| `notify_service_state_changed` | `machine:service_state_changed` | machine.py |
+| `notify_sudo_alert` | `machine:sudo_alert` | machine.py |
+| `notify_announcement_dismissed` | `announcements:dismissed` | announcements.py |
+| `notify_announcement_update` | `announcements:entries_updated` | announcements.py |
+| `notify_announcement_wake` | `announcements:dismiss_wake` | announcements.py |
+| `notify_user_created` | `authorization:user_created` | authorization.py |
+| `notify_user_deleted` | `authorization:user_deleted` (logout side-effect) | authorization.py |
+| `notify_user_logged_out` | `authorization:user_logged_out` (logout side-effect) | authorization.py |
+| `notify_agent_event` | agent `connection/send_event` | extensions.py |
+
+Total: **27** distinct push notifications (26 registered via
+`register_notification` + `notify_status_update` which is pushed directly from the
+subscription pipeline). Documented set in
+`docs/external_api/jsonrpc_notifications.md` lists 26 (it omits the
+`button_event`/`power_changed` distinction the same way — see Discrepancies).
+
+`notify_user_deleted` and `notify_user_logged_out` additionally trigger a server-side
+logout of affected connections (`event_type="logout"`).
+
+---
+
+## 5. Auth model (authorization.py)
+
+Optional component `[authorization]`. When absent, all requests are allowed.
+`authenticate_request(request, auth_required)` order of checks:
+
+1. **OPTIONS** requests → no auth (CORS preflight).
+2. **JSON Web Token (JWT)** — header `X-Access-Token: <jwt>` or
+   `Authorization: Bearer <jwt>` or query `?access_token=<jwt>`. Decoded with
+   per-user ES256-style signature; 1-hour access token (`JWT_EXP_TIME`), separate
+   refresh token. JWK id + jwt_secret stored per user.
+3. **Oneshot token** — query `?token=<token>`. Single-use, IP-bound, short-lived
+   (obtained from `access.oneshot_token`). Useful for `<img>`/download URLs.
+4. **API key** — header `X-Api-Key: <key>` (if `enable_api_key`, default true).
+   Matches the single `_API_KEY_USER` key. Retrieve/rotate via `access.get_api_key` /
+   `access.post_api_key`.
+5. **Force logins** — if `force_logins` and ≥1 real user exists, trusted-IP auth is
+   disabled; unauthenticated requests to protected endpoints get 401.
+6. **Trusted client** — request IP matched against `trusted_clients` config:
+   `trusted_ips`, `trusted_ranges` (CIDR), `trusted_domains` (reverse-DNS). A trusted
+   connection authenticates as the implicit trusted user.
+7. Otherwise → `401 Unauthorized` (unless `auth_required=False` for the endpoint).
+
+Endpoints with `auth_required=False`: `/access/login`, `/access/refresh_jwt`,
+`/access/info`, `/server/connection/identify`, `/server/zeroconf/ssdp`.
+
+**access.* JSON-RPC methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `access.login` | Username/password → JWT access + refresh tokens. |
+| `access.logout` | Invalidate current user session. |
+| `access.refresh_jwt` | Exchange refresh token for a new access token. |
+| `access.get_user` / `post_user` / `delete_user` | Read current / create / delete user. |
+| `access.users.list` | List users. |
+| `access.user.password` | Change current user's password. |
+| `access.get_api_key` / `post_api_key` | Read / regenerate the API key. |
+| `access.oneshot_token` | Issue a single-use, IP-bound token. |
+| `access.info` | Auth capabilities + default source + login requirement (no auth). |
+
+**CORS:** `cors_domains` config; `check_cors(origin)` matches origin against allowed
+regex domains; wildcards/trailing-slash rejected. Applied in request handlers.
+
+Users persisted in DB namespace with `UserInfo` (username, password hash, salt, source
+`moonraker`|`ldap`, jwt_secret, jwk_id, groups; default group `admin`).
+
+---
+
+## 6. Transports
+
+All transports converge on the same `JsonRPC` dispatcher (`moonraker/common.py`),
+which looks up `method_name` → `APIDefinition` and invokes the registered callback
+with a `WebRequest`. The `APITransport` abstraction carries `transport_type` and
+`user_info`.
+
+| Transport | Entry point | Notes |
+|-----------|-------------|-------|
+| **HTTP REST** | `DynamicRequestHandler` per route | Path+verb mapped to method; params from query + JSON body + path kwargs. Response `{"result": ...}`. |
+| **HTTP JSON-RPC** | `POST /server/jsonrpc` (`RPCHandler`) | Plain-HTTP JSON-RPC envelope; same dispatcher. |
+| **WebSocket** | `GET /websocket` (`WebSocket` ← `BaseRemoteConnection`) | Bidirectional JSON-RPC; receives requests, pushes `notify_*`. Auth via query token / API key on the upgrade request. |
+| **Klippy bridge** | `GET /klippysocket` (`BridgeSocket`) | Raw passthrough to Klippy's Unix domain socket (not JSON-RPC-wrapped). |
+| **MQTT** | `mqtt.py` | Subscribes `<instance>/moonraker/api/request`, replies on `<instance>/moonraker/api/response`. Publishes status on `<instance>/moonraker/status`, klipper status `<instance>/klipper/status`, state `<instance>/klipper/state/*`. JSON-RPC envelope. `server.mqtt.publish`/`subscribe` are NOT exposed over the MQTT transport (redundant). |
+| **Unix socket** | local server socket | Internal/local JSON-RPC clients (e.g. `moonraker.sock`). Uses `INTERNAL`/socket transport through the same dispatcher. |
+| **INTERNAL** | `internal_transport` component | In-process callers; bypasses auth. |
+
+Notes:
+- `register_endpoint(transports=...)` controls which transports expose a given method.
+  WebSocket-only endpoints (e.g. `server.files.delete_file`, `connection.*`,
+  `server.websocket.id`, `server.connection.identify`) have no HTTP route.
+- HTTP-only endpoints (octoprint compat, zeroconf SSDP) have no JSON-RPC method.
+
+---
+
+## 7. Test coverage gap
+
+The vendored `tests/` suite (`test_server.py`, `test_database.py`,
+`test_klippy_connection.py`, `test_config.py`) only exercises:
+
+- `server.info`, `server.config`, `server.restart`
+- `server.database.list`, `server.database.get_item`, `server.database.post_item`,
+  `server.database.delete_item`
+
+**Every other registered endpoint and JSON-RPC method listed in §2 has no test.**
+This includes all of file_manager, history, job_queue, machine, power, update_manager,
+announcements, webcam, sensor, spoolman, analysis, extensions, klippy_apis print
+control, authorization/`access.*`, mqtt, octoprint compat, zeroconf, td1, the upload
+handler, and all `notify_*` notifications.
+
+---
+
+## 8. Counts
+
+- **Distinct HTTP `register_endpoint` paths:** 110
+  (88 standard `register_endpoint` paths + the dynamic `/printer/*` Klipper set,
+  excluding fixed router handlers and static-file handlers).
+- **JSON-RPC methods (documented contract):** 130 distinct method names
+  (multi-verb endpoints expand to per-verb `get_`/`post_`/`delete_` methods; includes
+  the 8 Klipper-proxied `printer.*` methods; excludes HTTP-only octoprint/zeroconf).
+- **Server-push notifications:** 27 (`notify_*`).
+- **API version:** `1.5.0`. **App version:** `0.10.1.dev`.
+
+### Documented JSON-RPC methods (full list, 130)
+
+```
+access.delete_user, access.get_api_key, access.get_user, access.info, access.login,
+access.logout, access.oneshot_token, access.post_api_key, access.post_user,
+access.refresh_jwt, access.user.password, access.users.list,
+connection.register_remote_method, connection.send_event,
+debug.database.delete_item, debug.database.get_item, debug.database.list,
+debug.database.post_item, debug.database.table, debug.notifiers.test,
+machine.device_power.devices, machine.device_power.get_device, machine.device_power.off,
+machine.device_power.on, machine.device_power.post_device, machine.device_power.status,
+machine.peripherals.canbus, machine.peripherals.serial, machine.peripherals.usb,
+machine.peripherals.video, machine.proc_stats, machine.reboot, machine.services.restart,
+machine.services.start, machine.services.stop, machine.shutdown, machine.sudo.info,
+machine.sudo.password, machine.system_info, machine.update.full, machine.update.klipper,
+machine.update.moonraker, machine.update.recover, machine.update.refresh,
+machine.update.rollback, machine.update.status, machine.update.system,
+machine.wled.get_strip, machine.wled.off, machine.wled.on, machine.wled.post_strip,
+machine.wled.status, machine.wled.strips, machine.wled.toggle,
+printer.emergency_stop, printer.firmware_restart, printer.gcode.help, printer.gcode.script,
+printer.info, printer.objects.list, printer.objects.query, printer.objects.subscribe,
+printer.print.cancel, printer.print.pause, printer.print.resume, printer.print.start,
+printer.query_endstops.status, printer.restart,
+server.analysis.dump_config, server.analysis.estimate, server.analysis.process,
+server.analysis.status, server.announcements.delete_feed, server.announcements.dismiss,
+server.announcements.feeds, server.announcements.list, server.announcements.post_feed,
+server.announcements.update, server.config, server.connection.identify,
+server.database.compact, server.database.delete_backup, server.database.delete_item,
+server.database.get_item, server.database.list, server.database.post_backup,
+server.database.post_item, server.database.restore, server.extensions.list,
+server.extensions.request, server.files.copy, server.files.delete_directory,
+server.files.delete_file, server.files.get_directory, server.files.list,
+server.files.metadata, server.files.metascan, server.files.move, server.files.post_directory,
+server.files.roots, server.files.thumbnails, server.files.zip, server.gcode_store,
+server.history.delete_job, server.history.get_job, server.history.list,
+server.history.reset_totals, server.history.totals, server.info,
+server.job_queue.delete_job, server.job_queue.jump, server.job_queue.pause,
+server.job_queue.post_job, server.job_queue.start, server.job_queue.status,
+server.logs.rollover, server.mqtt.publish, server.mqtt.subscribe, server.notifiers.list,
+server.restart, server.sensors.info, server.sensors.list, server.sensors.measurements,
+server.spoolman.get_spool_id, server.spoolman.post_spool_id, server.spoolman.proxy,
+server.spoolman.status, server.temperature_store, server.webcams.delete_item,
+server.webcams.get_item, server.webcams.list, server.webcams.post_item,
+server.webcams.test, server.websocket.id
+```
+
+(`moontest.hello_world` appears in docs as a tutorial example of a third-party
+component method, not part of core Moonraker; excluded from the count.
+`machine.td1.*` is in code but not in the documented method list above; include it
+for full code parity.)
+
+---
+
+## 9. Discrepancies between docs and code
+
+1. **`machine.td1.data` / `machine.td1.reboot`** (`td1.py`) exist in code but are not
+   in `docs/external_api/*`. Implement for parity.
+2. **`notify_button_event` / `notify_power_changed`**: `power_changed` is registered
+   in `power.py`; `button_event` is registered by the gpio buttons component.
+   The notifications doc covers both but they depend on optional components.
+3. **`moontest.hello_world`** appears in docs (`extensions.md` tutorial) but is an
+   example agent method, not a built-in endpoint.
+4. **`/debug/*` endpoints** (`debug.database.*`, `debug.notifiers.test`) only register
+   when Moonraker runs with `--debug` (`is_debug_enabled()`); otherwise absent.
+5. **Klipper-proxied `printer.*` methods** are dynamic — they only exist after Klippy
+   connects and reports its endpoint list. The documented set is the standard Klipper
+   surface; additional `printer.*` methods appear for installed Klipper modules.
+6. **`server.config`** response includes both the parsed config and the original file
+   sections; the doc shows the merged view.

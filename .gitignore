@@ -1,0 +1,7 @@
+# Zig
+.zig-cache/
+zig-out/
+# Vendored upstream (reference only; reproduce: git clone --depth 50 https://github.com/Arksine/moonraker vendor/moonraker)
+/vendor/
+# Conformance golden captures are large; track selectively later
+/conformance/golden/*.raw
