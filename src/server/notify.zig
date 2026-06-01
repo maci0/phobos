@@ -171,6 +171,21 @@ pub const NotifyBus = struct {
         return self.fanout(io, method, params, null);
     }
 
+    /// Like `emit`, but assumes the caller ALREADY holds the `Core` lock (e.g.
+    /// an API handler invoked through `Core.run`). Emitting via plain `emit`
+    /// from such a context would deadlock on the non-reentrant Core mutex, so
+    /// handlers that mutate state under the lock must use this variant. The
+    /// fan-out still runs in the correct serialized order because the lock is
+    /// held for the duration of the enclosing handler.
+    pub fn emitLocked(
+        self: *NotifyBus,
+        io: Io,
+        method: []const u8,
+        params: std.json.Value,
+    ) !void {
+        return self.fanout(io, method, params, null);
+    }
+
     /// Like `emit`, but for status updates: deliver only to connections
     /// subscribed to `topic`. Matches Moonraker masking unsubscribed uids for
     /// `notify_status_update`.

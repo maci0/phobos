@@ -113,6 +113,34 @@ pub const TestServer = struct {
         return self.request(alloc, .POST, path, body);
     }
 
+    /// Upload a file via POST /server/files/upload using a multipart/form-data
+    /// body. `root`/`dir` are optional form fields; `filename` and `contents`
+    /// are the file part. Returns the owned response body.
+    pub fn uploadFile(
+        self: *TestServer,
+        alloc: std.mem.Allocator,
+        root: ?[]const u8,
+        dir: ?[]const u8,
+        filename: []const u8,
+        contents: []const u8,
+    ) ![]u8 {
+        const boundary = "----phobostestboundary";
+        var b: std.Io.Writer.Allocating = .init(alloc);
+        defer b.deinit();
+        const w = &b.writer;
+        if (root) |r| {
+            try w.print("--{s}\r\nContent-Disposition: form-data; name=\"root\"\r\n\r\n{s}\r\n", .{ boundary, r });
+        }
+        if (dir) |d| {
+            try w.print("--{s}\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n{s}\r\n", .{ boundary, d });
+        }
+        try w.print(
+            "--{s}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{s}\"\r\nContent-Type: application/octet-stream\r\n\r\n{s}\r\n--{s}--\r\n",
+            .{ boundary, filename, contents, boundary },
+        );
+        return self.postJson(alloc, "/server/files/upload", b.written());
+    }
+
     /// Issue a DELETE request. Body is passed as JSON query params aren't supported
     /// for DELETE in std.http.Client, so params must be embedded in the path as
     /// query string (e.g. "?namespace=ns&key=k"), or pass null for bodyless DELETE.
@@ -733,4 +761,205 @@ test "access: POST /access/api_key regenerates the key" {
     const key2 = pp.value.object.get("result").?.string;
     try std.testing.expectEqual(@as(usize, 32), key2.len);
     try std.testing.expect(!std.mem.eql(u8, key1, key2));
+}
+
+// ---------------------------------------------------------------------------
+// File manager (server.files.*) integration tests — full socket path on a
+// per-instance temp datadir.
+// ---------------------------------------------------------------------------
+
+fn resultOf(alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+}
+
+test "files: GET /server/files/roots lists gcodes/config/logs" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/files/roots");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const roots = p.value.object.get("result").?.array;
+    try std.testing.expect(roots.items.len >= 3);
+    var found_gcodes = false;
+    for (roots.items) |r| {
+        if (std.mem.eql(u8, r.object.get("name").?.string, "gcodes")) {
+            found_gcodes = true;
+            try std.testing.expectEqualStrings("rw", r.object.get("permissions").?.string);
+        }
+    }
+    try std.testing.expect(found_gcodes);
+}
+
+test "files: upload → list → metadata → download round-trip" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Upload a gcode file.
+    const up = try ts.uploadFile(alloc, "gcodes", null, "round.gcode", "G28\nG1 X1 Y2\n");
+    defer alloc.free(up);
+    const up_p = try resultOf(alloc, up);
+    defer up_p.deinit();
+    const up_res = up_p.value.object.get("result").?.object;
+    const item = up_res.get("item").?.object;
+    try std.testing.expectEqualStrings("round.gcode", item.get("path").?.string);
+    try std.testing.expectEqualStrings("gcodes", item.get("root").?.string);
+    try std.testing.expectEqual(false, up_res.get("print_started").?.bool);
+
+    // List shows it.
+    const list = try ts.get(alloc, "/server/files/list?root=gcodes");
+    defer alloc.free(list);
+    try std.testing.expect(std.mem.indexOf(u8, list, "round.gcode") != null);
+
+    // Metadata has the record shape.
+    const md = try ts.get(alloc, "/server/files/metadata?filename=round.gcode");
+    defer alloc.free(md);
+    const md_p = try resultOf(alloc, md);
+    defer md_p.deinit();
+    const md_res = md_p.value.object.get("result").?.object;
+    try std.testing.expectEqualStrings("round.gcode", md_res.get("filename").?.string);
+    try std.testing.expect(md_res.get("size") != null);
+    try std.testing.expect(md_res.get("uuid") != null);
+    try std.testing.expect(md_res.get("thumbnails").? == .array);
+
+    // Download round-trips the exact bytes.
+    const dl = try ts.get(alloc, "/server/files/gcodes/round.gcode");
+    defer alloc.free(dl);
+    try std.testing.expectEqualStrings("G28\nG1 X1 Y2\n", dl);
+}
+
+test "files: get_directory shows uploaded file with disk_usage and root_info" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const up = try ts.uploadFile(alloc, "gcodes", null, "dir_test.gcode", "G1\n");
+    defer alloc.free(up);
+
+    const body = try ts.get(alloc, "/server/files/directory?path=gcodes");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const res = p.value.object.get("result").?.object;
+    try std.testing.expect(res.get("files").? == .array);
+    try std.testing.expect(res.get("dirs").? == .array);
+    const du = res.get("disk_usage").?.object;
+    try std.testing.expect(du.get("total") != null);
+    try std.testing.expect(du.get("used") != null);
+    try std.testing.expect(du.get("free") != null);
+    const ri = res.get("root_info").?.object;
+    try std.testing.expectEqualStrings("gcodes", ri.get("name").?.string);
+}
+
+test "files: mkdir then rmdir via POST/DELETE /server/files/directory" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const mk = try ts.postJson(alloc, "/server/files/directory",
+        \\{"path":"gcodes/intdir"}
+    );
+    defer alloc.free(mk);
+    const mk_p = try resultOf(alloc, mk);
+    defer mk_p.deinit();
+    try std.testing.expectEqualStrings("create_dir", mk_p.value.object.get("result").?.object.get("action").?.string);
+
+    // DELETE via query string (Zig client has no DELETE body).
+    const rm = try ts.deleteJson(alloc, "/server/files/directory?path=gcodes/intdir", null);
+    defer alloc.free(rm);
+    const rm_p = try resultOf(alloc, rm);
+    defer rm_p.deinit();
+    try std.testing.expectEqualStrings("delete_dir", rm_p.value.object.get("result").?.object.get("action").?.string);
+}
+
+test "files: move then copy then delete a file" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const up = try ts.uploadFile(alloc, "gcodes", null, "mc.gcode", "G28\n");
+    defer alloc.free(up);
+
+    // Move.
+    const mv = try ts.postJson(alloc, "/server/files/move",
+        \\{"source":"gcodes/mc.gcode","dest":"gcodes/mc2.gcode"}
+    );
+    defer alloc.free(mv);
+    const mv_p = try resultOf(alloc, mv);
+    defer mv_p.deinit();
+    try std.testing.expectEqualStrings("move_file", mv_p.value.object.get("result").?.object.get("action").?.string);
+
+    // Copy.
+    const cp = try ts.postJson(alloc, "/server/files/copy",
+        \\{"source":"gcodes/mc2.gcode","dest":"gcodes/mc3.gcode"}
+    );
+    defer alloc.free(cp);
+    const cp_p = try resultOf(alloc, cp);
+    defer cp_p.deinit();
+    try std.testing.expectEqualStrings("create_file", cp_p.value.object.get("result").?.object.get("action").?.string);
+
+    // Delete (DELETE /server/files/<root>/<path>).
+    const del = try ts.deleteJson(alloc, "/server/files/gcodes/mc3.gcode", null);
+    defer alloc.free(del);
+    const del_p = try resultOf(alloc, del);
+    defer del_p.deinit();
+    try std.testing.expectEqualStrings("delete_file", del_p.value.object.get("result").?.object.get("action").?.string);
+}
+
+test "files: path escape attempt is rejected (403/400 error envelope)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Download with a traversal escape → error envelope, never serves /etc.
+    const body = try ts.get(alloc, "/server/files/gcodes/../../../etc/passwd");
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"error\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "root:") == null);
+}
+
+test "files: notify_filelist_changed emitted on upload with correct payload" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Subscribe a websocket-less recorder via the connection registry. Simplest
+    // path: attach a recording writer to a fresh connection.
+    const RecordWriter = struct {
+        alloc: std.mem.Allocator,
+        frames: std.ArrayList([]u8) = .empty,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const dup = try self.alloc.dupe(u8, bytes);
+            try self.frames.append(self.alloc, dup);
+        }
+        fn deinit(self: *@This()) void {
+            for (self.frames.items) |f| self.alloc.free(f);
+            self.frames.deinit(self.alloc);
+        }
+    };
+    var rec = RecordWriter{ .alloc = alloc };
+    defer rec.deinit();
+    const conns = ts.connsRef();
+    const cid = try conns.add(ts.io);
+    conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+
+    const up = try ts.uploadFile(alloc, "gcodes", null, "notif.gcode", "G28\n");
+    defer alloc.free(up);
+
+    // The filelist_changed notification must have reached the connection.
+    try std.testing.expect(rec.frames.items.len >= 1);
+    var saw = false;
+    for (rec.frames.items) |f| {
+        if (std.mem.indexOf(u8, f, "notify_filelist_changed") != null and
+            std.mem.indexOf(u8, f, "create_file") != null and
+            std.mem.indexOf(u8, f, "notif.gcode") != null)
+        {
+            saw = true;
+        }
+    }
+    try std.testing.expect(saw);
 }

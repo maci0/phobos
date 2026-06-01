@@ -21,6 +21,7 @@ const jv = @import("json/value.zig");
 const connections = @import("server/connections.zig");
 const ws = @import("transport/ws.zig");
 const authz = @import("components/authorization.zig");
+const file_manager = @import("components/file_manager.zig");
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -75,6 +76,12 @@ pub const Server = struct {
     /// keys so access.* handlers can identify the caller. When null, the
     /// transport falls back to `hook` (spine default = allow).
     auth: ?*authz.AuthCtx = null,
+    /// File manager context backing upload/download + the
+    /// GET/DELETE /server/files/<root>/<path> routes. Optional so tests can
+    /// build a Server without it.
+    file_ctx: ?*file_manager.FileCtx = null,
+    /// Absolute datadir; used only for diagnostics around the file routes.
+    datadir: ?[]const u8 = null,
 };
 
 /// Credentials carried by an HTTP request, extracted from headers and query.
@@ -196,6 +203,22 @@ pub fn handleParsedAuth(
         // empty object to keep the body valid JSON.
         const out = if (bytes.len == 0) try alloc.dupe(u8, "{}") else bytes;
         return .{ .status = .ok, .body = out };
+    }
+
+    // File manager upload: POST /server/files/upload (multipart form body).
+    if (method == .POST and std.mem.eql(u8, path, "/server/files/upload")) {
+        if (srv.file_ctx) |fctx| {
+            return handleUpload(srv, fctx, target, body, alloc);
+        }
+    }
+
+    // File manager download / delete: /server/files/<root>/<path...>. Matched by
+    // prefix so the dynamic tail is captured. Skips the named sub-routes above
+    // (list, roots, directory, ...) which the registry already owns.
+    if ((method == .GET or method == .DELETE) and isFileServePath(path)) {
+        if (srv.file_ctx) |fctx| {
+            return handleFileServe(srv, fctx, method.?, path, alloc);
+        }
     }
 
     // Unsupported HTTP verb -> 404 (no route can match).
@@ -443,6 +466,246 @@ fn readBody(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const u8
     var rbuf: [16 * 1024]u8 = undefined;
     const reader = req.readerExpectNone(&rbuf);
     return reader.allocRemaining(alloc, .unlimited);
+}
+
+// ---------------------------------------------------------------------------
+// File manager upload / download / delete wiring
+// ---------------------------------------------------------------------------
+
+/// The reserved named sub-routes under /server/files/ that are handled by the
+/// registry, NOT by the dynamic file-serve handler.
+const reserved_file_subpaths = [_][]const u8{
+    "list", "roots", "directory", "metadata", "metascan",
+    "thumbnails", "move", "copy", "zip", "upload", "delete_file",
+};
+
+/// True if `path` is a `/server/files/<root>/<...>` path that should be served
+/// as a file (download/delete), i.e. not one of the reserved named sub-routes.
+pub fn isFileServePath(path: []const u8) bool {
+    const prefix = "/server/files/";
+    if (!std.mem.startsWith(u8, path, prefix)) return false;
+    const rest = path[prefix.len..];
+    if (rest.len == 0) return false;
+    // First segment is the root; if there's no '/', it's just "/server/files/x"
+    // which must still not collide with a reserved single-segment name.
+    const first = rest[0 .. std.mem.indexOfScalar(u8, rest, '/') orelse rest.len];
+    for (reserved_file_subpaths) |r| {
+        if (std.mem.eql(u8, r, first)) return false;
+    }
+    return true;
+}
+
+/// Serve GET (download) / DELETE for /server/files/<root>/<path...>.
+fn handleFileServe(
+    srv: *Server,
+    fctx: *file_manager.FileCtx,
+    verb: RequestType,
+    path: []const u8,
+    alloc: std.mem.Allocator,
+) !Response {
+    const prefix = "/server/files/";
+    const request_path = path[prefix.len..];
+
+    if (verb == .DELETE) {
+        // Delete via the file_manager (runs under the serialized core).
+        const result = srv.core.run(srv.io, file_manager.deleteFileImpl, .{ fctx, alloc, request_path }) catch |err| {
+            return fileErrResponse(alloc, err);
+        };
+        const b = try wrapResult(alloc, result);
+        return .{ .status = .ok, .body = b };
+    }
+
+    // GET: resolve + stream the file bytes back.
+    const io = srv.io;
+    const resolved = file_manager.resolveRequestPath(fctx, alloc, request_path) catch |err| {
+        return fileErrResponse(alloc, mapResolveErr(err));
+    };
+    const f = std.Io.Dir.cwd().openFile(io, resolved.abs, .{}) catch {
+        const b = try errorBody(alloc, 404, "File not found");
+        return .{ .status = .not_found, .body = b };
+    };
+    defer f.close(io);
+    var rbuf: [64 * 1024]u8 = undefined;
+    var fr = f.reader(io, &rbuf);
+    const data = fr.interface.allocRemaining(alloc, .unlimited) catch {
+        const b = try errorBody(alloc, 500, "Read error");
+        return .{ .status = .internal_server_error, .body = b };
+    };
+    return .{ .status = .ok, .body = data };
+}
+
+fn mapResolveErr(err: file_manager.ResolveError) anyerror {
+    return switch (err) {
+        error.InvalidParams => error.InvalidParams,
+        error.Forbidden => error.Forbidden,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+fn fileErrResponse(alloc: std.mem.Allocator, err: anyerror) !Response {
+    const code: i64 = switch (err) {
+        error.InvalidParams => 400,
+        error.Forbidden => 403,
+        error.NotFound => 404,
+        else => 500,
+    };
+    const status: std.http.Status = switch (err) {
+        error.InvalidParams => .bad_request,
+        error.Forbidden => .forbidden,
+        error.NotFound => .not_found,
+        else => .internal_server_error,
+    };
+    const msg: []const u8 = switch (err) {
+        error.InvalidParams => "Bad Request",
+        error.Forbidden => "Forbidden",
+        error.NotFound => "Not Found",
+        else => "Internal Server Error",
+    };
+    const b = try errorBody(alloc, code, msg);
+    return .{ .status = status, .body = b };
+}
+
+/// Handle POST /server/files/upload with a multipart/form-data body. Extracts
+/// the file part and the `root` / `path` / `filename` form fields, writes the
+/// file, emits notify_filelist_changed, and returns Moonraker's response shape:
+///   { "item": {path, root, size, modified, permissions}, "print_started": false,
+///     "print_queued": false, "action": "create_file" }
+fn handleUpload(
+    srv: *Server,
+    fctx: *file_manager.FileCtx,
+    target: []const u8,
+    body: []const u8,
+    alloc: std.mem.Allocator,
+) !Response {
+    _ = target;
+    const form = parseMultipart(alloc, body) catch {
+        const b = try errorBody(alloc, 400, "Invalid upload form");
+        return .{ .status = .bad_request, .body = b };
+    };
+    const filename = form.filename orelse {
+        const b = try errorBody(alloc, 400, "No file name specified in upload form");
+        return .{ .status = .bad_request, .body = b };
+    };
+    const root_name = form.root orelse "gcodes";
+
+    // Build the request path: <root>/[<path>/]<filename>.
+    const req_path = if (form.path) |p|
+        try std.fmt.allocPrint(alloc, "{s}/{s}/{s}", .{ root_name, std.mem.trim(u8, p, "/"), filename })
+    else
+        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_name, filename });
+
+    // Run the actual write + notify under the serialized core.
+    const io = srv.io;
+    const result = srv.core.run(srv.io, uploadWrite, .{ fctx, io, alloc, req_path, form.content }) catch |err| {
+        return fileErrResponse(alloc, err);
+    };
+    const b = try wrapResult(alloc, result);
+    return .{ .status = .ok, .body = b };
+}
+
+/// Perform the upload write + notify. Separated so it runs inside Core.run with
+/// a comptime-known function. Returns the upload response object.
+fn uploadWrite(
+    fctx: *file_manager.FileCtx,
+    io: Io,
+    alloc: std.mem.Allocator,
+    req_path: []const u8,
+    content: []const u8,
+) anyerror!std.json.Value {
+    const resolved = file_manager.resolveRequestPath(fctx, alloc, req_path) catch |err| return mapResolveErr(err);
+    if (!resolved.root.full_access) return error.Forbidden;
+    if (resolved.rel.len == 0) return error.InvalidParams;
+
+    const dir = std.Io.Dir.cwd();
+    // Ensure parent directories exist.
+    if (std.fs.path.dirname(resolved.abs)) |d| dir.createDirPath(io, d) catch {};
+    dir.writeFile(io, .{ .sub_path = resolved.abs, .data = content }) catch return error.InvalidParams;
+
+    return file_manager.buildUploadResult(fctx, alloc, resolved);
+}
+
+/// Parsed multipart form fields relevant to an upload.
+const MultipartForm = struct {
+    root: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    filename: ?[]const u8 = null,
+    content: []const u8 = "",
+};
+
+/// Minimal multipart/form-data parser: scans for `--<boundary>` delimited parts,
+/// reads each part's `Content-Disposition` to find the field `name` (and
+/// `filename` for the file part), and captures the bytes after the blank line.
+/// The boundary is inferred from the body (first `--` line). This is a pragmatic
+/// parser sufficient for the spine; it does not handle nested multipart.
+fn parseMultipart(alloc: std.mem.Allocator, body: []const u8) !MultipartForm {
+    var form = MultipartForm{};
+    if (body.len < 3) return error.Invalid;
+
+    // The boundary delimiter is the first line (up to CRLF or LF).
+    const first_nl = std.mem.indexOfScalar(u8, body, '\n') orelse return error.Invalid;
+    var boundary_line = body[0..first_nl];
+    boundary_line = std.mem.trimEnd(u8, boundary_line, "\r");
+    if (!std.mem.startsWith(u8, boundary_line, "--")) return error.Invalid;
+    const delim = try std.fmt.allocPrint(alloc, "\n{s}", .{boundary_line});
+
+    // Split the body on the boundary delimiter.
+    var it = std.mem.splitSequence(u8, body, delim);
+    // First chunk is the leading boundary line (already the delimiter w/o the
+    // leading newline) — skip parts that are not real form sections.
+    while (it.next()) |raw_part| {
+        var part = raw_part;
+        // Skip the opening boundary token and the trailing "--" terminator.
+        if (std.mem.startsWith(u8, part, boundary_line)) {
+            part = part[boundary_line.len..];
+        }
+        part = std.mem.trimStart(u8, part, "\r\n");
+        if (part.len == 0 or std.mem.startsWith(u8, part, "--")) continue;
+
+        // Header block ends at the first blank line (CRLFCRLF or LFLF).
+        const sep = std.mem.indexOf(u8, part, "\r\n\r\n") orelse
+            std.mem.indexOf(u8, part, "\n\n") orelse continue;
+        const sep_len: usize = if (part[sep] == '\r') 4 else 2;
+        const headers = part[0..sep];
+        var content = part[sep + sep_len ..];
+        // Strip exactly ONE trailing line terminator (the CRLF / LF / lone CR
+        // that precedes the next boundary delimiter — the split on "\n--<b>"
+        // can leave a bare CR). Trimming greedily would corrupt file content
+        // that legitimately ends with newlines.
+        if (std.mem.endsWith(u8, content, "\r\n")) {
+            content = content[0 .. content.len - 2];
+        } else if (std.mem.endsWith(u8, content, "\n") or std.mem.endsWith(u8, content, "\r")) {
+            content = content[0 .. content.len - 1];
+        }
+
+        // Find the disposition name / filename.
+        const name = extractDispositionField(headers, "name");
+        const fname = extractDispositionField(headers, "filename");
+
+        if (fname) |fn_val| {
+            form.filename = fn_val;
+            form.content = content;
+        } else if (name) |n| {
+            if (std.mem.eql(u8, n, "root")) {
+                form.root = content;
+            } else if (std.mem.eql(u8, n, "path")) {
+                form.path = content;
+            } else if (std.mem.eql(u8, n, "filename") and form.filename == null) {
+                form.filename = content;
+            }
+        }
+    }
+    return form;
+}
+
+/// Extract a `key="value"` parameter from a Content-Disposition header block.
+fn extractDispositionField(headers: []const u8, key: []const u8) ?[]const u8 {
+    var search_buf: [32]u8 = undefined;
+    if (key.len + 2 > search_buf.len) return null;
+    const needle = std.fmt.bufPrint(&search_buf, "{s}=\"", .{key}) catch return null;
+    const idx = std.mem.indexOf(u8, headers, needle) orelse return null;
+    const start = idx + needle.len;
+    const end = std.mem.indexOfScalarPos(u8, headers, start, '"') orelse return null;
+    return headers[start..end];
 }
 
 // --- tests ---------------------------------------------------------------

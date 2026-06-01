@@ -33,6 +33,7 @@ const spoolman_component = @import("components/spoolman.zig");
 const mqtt_component = @import("components/mqtt.zig");
 const extensions_component = @import("components/extensions.zig");
 const analysis_component = @import("components/analysis.zig");
+const file_manager_component = @import("components/file_manager.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -54,6 +55,8 @@ const SpoolmanCtx = spoolman_component.SpoolmanCtx;
 const MqttCtx = mqtt_component.MqttCtx;
 const ExtensionsCtx = extensions_component.ExtensionsCtx;
 const AnalysisCtx = analysis_component.AnalysisCtx;
+const FileCtx = file_manager_component.FileCtx;
+const FileRoot = file_manager_component.Root;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -100,6 +103,15 @@ const NullStore = struct {
     }
 };
 
+/// Create a directory via the raw mkdir syscall (App.init has no live io yet).
+/// Ignores already-exists; other failures are non-fatal (the file_manager
+/// handlers will surface I/O errors at request time).
+fn mkdirRaw(path_z: [:0]const u8) void {
+    const rc = std.os.linux.mkdir(path_z.ptr, 0o755);
+    const e = std.os.linux.errno(rc);
+    if (e != .SUCCESS and e != .EXIST) {}
+}
+
 /// The fully-assembled server application. All fields are heap-allocated and
 /// owned by this struct; call `deinit` to release them.
 pub const App = struct {
@@ -125,6 +137,12 @@ pub const App = struct {
     mqtt_ctx: *MqttCtx,
     extensions_ctx: *ExtensionsCtx,
     analysis_ctx: *AnalysisCtx,
+    file_ctx: *FileCtx,
+    /// Absolute datadir whose subfolders back the file_manager roots. Owned and
+    /// freed in deinit. The root paths in `file_roots` point into the joined
+    /// strings owned alongside it.
+    datadir: []u8,
+    file_roots: []FileRoot,
     /// Owns the LMDB environment when with_lmdb=true; void otherwise.
     lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
 
@@ -262,6 +280,37 @@ pub const App = struct {
         errdefer alloc.destroy(analysis_ctx);
         analysis_ctx.* = .{};
 
+        // --- File manager context (server.files.*) ---
+        // Datadir defaults to a per-instance temp directory so tests and
+        // --dump-api have writable roots without polluting the cwd. The roots
+        // gcodes/config/logs are created beneath it. Directories are created
+        // with the raw mkdir syscall because App.init has no live io yet (io is
+        // wired later via httpServer/setIo).
+        var dd_buf: [256]u8 = undefined;
+        const dd_tmp = try std.fmt.bufPrintZ(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(analysis_ctx)});
+        mkdirRaw(dd_tmp);
+        const datadir = try alloc.dupe(u8, dd_tmp);
+        errdefer alloc.free(datadir);
+
+        const root_specs = [_]struct { name: []const u8, full: bool }{
+            .{ .name = "gcodes", .full = true },
+            .{ .name = "config", .full = true },
+            .{ .name = "logs", .full = false },
+        };
+        const file_roots = try alloc.alloc(FileRoot, root_specs.len);
+        errdefer alloc.free(file_roots);
+        for (root_specs, 0..) |spec, i| {
+            const p = try std.fs.path.join(alloc, &.{ datadir, spec.name });
+            const pz = try alloc.dupeZ(u8, p);
+            defer alloc.free(pz);
+            mkdirRaw(pz);
+            file_roots[i] = .{ .name = spec.name, .path = p, .full_access = spec.full };
+        }
+
+        const file_ctx = try alloc.create(FileCtx);
+        errdefer alloc.destroy(file_ctx);
+        file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus };
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -284,6 +333,9 @@ pub const App = struct {
             .mqtt_ctx = mqtt_ctx,
             .extensions_ctx = extensions_ctx,
             .analysis_ctx = analysis_ctx,
+            .file_ctx = file_ctx,
+            .datadir = datadir,
+            .file_roots = file_roots,
             .lmdb_store_ptr = lmdb_ptr,
         };
 
@@ -304,6 +356,10 @@ pub const App = struct {
         self.alloc.destroy(self.auth_ctx);
         self.extensions_ctx.deinit();
         self.alloc.destroy(self.extensions_ctx);
+        for (self.file_roots) |r| self.alloc.free(r.path);
+        self.alloc.free(self.file_roots);
+        self.alloc.free(self.datadir);
+        self.alloc.destroy(self.file_ctx);
         self.alloc.destroy(self.analysis_ctx);
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
@@ -384,6 +440,9 @@ pub const App = struct {
         // Analysis component: server.analysis.* endpoints.
         try analysis_component.registerAnalysis(self.reg, self.analysis_ctx);
 
+        // File manager component: server.files.* endpoints.
+        try file_manager_component.registerFileManager(self.reg, self.file_ctx);
+
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
         // the live *Connection). Register them in the dispatcher so the
@@ -407,6 +466,8 @@ pub const App = struct {
         // Wire the live io into the spoolman component so it can emit
         // notify_active_spool_set to connected WebSocket clients.
         self.spoolman_ctx.setIo(io);
+        // Wire io into the file manager so it can emit notify_filelist_changed.
+        self.file_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,
@@ -414,6 +475,8 @@ pub const App = struct {
             .dispatcher = self.dispatcher,
             .conns = self.conns,
             .auth = self.auth_ctx,
+            .file_ctx = self.file_ctx,
+            .datadir = self.datadir,
         };
     }
 };
@@ -548,6 +611,17 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.analysis.estimate",
         "server.analysis.process",
         "server.analysis.dump_config",
+        // File manager (server.files.*)
+        "server.files.roots",
+        "server.files.list",
+        "server.files.metadata",
+        "server.files.metascan",
+        "server.files.thumbnails",
+        "server.files.directory",
+        "server.files.move",
+        "server.files.copy",
+        "server.files.zip",
+        "server.files.delete_file",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",
