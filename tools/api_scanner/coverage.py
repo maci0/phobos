@@ -12,7 +12,13 @@ def _norm_path(path: str) -> str:
 
 
 def _baseline_endpoint_paths(baseline: Dict[str, Any]) -> Set[str]:
-    return {_norm_path(e["path"]) for e in baseline.get("endpoints", [])}
+    # Skip <dynamic> entries: runtime-registered variable paths (Klippy-proxied)
+    # that cannot be matched statically; they are not part of the achievable surface.
+    return {
+        _norm_path(e["path"])
+        for e in baseline.get("endpoints", [])
+        if not _norm_path(e["path"]).startswith("<")
+    }
 
 
 def _baseline_jsonrpc_methods(baseline: Dict[str, Any]) -> Set[str]:
