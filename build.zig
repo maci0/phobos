@@ -23,6 +23,5 @@ pub fn build(b: *std.Build) void {
 
     const fuzz = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_lmdb) });
     const fuzz_run = b.addRunArtifact(fuzz);
-    fuzz_run.addArg("--fuzz");
     b.step("fuzz", "Run fuzz harnesses").dependOn(&fuzz_run.step);
 }

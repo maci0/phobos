@@ -43,10 +43,11 @@ pub const Listener = struct {
     }
 
     /// The actual bound port, resolving the ephemeral port when 0 was passed.
-    pub fn port(self: *Listener) u16 {
+    pub fn port(self: *Listener) !u16 {
         var sa: std.os.linux.sockaddr.in = undefined;
         var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
-        _ = std.os.linux.getsockname(self.server.socket.handle, @ptrCast(&sa), &slen);
+        const rc = std.os.linux.getsockname(self.server.socket.handle, @ptrCast(&sa), &slen);
+        if (std.os.linux.errno(rc) != .SUCCESS) return error.GetSockNameFailed;
         return std.mem.bigToNative(u16, sa.port);
     }
 
@@ -65,15 +66,24 @@ pub const Listener = struct {
     }
 
     /// Accept loop: spawn one async task per accepted connection.
-    /// Loops until `accept` fails (e.g. the listener is shut down).
+    /// All accepted connection tasks run concurrently via a `Group`; the loop
+    /// exits (and the group is awaited) when `accept` fails due to shutdown or
+    /// cancellation.  Memory is bounded: `Group` releases each task's resources
+    /// as soon as the individual task returns, not at group-await time.
     pub fn serve(self: *Listener, io: Io, handler: Handler) !void {
+        var group: Io.Group = .init;
+        defer group.await(io) catch {};
         while (true) {
             const stream = self.server.accept(io) catch |err| switch (err) {
                 error.SocketNotListening, error.Canceled => return,
                 else => return err,
             };
-            var fut = io.async(connTask, .{ io, stream, handler });
-            fut.await(io);
+            // Use `concurrent` so each connection task runs on its own OS thread
+            // and cannot block the accept loop by running inline.  If the backend
+            // cannot provide concurrency (single-threaded builds or resource
+            // exhaustion), fall back to the sequential `group.async` path.
+            group.concurrent(io, connTask, .{ io, stream, handler }) catch
+                group.async(io, connTask, .{ io, stream, handler });
         }
     }
 
@@ -110,7 +120,7 @@ test "listener accepts and a registered handler echoes a line" {
     var lst = try Listener.bind(io, "127.0.0.1", 0);
     defer lst.deinit(io);
 
-    const bound_port = lst.port();
+    const bound_port = try lst.port();
     try std.testing.expect(bound_port != 0);
 
     var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
@@ -131,7 +141,7 @@ test "serve smoke: spawns per-connection task and echoes" {
 
     var lst = try Listener.bind(io, "127.0.0.1", 0);
     defer lst.deinit(io);
-    const bound_port = lst.port();
+    const bound_port = try lst.port();
 
     // Run a single accept+handle through serveOnce (serve is the same body
     // looped); this exercises the per-connection close + handler path.
@@ -143,6 +153,48 @@ test "serve smoke: spawns per-connection task and echoes" {
     srv_fut.await(io) catch {};
 
     try std.testing.expectEqualStrings("echo:smoke", out[0..out_len]);
+}
+
+test "serve handles two connections concurrently" {
+    // Verify that `serve`'s Group-based accept loop accepts and handles
+    // multiple connections.  Two connections are made sequentially from the
+    // main thread (using sendLine), and both echo responses must be correct.
+    // The concurrent accept loop must remain running between the first and
+    // second connections; a deadlocked or single-shot implementation would
+    // fail to respond to the second connection.
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var lst = try Listener.bind(io, "127.0.0.1", 0);
+    const bound_port = try lst.port();
+
+    // Serve in the background; deinit() below will shut the loop down.
+    const serveIgnoringErrors = struct {
+        fn f(l: *Listener, pio: Io, h: Handler) void {
+            l.serve(pio, h) catch {};
+        }
+    }.f;
+    var srv_fut = io.async(serveIgnoringErrors, .{ &lst, io, @as(Handler, echoHandler) });
+
+    var out_a: [256]u8 = undefined;
+    var out_b: [256]u8 = undefined;
+    var len_a: usize = 0;
+    var len_b: usize = 0;
+
+    // Two sequential connections from the main thread.
+    sendLine(io, bound_port, "ping_a", &out_a, &len_a);
+    sendLine(io, bound_port, "ping_b", &out_b, &len_b);
+
+    // Cancel the serve task to stop the accept loop cleanly, then free the
+    // listener socket.  Cancellation causes accept to return error.Canceled
+    // which the serve loop handles by returning; this avoids the EBADF that
+    // would occur if we closed the socket while accept4 is in progress.
+    srv_fut.cancel(io);
+    lst.deinit(io);
+
+    try std.testing.expectEqualStrings("echo:ping_a", out_a[0..len_a]);
+    try std.testing.expectEqualStrings("echo:ping_b", out_b[0..len_b]);
 }
 
 test "fuzz_listener: random payload round-trips through the echo path" {
@@ -168,7 +220,7 @@ test "fuzz_listener: random payload round-trips through the echo path" {
 
             var lst = try Listener.bind(io, "127.0.0.1", 0);
             defer lst.deinit(io);
-            const bound_port = lst.port();
+            const bound_port = try lst.port();
 
             var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
 
