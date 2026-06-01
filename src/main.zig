@@ -1,5 +1,13 @@
 const std = @import("std");
+const build_options = @import("build_options");
 pub const arena = @import("util/arena.zig");
+
+/// LMDB-backed datastore modules. Guarded behind the `with_lmdb` build option
+/// so `-Dwith_lmdb=false` still compiles (no libc, no vendored C). When the
+/// option is off these alias an empty struct so `refAllDecls` stays cheap.
+pub const lmdb_c = if (build_options.with_lmdb) @import("store/lmdb_c.zig") else struct {};
+pub const datastore = if (build_options.with_lmdb) @import("store/datastore.zig") else struct {};
+pub const lmdb_store = if (build_options.with_lmdb) @import("store/lmdb_store.zig") else struct {};
 pub const config_backend = @import("config/backend.zig");
 pub const config = @import("config/confighelper.zig");
 pub const io = @import("io.zig");
