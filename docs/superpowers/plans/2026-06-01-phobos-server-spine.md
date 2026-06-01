@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the phobos server spine — an epoll reactor, HTTP/1.1 + WebSocket transports, a JSON-RPC 2.0 dispatcher, the always-on `server.info`/`server.config`/`server.connection.identify` methods, a notification bus, and a golden-capture conformance oracle — in Zig 0.16, byte-for-byte behavior-equal (after the §8a normalization manifest) to stock Moonraker.
+**Goal:** Build the phobos server spine — `std.Io.net` + `std.Io.Threaded` networking, HTTP/1.1 + WebSocket transports, a JSON-RPC 2.0 dispatcher, the always-on `server.info`/`server.config`/`server.connection.identify` methods, a notification bus, and a golden-capture conformance oracle — in Zig 0.16, byte-for-byte behavior-equal (after the §8a normalization manifest) to stock Moonraker.
 
-**Architecture:** Single-threaded epoll event loop mirroring asyncio FIFO ordering. All transports (HTTP REST, `/server/jsonrpc`, `/websocket`) converge on one JSON-RPC dispatcher consulting a runtime method table. Arena-per-request allocation, fixed connection pools, bounded buffers. No language async (removed in Zig); the reactor is an explicit callback state machine. liblmdb linked for the drop-in data store; phobos-owned data uses Zig std allocators.
+**Architecture:** Networking via `std.Io.net` over the `std.Io.Threaded` backend (the only std Io backend on 32-bit ARM Cortex-A7; `std.net` and the old socket layer are gone in 0.16). Listener accept loop spawns a per-connection `io.async` task; connection IO uses `std.Io.net` `Stream` reader/writer with caller-provided fixed buffers. Moonraker's single-loop observable ordering is restored by a **serialized server core**: JSON-RPC execution, shared-state mutation, and notification fan-out run under one core mutex/queue while connection IO stays concurrent. All transports (HTTP REST, `/server/jsonrpc`, `/websocket`) converge on one JSON-RPC dispatcher consulting a runtime method table. Arena-per-request allocation, bounded buffers, small thread-pool stacks. liblmdb linked for the drop-in data store; phobos-owned data uses Zig std allocators.
 
 **Tech Stack:** Zig 0.16.0; target `arm-linux-musleabihf -mcpu=cortex_a7` static (deploy) + native `x86_64-linux` (dev/CI); liblmdb (C); Python `uv`-run stock Moonraker as the golden oracle source.
 
@@ -18,7 +18,23 @@
 - **Allocator:** `var gpa: std.heap.DebugAllocator(.{}) = .init; defer _ = gpa.deinit();` (`GeneralPurposeAllocator` is gone). Tests use `std.testing.allocator`.
 - **ArrayList is unmanaged:** `var xs: std.ArrayList(T) = .empty;` then `try xs.append(alloc, item);`, `xs.deinit(alloc);`, `xs.items`. The allocator is passed to every mutating method — there is no `.init(alloc)`.
 - **Fuzzing:** `std.testing.fuzz(context, testOne, .{})` where `testOne: fn(@TypeOf(context), smith: *std.testing.Smith) anyerror!void`. The input is a `*Smith` structured generator, **not** `[]const u8`. Pull bytes with `smith.bytesWithHash(buf, 0)` / values with `smith.valueRangeAtMostWithHash(u8, 0, 255, 0)`. Helper used throughout: fill a stack buffer via `bytesWithHash`, slice it, feed the parser.
-- **epoll:** not in `std.posix`. Use `std.os.linux.epoll_create1/epoll_ctl/epoll_wait` (return `usize`, check errno via `std.os.linux.errno(rc)`) — or `std.c.epoll_*` when libc is linked. Pick `std.os.linux.*`.
+- **Networking = `std.Io.net` over `std.Io.Threaded`** (NOT raw syscalls, NOT a custom reactor — both rejected). `std.net` is gone in 0.16; networking moved under `std.Io`. Validated pattern:
+  ```zig
+  var threaded = std.Io.Threaded.init(gpa, .{}); defer threaded.deinit();
+  const io = threaded.io();
+  var addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+  var server = try addr.listen(io, .{ .reuse_address = true });   // -> net.Server
+  defer server.deinit(io);
+  const stream = try server.accept(io);                            // -> net.Stream (scheduled by io)
+  var rbuf: [N]u8 = undefined; var r = stream.reader(io, &rbuf);   // r.interface is *std.Io.Reader
+  const line = try r.interface.takeDelimiterExclusive('\n');
+  var wbuf: [N]u8 = undefined; var w = stream.writer(io, &wbuf);   // w.interface is *std.Io.Writer
+  try w.interface.print("...", .{}); try w.interface.flush();
+  // client: try std.Io.net.IpAddress.parseIp4(ip,port) then .connect(io, .{ .mode = .stream })
+  // concurrency: var fut = io.async(func, .{args}); ... fut.await(io);
+  // ephemeral-port readback: std.os.linux.getsockname(server.socket.handle, &sa, &len) then std.mem.bigToNative(u16, sa.port)
+  ```
+  Caller-provided fixed reader/writer buffers = our memory control. `getsockname` for ephemeral-port readback is the lone raw-syscall exception (no std wrapper).
 - **JSON:** parse with `std.json.parseFromSlice(std.json.Value, alloc, src, .{})`. Serialize with `std.json.Stringify` (struct: `Stringify.valueAlloc(alloc, v, .{})`) — there is no free `std.json.stringify`. Insertion-order key output: `std.json.Value`'s `object` is an `ArrayHashMap`, so it preserves insertion order; verify against goldens before assuming.
 - **Build: link flags live on the Module, not the Compile.** Pass `.link_libc = true` into `b.createModule(...)`, then `mod.linkSystemLibrary("lmdb", .{})` on that module (or `exe.root_module.linkSystemLibrary(...)`). `exe.linkLibC()` does not exist in 0.16.
 - **ArenaAllocator.reset** returns `bool`: `_ = self.arena.reset(.retain_capacity);` is correct.
@@ -40,8 +56,8 @@ phobos/
   build.zig                     # build graph: exe, test step, fuzz step, cross-target option
   build.zig.zon                 # package manifest (name, version, deps: lmdb via system lib)
   src/
-    main.zig                    # entry: parse args, load config, build server, run reactor
-    reactor.zig                 # epoll loop, timers, deferred-call FIFO queue, worker wakeup
+    main.zig                    # entry: parse args, load config, build server, run std.Io listener
+    io.zig                      # std.Io.Threaded bootstrap, Io handle, accept loop, conn spawn
     json/value.zig              # minimal JSON value + parse/stringify (canonical key order)
     jsonrpc.zig                 # JSON-RPC 2.0 envelope, error codes, dispatch table
     net/http.zig                # HTTP/1.1 request parser + response serializer
@@ -178,35 +194,45 @@ test { std.testing.refAllDecls(@This()); }
 
 ---
 
-## Task 1: Reactor (epoll loop + timers + deferred FIFO queue)
+## Task 1: Io bootstrap — `std.Io.Threaded` + `std.Io.net` accept loop + serialized core
 
-**Files:** Create `src/reactor.zig`. The ordering contract: deferred callbacks run FIFO (asyncio `call_soon`); timers fire in deadline order; both before the next epoll wait returns to user code.
+**Files:** Create `src/io.zig` (Io bootstrap + listener/accept loop + per-conn spawn) and `src/server/core.zig` (the serialized-core mutex wrapper that preserves Moonraker's single-loop ordering). The hand-rolled reactor is GONE — we use the std backend. See the networking cheatsheet above for the validated `std.Io.net` API.
 
-- [ ] **Step 1: Failing test — deferred calls run in FIFO order**
+- [ ] **Step 1: Failing test — `Listener` accepts a connection and the handler echoes**
 
 ```zig
-test "deferred callbacks run FIFO" {
+test "listener accepts and a registered handler echoes a line" {
     const alloc = std.testing.allocator;
-    var r = try Reactor.init(alloc);
-    defer r.deinit();
-    var order: std.ArrayList(u8) = .empty;
-    defer order.deinit(alloc);
-    // register three call_soon callbacks that append 1,2,3 (callback appends via order.append(alloc, n))
-    var ctx = AppendCtx{ .list = &order, .alloc = alloc };
-    try r.callSoon(appendCb, &ctx, 1);
-    try r.callSoon(appendCb, &ctx, 2);
-    try r.callSoon(appendCb, &ctx, 3);
-    try r.runPending(); // drains the deferred queue once
-    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, order.items);
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var lst = try Listener.bind(io, "127.0.0.1", 0); // port 0 -> ephemeral
+    defer lst.deinit(io);
+    const port = lst.port();
+    try std.testing.expect(port != 0);
+
+    // serve one connection concurrently, echoing "echo:<line>"
+    var fut = io.async(Listener.serveOnce, .{ &lst, io, echoHandler });
+
+    var caddr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var cs = try caddr.connect(io, .{ .mode = .stream });
+    defer cs.close(io);
+    var wb: [64]u8 = undefined; var w = cs.writer(io, &wb);
+    try w.interface.print("hello\n", .{}); try w.interface.flush();
+    var rb: [64]u8 = undefined; var r = cs.reader(io, &rb);
+    const reply = try r.interface.takeDelimiterExclusive('\n');
+    try std.testing.expectEqualStrings("echo:hello", reply);
+    fut.await(io);
 }
 ```
 
-- [ ] **Step 2:** Run `zig test src/reactor.zig` → FAIL (Reactor undefined).
-- [ ] **Step 3: Minimal impl** — `Reactor` over `std.os.linux.epoll_create1/epoll_ctl/epoll_wait` (check return via `std.os.linux.errno(rc)`): a deferred queue (e.g. `std.ArrayList(Deferred)` used FIFO, or `std.fifo.LinearFifo`), a timer min-heap keyed by `std.time.Instant`, `callSoon`, `callLater`, `runPending`, `addFd`/`modFd`/`delFd`, and `run()` that loops: drain deferred → compute next timer timeout → `epoll_wait` → dispatch ready fds → fire due timers. No threads. Define `AppendCtx`/`appendCb` test helpers in-file. **`run()` must include a working accept→read path** (not just readiness flags) because Task 3b/4's `TestServer` drives real sockets through it.
+- [ ] **Step 2:** Run `zig build test -Dwith_lmdb=false` (or `zig test -target x86_64-linux-musl src/io.zig`) → FAIL.
+- [ ] **Step 3: Minimal impl** — `Listener.bind(io, host, port)` wraps `IpAddress.parseIp4 + listen(.{.reuse_address=true})`; `port()` reads the bound port via `getsockname`; `serveOnce(io, handler)` does one `accept` + calls handler with the `Stream`; `serve(io, handler)` loops `accept` and `io.async`-spawns a connection task per accept. `deinit`. Define `echoHandler` as an in-file test helper. **Run/test builds use `-Dwith_lmdb=false`** (no libc needed yet; host glibc link is broken — use musl).
 - [ ] **Step 4:** Run → PASS.
-- [ ] **Step 5: Add timer-ordering test** (callLater 5ms vs 1ms fire in deadline order) + **fd-readiness test** using `std.posix.socketpair`: register one end, write to the other, assert the registered read callback fires from a bounded `run()`. Add an **accept test**: listen on an ephemeral port, connect, assert the accept callback fires and the connection is readable — this is the path `TestServer` depends on. Implement until green.
-- [ ] **Step 6: Fuzz** — `fuzz_reactor`: feed random sequences of callSoon/callLater(ms from input)/runPending; assert no crash, queue never reorders same-deadline items, no leak.
-- [ ] **Step 7: Commit** — `feat: epoll reactor with FIFO deferred queue and timer heap`
+- [ ] **Step 5: Serialized core** — in `src/server/core.zig`, add `Core` holding a `std.Thread.Mutex` and a monotonic sequence counter. Test that two `io.async` tasks calling `core.run(fn)` are mutually exclusive and that emitted notifications preserve a single total order (enqueue under the lock, drain in FIFO). This is the mechanism that makes thread-pool concurrency observably equal to Moonraker's single loop. Implement until green.
+- [ ] **Step 6: Fuzz** — `fuzz_core`: many concurrent `io.async` tasks pushing notifications through `Core`; assert the drained order is a valid serialization (per-producer order preserved, no loss, no data race — run under `-fsanitize` / ThreadSanitizer-style assertions where available, else assert invariants). For `Listener`, a fuzz harness feeds random byte payloads through the echo path asserting no crash.
+- [ ] **Step 7: Commit** — `feat: std.Io.net listener with serialized server core`
 
 ---
 
@@ -276,7 +302,7 @@ test "TestServer starts on an ephemeral port and accepts a connection" {
 }
 ```
 
-- [ ] **Step 2:** Run → FAIL. **Step 3:** Impl `TestServer`: bind a listener on `127.0.0.1:0`, register it with a `Reactor`, run the reactor on a background thread (this is test infra, not the production single-thread model) until `stop()`. Expose `address`/`port()`.
+- [ ] **Step 2:** Run → FAIL. **Step 3:** Impl `TestServer`: own a `std.Io.Threaded` instance, bind a `Listener` (Task 1) on `127.0.0.1:0`, run its `serve` loop via `io.async` until `stop()`. Expose `address`/`port()`. Uses the production `std.Io.net` path — not a separate socket impl.
 - [ ] **Step 4:** PASS.
 - [ ] **Step 5:** Add `srv.get(path) []u8` (minimal blocking HTTP/1.1 client: send request, read response, return body), `srv.wsConnect() WsTestConn` (perform the RFC6455 handshake using `net/ws.acceptKey` logic on the client side), and `WsTestConn.call(method, params_json) -> result_json` (send a JSON-RPC frame, read the matching response frame). These reuse `net/http` and `net/ws` (Tasks 3 + 5) — so **schedule Task 5 (ws codec) before this task's WS client step**, or split: TCP+HTTP client now, WS client added right after Task 5. Keep `TestServer` itself dependency-light.
 - [ ] **Step 6: Fuzz** — `fuzz_testclient` is **not required** (test-only helper, not production input surface); note this explicitly to satisfy the per-function rule by exception.
@@ -286,13 +312,13 @@ test "TestServer starts on an ephemeral port and accepts a connection" {
 
 ## Task 4: HTTP transport + minimal `server.info`/`server.config` + server registry + auth hook
 
-**Files:** Create `src/transport/http.zig`, `src/server/registry.zig`, `src/core/methods.zig`. Wire reactor → http parser → dispatcher.
+**Files:** Create `src/transport/http.zig`, `src/server/registry.zig`, `src/core/methods.zig`. Wire `Listener` (std.Io.net) → http parser → dispatcher, executing handlers under the serialized `Core`.
 
 - [ ] **Step 1: Failing test — REST `GET /server/info` returns wrapped result with `api_version_string`**
 
 ```zig
 test "GET /server/info returns wrapped result envelope" {
-    var srv = try TestServer.start(std.testing.allocator); // boots reactor+http on an ephemeral port
+    var srv = try TestServer.start(std.testing.allocator); // boots std.Io listener+http on an ephemeral port
     defer srv.stop();
     const body = try srv.get("/server/info");
     try std.testing.expect(std.mem.indexOf(u8, body, "\"result\"") != null);
@@ -349,7 +375,7 @@ test "two ws connections get distinct monotonic connection ids" {
 }
 ```
 
-- [ ] **Step 2:** FAIL. **Step 3:** Impl WS transport over reactor+ws codec; per-connection struct holds a `u64` id from a monotonic counter; register `server.connection.identify`/`server.websocket.id` in the dispatcher bound to the connection. **Step 4:** PASS.
+- [ ] **Step 2:** FAIL. **Step 3:** Impl WS transport over the `std.Io.net` `Stream` + ws codec; per-connection struct holds a `u64` id from a monotonic counter (assigned under `Core`); register `server.connection.identify`/`server.websocket.id` in the dispatcher bound to the connection. **Step 4:** PASS.
 - [ ] **Step 5:** Test that the same JSON-RPC dispatcher serves WS (call `server.info` over WS, assert same payload as HTTP) — proves transport convergence. Implement until green.
 - [ ] **Step 6: Fuzz** — `fuzz_ws_transport`: random frame/payload sequences; never crash.
 - [ ] **Step 7: Commit** — `feat: websocket transport with monotonic connection ids`
@@ -382,30 +408,29 @@ test "parse sections and coerce types" {
 
 ## Task 8: Notification bus + one `notify_*`
 
-**Files:** Create `src/server/notify.zig`. FIFO fan-out to all subscribed WS connections, bounded per-connection queue, ordering preserved (contract). Emit one notification to prove framing/ordering (e.g. a `notify_` on a server event).
+**Files:** Create `src/server/notify.zig`. FIFO fan-out to all subscribed WS connections, bounded per-connection queue, ordering preserved (contract). Emission goes through the serialized `Core` (Task 1) so the total order is deterministic. Emit one notification to prove framing/ordering.
 
 - [ ] **Step 1: Failing test — subscribers receive notifications in emit order**
 
 ```zig
 test "notifications delivered in FIFO emit order" {
     const alloc = std.testing.allocator;
-    var r = try Reactor.init(alloc);
-    defer r.deinit();
-    var bus = NotifyBus.init(alloc, &r);
+    var core = Core.init();            // serialized core from Task 1 (mutex + seq)
+    var bus = NotifyBus.init(alloc, &core);
     defer bus.deinit();
-    var sink = TestSink.init(alloc); // records JSON frames it receives
+    var sink = TestSink.init(alloc);   // records JSON frames it receives
     defer sink.deinit();
     try bus.subscribe(sink.conn());
     try bus.emit("notify_a", "[1]");
     try bus.emit("notify_b", "[2]");
-    try r.runPending();
+    bus.drain();                        // deliver queued notifications in FIFO
     try std.testing.expectEqual(@as(usize, 2), sink.frames.items.len);
     try std.testing.expect(std.mem.indexOf(u8, sink.frames.items[0], "notify_a") != null);
     try std.testing.expect(std.mem.indexOf(u8, sink.frames.items[1], "notify_b") != null);
 }
 ```
 
-- [ ] **Step 2:** FAIL. **Step 3:** Impl bus: `subscribe(conn)`, `emit(method, params)` enqueues a JSON-RPC notification (no `id`) to each subscriber via `reactor.callSoon` (preserves FIFO). Define `TestSink` in-file. **Step 4:** PASS.
+- [ ] **Step 2:** FAIL. **Step 3:** Impl bus: `subscribe(conn)`, `emit(method, params)` enqueues a JSON-RPC notification (no `id`) per subscriber **under the `Core` lock** (preserves FIFO total order), `drain()` writes queued frames to each subscriber's `Stream`. Define `TestSink` in-file. **Step 4:** PASS.
 - [ ] **Step 5:** Test bounded-queue backpressure (full queue → drop/close matching Moonraker) and exact wire shape `{"jsonrpc":"2.0","method":"notify_...","params":[...]}`. Implement until green.
 - [ ] **Step 6: Fuzz** — `fuzz_notify`: random emit/subscribe/unsubscribe interleavings; never crash, never reorder.
 - [ ] **Step 7: Commit** — `feat: notification bus with FIFO fan-out`

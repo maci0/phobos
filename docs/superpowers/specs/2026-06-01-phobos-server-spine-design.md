@@ -42,34 +42,55 @@ RSS, not to imitate Python.
 - **libc:** linked only because liblmdb (C) needs it; Zig code uses Zig std allocators,
   not libc malloc, for its own data.
 
-## 3a. Zig 0.16 constraints
+## 3a. Zig 0.16 constraints & the std.Io decision (revised)
 
-- **No language async/await** — removed from Zig. The reactor is a hand-rolled,
-  explicit state-machine/callback design. No `async fn`, no `std.event.Loop` (gone).
-- **`std.Io` not used** — its interface churned across 0.13→0.16; phobos owns its
-  reactor to avoid the moving target.
-- **Allocator boundary, scoped precisely:** Zig std allocators (`DebugAllocator`/GPA,
-  arenas, page allocator) manage their own pages via `mmap` and do **not** route
-  phobos-owned allocations through libc `malloc`. **However**, linked C code retains
-  its own allocator: liblmdb, the libc DNS resolver, and stdio call libc `malloc`.
-  On the **musl-static target** that is musl's mallocng (lean); on the **native
-  x86_64 dev/CI build** it is typically glibc with arenas. So: the "no glibc arena
-  overhead" rationale holds for the deployed target only — dev and target differ in
-  allocator behavior, which the oracle host must account for.
+The Zig 0.16 "Io rewrite" relocated all networking to **`std.Io.net`** (the old
+`std.net` and most of `std.posix`'s socket layer are gone), operating over a pluggable
+**`std.Io`** backend (`Threaded`, `Uring`, `Kqueue`, fiber `Evented`). Per the user's
+direction, phobos **uses the standard library** (`std.Io.net`, `std.Io`, and `std.http`
+where it fits) rather than hand-rolling sockets or a reactor.
+
+- **No language async/await** — removed from Zig. Concurrency is the `std.Io` model:
+  `io.async(fn, args)` → `Future`, `future.await(io)`, blocking-style calls that the
+  backend schedules. No `async fn`, no `std.event.Loop`.
+- **Backend = `std.Io.Threaded`** (thread pool). Rationale: the deploy target is 32-bit
+  ARM **Cortex-A7 (`arm` arch)**, where `std.Io.Evented`/fiber is **not implemented**
+  (`fiber.supported` covers only aarch64/riscv64/x86_64). `Threaded` is the only std
+  backend available on the target, so we use it on **both** dev and target for behavioral
+  consistency. Validated end-to-end (Threaded + `net` TCP echo) before adopting.
+- **Consequence for the memory goal:** `Threaded` parks a blocking op on a worker
+  thread/stack for its duration. This suits Moonraker's workload — a 3D-printer host has
+  a *handful* of concurrent clients (a few web UIs, not thousands of idle sockets) — so
+  the thread/stack count stays small. We bound it: small `stack_size`, a configured
+  `async_limit`/`concurrent_limit`, and we do not hold a worker per idle connection any
+  longer than a request needs. Document the realistic concurrency ceiling.
+- **Allocator boundary:** Zig std allocators (`DebugAllocator`, arenas, page allocator)
+  manage their own pages via `mmap`, not libc `malloc`. Linked C (liblmdb, resolver,
+  stdio) uses libc `malloc` — musl mallocng on the static target (lean), glibc arenas on
+  a glibc dev build. **Host note:** this dev machine's system glibc cannot be linked by
+  Zig 0.16 (GCC 16 `.sframe` reloc); dev/CI/oracle builds use `x86_64-linux-musl` (Zig's
+  bundled musl, static). Deploy uses `arm-linux-musleabihf -mcpu=cortex_a7`, static.
 
 ## 4. Runtime model
 
-Single-threaded epoll event loop (`Reactor`) mirroring asyncio semantics:
+`std.Io.Threaded`-backed concurrency with a **single serialized server core** to
+preserve Moonraker's observable single-loop ordering:
 
-- fd readiness registration (level/edge as appropriate), one-shot and periodic timers,
-  and a deferred-callback queue (asyncio `call_soon` equivalent) that preserves FIFO
-  ordering — this ordering is part of the observable contract for notification
-  delivery.
-- No threads, no locks on the hot path. A small **bounded** worker queue handles only
-  the operations Moonraker itself offloads (shell commands, blocking file IO); results
-  re-enter the loop via an eventfd/self-pipe wakeup.
-- Backpressure: bounded per-connection write buffers; bounded notification fan-out
-  queues. Drops/closes match Moonraker's behavior where it has limits.
+- One `std.Io.Threaded` instance; `io = threaded.io()` threaded through the app.
+- The listener runs an accept loop; each accepted connection is handled by
+  `io.async(handleConn, .{...})`. Connection IO (read request, write response, WS
+  frames) uses `std.Io.net` `Stream` reader/writer.
+- **Ordering contract:** Moonraker processes requests and emits notifications on one
+  asyncio loop, so clients observe a single total order. Under a thread pool that order
+  is *not* automatic. Phobos restores it with a **serialized core**: all shared-state
+  mutation, JSON-RPC method execution, and notification fan-out happen under a single
+  core mutex (or equivalently a single-consumer command queue). Connection IO is
+  concurrent; the *logical* request handling and notify emission are serialized. This is
+  the minimal mechanism that keeps the observable ordering identical to Moonraker.
+- Blocking sub-operations Moonraker offloads (shell commands, file IO) are
+  `io.async` tasks; their results re-enter the core under the same lock.
+- Backpressure: bounded per-connection write buffers and bounded notification queues;
+  drops/closes match Moonraker where it has limits.
 
 ## 5. Memory strategy
 
@@ -77,10 +98,14 @@ Single-threaded epoll event loop (`Reactor`) mirroring asyncio semantics:
   *reset* (not individually freed) at end of request. Eliminates per-allocation
   bookkeeping and fragmentation.
 - **Fixed pools:** preallocated connection objects, parse buffers, and frame buffers;
-  pool size is a config bound.
+  pool size is a config bound. `Stream` reader/writer buffers are caller-provided
+  fixed slices (std.Io gives us this control) — size them small and reuse.
 - **Bounded buffers everywhere:** no unbounded reads; streaming for uploads/downloads.
 - **No global allocator churn:** long-lived state (registry, config, store handles)
   in a dedicated arena that lives for process lifetime.
+- **Thread-pool footprint:** keep `std.Io.Threaded` `stack_size` small and the
+  concurrency limit low (printer workload = few clients); a worker stack is the main
+  per-concurrency cost, so bounding concurrency bounds RSS.
 
 ## 6. Module decomposition
 
@@ -88,17 +113,23 @@ Each module has one purpose, a defined interface, and is independently testable.
 
 | Module | Purpose | Depends on |
 |---|---|---|
-| `reactor` | epoll loop, timers, deferred-call queue, worker wakeup | (none) |
-| `net/http` | HTTP/1.1 request parse + response serialize | reactor |
+| `io` | `std.Io.Threaded` bootstrap, `Io` handle, accept loop, conn spawn helpers | std.Io |
+| `net/http` | HTTP/1.1 request parse + response serialize (over `std.Io.net` Stream; evaluate `std.http`) | io |
 | `net/ws` | WebSocket RFC6455 framing (handshake, frames, close, ping/pong) | net/http |
 | `jsonrpc` | JSON-RPC 2.0 dispatch + error codes (-32700/-32600/-32601/-32602) | (none) |
 | `transport/http` | REST + `/server/jsonrpc` → jsonrpc | net/http, jsonrpc |
 | `transport/ws` | `/websocket`, `/klippysocket` → jsonrpc | net/ws, jsonrpc |
-| `transport/unixsocket` | internal socket → jsonrpc | reactor, jsonrpc |
-| `server` | component registry, lifecycle, event/notification bus | reactor |
+| `transport/unixsocket` | internal socket → jsonrpc | io, jsonrpc |
+| `server` | component registry, lifecycle, **serialized core** (mutex/queue), event/notification bus | io |
 | `core` | transport-agnostic `server.info`, `server.config`, notify plumbing | server, jsonrpc |
 | `config` | confighelper port behind `ConfigBackend` interface | (none) |
 | `store` | `DataStore` interface; default drop-in liblmdb impl | (none) |
+
+**HTTP build-vs-buy (idiomatic + lean):** prefer `std.http`/`std.Io.net` primitives
+over re-implementing where they give byte-exact control. The spine evaluates
+`std.http.Server` for request parsing; if its forced response headers/format diverge
+from Moonraker's goldens, fall back to a thin custom HTTP/1.1 codec over `Stream`
+reader/writer. The oracle decides. Either way we do not hand-roll sockets.
 
 **Module-boundary note (review H1):** `server.connection.identify` and
 `server.websocket.id` are **WebSocket-transport-only**, `auth_required=False`, and

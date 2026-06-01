@@ -1,6 +1,5 @@
 const std = @import("std");
 pub const arena = @import("util/arena.zig");
-pub const reactor = @import("reactor.zig");
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
