@@ -23,6 +23,11 @@ const db_component = @import("components/database.zig");
 const history_component = @import("components/history.zig");
 const job_queue_component = @import("components/job_queue.zig");
 const announcements_component = @import("components/announcements.zig");
+const data_store_component = @import("components/data_store.zig");
+const server_misc_component = @import("components/server_misc.zig");
+const notifier_component = @import("components/notifier.zig");
+const webcam_component = @import("components/webcam.zig");
+const sensor_component = @import("components/sensor.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -34,6 +39,11 @@ const DbCtx = db_component.DbCtx;
 const HistoryCtx = history_component.HistoryCtx;
 const JobQueueCtx = job_queue_component.JobQueueCtx;
 const AnnouncementsCtx = announcements_component.AnnouncementsCtx;
+const DataStoreCtx = data_store_component.DataStoreCtx;
+const ServerMiscCtx = server_misc_component.ServerMiscCtx;
+const NotifierCtx = notifier_component.NotifierCtx;
+const WebcamCtx = webcam_component.WebcamCtx;
+const SensorCtx = sensor_component.SensorCtx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -95,6 +105,11 @@ pub const App = struct {
     history_ctx: *HistoryCtx,
     job_queue_ctx: *JobQueueCtx,
     announcements_ctx: *AnnouncementsCtx,
+    data_store_ctx: *DataStoreCtx,
+    server_misc_ctx: *ServerMiscCtx,
+    notifier_ctx: *NotifierCtx,
+    webcam_ctx: *WebcamCtx,
+    sensor_ctx: *SensorCtx,
     /// Owns the LMDB environment when with_lmdb=true; void otherwise.
     lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
 
@@ -174,6 +189,31 @@ pub const App = struct {
         errdefer alloc.destroy(announcements_ctx);
         announcements_ctx.* = try AnnouncementsCtx.init(alloc, db_ctx.store, bus);
 
+        // --- Data store context (gcode_store + temperature_store) ---
+        const data_store_ctx = try alloc.create(DataStoreCtx);
+        errdefer alloc.destroy(data_store_ctx);
+        data_store_ctx.* = try DataStoreCtx.init(alloc);
+
+        // --- Server misc context (restart + logs/rollover) ---
+        const server_misc_ctx = try alloc.create(ServerMiscCtx);
+        errdefer alloc.destroy(server_misc_ctx);
+        server_misc_ctx.* = .{};
+
+        // --- Notifier context (notifiers/list) ---
+        const notifier_ctx = try alloc.create(NotifierCtx);
+        errdefer alloc.destroy(notifier_ctx);
+        notifier_ctx.* = .{};
+
+        // --- Webcam context (webcams CRUD) ---
+        const webcam_ctx = try alloc.create(WebcamCtx);
+        errdefer alloc.destroy(webcam_ctx);
+        webcam_ctx.* = try WebcamCtx.init(alloc, db_ctx.store, bus);
+
+        // --- Sensor context (sensors list/info/measurements) ---
+        const sensor_ctx = try alloc.create(SensorCtx);
+        errdefer alloc.destroy(sensor_ctx);
+        sensor_ctx.* = .{};
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -186,6 +226,11 @@ pub const App = struct {
             .history_ctx = history_ctx,
             .job_queue_ctx = job_queue_ctx,
             .announcements_ctx = announcements_ctx,
+            .data_store_ctx = data_store_ctx,
+            .server_misc_ctx = server_misc_ctx,
+            .notifier_ctx = notifier_ctx,
+            .webcam_ctx = webcam_ctx,
+            .sensor_ctx = sensor_ctx,
             .lmdb_store_ptr = lmdb_ptr,
         };
 
@@ -204,6 +249,16 @@ pub const App = struct {
             self.lmdb_store_ptr.close();
             self.alloc.destroy(self.lmdb_store_ptr);
         }
+        self.sensor_ctx.* = .{};
+        self.alloc.destroy(self.sensor_ctx);
+        self.webcam_ctx.deinit();
+        self.alloc.destroy(self.webcam_ctx);
+        self.notifier_ctx.* = .{};
+        self.alloc.destroy(self.notifier_ctx);
+        self.server_misc_ctx.* = .{};
+        self.alloc.destroy(self.server_misc_ctx);
+        self.data_store_ctx.deinit();
+        self.alloc.destroy(self.data_store_ctx);
         self.announcements_ctx.deinit();
         self.alloc.destroy(self.announcements_ctx);
         self.job_queue_ctx.deinit();
@@ -236,6 +291,21 @@ pub const App = struct {
 
         // Announcements component: server.announcements.* endpoints.
         try announcements_component.registerAnnouncements(self.reg, self.announcements_ctx);
+
+        // Data store component: server.gcode_store + server.temperature_store.
+        try data_store_component.registerDataStore(self.reg, self.data_store_ctx);
+
+        // Server misc component: server.restart + server.logs.rollover.
+        try server_misc_component.registerServerMisc(self.reg, self.server_misc_ctx);
+
+        // Notifier component: server.notifiers.list + debug.notifiers.test.
+        try notifier_component.registerNotifier(self.reg, self.notifier_ctx);
+
+        // Webcam component: server.webcams.* endpoints.
+        try webcam_component.registerWebcam(self.reg, self.webcam_ctx);
+
+        // Sensor component: server.sensors.* endpoints.
+        try sensor_component.registerSensor(self.reg, self.sensor_ctx);
 
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
@@ -351,6 +421,23 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.announcements.post_feed",
         "server.announcements.delete_feed",
         "server.announcements.feeds",
+        // Data store
+        "server.gcode_store",
+        "server.temperature_store",
+        // Server misc
+        "server.restart",
+        "server.logs.rollover",
+        // Notifier
+        "server.notifiers.list",
+        "debug.notifiers.test",
+        // Webcam (item endpoint follows single-method pattern like database.item)
+        "server.webcams.list",
+        "server.webcams.item",
+        "server.webcams.test",
+        // Sensor
+        "server.sensors.list",
+        "server.sensors.info",
+        "server.sensors.measurements",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",

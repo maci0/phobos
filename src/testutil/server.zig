@@ -423,3 +423,170 @@ test "database: POST /server/database/compact returns old_size and new_size" {
     try std.testing.expect(result.object.get("old_size") != null);
     try std.testing.expect(result.object.get("new_size") != null);
 }
+
+// ---------------------------------------------------------------------------
+// Data store component integration tests
+// ---------------------------------------------------------------------------
+
+test "data_store: GET /server/gcode_store returns gcode_store array" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/gcode_store");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("gcode_store") != null);
+    try std.testing.expect(result.object.get("gcode_store").? == .array);
+}
+
+test "data_store: GET /server/temperature_store returns empty object (no Klippy)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/temperature_store");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    // Empty object (no sensors without Klippy)
+    try std.testing.expect(result == .object);
+}
+
+// ---------------------------------------------------------------------------
+// Server misc integration tests
+// ---------------------------------------------------------------------------
+
+test "server_misc: POST /server/restart returns ok" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/restart", "{}");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expectEqualStrings("ok", result.string);
+}
+
+test "server_misc: POST /server/logs/rollover returns rolled_over and failed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/logs/rollover", "{}");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("rolled_over") != null);
+    try std.testing.expect(result.object.get("failed") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Notifier integration tests
+// ---------------------------------------------------------------------------
+
+test "notifier: GET /server/notifiers/list returns empty notifiers array" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/notifiers/list");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("notifiers") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.object.get("notifiers").?.array.items.len);
+}
+
+// ---------------------------------------------------------------------------
+// Webcam integration tests
+// ---------------------------------------------------------------------------
+
+test "webcam: GET /server/webcams/list returns empty webcams array" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/webcams/list");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("webcams") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.object.get("webcams").?.array.items.len);
+}
+
+test "webcam: POST /server/webcams/item creates webcam (HTTP)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/webcams/item",
+        \\{"name":"test_cam","stream_url":"http://localhost/stream"}
+    );
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("webcam") != null);
+    try std.testing.expectEqualStrings("test_cam", result.object.get("webcam").?.object.get("name").?.string);
+}
+
+// ---------------------------------------------------------------------------
+// Sensor integration tests
+// ---------------------------------------------------------------------------
+
+test "sensor: GET /server/sensors/list returns empty sensors object" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/sensors/list");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("sensors") != null);
+}
+
+test "sensor: GET /server/sensors/info without sensor param returns error" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/sensors/info");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("error") != null);
+}
+
+test "sensor: GET /server/sensors/measurements returns empty object (no sensors)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/sensors/measurements");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result == .object);
+}
