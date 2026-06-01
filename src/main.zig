@@ -20,6 +20,7 @@ pub const http_transport = @import("http_transport.zig");
 pub const connections = @import("server/connections.zig");
 pub const notify = @import("server/notify.zig");
 pub const ws_transport = @import("transport/ws.zig");
+pub const database_component = @import("components/database.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub const app = @import("app.zig");

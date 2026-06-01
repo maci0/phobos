@@ -211,10 +211,25 @@ pub fn handleParsed(
     // comptime-known function, so dispatch the runtime handler pointer through a
     // fixed trampoline.
     const result = srv.core.run(srv.io, callHandler, .{ route.handler, route.ctx, params, alloc }) catch |err| {
-        const code: i64 = if (err == error.InvalidParams) 400 else 500;
-        const msg: []const u8 = if (err == error.InvalidParams) "Bad Request" else "Internal Server Error";
+        const code: i64 = switch (err) {
+            error.InvalidParams => 400,
+            error.Forbidden => 403,
+            error.NotFound => 404,
+            else => 500,
+        };
+        const msg: []const u8 = switch (err) {
+            error.InvalidParams => "Bad Request",
+            error.Forbidden => "Forbidden",
+            error.NotFound => "Not Found",
+            else => "Internal Server Error",
+        };
+        const status: std.http.Status = switch (err) {
+            error.InvalidParams => .bad_request,
+            error.Forbidden => .forbidden,
+            error.NotFound => .not_found,
+            else => .internal_server_error,
+        };
         const b = try errorBody(alloc, code, msg);
-        const status: std.http.Status = if (err == error.InvalidParams) .bad_request else .internal_server_error;
         return .{ .status = status, .body = b };
     };
 

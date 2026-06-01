@@ -355,23 +355,37 @@ pub const LmdbStore = struct {
         .getNamespace = vtGetNamespace,
     };
 
-    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8) Error!?json.Value {
-        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).getItem(arena, ns, key);
+    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!?json.Value {
+        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).getItem(arena, ns, key) catch |e| return lmdbErrToDs(e);
     }
-    fn vtInsertItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: json.Value) Error!void {
-        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).insertItem(arena, ns, key, value);
+    fn vtInsertItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: json.Value) ds.Error!void {
+        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).insertItem(arena, ns, key, value) catch |e| return lmdbErrToDs(e);
     }
-    fn vtUpdateItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: json.Value) Error!void {
-        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).updateItem(arena, ns, key, value);
+    fn vtUpdateItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: json.Value) ds.Error!void {
+        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).updateItem(arena, ns, key, value) catch |e| return lmdbErrToDs(e);
     }
-    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8) Error!json.Value {
-        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).deleteItem(arena, ns, key);
+    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!json.Value {
+        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).deleteItem(arena, ns, key) catch |e| return lmdbErrToDs(e);
     }
-    fn vtListNamespaces(ctx: *anyopaque, arena: std.mem.Allocator) Error![][]const u8 {
-        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).listNamespaces(arena);
+    fn vtListNamespaces(ctx: *anyopaque, arena: std.mem.Allocator) ds.Error![][]const u8 {
+        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).listNamespaces(arena) catch |e| return lmdbErrToDs(e);
     }
-    fn vtGetNamespace(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8) Error!json.Value {
-        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).getNamespace(arena, ns);
+    fn vtGetNamespace(ctx: *anyopaque, arena: std.mem.Allocator, ns: [:0]const u8) ds.Error!json.Value {
+        return @as(*LmdbStore, @ptrCast(@alignCast(ctx))).getNamespace(arena, ns) catch |e| return lmdbErrToDs(e);
+    }
+
+    /// Map LMDB-specific errors to the backend-agnostic `ds.Error` set.
+    /// `EnvOpenFailed`, `TxnFailed`, `PutFailed` all map to `BackendError`.
+    fn lmdbErrToDs(e: Error) ds.Error {
+        return switch (e) {
+            ds.Error.InvalidKey => ds.Error.InvalidKey,
+            ds.Error.KeyNotFound => ds.Error.KeyNotFound,
+            ds.Error.NamespaceNotFound => ds.Error.NamespaceNotFound,
+            ds.Error.NotAnObject => ds.Error.NotAnObject,
+            ds.Error.OutOfMemory => ds.Error.OutOfMemory,
+            ds.Error.BackendError => ds.Error.BackendError,
+            error.EnvOpenFailed, error.TxnFailed, error.PutFailed => ds.Error.BackendError,
+        };
     }
 
     /// Return all top-level key -> decoded-value pairs in `namespace` as a

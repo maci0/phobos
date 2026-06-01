@@ -113,6 +113,13 @@ pub const TestServer = struct {
         return self.request(alloc, .POST, path, body);
     }
 
+    /// Issue a DELETE request. Body is passed as JSON query params aren't supported
+    /// for DELETE in std.http.Client, so params must be embedded in the path as
+    /// query string (e.g. "?namespace=ns&key=k"), or pass null for bodyless DELETE.
+    pub fn deleteJson(self: *TestServer, alloc: std.mem.Allocator, path: []const u8, _: ?[]const u8) ![]u8 {
+        return self.request(alloc, .DELETE, path, null);
+    }
+
     fn request(
         self: *TestServer,
         alloc: std.mem.Allocator,
@@ -261,4 +268,158 @@ test "fuzz_testserver: arbitrary paths never crash the server, always JSON back"
             parsed.deinit();
         }
     }.run, .{});
+}
+
+// ---------------------------------------------------------------------------
+// Database component integration tests
+// ---------------------------------------------------------------------------
+
+const build_options = @import("build_options");
+
+test "database: GET /server/database/list returns namespaces and backups" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/database/list");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("namespaces") != null);
+    try std.testing.expect(result.object.get("backups") != null);
+}
+
+test "database: POST item then GET it back — value round-trips (lmdb only)" {
+    if (!build_options.with_lmdb) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // POST an item.
+    const post_body = try ts.postJson(alloc, "/server/database/item",
+        \\{"namespace":"inttest","key":"mykey","value":{"x":99}}
+    );
+    defer alloc.free(post_body);
+    const post_parsed = try std.json.parseFromSlice(std.json.Value, alloc, post_body, .{});
+    defer post_parsed.deinit();
+    const post_result = post_parsed.value.object.get("result").?;
+    try std.testing.expectEqualStrings("inttest", post_result.object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("mykey", post_result.object.get("key").?.string);
+    try std.testing.expectEqual(@as(i64, 99), post_result.object.get("value").?.object.get("x").?.integer);
+
+    // GET it back.
+    const get_body = try ts.get(alloc, "/server/database/item?namespace=inttest&key=mykey");
+    defer alloc.free(get_body);
+    const get_parsed = try std.json.parseFromSlice(std.json.Value, alloc, get_body, .{});
+    defer get_parsed.deinit();
+    const get_result = get_parsed.value.object.get("result").?;
+    try std.testing.expectEqualStrings("inttest", get_result.object.get("namespace").?.string);
+    try std.testing.expectEqualStrings("mykey", get_result.object.get("key").?.string);
+    try std.testing.expectEqual(@as(i64, 99), get_result.object.get("value").?.object.get("x").?.integer);
+}
+
+test "database: GET /server/database/list includes namespace after POST (lmdb only)" {
+    if (!build_options.with_lmdb) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Insert into a fresh namespace.
+    const post_body = try ts.postJson(alloc, "/server/database/item",
+        \\{"namespace":"listtest","key":"k","value":1}
+    );
+    defer alloc.free(post_body);
+
+    // List should now contain "listtest".
+    const list_body = try ts.get(alloc, "/server/database/list");
+    defer alloc.free(list_body);
+    try std.testing.expect(std.mem.indexOf(u8, list_body, "\"listtest\"") != null);
+}
+
+test "database: DELETE removes item; subsequent GET returns error shape (lmdb only)" {
+    if (!build_options.with_lmdb) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Insert.
+    const post_body = try ts.postJson(alloc, "/server/database/item",
+        \\{"namespace":"deltest","key":"dk","value":"hello"}
+    );
+    defer alloc.free(post_body);
+
+    // DELETE via query string (Zig HTTP client does not support DELETE + body).
+    const del_body = try ts.deleteJson(alloc, "/server/database/item?namespace=deltest&key=dk", null);
+    defer alloc.free(del_body);
+    const del_parsed = try std.json.parseFromSlice(std.json.Value, alloc, del_body, .{});
+    defer del_parsed.deinit();
+    const del_result = del_parsed.value.object.get("result").?;
+    try std.testing.expectEqualStrings("hello", del_result.object.get("value").?.string);
+
+    // GET after delete → error envelope (404).
+    const get_body = try ts.get(alloc, "/server/database/item?namespace=deltest&key=dk");
+    defer alloc.free(get_body);
+    try std.testing.expect(std.mem.indexOf(u8, get_body, "\"error\"") != null);
+}
+
+test "database: GET missing key returns error shape" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/server/database/item?namespace=nosuchns&key=nosuchkey");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("error") != null);
+}
+
+test "database: POST to forbidden namespace returns 403 error" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/database/item",
+        \\{"namespace":"database","key":"k","value":1}
+    );
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("error") != null);
+    try std.testing.expectEqual(@as(i64, 403), parsed.value.object.get("error").?.object.get("code").?.integer);
+}
+
+test "database: POST to protected namespace (moonraker) returns error" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/database/item",
+        \\{"namespace":"moonraker","key":"k","value":1}
+    );
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("error") != null);
+}
+
+test "database: POST /server/database/compact returns old_size and new_size" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/server/database/compact", "{}");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("old_size") != null);
+    try std.testing.expect(result.object.get("new_size") != null);
 }
