@@ -24,6 +24,13 @@ pub const ClientData = struct {
     url: []const u8 = "",
 };
 
+/// Type-erased frame writer bound to a live transport (a
+/// `std.http.Server.WebSocket`). `ctx` is the transport handle; `bytes` is one
+/// complete text frame to emit. Returning an error signals the connection is
+/// dead (write failed / socket closed). Defined here so `Connections` need not
+/// import the transport layer (avoids an import cycle).
+pub const WriteFn = *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void;
+
 /// One active WebSocket connection.
 pub const Connection = struct {
     /// Monotonic connection id (Moonraker `uid`). Stable for the connection's
@@ -33,6 +40,24 @@ pub const Connection = struct {
     identified: bool = false,
     /// Identify metadata; the slices are owned by `Connections.alloc`.
     client: ClientData = .{},
+    /// Per-connection write mutex. EVERY write to this connection's WebSocket —
+    /// JSON-RPC responses from the read loop AND notifications from the emitter —
+    /// must be held while writing, so frames never interleave. Reads are
+    /// unaffected (std.http WS uses separate input/output buffers).
+    write_mutex: Io.Mutex = .init,
+    /// Live transport handle + writer, installed by the serve loop while the
+    /// session is active and cleared on exit. `null` => not yet attached (or
+    /// already torn down); writes are dropped.
+    write_ctx: ?*anyopaque = null,
+    write_fn: ?WriteFn = null,
+    /// Set once a write to this connection has failed; the serve loop checks it
+    /// to tear the session down. Guarded by `write_mutex`.
+    dead: bool = false,
+    /// Subscription topic set for status updates (`printer.objects.subscribe`).
+    /// Empty => not subscribed. Owned by `Connections.alloc`; guarded by the
+    /// registry mutex. Status notifications are gated on membership here; all
+    /// other notifications broadcast regardless.
+    subs: std.StringHashMapUnmanaged(void) = .empty,
 };
 
 pub const Connections = struct {
@@ -59,7 +84,97 @@ pub const Connections = struct {
         self.alloc.free(c.client.version);
         self.alloc.free(c.client.type);
         self.alloc.free(c.client.url);
+        var it = c.subs.keyIterator();
+        while (it.next()) |k| self.alloc.free(k.*);
+        c.subs.deinit(self.alloc);
         self.alloc.destroy(c);
+    }
+
+    /// Attach the live transport writer to a connection for the duration of its
+    /// session. Held under the connection's own write mutex so an in-flight
+    /// notification observes a consistent (ctx, fn) pair.
+    pub fn attachWriter(self: *Connections, io: Io, conn: *Connection, ctx: *anyopaque, write_fn: WriteFn) void {
+        _ = self;
+        conn.write_mutex.lockUncancelable(io);
+        defer conn.write_mutex.unlock(io);
+        conn.write_ctx = ctx;
+        conn.write_fn = write_fn;
+    }
+
+    /// Detach the transport writer (session ending). Subsequent `writeFrame`
+    /// calls become no-ops.
+    pub fn detachWriter(self: *Connections, io: Io, conn: *Connection) void {
+        _ = self;
+        conn.write_mutex.lockUncancelable(io);
+        defer conn.write_mutex.unlock(io);
+        conn.write_ctx = null;
+        conn.write_fn = null;
+    }
+
+    /// Write one complete frame to a connection, holding its per-connection write
+    /// mutex so responses and notifications never interleave. On write failure
+    /// the connection is flagged `dead` and the error is returned. A no-op (no
+    /// error) when no writer is attached. Thread-safe; never blocks reads.
+    pub fn writeFrame(self: *Connections, io: Io, conn: *Connection, bytes: []const u8) !void {
+        _ = self;
+        conn.write_mutex.lockUncancelable(io);
+        defer conn.write_mutex.unlock(io);
+        if (conn.dead) return error.ConnectionDead;
+        const wfn = conn.write_fn orelse return;
+        const ctx = conn.write_ctx orelse return;
+        wfn(ctx, bytes) catch |err| {
+            conn.dead = true;
+            return err;
+        };
+    }
+
+    /// True if the connection has been flagged dead by a failed write.
+    pub fn isDead(self: *Connections, io: Io, conn: *Connection) bool {
+        _ = self;
+        conn.write_mutex.lockUncancelable(io);
+        defer conn.write_mutex.unlock(io);
+        return conn.dead;
+    }
+
+    /// Snapshot the current set of connection pointers into `out_alloc` so the
+    /// notification bus can fan out without holding the registry mutex while it
+    /// writes (writes take per-connection mutexes, which must not nest under the
+    /// registry lock). Caller frees the returned slice. Thread-safe.
+    pub fn snapshot(self: *Connections, io: Io, out_alloc: std.mem.Allocator) ![]*Connection {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return out_alloc.dupe(*Connection, self.list.items);
+    }
+
+    /// Add status-update topics to a connection's subscription set. Duplicate
+    /// topics are ignored. Strings are copied into the registry allocator.
+    /// Thread-safe.
+    pub fn subscribe(self: *Connections, io: Io, conn: *Connection, topics: []const []const u8) !void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (topics) |t| {
+            if (conn.subs.contains(t)) continue;
+            const key = try self.alloc.dupe(u8, t);
+            errdefer self.alloc.free(key);
+            try conn.subs.put(self.alloc, key, {});
+        }
+    }
+
+    /// Remove topics from a connection's subscription set. No-op for absent
+    /// topics. Thread-safe.
+    pub fn unsubscribe(self: *Connections, io: Io, conn: *Connection, topics: []const []const u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (topics) |t| {
+            if (conn.subs.fetchRemove(t)) |kv| self.alloc.free(kv.key);
+        }
+    }
+
+    /// True if `conn` is subscribed to `topic`. Thread-safe.
+    pub fn isSubscribed(self: *Connections, io: Io, conn: *Connection, topic: []const u8) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return conn.subs.contains(topic);
     }
 
     /// Allocate the next monotonic connection id under the Core lock so it
@@ -291,6 +406,226 @@ test "fuzz_connections: random add/remove sequence keeps count consistent" {
                     expected -= 1;
                 }
                 try std.testing.expectEqual(expected, conns.count(io));
+            }
+        }
+    }.run, .{});
+}
+
+// A capturing test writer that records every frame it is handed, so we can
+// assert ordering and content without real sockets.
+const RecordWriter = struct {
+    alloc: std.mem.Allocator,
+    frames: std.ArrayList([]u8) = .empty,
+    fail: bool = false,
+
+    fn deinit(self: *RecordWriter) void {
+        for (self.frames.items) |f| self.alloc.free(f);
+        self.frames.deinit(self.alloc);
+    }
+
+    fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *RecordWriter = @ptrCast(@alignCast(ctx));
+        if (self.fail) return error.WriteFailed;
+        const dup = try self.alloc.dupe(u8, bytes);
+        errdefer self.alloc.free(dup);
+        try self.frames.append(self.alloc, dup);
+    }
+};
+
+test "writeFrame routes bytes through the attached writer in order" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    var rec = RecordWriter{ .alloc = std.testing.allocator };
+    defer rec.deinit();
+    conns.attachWriter(io, c, &rec, RecordWriter.write);
+
+    try conns.writeFrame(io, c, "one");
+    try conns.writeFrame(io, c, "two");
+
+    try std.testing.expectEqual(@as(usize, 2), rec.frames.items.len);
+    try std.testing.expectEqualStrings("one", rec.frames.items[0]);
+    try std.testing.expectEqualStrings("two", rec.frames.items[1]);
+}
+
+test "writeFrame is a no-op with no writer attached" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    // No attachWriter: must not error, must not crash.
+    try conns.writeFrame(io, c, "ignored");
+    try std.testing.expect(!conns.isDead(io, c));
+}
+
+test "writeFrame flags the connection dead on write failure" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    var rec = RecordWriter{ .alloc = std.testing.allocator, .fail = true };
+    defer rec.deinit();
+    conns.attachWriter(io, c, &rec, RecordWriter.write);
+
+    try std.testing.expectError(error.WriteFailed, conns.writeFrame(io, c, "x"));
+    try std.testing.expect(conns.isDead(io, c));
+    // Once dead, further writes short-circuit with ConnectionDead.
+    try std.testing.expectError(error.ConnectionDead, conns.writeFrame(io, c, "y"));
+}
+
+test "detachWriter stops further delivery" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    var rec = RecordWriter{ .alloc = std.testing.allocator };
+    defer rec.deinit();
+    conns.attachWriter(io, c, &rec, RecordWriter.write);
+    try conns.writeFrame(io, c, "before");
+    conns.detachWriter(io, c);
+    try conns.writeFrame(io, c, "after"); // dropped
+    try std.testing.expectEqual(@as(usize, 1), rec.frames.items.len);
+}
+
+test "subscribe/unsubscribe/isSubscribed track topics" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    try std.testing.expect(!conns.isSubscribed(io, c, "toolhead"));
+
+    try conns.subscribe(io, c, &.{ "toolhead", "extruder" });
+    try std.testing.expect(conns.isSubscribed(io, c, "toolhead"));
+    try std.testing.expect(conns.isSubscribed(io, c, "extruder"));
+
+    // Duplicate subscribe is idempotent.
+    try conns.subscribe(io, c, &.{"toolhead"});
+    try std.testing.expect(conns.isSubscribed(io, c, "toolhead"));
+
+    conns.unsubscribe(io, c, &.{"toolhead"});
+    try std.testing.expect(!conns.isSubscribed(io, c, "toolhead"));
+    try std.testing.expect(conns.isSubscribed(io, c, "extruder"));
+
+    // Unsubscribe of an absent topic is a no-op.
+    conns.unsubscribe(io, c, &.{"missing"});
+    try std.testing.expect(conns.isSubscribed(io, c, "extruder"));
+}
+
+test "snapshot returns the live connection set" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const a = try conns.add(io);
+    const b = try conns.add(io);
+    const snap = try conns.snapshot(io, std.testing.allocator);
+    defer std.testing.allocator.free(snap);
+    try std.testing.expectEqual(@as(usize, 2), snap.len);
+    var seen_a = false;
+    var seen_b = false;
+    for (snap) |c| {
+        if (c == a) seen_a = true;
+        if (c == b) seen_b = true;
+    }
+    try std.testing.expect(seen_a and seen_b);
+}
+
+test "fuzz_subscribe: random subscribe/unsubscribe never crashes or leaks" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var ops: [128]u8 = undefined;
+            smith.bytesWithHash(&ops, 0);
+
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+
+            var core = Core.init();
+            var conns = Connections.init(std.heap.smp_allocator, &core);
+            defer conns.deinit(io);
+
+            const c = try conns.add(io);
+            const topics = [_][]const u8{ "toolhead", "extruder", "gcode_move", "heater_bed" };
+            for (ops) |b| {
+                const t = topics[(b >> 1) % topics.len];
+                if (b & 1 == 0) {
+                    try conns.subscribe(io, c, &.{t});
+                    try std.testing.expect(conns.isSubscribed(io, c, t));
+                } else {
+                    conns.unsubscribe(io, c, &.{t});
+                    try std.testing.expect(!conns.isSubscribed(io, c, t));
+                }
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz_writeframe: random frames delivered in order, never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var ctl: [64]u8 = undefined;
+            smith.bytesWithHash(&ctl, 0);
+
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+
+            var core = Core.init();
+            var conns = Connections.init(std.heap.smp_allocator, &core);
+            defer conns.deinit(io);
+
+            const c = try conns.add(io);
+            var rec = RecordWriter{ .alloc = std.heap.smp_allocator };
+            defer rec.deinit();
+            conns.attachWriter(io, c, &rec, RecordWriter.write);
+
+            var expected: usize = 0;
+            for (ctl, 0..) |b, i| {
+                var buf: [8]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "f{d}", .{i}) catch continue;
+                if (b & 0x80 != 0) {
+                    conns.detachWriter(io, c);
+                    conns.attachWriter(io, c, &rec, RecordWriter.write);
+                }
+                try conns.writeFrame(io, c, msg);
+                expected += 1;
+            }
+            try std.testing.expectEqual(expected, rec.frames.items.len);
+            // Order preserved: each frame index strictly increases.
+            for (rec.frames.items, 0..) |f, i| {
+                var buf: [8]u8 = undefined;
+                const want = std.fmt.bufPrint(&buf, "f{d}", .{i}) catch unreachable;
+                try std.testing.expectEqualStrings(want, f);
             }
         }
     }.run, .{});

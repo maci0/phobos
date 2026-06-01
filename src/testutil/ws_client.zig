@@ -18,6 +18,7 @@ const net = std.Io.net;
 
 const server_mod = @import("server.zig");
 const TestServer = server_mod.TestServer;
+const notify = @import("../server/notify.zig");
 
 pub const Opcode = enum(u4) {
     continuation = 0,
@@ -356,4 +357,155 @@ test "fuzz_ws_client: arbitrary text frames never crash the server, always JSON 
             parsed.deinit();
         }
     }.run, .{});
+}
+
+/// Build a single-element JSON array params value owned by `alloc`.
+fn arrayParam(alloc: std.mem.Allocator, s: []const u8) !std.json.Value {
+    var arr: std.json.Array = .init(alloc);
+    try arr.append(.{ .string = s });
+    return .{ .array = arr };
+}
+
+/// Read the next non-ping frame from a client (auto-replies to pings).
+const DataFrame = struct { opcode: Opcode, data: []u8 };
+
+fn nextDataFrame(c: *WsTestConn) anyerror!DataFrame {
+    while (true) {
+        const f = try c.readFrame();
+        if (f.opcode == .ping) {
+            try c.sendFrame(.pong, f.data);
+            c.alloc.free(f.data);
+            continue;
+        }
+        return .{ .opcode = f.opcode, .data = f.data };
+    }
+}
+
+test "WS: client receives a server-emitted notification with the Moonraker wire shape" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+
+    // Round-trip a request first: this guarantees the serve loop is running and
+    // the connection's frame writer is attached before we emit.
+    const env = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    try ts.emit(notify.names.gcode_response, try arrayParam(arena.allocator(), "ok\n"));
+
+    const frame = try nextDataFrame(c);
+    defer alloc.free(frame.data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("notify_gcode_response", obj.get("method").?.string);
+    // No id on a notification.
+    try std.testing.expect(obj.get("id") == null);
+    // params is an ARRAY, first element our payload string.
+    const params = obj.get("params").?.array;
+    try std.testing.expectEqual(@as(usize, 1), params.items.len);
+    try std.testing.expectEqualStrings("ok\n", params.items[0].string);
+}
+
+test "WS: notifications arrive in emit order" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+    const env = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    try ts.emit(notify.names.gcode_response, try arrayParam(aa, "first"));
+    try ts.emit(notify.names.gcode_response, try arrayParam(aa, "second"));
+    try ts.emit(notify.names.gcode_response, try arrayParam(aa, "third"));
+
+    const want = [_][]const u8{ "first", "second", "third" };
+    for (want) |w| {
+        const frame = try nextDataFrame(c);
+        defer alloc.free(frame.data);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+        defer parsed.deinit();
+        const got = parsed.value.object.get("params").?.array.items[0].string;
+        try std.testing.expectEqualStrings(w, got);
+    }
+}
+
+const EmitterCtx = struct {
+    ts: *TestServer,
+    n: usize,
+    alloc: std.mem.Allocator,
+};
+
+fn emitterTask(ctx: *EmitterCtx) void {
+    var i: usize = 0;
+    while (i < ctx.n) : (i += 1) {
+        var arena = std.heap.ArenaAllocator.init(ctx.alloc);
+        defer arena.deinit();
+        const p = arrayParam(arena.allocator(), "notif") catch return;
+        ctx.ts.emit(notify.names.gcode_response, p) catch return;
+    }
+}
+
+test "WS: response and notifications never interleave (each frame is intact valid JSON)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+    // Ensure the writer is attached.
+    const env0 = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env0);
+
+    const notif_count = 40;
+
+    // Fire a burst of notifications concurrently from a separate task while we
+    // issue a request on the read loop. Every frame the client reads — whether a
+    // notification or the request response — must be a complete, valid JSON-RPC
+    // object; if writes interleaved, JSON parsing would fail.
+    var ectx = EmitterCtx{ .ts = ts, .n = notif_count, .alloc = alloc };
+    var fut = ts.io.async(emitterTask, .{&ectx});
+
+    // Send a request; its response is one of the frames we will read back.
+    try c.sendFrame(.text,
+        \\{"jsonrpc":"2.0","method":"server.info","id":99}
+    );
+
+    fut.await(ts.io);
+
+    // We expect notif_count notifications plus exactly one response (id:99),
+    // each a self-contained valid JSON object, in some order.
+    var got_response = false;
+    var got_notifs: usize = 0;
+    var read: usize = 0;
+    while (read < notif_count + 1) : (read += 1) {
+        const frame = try nextDataFrame(c);
+        defer alloc.free(frame.data);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+        if (obj.get("id")) |idv| {
+            try std.testing.expectEqual(@as(i64, 99), idv.integer);
+            try std.testing.expect(obj.get("result") != null);
+            got_response = true;
+        } else {
+            try std.testing.expectEqualStrings("notify_gcode_response", obj.get("method").?.string);
+            got_notifs += 1;
+        }
+    }
+    try std.testing.expect(got_response);
+    try std.testing.expectEqual(@as(usize, notif_count), got_notifs);
 }

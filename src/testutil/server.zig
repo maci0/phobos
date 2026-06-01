@@ -16,6 +16,7 @@ const jsonrpc = @import("../jsonrpc.zig");
 const http_transport = @import("../http_transport.zig");
 const methods = @import("../core/methods.zig");
 const connections = @import("../server/connections.zig");
+const notify = @import("../server/notify.zig");
 
 pub const TestServer = struct {
     threaded: *std.Io.Threaded,
@@ -28,6 +29,7 @@ pub const TestServer = struct {
     reg: *registry.Registry,
     info: *methods.ServerInfo,
     conns: *connections.Connections,
+    bus: *notify.NotifyBus,
     srv: *http_transport.Server,
 
     serve_fut: Io.Future(void),
@@ -65,6 +67,9 @@ pub const TestServer = struct {
         self.conns = try alloc.create(connections.Connections);
         self.conns.* = connections.Connections.init(alloc, self.core);
 
+        self.bus = try alloc.create(notify.NotifyBus);
+        self.bus.* = notify.NotifyBus.init(self.core, self.conns);
+
         self.srv = try alloc.create(http_transport.Server);
         self.srv.* = .{
             .io = self.io,
@@ -85,6 +90,12 @@ pub const TestServer = struct {
         return self.bound_port;
     }
 
+    /// Broadcast a notification to every connected client via the bus. Used by
+    /// integration tests to prove end-to-end server→client delivery.
+    pub fn emit(self: *TestServer, method: []const u8, params: std.json.Value) !void {
+        return self.bus.emit(self.io, method, params);
+    }
+
     /// Stop the accept loop and free everything.
     pub fn stop(self: *TestServer) void {
         self.serve_fut.cancel(self.io);
@@ -96,6 +107,7 @@ pub const TestServer = struct {
 
         const alloc = self.alloc;
         alloc.destroy(self.srv);
+        alloc.destroy(self.bus);
         alloc.destroy(self.conns);
         alloc.destroy(self.info);
         alloc.destroy(self.reg);

@@ -10,6 +10,7 @@ pub const registry = @import("server/registry.zig");
 pub const methods = @import("core/methods.zig");
 pub const http_transport = @import("http_transport.zig");
 pub const connections = @import("server/connections.zig");
+pub const notify = @import("server/notify.zig");
 pub const ws_transport = @import("transport/ws.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
@@ -30,11 +31,20 @@ pub fn main() !void {
     var info = methods.ServerInfo{};
     try methods.registerCore(&reg, &info);
 
+    var conns = connections.Connections.init(alloc, &server_core);
+    defer conns.deinit(aio);
+
+    // The notification bus fans server events out to connected websocket clients.
+    // Components emit through it; it is held here so it outlives the serve loop.
+    var bus = notify.NotifyBus.init(&server_core, &conns);
+    _ = &bus;
+
     var srv = http_transport.Server{
         .io = aio,
         .core = &server_core,
         .reg = &reg,
         .dispatcher = &dispatcher,
+        .conns = &conns,
     };
 
     const host = "127.0.0.1";

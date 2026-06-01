@@ -168,8 +168,28 @@ pub const WsServer = struct {
 pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket) void {
     const conn = srv.conns.add(srv.io) catch return;
     defer srv.conns.remove(srv.io, conn);
+
+    // Bind the live socket as the connection's frame writer so the notification
+    // bus can push notifications to it (under the per-connection write mutex)
+    // while this loop is blocked in readSmallMessage. Detach on exit.
+    var fw = FrameWriter{ .ws = ws };
+    srv.conns.attachWriter(srv.io, conn, &fw, FrameWriter.write);
+    defer srv.conns.detachWriter(srv.io, conn);
+
     serveLoop(srv, ws, conn) catch {};
 }
+
+/// Adapter exposing a `std.http.Server.WebSocket` as a `connections.WriteFn`.
+/// The write mutex that serializes frames is the connection's, taken inside
+/// `Connections.writeFrame`; this adapter just performs the raw send.
+const FrameWriter = struct {
+    ws: *std.http.Server.WebSocket,
+
+    fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *FrameWriter = @ptrCast(@alignCast(ctx));
+        try self.ws.writeMessage(bytes, .text);
+    }
+};
 
 fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) !void {
     while (true) {
@@ -182,7 +202,11 @@ fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) 
         switch (msg.opcode) {
             .ping => {
                 // Reply with a pong carrying the ping payload (pongs are skipped
-                // automatically by readSmallMessage on the read side).
+                // automatically by readSmallMessage on the read side). Pongs are
+                // control frames, not data; they still go under the write mutex
+                // so they cannot split a data frame mid-flight.
+                conn.write_mutex.lockUncancelable(srv.io);
+                defer conn.write_mutex.unlock(srv.io);
                 ws.writeMessage(msg.data, .pong) catch return;
                 continue;
             },
@@ -203,7 +227,9 @@ fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) 
 
                 // Notifications (and no-id requests) produce no response bytes.
                 if (resp.len == 0) continue;
-                ws.writeMessage(resp, .text) catch return;
+                // Route the response through the per-connection write mutex so a
+                // concurrently-emitted notification can never interleave with it.
+                srv.conns.writeFrame(srv.io, conn, resp) catch return;
             },
             // continuation/connection_close/pong are not surfaced as messages.
             else => return,
