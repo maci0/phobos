@@ -36,6 +36,9 @@ const analysis_component = @import("components/analysis.zig");
 const file_manager_component = @import("components/file_manager.zig");
 const machine_component = @import("components/machine.zig");
 const update_manager_component = @import("components/update_manager.zig");
+const power_component = @import("components/power.zig");
+const wled_component = @import("components/wled.zig");
+const td1_component = @import("components/td1.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -62,6 +65,9 @@ const FileRoot = file_manager_component.Root;
 const MachineCtx = machine_component.MachineCtx;
 const UpdateCtx = update_manager_component.UpdateCtx;
 const UpdateSource = update_manager_component.Source;
+const PowerCtx = power_component.PowerCtx;
+const WledCtx = wled_component.WledCtx;
+const Td1Ctx = td1_component.Td1Ctx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -145,6 +151,9 @@ pub const App = struct {
     file_ctx: *FileCtx,
     machine_ctx: *MachineCtx,
     update_ctx: *UpdateCtx,
+    power_ctx: *PowerCtx,
+    wled_ctx: *WledCtx,
+    td1_ctx: *Td1Ctx,
     /// Absolute datadir whose subfolders back the file_manager roots. Owned and
     /// freed in deinit. The root paths in `file_roots` point into the joined
     /// strings owned alongside it.
@@ -336,6 +345,27 @@ pub const App = struct {
             .bus = bus,
         };
 
+        // --- Power device context (machine.device_power.*) ---
+        // No [power <name>] sections in the spine configuration → empty device
+        // list. Real GPIO/network control is STUBBED (see power.zig).
+        const power_ctx = try alloc.create(PowerCtx);
+        errdefer alloc.destroy(power_ctx);
+        power_ctx.* = PowerCtx.init(alloc, bus);
+
+        // --- WLED context (machine.wled.*) ---
+        // No [wled <name>] sections in the spine → empty strip list.
+        // Real WLED HTTP/serial control is STUBBED (see wled.zig).
+        const wled_ctx = try alloc.create(WledCtx);
+        errdefer alloc.destroy(wled_ctx);
+        wled_ctx.* = WledCtx.init(alloc);
+
+        // --- TD-1 context (machine.td1.*) ---
+        // No USB TD-1 devices are enumerated in phobos. Serial port
+        // interaction is STUBBED (see td1.zig).
+        const td1_ctx = try alloc.create(Td1Ctx);
+        errdefer alloc.destroy(td1_ctx);
+        td1_ctx.* = .{};
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -361,6 +391,9 @@ pub const App = struct {
             .file_ctx = file_ctx,
             .machine_ctx = machine_ctx,
             .update_ctx = update_ctx,
+            .power_ctx = power_ctx,
+            .wled_ctx = wled_ctx,
+            .td1_ctx = td1_ctx,
             .datadir = datadir,
             .file_roots = file_roots,
             .lmdb_store_ptr = lmdb_ptr,
@@ -390,6 +423,11 @@ pub const App = struct {
         self.machine_ctx.deinit();
         self.alloc.destroy(self.machine_ctx);
         self.alloc.destroy(self.update_ctx);
+        self.power_ctx.deinit();
+        self.alloc.destroy(self.power_ctx);
+        self.wled_ctx.deinit();
+        self.alloc.destroy(self.wled_ctx);
+        self.alloc.destroy(self.td1_ctx);
         self.alloc.destroy(self.analysis_ctx);
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
@@ -479,6 +517,15 @@ pub const App = struct {
         // Update manager component: machine.update.* endpoints.
         try update_manager_component.registerUpdateManager(self.reg, self.update_ctx);
 
+        // Power device component: machine.device_power.* endpoints.
+        try power_component.registerPower(self.reg, self.power_ctx);
+
+        // WLED component: machine.wled.* endpoints.
+        try wled_component.registerWled(self.reg, self.wled_ctx);
+
+        // TD-1 component: machine.td1.* endpoints.
+        try td1_component.registerTd1(self.reg, self.td1_ctx);
+
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
         // the live *Connection). Register them in the dispatcher so the
@@ -509,6 +556,8 @@ pub const App = struct {
         // Wire io into the update manager so it can emit notify_update_response /
         // notify_update_refreshed to connected WebSocket clients.
         self.update_ctx.setIo(io);
+        // Wire io into the power component so it can emit notify_power_changed.
+        self.power_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,
@@ -688,6 +737,24 @@ test "App.init: dispatcher has exactly the expected methods" {
         "machine.update.client",
         "machine.update.recover",
         "machine.update.rollback",
+        // Power device (machine.device_power.*)
+        "machine.device_power.devices",
+        "machine.device_power.status",
+        "machine.device_power.on",
+        "machine.device_power.off",
+        "machine.device_power.get_device",
+        "machine.device_power.post_device",
+        // WLED (machine.wled.*)
+        "machine.wled.strips",
+        "machine.wled.status",
+        "machine.wled.on",
+        "machine.wled.off",
+        "machine.wled.toggle",
+        "machine.wled.get_strip",
+        "machine.wled.post_strip",
+        // TD-1 (machine.td1.*)
+        "machine.td1.data",
+        "machine.td1.reboot",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",

@@ -1236,6 +1236,259 @@ test "update: recover (git source) and rollback ack ok; recover non-git errors" 
     try std.testing.expect(std.mem.indexOf(u8, bad, "\"error\"") != null);
 }
 
+// ---------------------------------------------------------------------------
+// Power device (machine.device_power.*) integration tests
+// ---------------------------------------------------------------------------
+
+test "power: GET /machine/device_power/devices returns empty list (no configured devices)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/device_power/devices");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?;
+    const arr = r.object.get("devices").?;
+    try std.testing.expect(arr == .array);
+    try std.testing.expectEqual(@as(usize, 0), arr.array.items.len);
+}
+
+test "power: GET /machine/device_power/device?device=unknown returns error" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/device_power/device?device=unknown");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("error") != null);
+}
+
+test "power: POST /machine/device_power/on with no args returns error" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/machine/device_power/on", "{}");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    // Empty params → InvalidParams error envelope.
+    try std.testing.expect(p.value.object.get("error") != null);
+}
+
+test "power: batch status with unknown device returns device_not_found" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/device_power/status?ghost=1");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?;
+    try std.testing.expectEqualStrings("device_not_found", r.object.get("ghost").?.string);
+}
+
+test "power: POST device action=on/toggle toggles state and emits notify_power_changed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Register a recorder to capture notifications.
+    const RecordWriter = struct {
+        alloc: std.mem.Allocator,
+        frames: std.ArrayList([]u8) = .empty,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const dup = try self.alloc.dupe(u8, bytes);
+            try self.frames.append(self.alloc, dup);
+        }
+        fn deinit(self: *@This()) void {
+            for (self.frames.items) |f| self.alloc.free(f);
+            self.frames.deinit(self.alloc);
+        }
+    };
+    var rec = RecordWriter{ .alloc = alloc };
+    defer rec.deinit();
+    const conns = ts.connsRef();
+    const cid = try conns.add(ts.io);
+    conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+
+    // Add a device via the power_ctx directly (no config loading in tests).
+    ts.app.power_ctx.addDevice("test_psu", "gpio", "off", false) catch unreachable;
+
+    // POST action=on → state becomes on.
+    const on_body = try ts.postJson(alloc, "/machine/device_power/device",
+        \\{"device":"test_psu","action":"on"}
+    );
+    defer alloc.free(on_body);
+    const on_p = try resultOf(alloc, on_body);
+    defer on_p.deinit();
+    const r = on_p.value.object.get("result").?;
+    try std.testing.expectEqualStrings("on", r.object.get("test_psu").?.string);
+
+    // notify_power_changed must have been emitted with the device info.
+    var saw = false;
+    for (rec.frames.items) |f| {
+        if (std.mem.indexOf(u8, f, "notify_power_changed") != null and
+            std.mem.indexOf(u8, f, "test_psu") != null)
+        {
+            saw = true;
+        }
+    }
+    try std.testing.expect(saw);
+
+    // POST action=toggle → state becomes off.
+    const tog_body = try ts.postJson(alloc, "/machine/device_power/device",
+        \\{"device":"test_psu","action":"toggle"}
+    );
+    defer alloc.free(tog_body);
+    const tog_p = try resultOf(alloc, tog_body);
+    defer tog_p.deinit();
+    const tr = tog_p.value.object.get("result").?;
+    try std.testing.expectEqualStrings("off", tr.object.get("test_psu").?.string);
+}
+
+// ---------------------------------------------------------------------------
+// WLED (machine.wled.*) integration tests
+// ---------------------------------------------------------------------------
+
+test "wled: GET /machine/wled/strips returns empty strips map (no configured strips)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/wled/strips");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?;
+    const strips = r.object.get("strips").?;
+    try std.testing.expect(strips == .object);
+    try std.testing.expectEqual(@as(usize, 0), strips.object.count());
+}
+
+test "wled: GET /machine/wled/strip?strip=unknown returns error" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/wled/strip?strip=ghost");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("error") != null);
+}
+
+test "wled: batch status with unknown strip returns strip_not_found" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/wled/status?ghost=1");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?;
+    const ghost = r.object.get("ghost").?.object;
+    try std.testing.expectEqualStrings("strip_not_found", ghost.get("error").?.string);
+}
+
+test "wled: on/off/toggle batch and single strip endpoints work correctly" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Add a strip via the wled_ctx.
+    ts.app.wled_ctx.addStrip("test_strip", 30, -1) catch unreachable;
+
+    // GET strip → initial state "off".
+    const get_body = try ts.get(alloc, "/machine/wled/strip?strip=test_strip");
+    defer alloc.free(get_body);
+    const gp = try resultOf(alloc, get_body);
+    defer gp.deinit();
+    try std.testing.expectEqualStrings("off", gp.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
+
+    // POST action=on → status becomes "on".
+    const on_body = try ts.postJson(alloc, "/machine/wled/strip",
+        \\{"strip":"test_strip","action":"on"}
+    );
+    defer alloc.free(on_body);
+    const op = try resultOf(alloc, on_body);
+    defer op.deinit();
+    try std.testing.expectEqualStrings("on", op.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
+
+    // POST /machine/wled/off (batch) → turns off.
+    const off_body = try ts.postJson(alloc, "/machine/wled/off",
+        \\{"test_strip":null}
+    );
+    defer alloc.free(off_body);
+    const offp = try resultOf(alloc, off_body);
+    defer offp.deinit();
+    try std.testing.expectEqualStrings("off", offp.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
+
+    // POST /machine/wled/toggle → should flip to on.
+    const tog_body = try ts.postJson(alloc, "/machine/wled/toggle",
+        \\{"test_strip":null}
+    );
+    defer alloc.free(tog_body);
+    const tp = try resultOf(alloc, tog_body);
+    defer tp.deinit();
+    try std.testing.expectEqualStrings("on", tp.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
+}
+
+// ---------------------------------------------------------------------------
+// TD-1 (machine.td1.*) integration tests
+// ---------------------------------------------------------------------------
+
+test "td1: GET /machine/td1/data returns status=ok and empty devices (no hardware)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/td1/data");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?;
+    try std.testing.expectEqualStrings("ok", r.object.get("status").?.string);
+    try std.testing.expect(r.object.get("devices").? == .object);
+    try std.testing.expectEqual(@as(usize, 0), r.object.get("devices").?.object.count());
+}
+
+test "td1: POST /machine/td1/reboot with serial returns serial_error (no hardware)" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/machine/td1/reboot",
+        \\{"serial":"SN-0001"}
+    );
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?;
+    try std.testing.expectEqualStrings("serial_error", r.object.get("status").?.string);
+}
+
+test "td1: POST /machine/td1/reboot without serial returns error envelope" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/machine/td1/reboot", "{}");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("error") != null);
+}
+
+// ---------------------------------------------------------------------------
+
 test "files: notify_filelist_changed emitted on upload with correct payload" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

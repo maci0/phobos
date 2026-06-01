@@ -1,0 +1,527 @@
+//! machine.wled.* API component — Moonraker-compatible WLED neopixel control.
+//!
+//! Mirrors the endpoints registered in
+//! `vendor/moonraker/moonraker/components/wled.py`:
+//!
+//!   GET  /machine/wled/strips  → machine.wled.strips
+//!   GET  /machine/wled/status  → machine.wled.status   (batch)
+//!   POST /machine/wled/on      → machine.wled.on        (batch)
+//!   POST /machine/wled/off     → machine.wled.off       (batch)
+//!   POST /machine/wled/toggle  → machine.wled.toggle    (batch)
+//!   GET  /machine/wled/strip   → machine.wled.get_strip (single)
+//!   POST /machine/wled/strip   → machine.wled.post_strip (single)
+//!
+//! REAL WLED HTTP/SERIAL CONTROL IS STUBBED. State is tracked in memory within
+//! WledCtx.strips. No HTTP requests are sent to any WLED device, no serial
+//! commands are transmitted. Each stub is noted at the relevant handler.
+//!
+//! STRIPS FROM CONFIG. Without `[wled <name>]` config sections (the spine
+//! carries none), the strips map is empty and the list endpoint returns {}.
+//! Strip-specific requests return a not-found error.
+
+const std = @import("std");
+const registry = @import("../server/registry.zig");
+
+const Registry = registry.Registry;
+
+// ---------------------------------------------------------------------------
+// Strip state
+// ---------------------------------------------------------------------------
+
+pub const Strip = struct {
+    name: []const u8,
+    status: []const u8, // "on" | "off"
+    chain_count: i64,
+    preset: i64,
+    brightness: i64,
+    intensity: i64,
+    speed: i64,
+    error_state: ?[]const u8,
+};
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+pub const WledCtx = struct {
+    gpa: std.mem.Allocator,
+    strips: std.StringHashMap(Strip),
+
+    pub fn init(alloc: std.mem.Allocator) WledCtx {
+        return .{
+            .gpa = alloc,
+            .strips = std.StringHashMap(Strip).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *WledCtx) void {
+        var it = self.strips.iterator();
+        while (it.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+            self.gpa.free(entry.value_ptr.name);
+            self.gpa.free(entry.value_ptr.status);
+            if (entry.value_ptr.error_state) |e| self.gpa.free(e);
+        }
+        self.strips.deinit();
+    }
+
+    pub fn findStrip(self: *WledCtx, name: []const u8) ?*Strip {
+        return self.strips.getPtr(name);
+    }
+
+    /// Add a strip (takes ownership of all slices passed by copy).
+    pub fn addStrip(
+        self: *WledCtx,
+        name: []const u8,
+        chain_count: i64,
+        preset: i64,
+    ) !void {
+        const k = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(k);
+        const s: Strip = .{
+            .name = try self.gpa.dupe(u8, name),
+            .status = try self.gpa.dupe(u8, "off"),
+            .chain_count = chain_count,
+            .preset = preset,
+            .brightness = 255,
+            .intensity = -1,
+            .speed = -1,
+            .error_state = null,
+        };
+        errdefer {
+            self.gpa.free(s.name);
+            self.gpa.free(s.status);
+        }
+        try self.strips.put(k, s);
+    }
+
+    pub fn setStatus(self: *WledCtx, name: []const u8, new_status: []const u8) !void {
+        const s = self.strips.getPtr(name) orelse return error.NotFound;
+        self.gpa.free(s.status);
+        s.status = try self.gpa.dupe(u8, new_status);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Param helpers
+// ---------------------------------------------------------------------------
+
+fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
+    switch (params) {
+        .object => |obj| {
+            const v = obj.get(field) orelse return null;
+            return switch (v) {
+                .string => |s| s,
+                else => null,
+            };
+        },
+        else => return null,
+    }
+}
+
+fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
+    return getOptStr(params, field) orelse error.InvalidParams;
+}
+
+// ---------------------------------------------------------------------------
+// Strip info shape
+// ---------------------------------------------------------------------------
+
+/// Build the per-strip info object matching Strip.get_strip_info():
+///   { strip, status, chain_count, preset, brightness, intensity, speed, error }
+pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value {
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "strip", .{ .string = s.name });
+    try obj.put(alloc, "status", .{ .string = s.status });
+    try obj.put(alloc, "chain_count", .{ .integer = s.chain_count });
+    try obj.put(alloc, "preset", .{ .integer = s.preset });
+    try obj.put(alloc, "brightness", .{ .integer = s.brightness });
+    try obj.put(alloc, "intensity", .{ .integer = s.intensity });
+    try obj.put(alloc, "speed", .{ .integer = s.speed });
+    if (s.error_state) |e| {
+        try obj.put(alloc, "error", .{ .string = e });
+    } else {
+        try obj.put(alloc, "error", .null);
+    }
+    return .{ .object = obj };
+}
+
+// ---------------------------------------------------------------------------
+// Action helpers
+// ---------------------------------------------------------------------------
+
+/// Apply an action ("on" | "off" | "toggle" | "status") to a strip.
+/// STUB: no real WLED commands are sent; state is updated in memory only.
+fn processRequest(ctx: *WledCtx, strip: *Strip, req: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, req, "status")) {
+        // STUB: Moonraker calls strip.get_strip_info() which reflects live WLED
+        // state. phobos returns the cached in-memory status.
+        return strip.status;
+    }
+    const action: []const u8 = blk: {
+        if (!std.mem.eql(u8, req, "toggle")) break :blk req;
+        break :blk if (std.mem.eql(u8, strip.status, "off")) "on" else "off";
+    };
+    if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
+        return error.InvalidParams;
+    }
+    // STUB: a real implementation would call strip.wled_on(preset) or
+    // strip.wled_off(), sending an HTTP POST to the WLED JSON API or a serial
+    // command. phobos only updates in-memory state.
+    ctx.setStatus(strip.name, action) catch {};
+    return ctx.findStrip(strip.name).?.status;
+}
+
+// ---------------------------------------------------------------------------
+// GET /machine/wled/strips → machine.wled.strips
+// ---------------------------------------------------------------------------
+
+/// Returns `{ "strips": { "<name>": { strip_info }, ... } }`.
+/// Without configured strips, the inner map is empty.
+pub fn handleStrips(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
+    var strips_obj: std.json.ObjectMap = .empty;
+    var it = ctx.strips.valueIterator();
+    while (it.next()) |s| {
+        try strips_obj.put(alloc, s.name, try buildStripInfo(alloc, s));
+    }
+    var out: std.json.ObjectMap = .empty;
+    try out.put(alloc, "strips", .{ .object = strips_obj });
+    return .{ .object = out };
+}
+
+// ---------------------------------------------------------------------------
+// GET  /machine/wled/strip?strip= → machine.wled.get_strip
+// POST /machine/wled/strip?strip=&action= → machine.wled.post_strip
+// ---------------------------------------------------------------------------
+
+/// Shared single-strip handler.
+/// GET → returns { "<strip>": strip_info }.
+/// POST → requires `action` in [on|off|toggle|control]; returns { "<strip>": strip_info }.
+pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
+    const strip_name = try getStr(params, "strip");
+    const strip = ctx.findStrip(strip_name) orelse {
+        // Matches Moonraker: "No valid strip named <x>"
+        return error.NotFound;
+    };
+    const action: []const u8 = if (getOptStr(params, "action")) |a| blk: {
+        const al = std.ascii.allocLowerString(alloc, a) catch a;
+        if (!std.mem.eql(u8, al, "on") and
+            !std.mem.eql(u8, al, "off") and
+            !std.mem.eql(u8, al, "toggle") and
+            !std.mem.eql(u8, al, "control"))
+        {
+            return error.InvalidParams;
+        }
+        break :blk al;
+    } else "status";
+
+    const req: []const u8 = if (std.mem.eql(u8, action, "control")) "on" else action;
+    _ = try processRequest(ctx, strip, req);
+    // Re-fetch after potential state change.
+    const updated = ctx.findStrip(strip_name) orelse strip;
+    var out: std.json.ObjectMap = .empty;
+    try out.put(alloc, strip_name, try buildStripInfo(alloc, updated));
+    return .{ .object = out };
+}
+
+// ---------------------------------------------------------------------------
+// Batch handlers
+// ---------------------------------------------------------------------------
+
+fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator, action: []const u8) anyerror!std.json.Value {
+    const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
+    var out: std.json.ObjectMap = .empty;
+    switch (params) {
+        .object => |obj| {
+            if (obj.count() == 0) return error.InvalidParams;
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const name = entry.key_ptr.*;
+                if (ctx.findStrip(name)) |strip| {
+                    _ = processRequest(ctx, strip, action) catch {};
+                    const updated = ctx.findStrip(name) orelse strip;
+                    const info = buildStripInfo(alloc, updated) catch continue;
+                    try out.put(alloc, name, info);
+                } else {
+                    // Matches Moonraker's result[name] = {"error": "strip_not_found"}
+                    var err_obj: std.json.ObjectMap = .empty;
+                    try err_obj.put(alloc, "error", .{ .string = "strip_not_found" });
+                    try out.put(alloc, name, .{ .object = err_obj });
+                }
+            }
+        },
+        else => return error.InvalidParams,
+    }
+    if (out.count() == 0) return error.InvalidParams;
+    return .{ .object = out };
+}
+
+pub fn handleBatchStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "status");
+}
+
+pub fn handleBatchOn(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "on");
+}
+
+pub fn handleBatchOff(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "off");
+}
+
+pub fn handleBatchToggle(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "toggle");
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+pub fn registerWled(reg: *Registry, ctx: *WledCtx) !void {
+    const c: *anyopaque = @ptrCast(ctx);
+
+    try reg.registerEndpoint(.{ .path = "/machine/wled/strips", .methods = &.{.GET} }, c, handleStrips);
+    try reg.registerEndpoint(.{ .path = "/machine/wled/status", .methods = &.{.GET} }, c, handleBatchStatus);
+    try reg.registerEndpoint(.{ .path = "/machine/wled/on", .methods = &.{.POST} }, c, handleBatchOn);
+    try reg.registerEndpoint(.{ .path = "/machine/wled/off", .methods = &.{.POST} }, c, handleBatchOff);
+    try reg.registerEndpoint(.{ .path = "/machine/wled/toggle", .methods = &.{.POST} }, c, handleBatchToggle);
+    try reg.registerEndpoint(.{ .path = "/machine/wled/strip", .methods = &.{ .GET, .POST } }, c, handleSingleStrip);
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+const testing = std.testing;
+
+fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, json_str, .{});
+    return p.value;
+}
+
+fn testCtx(alloc: std.mem.Allocator) WledCtx {
+    return WledCtx.init(alloc);
+}
+
+// ---- handleStrips ----
+
+test "handleStrips: empty map when no strips configured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const v = try handleStrips(@ptrCast(&ctx), .null, a);
+    const strips = v.object.get("strips").?.object;
+    try testing.expectEqual(@as(usize, 0), strips.count());
+}
+
+test "handleStrips: returns strip info when strip configured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("printer_leds", 30, -1);
+    const v = try handleStrips(@ptrCast(&ctx), .null, a);
+    const strips = v.object.get("strips").?.object;
+    try testing.expectEqual(@as(usize, 1), strips.count());
+    const s = strips.get("printer_leds").?.object;
+    try testing.expectEqualStrings("printer_leds", s.get("strip").?.string);
+    try testing.expectEqualStrings("off", s.get("status").?.string);
+    try testing.expectEqual(@as(i64, 30), s.get("chain_count").?.integer);
+    try testing.expectEqual(@as(i64, -1), s.get("preset").?.integer);
+}
+
+// ---- handleSingleStrip GET ----
+
+test "handleSingleStrip: GET unknown strip returns NotFound" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try testing.expectError(error.NotFound, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"ghost\"}"), a));
+}
+
+test "handleSingleStrip: GET returns strip info" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\"}"), a);
+    const s = v.object.get("leds").?.object;
+    try testing.expectEqualStrings("leds", s.get("strip").?.string);
+    try testing.expectEqualStrings("off", s.get("status").?.string);
+}
+
+// ---- handleSingleStrip POST ----
+
+test "handleSingleStrip: POST action=on turns strip on" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
+    try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
+}
+
+test "handleSingleStrip: POST action=toggle flips status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    // off → on
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
+    try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
+    // on → off
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
+    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
+}
+
+test "handleSingleStrip: POST action=off turns strip off" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    // Turn on first, then off.
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"off\"}"), a);
+    try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
+}
+
+test "handleSingleStrip: POST invalid action returns InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"dance\"}"), a));
+}
+
+// ---- batch handlers ----
+
+test "handleBatchOn: turns on known strip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleBatchOn(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
+    try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
+}
+
+test "handleBatchOff: turns off known strip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    try ctx.setStatus("leds", "on");
+    const v = try handleBatchOff(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
+    try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
+}
+
+test "handleBatchToggle: toggles strip status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
+    try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
+    _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
+    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
+}
+
+test "handleBatchStatus: unknown strip returns strip_not_found shape" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const v = try handleBatchStatus(@ptrCast(&ctx), try objParams(a, "{\"ghost\":null}"), a);
+    const r = v.object.get("ghost").?.object;
+    try testing.expectEqualStrings("strip_not_found", r.get("error").?.string);
+}
+
+// ---- buildStripInfo ----
+
+test "buildStripInfo: full key set" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const s: Strip = .{ .name = "t", .status = "on", .chain_count = 5, .preset = 2, .brightness = 200, .intensity = 100, .speed = 50, .error_state = null };
+    const v = try buildStripInfo(a, &s);
+    const o = v.object;
+    try testing.expectEqualStrings("t", o.get("strip").?.string);
+    try testing.expectEqualStrings("on", o.get("status").?.string);
+    try testing.expectEqual(@as(i64, 5), o.get("chain_count").?.integer);
+    try testing.expectEqual(@as(i64, 2), o.get("preset").?.integer);
+    try testing.expectEqual(@as(i64, 200), o.get("brightness").?.integer);
+    try testing.expectEqual(@as(i64, 100), o.get("intensity").?.integer);
+    try testing.expectEqual(@as(i64, 50), o.get("speed").?.integer);
+    try testing.expect(o.get("error").? == .null);
+}
+
+// ---- fuzz ----
+
+test "fuzz_single_strip: arbitrary params never crash handleSingleStrip" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+            ctx.addStrip("leds", 10, -1) catch {};
+
+            const names = [_][]const u8{ "leds", "ghost", "" };
+            const nm = names[buf[0] % names.len];
+            const actions = [_][]const u8{ "on", "off", "toggle", "control", "status", "bad" };
+            const act = actions[buf[1] % actions.len];
+            const params_str = std.fmt.allocPrint(a, "{{\"strip\":\"{s}\",\"action\":\"{s}\"}}", .{ nm, act }) catch return;
+            const pv = std.json.parseFromSlice(std.json.Value, a, params_str, .{}) catch return;
+            _ = handleSingleStrip(@ptrCast(&ctx), pv.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz_batch_wled: arbitrary params never crash batch handlers" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+            ctx.addStrip("leds", 10, -1) catch {};
+
+            const names = [_][]const u8{ "leds", "ghost", "another" };
+            const nm = names[buf[0] % names.len];
+            const params_str = std.fmt.allocPrint(a, "{{\"{s}\":null}}", .{nm}) catch return;
+            const pv = std.json.parseFromSlice(std.json.Value, a, params_str, .{}) catch return;
+            _ = handleBatchOn(@ptrCast(&ctx), pv.value, a) catch {};
+            _ = handleBatchOff(@ptrCast(&ctx), pv.value, a) catch {};
+            _ = handleBatchToggle(@ptrCast(&ctx), pv.value, a) catch {};
+            _ = handleBatchStatus(@ptrCast(&ctx), pv.value, a) catch {};
+        }
+    }.run, .{});
+}

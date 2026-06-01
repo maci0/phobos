@@ -1,0 +1,560 @@
+//! machine.device_power.* API component — Moonraker-compatible power device control.
+//!
+//! Mirrors the endpoints registered in
+//! `vendor/moonraker/moonraker/components/power.py`:
+//!
+//!   GET  /machine/device_power/devices → machine.device_power.devices
+//!   GET  /machine/device_power/status  → machine.device_power.status  (batch)
+//!   POST /machine/device_power/on      → machine.device_power.on      (batch)
+//!   POST /machine/device_power/off     → machine.device_power.off     (batch)
+//!   GET  /machine/device_power/device  → machine.device_power.get_device (single)
+//!   POST /machine/device_power/device  → machine.device_power.post_device (single)
+//!
+//! REAL GPIO/NETWORK CONTROL IS STUBBED. State is tracked in memory (within
+//! PowerCtx.devices). No GPIO pins are written, no network plugs are reached, no
+//! MQTT topics are published. Each stub is noted at the relevant handler. The
+//! in-memory state persists across requests within a single process lifetime.
+//!
+//! DEVICES FROM CONFIG. Without `[power <name>]` config sections (the spine
+//! carries none), the devices map is empty and the list endpoint returns [].
+//! Device-specific requests return a device-not-found error matching Moonraker's
+//! `"No valid device named <x>"` message.
+//!
+//! NOTIFICATIONS. State changes emit `notify_power_changed` with the per-device
+//! info payload via `bus.emitLocked` — handlers run under the held Core lock.
+
+const std = @import("std");
+const registry = @import("../server/registry.zig");
+const notify = @import("../server/notify.zig");
+const NotifyBus = @import("../server/notify.zig").NotifyBus;
+
+const Registry = registry.Registry;
+
+// ---------------------------------------------------------------------------
+// Device types (matches power.py dev_types)
+// ---------------------------------------------------------------------------
+
+/// All supported device types from Moonraker's power.py.
+pub const DeviceType = enum {
+    gpio,
+    klipper_device,
+    tplink_smartplug,
+    tasmota,
+    shelly,
+    homeseer,
+    homeassistant,
+    loxonev1,
+    rf,
+    mqtt,
+    smartthings,
+    hue,
+    http,
+    uhubctl,
+};
+
+/// A configured power device. State is tracked in memory; real hardware control
+/// is STUBBED (noted at set_power).
+pub const Device = struct {
+    name: []const u8,
+    type_str: []const u8,
+    state: []const u8, // "on" | "off" | "init" | "error"
+    locked_while_printing: bool,
+    /// KlipperDevice-specific field; always false for other types.
+    is_shutdown: bool,
+};
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+pub const PowerCtx = struct {
+    gpa: std.mem.Allocator,
+    bus: ?*NotifyBus,
+    io: ?std.Io,
+    /// Configured devices. Owned by the ctx; keys/values allocated with gpa.
+    devices: std.StringHashMap(Device),
+
+    pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) PowerCtx {
+        return .{
+            .gpa = alloc,
+            .bus = bus,
+            .io = null,
+            .devices = std.StringHashMap(Device).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *PowerCtx) void {
+        var it = self.devices.iterator();
+        while (it.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+            self.gpa.free(entry.value_ptr.name);
+            self.gpa.free(entry.value_ptr.type_str);
+            self.gpa.free(entry.value_ptr.state);
+        }
+        self.devices.deinit();
+    }
+
+    pub fn setIo(self: *PowerCtx, io: std.Io) void {
+        self.io = io;
+    }
+
+    /// Get a device by name (borrowed pointer into the map).
+    pub fn findDevice(self: *PowerCtx, name: []const u8) ?*Device {
+        return self.devices.getPtr(name);
+    }
+
+    /// Update a device's state in-place.
+    pub fn setState(self: *PowerCtx, name: []const u8, new_state: []const u8) !void {
+        const dev = self.devices.getPtr(name) orelse return error.NotFound;
+        self.gpa.free(dev.state);
+        dev.state = try self.gpa.dupe(u8, new_state);
+    }
+
+    /// Add a device (takes ownership of all slices).
+    pub fn addDevice(
+        self: *PowerCtx,
+        name: []const u8,
+        type_str: []const u8,
+        initial_state: []const u8,
+        locked_while_printing: bool,
+    ) !void {
+        const k = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(k);
+        const dev: Device = .{
+            .name = try self.gpa.dupe(u8, name),
+            .type_str = try self.gpa.dupe(u8, type_str),
+            .state = try self.gpa.dupe(u8, initial_state),
+            .locked_while_printing = locked_while_printing,
+            .is_shutdown = false,
+        };
+        errdefer {
+            self.gpa.free(dev.name);
+            self.gpa.free(dev.type_str);
+            self.gpa.free(dev.state);
+        }
+        try self.devices.put(k, dev);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Param helpers
+// ---------------------------------------------------------------------------
+
+fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
+    switch (params) {
+        .object => |obj| {
+            const v = obj.get(field) orelse return null;
+            return switch (v) {
+                .string => |s| s,
+                else => null,
+            };
+        },
+        else => return null,
+    }
+}
+
+fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
+    return getOptStr(params, field) orelse error.InvalidParams;
+}
+
+// ---------------------------------------------------------------------------
+// Device info shape
+// ---------------------------------------------------------------------------
+
+/// Build the per-device info object matching PowerDevice.get_device_info():
+///   { device, status, locked_while_printing, type }
+/// KlipperDevice also adds `is_shutdown`; we always include it (false for
+/// non-klipper devices) to match the shape KlipperDevice.get_device_info
+/// extends with.
+pub fn buildDeviceInfo(alloc: std.mem.Allocator, dev: *const Device) !std.json.Value {
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "device", .{ .string = dev.name });
+    try obj.put(alloc, "status", .{ .string = dev.state });
+    try obj.put(alloc, "locked_while_printing", .{ .bool = dev.locked_while_printing });
+    try obj.put(alloc, "type", .{ .string = dev.type_str });
+    try obj.put(alloc, "is_shutdown", .{ .bool = dev.is_shutdown });
+    return .{ .object = obj };
+}
+
+// ---------------------------------------------------------------------------
+// Notification
+// ---------------------------------------------------------------------------
+
+/// Emit `notify_power_changed` with the device info payload.
+/// Uses emitLocked — handlers run under the held Core lock.
+fn emitPowerChanged(ctx: *PowerCtx, alloc: std.mem.Allocator, dev: *const Device) void {
+    const bus = ctx.bus orelse return;
+    const io = ctx.io orelse return;
+    const info = buildDeviceInfo(alloc, dev) catch return;
+    var arr: std.json.Array = .init(alloc);
+    arr.append(info) catch return;
+    bus.emitLocked(io, notify.names.power_changed, .{ .array = arr }) catch {};
+}
+
+// ---------------------------------------------------------------------------
+// State machine helpers
+// ---------------------------------------------------------------------------
+
+/// Apply a power request ("on" | "off" | "toggle" | "status") to a device.
+/// STUB: no real GPIO/network control is performed. State is updated in memory.
+/// Returns the resulting state string (points into ctx-owned memory or a
+/// literal — caller must not free).
+fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+    const cur = dev.state;
+    if (std.mem.eql(u8, req, "status")) {
+        // STUB: in Moonraker this calls refresh_status() on the device to read
+        // live state from the hardware. phobos returns the cached in-memory
+        // state without touching any hardware.
+        return cur;
+    }
+    // Resolve "toggle" to the opposite of the current state.
+    const action: []const u8 = blk: {
+        if (!std.mem.eql(u8, req, "toggle")) break :blk req;
+        break :blk if (std.mem.eql(u8, cur, "off")) "on" else "off";
+    };
+    if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
+        return error.InvalidParams;
+    }
+    // STUB: a real implementation would call device.set_power(action) which
+    // writes a GPIO pin, sends an HTTP request, publishes an MQTT topic, etc.
+    // phobos only updates the in-memory state and emits the notification.
+    ctx.setState(dev.name, action) catch {};
+    // Refresh pointer after setState (dupe may have reallocated).
+    const updated = ctx.findDevice(dev.name) orelse return action;
+    emitPowerChanged(ctx, alloc, updated);
+    return updated.state;
+}
+
+// ---------------------------------------------------------------------------
+// GET /machine/device_power/devices → machine.device_power.devices
+// ---------------------------------------------------------------------------
+
+/// Returns `{ "devices": [ { device, status, locked_while_printing, type, is_shutdown }, ... ] }`.
+/// Without configured devices the list is empty, matching Moonraker when no
+/// `[power <name>]` sections are present.
+pub fn handleDevices(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *PowerCtx = @ptrCast(@alignCast(ctx_ptr));
+    var arr: std.json.Array = .init(alloc);
+    var it = ctx.devices.valueIterator();
+    while (it.next()) |dev| {
+        try arr.append(try buildDeviceInfo(alloc, dev));
+    }
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "devices", .{ .array = arr });
+    return .{ .object = obj };
+}
+
+// ---------------------------------------------------------------------------
+// GET /machine/device_power/device?device=  → machine.device_power.get_device
+// POST /machine/device_power/device?device=&action=  → machine.device_power.post_device
+// ---------------------------------------------------------------------------
+
+/// Shared handler for GET + POST /machine/device_power/device.
+/// GET → returns { "<device>": "<state>" } (status query).
+/// POST → requires `action` in [on|off|toggle], returns { "<device>": "<new_state>" }.
+pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *PowerCtx = @ptrCast(@alignCast(ctx_ptr));
+    const dev_name = try getStr(params, "device");
+    const dev = ctx.findDevice(dev_name) orelse {
+        // Matches Moonraker: "No valid device named <x>"
+        return error.NotFound;
+    };
+    // Determine the action: if `action` param is present → POST semantics;
+    // otherwise → GET semantics (status query).
+    const action: []const u8 = if (getOptStr(params, "action")) |a| blk: {
+        const al = std.ascii.allocLowerString(alloc, a) catch a;
+        if (!std.mem.eql(u8, al, "on") and !std.mem.eql(u8, al, "off") and !std.mem.eql(u8, al, "toggle")) {
+            return error.InvalidParams;
+        }
+        break :blk al;
+    } else "status";
+
+    const result_state = try processRequest(ctx, dev, action, alloc);
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, dev_name, .{ .string = result_state });
+    return .{ .object = obj };
+}
+
+// ---------------------------------------------------------------------------
+// GET  /machine/device_power/status   → batch status
+// POST /machine/device_power/on       → batch on
+// POST /machine/device_power/off      → batch off
+// ---------------------------------------------------------------------------
+
+/// Batch handler. The request names are inferred from the endpoint path last
+/// segment: "status" | "on" | "off". Device names come from the query params
+/// (each param key is a device name; values are ignored by Moonraker).
+/// Returns `{ "<device>": "<state>" | "device_not_found" }`.
+///
+/// We route all three paths here; the actual action is passed via a param
+/// `__batch_action` injected by the per-path wrappers below.
+fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator, action: []const u8) anyerror!std.json.Value {
+    const ctx: *PowerCtx = @ptrCast(@alignCast(ctx_ptr));
+    var out: std.json.ObjectMap = .empty;
+    switch (params) {
+        .object => |obj| {
+            if (obj.count() == 0) return error.InvalidParams;
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                const name = entry.key_ptr.*;
+                if (std.mem.eql(u8, name, "__batch_action")) continue;
+                if (ctx.findDevice(name)) |dev| {
+                    const state = processRequest(ctx, dev, action, alloc) catch "error";
+                    try out.put(alloc, name, .{ .string = state });
+                } else {
+                    try out.put(alloc, name, .{ .string = "device_not_found" });
+                }
+            }
+        },
+        else => return error.InvalidParams,
+    }
+    // If nothing was requested (all keys were internal) it's an empty param set.
+    if (out.count() == 0) return error.InvalidParams;
+    return .{ .object = out };
+}
+
+pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "status");
+}
+
+pub fn handleOn(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "on");
+}
+
+pub fn handleOff(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handleBatch(ctx_ptr, params, alloc, "off");
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+pub fn registerPower(reg: *Registry, ctx: *PowerCtx) !void {
+    const c: *anyopaque = @ptrCast(ctx);
+
+    try reg.registerEndpoint(.{ .path = "/machine/device_power/devices", .methods = &.{.GET} }, c, handleDevices);
+    try reg.registerEndpoint(.{ .path = "/machine/device_power/status", .methods = &.{.GET} }, c, handleStatus);
+    try reg.registerEndpoint(.{ .path = "/machine/device_power/on", .methods = &.{.POST} }, c, handleOn);
+    try reg.registerEndpoint(.{ .path = "/machine/device_power/off", .methods = &.{.POST} }, c, handleOff);
+    try reg.registerEndpoint(.{ .path = "/machine/device_power/device", .methods = &.{ .GET, .POST } }, c, handleSingleDevice);
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+const testing = std.testing;
+
+fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, json_str, .{});
+    return p.value;
+}
+
+fn testCtx(alloc: std.mem.Allocator) PowerCtx {
+    return PowerCtx.init(alloc, null);
+}
+
+// ---- handleDevices ----
+
+test "handleDevices: empty list when no devices configured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const v = try handleDevices(@ptrCast(&ctx), .null, a);
+    const arr = v.object.get("devices").?.array;
+    try testing.expectEqual(@as(usize, 0), arr.items.len);
+}
+
+test "handleDevices: returns device info shape for configured device" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("printer_psu", "gpio", "off", false);
+    const v = try handleDevices(@ptrCast(&ctx), .null, a);
+    const arr = v.object.get("devices").?.array;
+    try testing.expectEqual(@as(usize, 1), arr.items.len);
+    const d = arr.items[0].object;
+    try testing.expectEqualStrings("printer_psu", d.get("device").?.string);
+    try testing.expectEqualStrings("off", d.get("status").?.string);
+    try testing.expectEqualStrings("gpio", d.get("type").?.string);
+    try testing.expectEqual(false, d.get("locked_while_printing").?.bool);
+    try testing.expectEqual(false, d.get("is_shutdown").?.bool);
+}
+
+// ---- handleSingleDevice (GET semantics) ----
+
+test "handleSingleDevice: GET device=unknown returns NotFound" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try testing.expectError(error.NotFound, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"ghost\"}"), a));
+}
+
+test "handleSingleDevice: GET returns current status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", false);
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\"}"), a);
+    try testing.expectEqualStrings("off", v.object.get("psu").?.string);
+}
+
+// ---- handleSingleDevice (POST semantics — action param) ----
+
+test "handleSingleDevice: POST action=on changes state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", false);
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\"}"), a);
+    try testing.expectEqualStrings("on", v.object.get("psu").?.string);
+    // State persisted.
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+}
+
+test "handleSingleDevice: POST action=toggle flips state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", false);
+    const v1 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\"}"), a);
+    try testing.expectEqualStrings("on", v1.object.get("psu").?.string);
+    const v2 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\"}"), a);
+    try testing.expectEqualStrings("off", v2.object.get("psu").?.string);
+}
+
+test "handleSingleDevice: POST action=invalid returns InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", false);
+    try testing.expectError(error.InvalidParams, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"banana\"}"), a));
+}
+
+// ---- batch handlers ----
+
+test "handleOn: turns on named device" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", false);
+    const v = try handleOn(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
+    try testing.expectEqualStrings("on", v.object.get("psu").?.string);
+}
+
+test "handleOff: turns off named device" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "on", false);
+    const v = try handleOff(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
+    try testing.expectEqualStrings("off", v.object.get("psu").?.string);
+}
+
+test "handleStatus: unknown device → device_not_found" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const v = try handleStatus(@ptrCast(&ctx), try objParams(a, "{\"ghost\":null}"), a);
+    try testing.expectEqualStrings("device_not_found", v.object.get("ghost").?.string);
+}
+
+test "batch handlers: empty params returns InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try testing.expectError(error.InvalidParams, handleOn(@ptrCast(&ctx), .null, a));
+    try testing.expectError(error.InvalidParams, handleOn(@ptrCast(&ctx), try objParams(a, "{}"), a));
+}
+
+// ---- buildDeviceInfo ----
+
+test "buildDeviceInfo: full key set" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const dev: Device = .{ .name = "test", .type_str = "gpio", .state = "on", .locked_while_printing = true, .is_shutdown = false };
+    const v = try buildDeviceInfo(a, &dev);
+    const o = v.object;
+    try testing.expectEqualStrings("test", o.get("device").?.string);
+    try testing.expectEqualStrings("on", o.get("status").?.string);
+    try testing.expectEqualStrings("gpio", o.get("type").?.string);
+    try testing.expectEqual(true, o.get("locked_while_printing").?.bool);
+    try testing.expectEqual(false, o.get("is_shutdown").?.bool);
+}
+
+// ---- fuzz ----
+
+test "fuzz_single_device: arbitrary params never crash handleSingleDevice" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+            ctx.addDevice("psu", "gpio", "off", false) catch {};
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz_";
+            var name_buf: [16]u8 = undefined;
+            for (buf[0..@min(16, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const name = name_buf[0..@min(8, buf[0] % 16 + 1)];
+            const actions = [_][]const u8{ "on", "off", "toggle", "status", "banana", "" };
+            const action = actions[buf[1] % actions.len];
+            const params_str = try std.fmt.allocPrint(a, "{{\"device\":\"{s}\",\"action\":\"{s}\"}}", .{ name, action });
+            const pv = try std.json.parseFromSlice(std.json.Value, a, params_str, .{});
+            _ = handleSingleDevice(@ptrCast(&ctx), pv.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz_batch: arbitrary batch params never crash handleOn/Off/Status" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+            ctx.addDevice("psu", "gpio", "off", false) catch {};
+            ctx.addDevice("fan", "gpio", "on", true) catch {};
+
+            // Alternate between known and unknown device names.
+            const names = [_][]const u8{ "psu", "fan", "unknown", "" };
+            const nm = names[buf[0] % names.len];
+            const params_str = try std.fmt.allocPrint(a, "{{\"{s}\":null}}", .{nm});
+            const pv = std.json.parseFromSlice(std.json.Value, a, params_str, .{}) catch return;
+            _ = handleOn(@ptrCast(&ctx), pv.value, a) catch {};
+            _ = handleOff(@ptrCast(&ctx), pv.value, a) catch {};
+            _ = handleStatus(@ptrCast(&ctx), pv.value, a) catch {};
+        }
+    }.run, .{});
+}
