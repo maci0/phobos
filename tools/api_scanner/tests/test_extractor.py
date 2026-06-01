@@ -215,3 +215,76 @@ def test_flag_names_dynamic_operand():
     import ast
     node = ast.parse("RequestType.GET | foo()", mode="eval").body
     assert ex._flag_names(node) == ["GET", DYNAMIC]
+
+
+# --- router_routes (FIX 1: add_handler) ------------------------------------
+
+def test_add_handler_captured_as_router_route():
+    src = (
+        "self.mutable_router.add_handler('/server/jsonrpc', RPCHandler, None)\n"
+    )
+    v = extract_from_source(src, "components/application.py", source_root=".")
+    assert len(v.router_routes) == 1
+    r = v.router_routes[0]
+    assert r.kind == "router_route"
+    assert r.path == "/server/jsonrpc"
+    assert r.handler == "RPCHandler"
+    assert r.component == "application"
+
+
+def test_add_handler_home_pattern():
+    src = "self.mutable_router.add_handler('/', WelcomeHandler, None)\n"
+    v = extract_from_source(src, "components/application.py", source_root=".")
+    assert any(r.path == "/" and r.kind == "router_route" for r in v.router_routes)
+
+
+def test_add_handler_dynamic_path_recorded():
+    src = "self.mutable_router.add_handler(some_var, RPCHandler, None)\n"
+    v = extract_from_source(src, "components/application.py", source_root=".")
+    assert len(v.router_routes) == 1
+    assert v.router_routes[0].path == DYNAMIC
+
+
+# --- router_routes (FIX 2: register_websocket_handler) ---------------------
+
+def test_register_websocket_handler_captured():
+    src = "app.register_websocket_handler('/websocket', WebSocket)\n"
+    v = extract_from_source(src, "components/websockets.py", source_root=".")
+    assert len(v.router_routes) == 1
+    r = v.router_routes[0]
+    assert r.kind == "websocket_route"
+    assert r.path == "/websocket"
+    assert r.handler == "WebSocket"
+    assert r.component == "websockets"
+
+
+def test_register_websocket_handler_klippysocket():
+    src = "app.register_websocket_handler('/klippysocket', BridgeSocket)\n"
+    v = extract_from_source(src, "components/websockets.py", source_root=".")
+    r = v.router_routes[0]
+    assert r.kind == "websocket_route"
+    assert r.path == "/klippysocket"
+    assert r.handler == "BridgeSocket"
+
+
+# --- verb order (FIX 3) ----------------------------------------------------
+
+def test_post_get_order_matches_get_post():
+    """POST | GET must produce the same ordered method list as GET | POST."""
+    methods_gp, _ = derive_rpc_methods(
+        "/server/history/job", ["GET", "POST"], [], is_remote=False)
+    methods_pg, _ = derive_rpc_methods(
+        "/server/history/job", ["POST", "GET"], [], is_remote=False)
+    assert methods_gp == methods_pg
+    # canonical order is GET first
+    assert methods_gp[0].endswith("get_job")
+    assert methods_gp[1].endswith("post_job")
+
+
+def test_delete_post_get_canonical_order():
+    methods, multi = derive_rpc_methods(
+        "/server/history/job", ["DELETE", "POST", "GET"], [], is_remote=False)
+    assert multi is True
+    assert methods[0].endswith("get_job")
+    assert methods[1].endswith("post_job")
+    assert methods[2].endswith("delete_job")

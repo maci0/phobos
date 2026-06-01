@@ -63,6 +63,9 @@ def diff(baseline: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
         "notifications": _diff_section(
             baseline["notifications"], current["notifications"],
             lambda n: n["name"]),
+        "router_routes": _diff_section(
+            baseline.get("router_routes", []), current.get("router_routes", []),
+            lambda r: f"{r['kind']}:{r['path']}"),
         "static_handlers": _diff_section(
             baseline["static_handlers"], current["static_handlers"],
             lambda s: f"{s['kind']}:{s['pattern']}"),
@@ -83,6 +86,7 @@ def render(d: Dict[str, Any]) -> str:
         "jsonrpc_methods": "JSON-RPC METHODS",
         "remote_methods": "REMOTE METHODS",
         "notifications": "NOTIFICATIONS",
+        "router_routes": "ROUTER ROUTES",
         "static_handlers": "STATIC HANDLERS",
     }
     any_drift = False

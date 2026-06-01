@@ -3897,6 +3897,43 @@
       "source": "components/job_queue.py:57"
     }
   ],
+  "router_routes": [
+    {
+      "component": "application",
+      "handler": "RPCHandler",
+      "kind": "router_route",
+      "path": "/server/jsonrpc",
+      "source": "components/application.py:241"
+    },
+    {
+      "component": "application",
+      "handler": "RedirectHandler",
+      "kind": "router_route",
+      "path": "/server/redirect",
+      "source": "components/application.py:241"
+    },
+    {
+      "component": "application",
+      "handler": "WelcomeHandler",
+      "kind": "router_route",
+      "path": "<dynamic>",
+      "source": "components/application.py:241"
+    },
+    {
+      "component": "websockets",
+      "handler": "BridgeSocket",
+      "kind": "websocket_route",
+      "path": "/klippysocket",
+      "source": "components/websockets.py:56"
+    },
+    {
+      "component": "websockets",
+      "handler": "WebSocket",
+      "kind": "websocket_route",
+      "path": "/websocket",
+      "source": "components/websockets.py:55"
+    }
+  ],
   "static_handlers": [
     {
       "component": "file_manager",
@@ -3943,6 +3980,7 @@
     "moonraker_version": "0.10.1.dev20+g9008485",
     "notification_count": 27,
     "remote_method_count": 14,
+    "router_route_count": 5,
     "static_handler_count": 6
   }
 }

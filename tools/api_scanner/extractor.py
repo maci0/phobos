@@ -96,6 +96,19 @@ class Notification:
                 "component": self.component, "source": self.source}
 
 
+@dataclass
+class RouterRoute:
+    kind: str   # "router_route" | "websocket_route"
+    path: str
+    handler: str
+    component: str
+    source: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"kind": self.kind, "path": self.path, "handler": self.handler,
+                "component": self.component, "source": self.source}
+
+
 def component_from_path(path: str, source_root: str) -> str:
     """Derive a component name from a file path.
 
@@ -139,9 +152,33 @@ def _flag_names(node: ast.AST) -> List[str]:
 
 
 def _literal(node: Optional[ast.AST]) -> Any:
-    """Return a Python literal for ``node`` or DYNAMIC if not statically known."""
+    """Return a Python literal for ``node`` or DYNAMIC if not statically known.
+
+    For f-strings (``ast.JoinedStr``) the constant suffix (the last run of
+    literal characters) is returned so that paths like
+    ``f"{prefix}/server/redirect"`` still surface as ``/server/redirect``.
+    When no constant segments exist the result is DYNAMIC.
+    """
     if node is None:
         return None
+    # f-strings: collect the literal constant parts in order
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for v in node.values:
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                parts.append(v.value)
+            else:
+                parts.append(None)  # variable placeholder
+        # Build the best static approximation: drop leading variable segments,
+        # keep any trailing literal run that looks like a path.
+        literal_suffix = ""
+        for p in reversed(parts):
+            if p is None:
+                break
+            literal_suffix = p + literal_suffix
+        if literal_suffix:
+            return literal_suffix
+        return DYNAMIC
     try:
         return _safe_parse_literal(node)
     except (ValueError, TypeError, SyntaxError):
@@ -176,6 +213,11 @@ def derive_rpc_methods(
     concrete_verbs = [r for r in request_types if r != DYNAMIC]
     multi_verb = len(request_types) > 1
     if multi_verb:
+        # Sort verbs into the canonical Moonraker enum order so that source
+        # written as POST | GET yields the same method list as GET | POST.
+        _VERB_ORDER = {"GET": 0, "POST": 1, "DELETE": 2}
+        concrete_verbs = sorted(
+            concrete_verbs, key=lambda v: _VERB_ORDER.get(v, 99))
         methods: List[str] = []
         for rtype in concrete_verbs:
             func_name = rtype.lower() + "_" + name_parts[-1]
@@ -213,6 +255,10 @@ class _Visitor(ast.NodeVisitor):
         self.remote_methods: List[RemoteMethod] = []
         self.static_handlers: List[StaticHandler] = []
         self.notifications: List[Notification] = []
+        self.router_routes: List[RouterRoute] = []
+        # AST node ids of add_handler Call nodes already unpacked via visit_For,
+        # so visit_Call doesn't produce a duplicate <dynamic> entry for them.
+        self._handled_call_ids: set = set()
 
     def _src(self, node: ast.AST) -> str:
         rel = os.path.relpath(self.path, self.source_root)
@@ -242,8 +288,75 @@ class _Visitor(ast.NodeVisitor):
             self._handle_notification(node)
         elif attr == "send_notification":
             self._handle_send_notification(node)
+        elif attr == "add_handler":
+            if id(node) not in self._handled_call_ids:
+                self._handle_add_handler(node)
+        elif attr == "register_websocket_handler":
+            self._handle_websocket_handler(node)
 
         self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:  # noqa: N802
+        """Detect `for (ptrn, hdlr) in (...): router.add_handler(ptrn, hdlr, ...)`
+        and unpack the tuple pairs directly for static extraction."""
+        self._try_unpack_router_for_loop(node)
+        self.generic_visit(node)
+
+    def _try_unpack_router_for_loop(self, node: ast.For) -> None:
+        """If the For loop matches the add_handler pattern, extract each pair."""
+        # Target must be a 2-tuple of Names
+        if not (isinstance(node.target, ast.Tuple) and
+                len(node.target.elts) == 2 and
+                all(isinstance(e, ast.Name) for e in node.target.elts)):
+            return
+        ptrn_var = node.target.elts[0].id  # type: ignore[attr-defined]
+        hdlr_var = node.target.elts[1].id  # type: ignore[attr-defined]
+
+        # Iter must be a Tuple of 2-element Tuples (the pairs)
+        if not isinstance(node.iter, ast.Tuple):
+            return
+        pairs = node.iter.elts
+
+        # Body must contain exactly one add_handler call using those variables
+        body_calls = [
+            s.value for s in node.body
+            if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+        ]
+        if len(body_calls) != 1:
+            return
+        call = body_calls[0]
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "add_handler"):
+            return
+        if len(call.args) < 2:
+            return
+        arg0, arg1 = call.args[0], call.args[1]
+        if not (isinstance(arg0, ast.Name) and arg0.id == ptrn_var):
+            return
+        if not (isinstance(arg1, ast.Name) and arg1.id == hdlr_var):
+            return
+
+        # Mark the inner call as already-handled so visit_Call skips it.
+        self._handled_call_ids.add(id(call))
+
+        # Unpack each (path, handler) pair from the tuple literal
+        for pair in pairs:
+            if not (isinstance(pair, ast.Tuple) and len(pair.elts) == 2):
+                continue
+            path = self._resolve_str(pair.elts[0])
+            if not isinstance(path, str):
+                # Try module-level str consts; resolve returns DYNAMIC if unknown
+                path = DYNAMIC
+            handler_elt = pair.elts[1]
+            if isinstance(handler_elt, ast.Name):
+                handler = handler_elt.id
+            elif isinstance(handler_elt, ast.Attribute):
+                handler = handler_elt.attr
+            else:
+                handler = DYNAMIC
+            self.router_routes.append(RouterRoute(
+                kind="router_route", path=path, handler=handler,
+                component=self.component, source=self._src(call)))
 
     def visit_Constant(self, node: ast.Constant) -> None:  # noqa: N802
         # Capture hard-coded wire names such as the printer status push
@@ -359,6 +472,44 @@ class _Visitor(ast.NodeVisitor):
         self.notifications.append(Notification(
             name="notify_" + name, event_name=None, component=self.component,
             source=self._src(node)))
+
+    # -- mutable_router.add_handler(path, HandlerClass, ...) ----------------
+    def _handle_add_handler(self, node: ast.Call) -> None:
+        """Capture direct Tornado router registrations (router_route kind)."""
+        if len(node.args) < 2:
+            return
+        path = self._resolve_str(node.args[0])
+        if not isinstance(path, str):
+            path = DYNAMIC
+        handler_node = node.args[1]
+        if isinstance(handler_node, ast.Name):
+            handler = handler_node.id
+        elif isinstance(handler_node, ast.Attribute):
+            handler = handler_node.attr
+        else:
+            handler = DYNAMIC
+        self.router_routes.append(RouterRoute(
+            kind="router_route", path=path, handler=handler,
+            component=self.component, source=self._src(node)))
+
+    # -- app.register_websocket_handler(path, HandlerClass) -----------------
+    def _handle_websocket_handler(self, node: ast.Call) -> None:
+        """Capture websocket transport route registrations."""
+        if len(node.args) < 1:
+            return
+        path = self._resolve_str(node.args[0])
+        if not isinstance(path, str):
+            path = DYNAMIC
+        handler = DYNAMIC
+        if len(node.args) >= 2:
+            handler_node = node.args[1]
+            if isinstance(handler_node, ast.Name):
+                handler = handler_node.id
+            elif isinstance(handler_node, ast.Attribute):
+                handler = handler_node.attr
+        self.router_routes.append(RouterRoute(
+            kind="websocket_route", path=path, handler=handler,
+            component=self.component, source=self._src(node)))
 
 
 def _collect_str_consts(tree: ast.AST) -> Dict[str, str]:

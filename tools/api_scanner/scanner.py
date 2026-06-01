@@ -72,6 +72,7 @@ def scan(source_root: str) -> Dict[str, Any]:
     remote_methods: List[Dict[str, Any]] = []
     static_handlers: List[Dict[str, Any]] = []
     notifications: List[Dict[str, Any]] = []
+    router_routes: List[Dict[str, Any]] = []
 
     for path in _iter_py_files(source_root):
         try:
@@ -84,6 +85,7 @@ def scan(source_root: str) -> Dict[str, Any]:
         remote_methods.extend(r.to_dict() for r in v.remote_methods)
         static_handlers.extend(s.to_dict() for s in v.static_handlers)
         notifications.extend(n.to_dict() for n in v.notifications)
+        router_routes.extend(r.to_dict() for r in v.router_routes)
 
     # JSON-RPC methods: flatten every rpc method from every endpoint.
     rpc_seen: Dict[str, Dict[str, Any]] = {}
@@ -107,6 +109,7 @@ def scan(source_root: str) -> Dict[str, Any]:
     remote_methods.sort(key=lambda x: (x["name"], x["source"]))
     static_handlers.sort(key=lambda x: (x["kind"], x["pattern"], x["source"]))
     notifications = _dedup_notifications(notifications)
+    router_routes = _dedup_router_routes(router_routes)
 
     version = discover_version(source_root)
 
@@ -119,6 +122,7 @@ def scan(source_root: str) -> Dict[str, Any]:
         "jsonrpc_method_count": len(jsonrpc_methods),
         "remote_method_count": len(remote_methods),
         "notification_count": len(notifications),
+        "router_route_count": len(router_routes),
         "static_handler_count": len(static_handlers),
     }
 
@@ -128,6 +132,7 @@ def scan(source_root: str) -> Dict[str, Any]:
         "jsonrpc_methods": jsonrpc_methods,
         "remote_methods": remote_methods,
         "notifications": notifications,
+        "router_routes": router_routes,
         "static_handlers": static_handlers,
     }
 
@@ -138,3 +143,12 @@ def _dedup_notifications(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if n["name"] not in seen:
             seen[n["name"]] = n
     return sorted(seen.values(), key=lambda x: x["name"])
+
+
+def _dedup_router_routes(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Dict[str, Dict[str, Any]] = {}
+    for r in items:
+        key = f"{r['kind']}:{r['path']}"
+        if key not in seen:
+            seen[key] = r
+    return sorted(seen.values(), key=lambda x: (x["kind"], x["path"]))
