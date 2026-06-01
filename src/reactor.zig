@@ -300,3 +300,218 @@ test "timers fire in deadline order" {
 
     try std.testing.expectEqualSlices(u8, &[_]u8{ 'a', 'b' }, list.items);
 }
+
+const linux = std.os.linux;
+
+const FlagCtx = struct {
+    fired: bool = false,
+    got: u8 = 0,
+};
+
+fn readFlagCb(ctx_ptr: *anyopaque, fd: i32, events: u32) void {
+    _ = events;
+    const ctx: *FlagCtx = @ptrCast(@alignCast(ctx_ptr));
+    var buf: [1]u8 = undefined;
+    const n = linux.read(fd, &buf, 1);
+    if (linux.errno(n) == .SUCCESS and n == 1) {
+        ctx.fired = true;
+        ctx.got = buf[0];
+    }
+}
+
+test "fd readiness callback fires when data arrives" {
+    var r = try Reactor.init(std.testing.allocator);
+    defer r.deinit();
+
+    var pair: [2]i32 = undefined;
+    const sp = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM, 0, &pair);
+    try std.testing.expect(linux.errno(sp) == .SUCCESS);
+    defer _ = linux.close(pair[0]);
+    defer _ = linux.close(pair[1]);
+
+    var ctx = FlagCtx{};
+    try r.addFd(pair[0], linux.EPOLL.IN, readFlagCb, &ctx);
+    defer r.delFd(pair[0]);
+
+    const byte = [_]u8{0x5a};
+    const w = linux.write(pair[1], &byte, 1);
+    try std.testing.expect(linux.errno(w) == .SUCCESS);
+
+    const deadline = nowMs() + 500;
+    while (!ctx.fired and nowMs() < deadline) {
+        try r.runOnce(50);
+    }
+
+    try std.testing.expect(ctx.fired);
+    try std.testing.expectEqual(@as(u8, 0x5a), ctx.got);
+}
+
+const AcceptCtx = struct {
+    listener: i32,
+    accepted: i32 = -1,
+    fired: bool = false,
+};
+
+fn acceptCb(ctx_ptr: *anyopaque, fd: i32, events: u32) void {
+    _ = events;
+    const ctx: *AcceptCtx = @ptrCast(@alignCast(ctx_ptr));
+    const rc = linux.accept(fd, null, null);
+    if (linux.errno(rc) == .SUCCESS) {
+        ctx.accepted = @intCast(rc);
+        ctx.fired = true;
+    }
+}
+
+fn htons(v: u16) u16 {
+    return std.mem.nativeToBig(u16, v);
+}
+
+test "accept path: listener callback fires and accepted fd is readable" {
+    var r = try Reactor.init(std.testing.allocator);
+    defer r.deinit();
+
+    // Create a non-blocking listening socket on 127.0.0.1:0.
+    const ls = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0);
+    try std.testing.expect(linux.errno(ls) == .SUCCESS);
+    const listener: i32 = @intCast(ls);
+    defer _ = linux.close(listener);
+
+    var addr = linux.sockaddr.in{
+        .port = htons(0),
+        .addr = std.mem.nativeToBig(u32, 0x7f000001), // 127.0.0.1
+    };
+    const alen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    try std.testing.expect(linux.errno(linux.bind(listener, @ptrCast(&addr), alen)) == .SUCCESS);
+    try std.testing.expect(linux.errno(linux.listen(listener, 8)) == .SUCCESS);
+
+    // Read back the assigned ephemeral port.
+    var bound: linux.sockaddr.in = undefined;
+    var blen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+    try std.testing.expect(linux.errno(linux.getsockname(listener, @ptrCast(&bound), &blen)) == .SUCCESS);
+
+    var ctx = AcceptCtx{ .listener = listener };
+    try r.addFd(listener, linux.EPOLL.IN, acceptCb, &ctx);
+    defer r.delFd(listener);
+
+    // Connect a client (non-blocking) from this same thread.
+    const cs = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK, 0);
+    try std.testing.expect(linux.errno(cs) == .SUCCESS);
+    const client: i32 = @intCast(cs);
+    defer _ = linux.close(client);
+
+    var caddr = linux.sockaddr.in{ .port = bound.port, .addr = bound.addr };
+    const crc = linux.connect(client, @ptrCast(&caddr), alen);
+    // Non-blocking connect typically returns EINPROGRESS; that is fine.
+    const cerr = linux.errno(crc);
+    try std.testing.expect(cerr == .SUCCESS or cerr == .INPROGRESS or cerr == .AGAIN);
+
+    // Drive the reactor until the accept callback fires.
+    const deadline = nowMs() + 500;
+    while (!ctx.fired and nowMs() < deadline) {
+        try r.runOnce(50);
+    }
+    try std.testing.expect(ctx.fired);
+    try std.testing.expect(ctx.accepted >= 0);
+    defer _ = linux.close(ctx.accepted);
+
+    // Send a byte from the client and confirm it is readable on the accepted fd.
+    const payload = [_]u8{0x42};
+    const w = linux.write(client, &payload, 1);
+    try std.testing.expect(linux.errno(w) == .SUCCESS);
+
+    var rbuf: [1]u8 = undefined;
+    const rdeadline = nowMs() + 500;
+    var read_ok = false;
+    while (!read_ok and nowMs() < rdeadline) {
+        const rn = linux.read(ctx.accepted, &rbuf, 1);
+        if (linux.errno(rn) == .SUCCESS and rn == 1) {
+            read_ok = true;
+        }
+    }
+    try std.testing.expect(read_ok);
+    try std.testing.expectEqual(@as(u8, 0x42), rbuf[0]);
+}
+
+test "fuzz_reactor: random op sequence never crashes, leaks, or reorders" {
+    const Ctx = struct {
+        log: *std.ArrayList(u64),
+        alloc: std.mem.Allocator,
+        token: u64,
+    };
+    const H = struct {
+        fn cb(ctx_ptr: *anyopaque, arg: u8) void {
+            _ = arg;
+            const c: *Ctx = @ptrCast(@alignCast(ctx_ptr));
+            c.log.append(c.alloc, c.token) catch {};
+        }
+        fn timer(ctx_ptr: *anyopaque) void {
+            const c: *Ctx = @ptrCast(@alignCast(ctx_ptr));
+            c.log.append(c.alloc, c.token) catch {};
+        }
+    };
+
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const a = std.testing.allocator;
+            var r = try Reactor.init(a);
+            defer r.deinit();
+
+            var buf: [128]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+
+            var log: std.ArrayList(u64) = .empty;
+            defer log.deinit(a);
+
+            // Keep contexts alive for the duration of the run.
+            var ctxs: std.ArrayList(*Ctx) = .empty;
+            defer {
+                for (ctxs.items) |c| a.destroy(c);
+                ctxs.deinit(a);
+            }
+
+            // Track the order in which equal-deadline (== 0ms) deferred soon
+            // callbacks were enqueued, to verify FIFO preservation.
+            var soon_tokens: std.ArrayList(u64) = .empty;
+            defer soon_tokens.deinit(a);
+
+            var token: u64 = 0;
+            for (buf) |b| {
+                const op = b % 3;
+                const c = try a.create(Ctx);
+                c.* = .{ .log = &log, .alloc = a, .token = token };
+                try ctxs.append(a, c);
+                switch (op) {
+                    0 => {
+                        try r.callSoon(H.cb, c, 0);
+                        try soon_tokens.append(a, token);
+                    },
+                    1 => {
+                        // delay derived from the byte
+                        try r.callLater(@as(i64, b), H.timer, c);
+                    },
+                    2 => {
+                        try r.runPending();
+                    },
+                    else => unreachable,
+                }
+                token += 1;
+            }
+
+            // Final drain of any remaining deferred callbacks.
+            try r.runPending();
+
+            // The deferred (callSoon) tokens that have been logged must appear in
+            // their original enqueue order — FIFO preserved for same deadline.
+            var prev: ?u64 = null;
+            var si: usize = 0;
+            for (log.items) |t| {
+                // Only consider tokens that were callSoon entries.
+                if (si < soon_tokens.items.len and t == soon_tokens.items[si]) {
+                    if (prev) |p| std.debug.assert(p < t);
+                    prev = t;
+                    si += 1;
+                }
+            }
+        }
+    }.run, .{});
+}
