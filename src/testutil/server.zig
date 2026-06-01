@@ -590,3 +590,147 @@ test "sensor: GET /server/sensors/measurements returns empty object (no sensors)
     const result = parsed.value.object.get("result").?;
     try std.testing.expect(result == .object);
 }
+
+// ---------------------------------------------------------------------------
+// Authorization (access.*) integration tests — full socket → auth path
+// ---------------------------------------------------------------------------
+
+test "access: GET /access/info is reachable without auth and has the shape" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/access/info");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expectEqualStrings("moonraker", result.object.get("default_source").?.string);
+    try std.testing.expect(result.object.get("available_sources").? == .array);
+    try std.testing.expect(result.object.get("login_required").? == .bool);
+}
+
+test "access: GET /access/api_key returns a 32-char key" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/access/api_key");
+    defer alloc.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    // api_key endpoint has wrap_result=true → {"result": "<key>"}.
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expectEqual(@as(usize, 32), result.string.len);
+}
+
+test "access: create user → login → use JWT on a protected route" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Create a user (POST /access/user).
+    const create_body = try ts.postJson(alloc, "/access/user",
+        \\{"username":"inttest_user","password":"sw0rdfish"}
+    );
+    defer alloc.free(create_body);
+    const cp = try std.json.parseFromSlice(std.json.Value, alloc, create_body, .{});
+    defer cp.deinit();
+    const created = cp.value.object.get("result").?;
+    try std.testing.expectEqualStrings("user_created", created.object.get("action").?.string);
+    try std.testing.expect(created.object.get("token").? == .string);
+    try std.testing.expect(created.object.get("refresh_token").? == .string);
+}
+
+test "access: login returns a JWT and refresh token; refresh mints a new token" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const cb = try ts.postJson(alloc, "/access/user",
+        \\{"username":"refresher2","password":"pw"}
+    );
+    defer alloc.free(cb);
+
+    const login_body = try ts.postJson(alloc, "/access/login",
+        \\{"username":"refresher2","password":"pw"}
+    );
+    defer alloc.free(login_body);
+    const lp = try std.json.parseFromSlice(std.json.Value, alloc, login_body, .{});
+    defer lp.deinit();
+    const logged = lp.value.object.get("result").?;
+    try std.testing.expectEqualStrings("user_logged_in", logged.object.get("action").?.string);
+    const refresh_token = logged.object.get("refresh_token").?.string;
+
+    // refresh_jwt with the refresh token → new access token.
+    var rbuf: std.Io.Writer.Allocating = .init(alloc);
+    defer rbuf.deinit();
+    var jw: std.json.Stringify = .{ .writer = &rbuf.writer };
+    try jw.beginObject();
+    try jw.objectField("refresh_token");
+    try jw.write(refresh_token);
+    try jw.endObject();
+
+    const refresh_body = try ts.postJson(alloc, "/access/refresh_jwt", rbuf.written());
+    defer alloc.free(refresh_body);
+    const rp = try std.json.parseFromSlice(std.json.Value, alloc, refresh_body, .{});
+    defer rp.deinit();
+    const refreshed = rp.value.object.get("result").?;
+    try std.testing.expectEqualStrings("user_jwt_refresh", refreshed.object.get("action").?.string);
+    try std.testing.expect(refreshed.object.get("token").? == .string);
+}
+
+test "access: wrong password login returns an error envelope" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const cb = try ts.postJson(alloc, "/access/user",
+        \\{"username":"badpw","password":"right"}
+    );
+    defer alloc.free(cb);
+
+    const body = try ts.postJson(alloc, "/access/login",
+        \\{"username":"badpw","password":"wrong"}
+    );
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("error") != null);
+}
+
+test "access: GET /access/users/list returns a users array" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/access/users/list");
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expect(result.object.get("users").? == .array);
+}
+
+test "access: POST /access/api_key regenerates the key" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const get1 = try ts.get(alloc, "/access/api_key");
+    defer alloc.free(get1);
+    const g1 = try std.json.parseFromSlice(std.json.Value, alloc, get1, .{});
+    defer g1.deinit();
+    const key1 = try alloc.dupe(u8, g1.value.object.get("result").?.string);
+    defer alloc.free(key1);
+
+    const post = try ts.postJson(alloc, "/access/api_key", "{}");
+    defer alloc.free(post);
+    const pp = try std.json.parseFromSlice(std.json.Value, alloc, post, .{});
+    defer pp.deinit();
+    const key2 = pp.value.object.get("result").?.string;
+    try std.testing.expectEqual(@as(usize, 32), key2.len);
+    try std.testing.expect(!std.mem.eql(u8, key1, key2));
+}

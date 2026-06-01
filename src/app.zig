@@ -28,6 +28,7 @@ const server_misc_component = @import("components/server_misc.zig");
 const notifier_component = @import("components/notifier.zig");
 const webcam_component = @import("components/webcam.zig");
 const sensor_component = @import("components/sensor.zig");
+const authorization_component = @import("components/authorization.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -44,6 +45,7 @@ const ServerMiscCtx = server_misc_component.ServerMiscCtx;
 const NotifierCtx = notifier_component.NotifierCtx;
 const WebcamCtx = webcam_component.WebcamCtx;
 const SensorCtx = sensor_component.SensorCtx;
+const AuthCtx = authorization_component.AuthCtx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -110,6 +112,7 @@ pub const App = struct {
     notifier_ctx: *NotifierCtx,
     webcam_ctx: *WebcamCtx,
     sensor_ctx: *SensorCtx,
+    auth_ctx: *AuthCtx,
     /// Owns the LMDB environment when with_lmdb=true; void otherwise.
     lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
 
@@ -214,6 +217,17 @@ pub const App = struct {
         errdefer alloc.destroy(sensor_ctx);
         sensor_ctx.* = .{};
 
+        // --- Authorization context (access.* + auth hook) ---
+        const auth_ctx = try alloc.create(AuthCtx);
+        errdefer alloc.destroy(auth_ctx);
+        // Issuer mirrors Moonraker's "http://<hostname>:<port>". The default
+        // host/port keep tokens self-consistent within this instance.
+        auth_ctx.* = try AuthCtx.init(alloc, db_ctx.store, "http://localhost:7125");
+        // The spine transport does not yet surface the socket peer address;
+        // trust requests whose IP is unknown (local deployment default). Valid
+        // JWT / API-key credentials still take precedence.
+        auth_ctx.trust_unknown_ip = true;
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -231,6 +245,7 @@ pub const App = struct {
             .notifier_ctx = notifier_ctx,
             .webcam_ctx = webcam_ctx,
             .sensor_ctx = sensor_ctx,
+            .auth_ctx = auth_ctx,
             .lmdb_store_ptr = lmdb_ptr,
         };
 
@@ -245,6 +260,10 @@ pub const App = struct {
         self.conns.deinit(io);
         self.reg.deinit();
         self.dispatcher.deinit();
+        // Auth context must be torn down before the store closes (it persists
+        // users to the DataStore).
+        self.auth_ctx.deinit();
+        self.alloc.destroy(self.auth_ctx);
         if (build_options.with_lmdb) {
             self.lmdb_store_ptr.close();
             self.alloc.destroy(self.lmdb_store_ptr);
@@ -307,6 +326,9 @@ pub const App = struct {
         // Sensor component: server.sensors.* endpoints.
         try sensor_component.registerSensor(self.reg, self.sensor_ctx);
 
+        // Authorization component: access.* endpoints.
+        try authorization_component.registerAuthorization(self.reg, self.auth_ctx);
+
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
         // the live *Connection). Register them in the dispatcher so the
@@ -333,6 +355,7 @@ pub const App = struct {
             .reg = self.reg,
             .dispatcher = self.dispatcher,
             .conns = self.conns,
+            .auth = self.auth_ctx,
         };
     }
 };
@@ -438,6 +461,17 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.sensors.list",
         "server.sensors.info",
         "server.sensors.measurements",
+        // Authorization (access.*)
+        "access.login",
+        "access.logout",
+        "access.refresh_jwt",
+        "access.user",
+        "access.users.list",
+        "access.user.password",
+        "access.get_api_key",
+        "access.post_api_key",
+        "access.oneshot_token",
+        "access.info",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",

@@ -20,6 +20,7 @@ const jsonrpc = @import("jsonrpc.zig");
 const jv = @import("json/value.zig");
 const connections = @import("server/connections.zig");
 const ws = @import("transport/ws.zig");
+const authz = @import("components/authorization.zig");
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -68,6 +69,20 @@ pub const Server = struct {
     /// can construct a Server without it; when null, upgrade requests are
     /// rejected (400) instead of handed off.
     conns: ?*connections.Connections = null,
+    /// Authorization component backing the auth hook. When set, requests are
+    /// authenticated via the JWT → oneshot → API key → trusted chain; the
+    /// resolved user is injected into the handler params under the reserved
+    /// keys so access.* handlers can identify the caller. When null, the
+    /// transport falls back to `hook` (spine default = allow).
+    auth: ?*authz.AuthCtx = null,
+};
+
+/// Credentials carried by an HTTP request, extracted from headers and query.
+pub const HttpCreds = struct {
+    jwt: ?[]const u8 = null,
+    oneshot: ?[]const u8 = null,
+    api_key: ?[]const u8 = null,
+    remote_ip: ?[]const u8 = null,
 };
 
 /// Comptime-known trampoline so a runtime handler pointer can be invoked inside
@@ -156,6 +171,22 @@ pub fn handleParsed(
     body: []const u8,
     alloc: std.mem.Allocator,
 ) !Response {
+    return handleParsedAuth(srv, transport, method, target, body, .{}, alloc);
+}
+
+/// Like `handleParsed` but with the request credentials extracted by the
+/// socket layer (headers + query). When `srv.auth` is set these drive the real
+/// authentication chain; otherwise they are ignored and the legacy `hook`
+/// applies.
+pub fn handleParsedAuth(
+    srv: *Server,
+    transport: TransportType,
+    method: ?RequestType,
+    target: []const u8,
+    body: []const u8,
+    creds: HttpCreds,
+    alloc: std.mem.Allocator,
+) !Response {
     const path = pathOf(target);
 
     // JSON-RPC bridge: POST /server/jsonrpc.
@@ -183,8 +214,28 @@ pub fn handleParsed(
         return .{ .status = .not_found, .body = b };
     };
 
-    // Auth gate.
-    if (!authorize(srv.hook, transport, route)) {
+    // Auth gate. When the authorization component is wired, run the real
+    // JWT → oneshot → API key → trusted chain; otherwise fall back to the
+    // legacy hook (spine default = allow). INTERNAL always bypasses.
+    var resolved_user: ?[]const u8 = null;
+    if (srv.auth) |auth_ctx| {
+        if (transport != .INTERNAL) {
+            const outcome = authz.authenticateRequest(auth_ctx, alloc, transport, .{
+                .jwt = creds.jwt,
+                .oneshot = creds.oneshot,
+                .api_key = creds.api_key,
+                .remote_ip = creds.remote_ip,
+            }, route.auth_required);
+            switch (outcome) {
+                .user => |u| resolved_user = u,
+                .anonymous => {},
+                .unauthorized => {
+                    const b = try errorBody(alloc, 401, "Unauthorized");
+                    return .{ .status = .unauthorized, .body = b };
+                },
+            }
+        }
+    } else if (!authorize(srv.hook, transport, route)) {
         const b = try errorBody(alloc, 401, "Unauthorized");
         return .{ .status = .unauthorized, .body = b };
     }
@@ -205,6 +256,25 @@ pub fn handleParsed(
 
     if (params == .null) {
         params = try queryParams(alloc, target);
+    }
+
+    // Inject the resolved user, remote IP and HTTP method into the params so the
+    // access.* handlers can identify the caller (mirrors Moonraker injecting the
+    // current user / ip into the WebRequest). Only for access.* routes to avoid
+    // polluting unrelated handlers.
+    if (std.mem.startsWith(u8, path, "/access/")) {
+        var obj: std.json.ObjectMap = switch (params) {
+            .object => |o| o,
+            else => .empty,
+        };
+        if (resolved_user) |u| {
+            try obj.put(alloc, authz.current_user_key, .{ .string = u });
+        }
+        if (creds.remote_ip) |ip| {
+            try obj.put(alloc, authz.current_ip_key, .{ .string = ip });
+        }
+        try obj.put(alloc, "_method", .{ .string = @tagName(verb) });
+        params = .{ .object = obj };
     }
 
     // Run the handler under the serialized core. `Core.run` needs a
@@ -306,9 +376,14 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         const verb = RequestType.fromHttp(req.head.method);
         const target = alloc.dupe(u8, req.head.target) catch req.head.target;
 
+        // Extract auth credentials from headers + query (duped into the arena,
+        // since the header backing memory is invalidated once the body reader
+        // runs). Only meaningful when the authorization component is wired.
+        const creds = extractCreds(&req, target, alloc);
+
         const body: []const u8 = readBody(&req, alloc) catch &.{};
 
-        const resp = handleParsed(srv, .HTTP, verb, target, body, alloc) catch
+        const resp = handleParsedAuth(srv, .HTTP, verb, target, body, creds, alloc) catch
             Response{ .status = .internal_server_error, .body = "{\"error\":{\"code\":500,\"message\":\"Internal Server Error\"}}" };
 
         req.respond(resp.body, .{
@@ -320,6 +395,45 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
 
         if (!req.head.keep_alive) return;
     }
+}
+
+/// Extract the auth credentials Moonraker recognizes from the request:
+///   * JWT: "Authorization: Bearer <t>" / "X-Access-Token" / "?access_token="
+///   * Oneshot: "?token="
+///   * API key: "X-Api-Key"
+/// All returned slices are duped into `alloc` so they survive the body read.
+fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.mem.Allocator) HttpCreds {
+    var creds = HttpCreds{};
+
+    var it = req.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "authorization")) {
+            creds.jwt = alloc.dupe(u8, h.value) catch null;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "x-access-token")) {
+            if (creds.jwt == null) creds.jwt = alloc.dupe(u8, h.value) catch null;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "x-api-key")) {
+            creds.api_key = alloc.dupe(u8, h.value) catch null;
+        }
+    }
+
+    // Query params: access_token (JWT) and token (oneshot).
+    const qp = queryParams(alloc, target) catch std.json.Value{ .null = {} };
+    if (qp == .object) {
+        if (qp.object.get("access_token")) |v| switch (v) {
+            .string => |s| if (creds.jwt == null) {
+                creds.jwt = alloc.dupe(u8, s) catch null;
+            },
+            else => {},
+        };
+        if (qp.object.get("token")) |v| switch (v) {
+            .string => |s| {
+                creds.oneshot = alloc.dupe(u8, s) catch null;
+            },
+            else => {},
+        };
+    }
+
+    return creds;
 }
 
 /// Read the full request body into `alloc`. Returns an empty slice when there
