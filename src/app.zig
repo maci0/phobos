@@ -29,6 +29,10 @@ const notifier_component = @import("components/notifier.zig");
 const webcam_component = @import("components/webcam.zig");
 const sensor_component = @import("components/sensor.zig");
 const authorization_component = @import("components/authorization.zig");
+const spoolman_component = @import("components/spoolman.zig");
+const mqtt_component = @import("components/mqtt.zig");
+const extensions_component = @import("components/extensions.zig");
+const analysis_component = @import("components/analysis.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -46,6 +50,10 @@ const NotifierCtx = notifier_component.NotifierCtx;
 const WebcamCtx = webcam_component.WebcamCtx;
 const SensorCtx = sensor_component.SensorCtx;
 const AuthCtx = authorization_component.AuthCtx;
+const SpoolmanCtx = spoolman_component.SpoolmanCtx;
+const MqttCtx = mqtt_component.MqttCtx;
+const ExtensionsCtx = extensions_component.ExtensionsCtx;
+const AnalysisCtx = analysis_component.AnalysisCtx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -113,6 +121,10 @@ pub const App = struct {
     webcam_ctx: *WebcamCtx,
     sensor_ctx: *SensorCtx,
     auth_ctx: *AuthCtx,
+    spoolman_ctx: *SpoolmanCtx,
+    mqtt_ctx: *MqttCtx,
+    extensions_ctx: *ExtensionsCtx,
+    analysis_ctx: *AnalysisCtx,
     /// Owns the LMDB environment when with_lmdb=true; void otherwise.
     lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
 
@@ -228,6 +240,28 @@ pub const App = struct {
         // JWT / API-key credentials still take precedence.
         auth_ctx.trust_unknown_ip = true;
 
+        // --- Spoolman context (spool_id persistence + proxy stubs) ---
+        // io is not stored here; setIo() is called after the event loop starts
+        // (see httpServer). Notifications are suppressed until then.
+        const spoolman_ctx = try alloc.create(SpoolmanCtx);
+        errdefer alloc.destroy(spoolman_ctx);
+        spoolman_ctx.* = SpoolmanCtx.init(alloc, db_ctx.store, bus);
+
+        // --- MQTT context (no broker; faithful endpoint shapes) ---
+        const mqtt_ctx = try alloc.create(MqttCtx);
+        errdefer alloc.destroy(mqtt_ctx);
+        mqtt_ctx.* = .{};
+
+        // --- Extensions context (agent registry) ---
+        const extensions_ctx = try alloc.create(ExtensionsCtx);
+        errdefer alloc.destroy(extensions_ctx);
+        extensions_ctx.* = ExtensionsCtx.init(alloc);
+
+        // --- Analysis context (klipper_estimator stubs) ---
+        const analysis_ctx = try alloc.create(AnalysisCtx);
+        errdefer alloc.destroy(analysis_ctx);
+        analysis_ctx.* = .{};
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -246,6 +280,10 @@ pub const App = struct {
             .webcam_ctx = webcam_ctx,
             .sensor_ctx = sensor_ctx,
             .auth_ctx = auth_ctx,
+            .spoolman_ctx = spoolman_ctx,
+            .mqtt_ctx = mqtt_ctx,
+            .extensions_ctx = extensions_ctx,
+            .analysis_ctx = analysis_ctx,
             .lmdb_store_ptr = lmdb_ptr,
         };
 
@@ -264,6 +302,11 @@ pub const App = struct {
         // users to the DataStore).
         self.auth_ctx.deinit();
         self.alloc.destroy(self.auth_ctx);
+        self.extensions_ctx.deinit();
+        self.alloc.destroy(self.extensions_ctx);
+        self.alloc.destroy(self.analysis_ctx);
+        self.alloc.destroy(self.mqtt_ctx);
+        self.alloc.destroy(self.spoolman_ctx);
         if (build_options.with_lmdb) {
             self.lmdb_store_ptr.close();
             self.alloc.destroy(self.lmdb_store_ptr);
@@ -329,6 +372,18 @@ pub const App = struct {
         // Authorization component: access.* endpoints.
         try authorization_component.registerAuthorization(self.reg, self.auth_ctx);
 
+        // Spoolman component: server.spoolman.* endpoints.
+        try spoolman_component.registerSpoolman(self.reg, self.spoolman_ctx);
+
+        // MQTT component: server.mqtt.* endpoints.
+        try mqtt_component.registerMqtt(self.reg, self.mqtt_ctx);
+
+        // Extensions component: server.extensions.* + connection.* endpoints.
+        try extensions_component.registerExtensions(self.reg, self.extensions_ctx);
+
+        // Analysis component: server.analysis.* endpoints.
+        try analysis_component.registerAnalysis(self.reg, self.analysis_ctx);
+
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
         // the live *Connection). Register them in the dispatcher so the
@@ -349,6 +404,9 @@ pub const App = struct {
     /// The caller must supply a live `io` (from a threaded event loop). The
     /// returned Server borrows all App-owned pointers; the App must outlive it.
     pub fn httpServer(self: *App, io: std.Io) http_transport.Server {
+        // Wire the live io into the spoolman component so it can emit
+        // notify_active_spool_set to connected WebSocket clients.
+        self.spoolman_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,
@@ -472,6 +530,24 @@ test "App.init: dispatcher has exactly the expected methods" {
         "access.post_api_key",
         "access.oneshot_token",
         "access.info",
+        // Spoolman
+        "server.spoolman.get_spool_id",
+        "server.spoolman.post_spool_id",
+        "server.spoolman.proxy",
+        "server.spoolman.status",
+        // MQTT
+        "server.mqtt.publish",
+        "server.mqtt.subscribe",
+        // Extensions
+        "server.extensions.list",
+        "server.extensions.request",
+        "connection.register_remote_method",
+        "connection.send_event",
+        // Analysis
+        "server.analysis.status",
+        "server.analysis.estimate",
+        "server.analysis.process",
+        "server.analysis.dump_config",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",
