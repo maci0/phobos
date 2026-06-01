@@ -1072,6 +1072,170 @@ test "machine: GET /machine/peripherals/* return correct list shapes" {
     try std.testing.expect(cp.value.object.get("result").?.object.get("can_uuids").? == .array);
 }
 
+// ---------------------------------------------------------------------------
+// Update manager (machine.update.*) integration tests — full socket path.
+// ---------------------------------------------------------------------------
+
+test "update: GET /machine/update/status returns version_info with configured sources" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/update/status");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?.object;
+
+    // Top-level rate-limit + busy keys.
+    for ([_][]const u8{ "github_rate_limit", "github_requests_remaining", "github_limit_reset_time", "version_info", "busy" }) |k| {
+        try std.testing.expect(r.get(k) != null);
+    }
+    try std.testing.expectEqual(false, r.get("busy").?.bool);
+
+    const vi = r.get("version_info").?.object;
+    // Default sources present.
+    try std.testing.expect(vi.get("moonraker") != null);
+    try std.testing.expect(vi.get("klipper") != null);
+    try std.testing.expect(vi.get("system") != null);
+    // moonraker is a git_repo with the full shape.
+    const moon = vi.get("moonraker").?.object;
+    try std.testing.expectEqualStrings("git_repo", moon.get("detected_type").?.string);
+    try std.testing.expect(moon.get("commits_behind").? == .array);
+    try std.testing.expect(moon.get("remote_url") != null);
+    // system is a package type.
+    const sys = vi.get("system").?.object;
+    try std.testing.expectEqualStrings("system", sys.get("configured_type").?.string);
+    try std.testing.expect(sys.get("package_list").? == .array);
+}
+
+test "update: POST /machine/update/refresh returns status and emits notify_update_refreshed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const RecordWriter = struct {
+        alloc: std.mem.Allocator,
+        frames: std.ArrayList([]u8) = .empty,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const dup = try self.alloc.dupe(u8, bytes);
+            try self.frames.append(self.alloc, dup);
+        }
+        fn deinit(self: *@This()) void {
+            for (self.frames.items) |f| self.alloc.free(f);
+            self.frames.deinit(self.alloc);
+        }
+    };
+    var rec = RecordWriter{ .alloc = alloc };
+    defer rec.deinit();
+    const conns = ts.connsRef();
+    const cid = try conns.add(ts.io);
+    conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+
+    const body = try ts.postJson(alloc, "/machine/update/refresh", "{}");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("result").?.object.get("version_info") != null);
+
+    var saw = false;
+    for (rec.frames.items) |f| {
+        if (std.mem.indexOf(u8, f, "notify_update_refreshed") != null and
+            std.mem.indexOf(u8, f, "version_info") != null) saw = true;
+    }
+    try std.testing.expect(saw);
+}
+
+test "update: POST /machine/update/upgrade emits notify_update_response and acks ok" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const RecordWriter = struct {
+        alloc: std.mem.Allocator,
+        frames: std.ArrayList([]u8) = .empty,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            const dup = try self.alloc.dupe(u8, bytes);
+            try self.frames.append(self.alloc, dup);
+        }
+        fn deinit(self: *@This()) void {
+            for (self.frames.items) |f| self.alloc.free(f);
+            self.frames.deinit(self.alloc);
+        }
+    };
+    var rec = RecordWriter{ .alloc = alloc };
+    defer rec.deinit();
+    const conns = ts.connsRef();
+    const cid = try conns.add(ts.io);
+    conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+
+    const body = try ts.postJson(alloc, "/machine/update/moonraker", "{}");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+
+    // notify_update_response with the CommandHelper shape must have been emitted.
+    var saw = false;
+    for (rec.frames.items) |f| {
+        if (std.mem.indexOf(u8, f, "notify_update_response") != null and
+            std.mem.indexOf(u8, f, "\"application\":\"moonraker\"") != null and
+            std.mem.indexOf(u8, f, "\"proc_id\"") != null and
+            std.mem.indexOf(u8, f, "\"complete\"") != null) saw = true;
+    }
+    try std.testing.expect(saw);
+}
+
+test "update: per-target endpoints and full update ack ok" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    for ([_][]const u8{
+        "/machine/update/klipper",
+        "/machine/update/system",
+        "/machine/update/full",
+        "/machine/update/client",
+    }) |path| {
+        const body = try ts.postJson(alloc, path, "{}");
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+    }
+}
+
+test "update: recover (git source) and rollback ack ok; recover non-git errors" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const rec = try ts.postJson(alloc, "/machine/update/recover",
+        \\{"name":"klipper","hard":true}
+    );
+    defer alloc.free(rec);
+    const rp = try resultOf(alloc, rec);
+    defer rp.deinit();
+    try std.testing.expectEqualStrings("ok", rp.value.object.get("result").?.string);
+
+    const rb = try ts.postJson(alloc, "/machine/update/rollback",
+        \\{"name":"moonraker"}
+    );
+    defer alloc.free(rb);
+    const rbp = try resultOf(alloc, rb);
+    defer rbp.deinit();
+    try std.testing.expectEqualStrings("ok", rbp.value.object.get("result").?.string);
+
+    // Recover on the system (non-git) source → error envelope.
+    const bad = try ts.postJson(alloc, "/machine/update/recover",
+        \\{"name":"system"}
+    );
+    defer alloc.free(bad);
+    try std.testing.expect(std.mem.indexOf(u8, bad, "\"error\"") != null);
+}
+
 test "files: notify_filelist_changed emitted on upload with correct payload" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

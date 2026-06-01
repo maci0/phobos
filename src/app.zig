@@ -35,6 +35,7 @@ const extensions_component = @import("components/extensions.zig");
 const analysis_component = @import("components/analysis.zig");
 const file_manager_component = @import("components/file_manager.zig");
 const machine_component = @import("components/machine.zig");
+const update_manager_component = @import("components/update_manager.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -59,6 +60,8 @@ const AnalysisCtx = analysis_component.AnalysisCtx;
 const FileCtx = file_manager_component.FileCtx;
 const FileRoot = file_manager_component.Root;
 const MachineCtx = machine_component.MachineCtx;
+const UpdateCtx = update_manager_component.UpdateCtx;
+const UpdateSource = update_manager_component.Source;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -141,6 +144,7 @@ pub const App = struct {
     analysis_ctx: *AnalysisCtx,
     file_ctx: *FileCtx,
     machine_ctx: *MachineCtx,
+    update_ctx: *UpdateCtx,
     /// Absolute datadir whose subfolders back the file_manager roots. Owned and
     /// freed in deinit. The root paths in `file_roots` point into the joined
     /// strings owned alongside it.
@@ -320,6 +324,18 @@ pub const App = struct {
         errdefer alloc.destroy(machine_ctx);
         machine_ctx.* = .{ .gpa = alloc };
 
+        // --- Update manager context (machine.update.*) ---
+        // The default source set (system + moonraker + klipper git repos) is a
+        // static borrow; real git/package state is stubbed. io is wired later via
+        // setIo so notifications reach connected WebSocket clients.
+        const update_ctx = try alloc.create(UpdateCtx);
+        errdefer alloc.destroy(update_ctx);
+        update_ctx.* = .{
+            .gpa = alloc,
+            .sources = &update_manager_component.default_sources,
+            .bus = bus,
+        };
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -344,6 +360,7 @@ pub const App = struct {
             .analysis_ctx = analysis_ctx,
             .file_ctx = file_ctx,
             .machine_ctx = machine_ctx,
+            .update_ctx = update_ctx,
             .datadir = datadir,
             .file_roots = file_roots,
             .lmdb_store_ptr = lmdb_ptr,
@@ -372,6 +389,7 @@ pub const App = struct {
         self.alloc.destroy(self.file_ctx);
         self.machine_ctx.deinit();
         self.alloc.destroy(self.machine_ctx);
+        self.alloc.destroy(self.update_ctx);
         self.alloc.destroy(self.analysis_ctx);
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
@@ -458,6 +476,9 @@ pub const App = struct {
         // Machine component: machine.* + machine.proc_stats endpoints.
         try machine_component.registerMachine(self.reg, self.machine_ctx);
 
+        // Update manager component: machine.update.* endpoints.
+        try update_manager_component.registerUpdateManager(self.reg, self.update_ctx);
+
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
         // the live *Connection). Register them in the dispatcher so the
@@ -485,6 +506,9 @@ pub const App = struct {
         self.file_ctx.setIo(io);
         // Wire io into the machine component for /proc & /sys reads.
         self.machine_ctx.setIo(io);
+        // Wire io into the update manager so it can emit notify_update_response /
+        // notify_update_refreshed to connected WebSocket clients.
+        self.update_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,
@@ -653,6 +677,17 @@ test "App.init: dispatcher has exactly the expected methods" {
         "machine.peripherals.serial",
         "machine.peripherals.video",
         "machine.peripherals.canbus",
+        // Update manager (machine.update.*)
+        "machine.update.status",
+        "machine.update.refresh",
+        "machine.update.upgrade",
+        "machine.update.full",
+        "machine.update.moonraker",
+        "machine.update.klipper",
+        "machine.update.system",
+        "machine.update.client",
+        "machine.update.recover",
+        "machine.update.rollback",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",
