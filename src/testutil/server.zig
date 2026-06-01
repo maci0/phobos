@@ -5,18 +5,19 @@
 //! loop in the background. `get` / `postJson` issue requests via
 //! `std.http.Client.fetch` and return the response body, so tests exercise the
 //! full socket → std.http.Server → registry → handler → std.http.Client path.
+//!
+//! `TestServer` now builds on `App` (src/app.zig) so tests and the production
+//! binary share identical registration wiring.
 
 const std = @import("std");
 const Io = std.Io;
 
 const ioz = @import("../io.zig");
-const Core = @import("../server/core.zig").Core;
-const registry = @import("../server/registry.zig");
-const jsonrpc = @import("../jsonrpc.zig");
+const app_mod = @import("../app.zig");
 const http_transport = @import("../http_transport.zig");
 const methods = @import("../core/methods.zig");
-const connections = @import("../server/connections.zig");
 const notify = @import("../server/notify.zig");
+const connections_mod = @import("../server/connections.zig");
 
 pub const TestServer = struct {
     threaded: *std.Io.Threaded,
@@ -24,23 +25,21 @@ pub const TestServer = struct {
     listener: ioz.Listener,
     bound_port: u16,
 
-    core: *Core,
-    dispatcher: *jsonrpc.Dispatcher,
-    reg: *registry.Registry,
-    info: *methods.ServerInfo,
-    conns: *connections.Connections,
-    bus: *notify.NotifyBus,
+    app: *app_mod.App,
     srv: *http_transport.Server,
+    /// Pointer into app.conns — exposed as a field for compatibility with
+    /// ws_client tests that inspect connection state directly.
+    conns: *connections_mod.Connections,
 
     serve_fut: Io.Future(void),
 
     alloc: std.mem.Allocator,
 
-    fn serveLoop(listener: *ioz.Listener, io: Io, ctx: *anyopaque) void {
-        listener.serveWith(io, ctx, http_transport.connHandler) catch {};
+    fn serveLoop(listener: *ioz.Listener, pio: Io, ctx: *anyopaque) void {
+        listener.serveWith(pio, ctx, http_transport.connHandler) catch {};
     }
 
-    /// Spin up a server with the core endpoints registered.
+    /// Spin up a server with all endpoints registered via App.
     pub fn init(alloc: std.mem.Allocator) !*TestServer {
         const self = try alloc.create(TestServer);
         errdefer alloc.destroy(self);
@@ -50,34 +49,15 @@ pub const TestServer = struct {
         self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{});
         self.io = self.threaded.io();
 
-        self.core = try alloc.create(Core);
-        self.core.* = Core.init();
-
-        self.dispatcher = try alloc.create(jsonrpc.Dispatcher);
-        self.dispatcher.* = jsonrpc.Dispatcher.init(alloc);
-
-        self.reg = try alloc.create(registry.Registry);
-        self.reg.* = registry.Registry.init(alloc, self.dispatcher);
-
-        self.info = try alloc.create(methods.ServerInfo);
-        self.info.* = .{};
-
-        try methods.registerCore(self.reg, self.info);
-
-        self.conns = try alloc.create(connections.Connections);
-        self.conns.* = connections.Connections.init(alloc, self.core);
-
-        self.bus = try alloc.create(notify.NotifyBus);
-        self.bus.* = notify.NotifyBus.init(self.core, self.conns);
+        self.app = try alloc.create(app_mod.App);
+        errdefer alloc.destroy(self.app);
+        self.app.* = try app_mod.App.init(alloc);
 
         self.srv = try alloc.create(http_transport.Server);
-        self.srv.* = .{
-            .io = self.io,
-            .core = self.core,
-            .reg = self.reg,
-            .dispatcher = self.dispatcher,
-            .conns = self.conns,
-        };
+        errdefer alloc.destroy(self.srv);
+        self.srv.* = self.app.httpServer(self.io);
+        // Convenience pointer for tests that inspect connection state.
+        self.conns = self.app.conns;
 
         self.listener = try ioz.Listener.bind(self.io, "127.0.0.1", 0);
         self.bound_port = try self.listener.port();
@@ -90,29 +70,31 @@ pub const TestServer = struct {
         return self.bound_port;
     }
 
-    /// Broadcast a notification to every connected client via the bus. Used by
-    /// integration tests to prove end-to-end server→client delivery.
+    /// Expose the ServerInfo so tests can inject warnings etc.
+    pub fn serverInfo(self: *TestServer) *methods.ServerInfo {
+        return self.app.info;
+    }
+
+    /// Expose the Connections registry so integration tests can inspect state.
+    pub fn connsRef(self: *TestServer) *@import("../server/connections.zig").Connections {
+        return self.app.conns;
+    }
+
+    /// Broadcast a notification to every connected client via the app's bus.
     pub fn emit(self: *TestServer, method: []const u8, params: std.json.Value) !void {
-        return self.bus.emit(self.io, method, params);
+        return self.app.bus.emit(self.io, method, params);
     }
 
     /// Stop the accept loop and free everything.
     pub fn stop(self: *TestServer) void {
         self.serve_fut.cancel(self.io);
         self.listener.deinit(self.io);
-        self.conns.deinit(self.io);
-        self.reg.deinit();
-        self.dispatcher.deinit();
+        self.app.deinit(self.io);
         self.threaded.deinit();
 
         const alloc = self.alloc;
         alloc.destroy(self.srv);
-        alloc.destroy(self.bus);
-        alloc.destroy(self.conns);
-        alloc.destroy(self.info);
-        alloc.destroy(self.reg);
-        alloc.destroy(self.dispatcher);
-        alloc.destroy(self.core);
+        alloc.destroy(self.app);
         alloc.destroy(self.threaded);
         alloc.destroy(self);
     }
@@ -221,7 +203,7 @@ test "GET /server/info?raw=true preserves newlines vs default <br/> substitution
 
     // Inject a multi-line warning so the substitution is observable.
     const warns = [_][]const u8{"line one\nline two"};
-    ts.info.warnings = &warns;
+    ts.serverInfo().warnings = &warns;
 
     const cooked = try ts.get(alloc, "/server/info");
     defer alloc.free(cooked);

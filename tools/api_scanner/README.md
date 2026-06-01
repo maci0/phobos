@@ -77,6 +77,51 @@ Defaults: `--source vendor/moonraker/moonraker`, `--baseline api/api_surface.jso
    git add api/api_surface.json
    ```
 
+## Coverage tracking (`tools/coverage.sh`)
+
+The `coverage` subcommand compares a phobos `--dump-api` dump against the
+Moonraker baseline and reports how much of the full API phobos currently
+implements.
+
+### One-command check
+
+```sh
+# From the repo root:
+tools/coverage.sh
+```
+
+This script:
+1. Builds phobos with `zig build -Dwith_lmdb=false`.
+2. Runs `phobos --dump-api` and saves the output to a temp file.
+3. Runs `python3 -m api_scanner coverage` against `api/api_surface.json`.
+4. Prints a summary line and the MISSING list; exits 1 if not 100% covered.
+
+Example output:
+```
+Coverage: endpoints 2/125 (1.6%), methods 4/120, notifications 27/27, OVERALL 16%
+
+MISSING endpoints (123):
+  - /access/api_key
+  ...
+```
+
+### Manual invocation
+
+```sh
+# Build phobos and dump its API surface:
+zig build -Dwith_lmdb=false
+zig-out/bin/phobos --dump-api > /tmp/phobos-dump.json
+
+# Run coverage:
+PYTHONPATH=tools python3 -m api_scanner coverage \
+    --baseline api/api_surface.json \
+    --phobos /tmp/phobos-dump.json
+```
+
+- Exit code **0** — 100% covered (goal gate).
+- Exit code **1** — partial coverage (current state during development).
+- Exit code **2** — baseline or phobos dump file not found.
+
 ## Wiring `diff` into CI
 
 `diff` is a ready-made gate — it exits non-zero on drift:

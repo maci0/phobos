@@ -13,7 +13,7 @@ import os
 import sys
 from typing import Any, Dict
 
-from . import differ, scanner
+from . import coverage as cov_module, differ, scanner
 
 DEFAULT_SOURCE = "vendor/moonraker/moonraker"
 DEFAULT_BASELINE = "api/api_surface.json"
@@ -51,6 +51,26 @@ def cmd_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_coverage(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.baseline):
+        sys.stderr.write(f"baseline not found: {args.baseline}\n")
+        return 2
+    if not os.path.isfile(args.phobos):
+        sys.stderr.write(f"phobos dump not found: {args.phobos}\n")
+        return 2
+
+    baseline = _load(args.baseline)
+    phobos_dump = _load(args.phobos)
+
+    report = cov_module.compute_coverage(baseline, phobos_dump)
+    sys.stdout.write(cov_module.format_summary(report) + "\n")
+    missing_text = cov_module.format_missing(report)
+    if missing_text:
+        sys.stdout.write(missing_text + "\n")
+
+    return 0 if report["covered"] == report["total"] else 1
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.baseline):
         sys.stderr.write(f"baseline not found: {args.baseline}\n")
@@ -77,6 +97,21 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--baseline", default=DEFAULT_BASELINE,
                         help="baseline JSON path (default: %(default)s)")
         sp.set_defaults(func=func)
+
+    cov = sub.add_parser(
+        "coverage",
+        help="Compare phobos --dump-api output against the Moonraker baseline.",
+    )
+    cov.add_argument(
+        "--baseline", default=DEFAULT_BASELINE,
+        help="Moonraker baseline JSON (default: %(default)s)",
+    )
+    cov.add_argument(
+        "--phobos", required=True,
+        help="Path to phobos --dump-api JSON output",
+    )
+    cov.set_defaults(func=cmd_coverage)
+
     return p
 
 
