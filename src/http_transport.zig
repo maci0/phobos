@@ -18,6 +18,8 @@ const Core = @import("server/core.zig").Core;
 const registry = @import("server/registry.zig");
 const jsonrpc = @import("jsonrpc.zig");
 const jv = @import("json/value.zig");
+const connections = @import("server/connections.zig");
+const ws = @import("transport/ws.zig");
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -62,6 +64,10 @@ pub const Server = struct {
     reg: *Registry,
     dispatcher: *jsonrpc.Dispatcher,
     hook: AuthHook = defaultAuthHook,
+    /// Active WebSocket connection registry. Optional so non-WS callers/tests
+    /// can construct a Server without it; when null, upgrade requests are
+    /// rejected (400) instead of handed off.
+    conns: ?*connections.Connections = null,
 };
 
 /// Comptime-known trampoline so a runtime handler pointer can be invoked inside
@@ -236,15 +242,44 @@ pub fn serveConn(srv: *Server, stream: net.Stream) void {
 
 fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     const io = srv.io;
-    var sbuf: [16 * 1024]u8 = undefined;
+    // 64KB reader buffer: this same buffer backs the WebSocket input after an
+    // upgrade (std.http.WebSocket.input == server.reader.in), and
+    // `readSmallMessage` requires each WS message fit it (else MessageOversize).
+    // A generous size keeps ordinary JSON-RPC frames comfortably in-bounds.
+    var sbuf: [64 * 1024]u8 = undefined;
     var s_r = stream.reader(io, &sbuf);
-    var wbuf: [16 * 1024]u8 = undefined;
+    var wbuf: [64 * 1024]u8 = undefined;
     var s_w = stream.writer(io, &wbuf);
 
     var http_server = std.http.Server.init(&s_r.interface, &s_w.interface);
 
     while (true) {
         var req = http_server.receiveHead() catch return;
+
+        // WebSocket upgrade: hand the connection off to the WS transport. The
+        // returned WebSocket borrows the HTTP reader/writer buffers above.
+        switch (req.upgradeRequested()) {
+            .websocket => |key| {
+                const conns = srv.conns orelse {
+                    req.respond("{\"error\":{\"code\":400,\"message\":\"WebSocket unsupported\"}}", .{
+                        .status = .bad_request,
+                        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+                    }) catch return;
+                    return;
+                };
+                var web_socket = req.respondWebSocket(.{ .key = key orelse "" }) catch return;
+                web_socket.flush() catch return;
+                var ws_srv = ws.WsServer{
+                    .io = io,
+                    .core = srv.core,
+                    .dispatcher = srv.dispatcher,
+                    .conns = conns,
+                };
+                ws.serveWebSocket(&ws_srv, &web_socket);
+                return; // connection consumed by the WS session
+            },
+            .other, .none => {},
+        }
 
         // Read the body (if any) into the request arena.
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);

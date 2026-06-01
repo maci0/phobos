@@ -15,6 +15,7 @@ const registry = @import("../server/registry.zig");
 const jsonrpc = @import("../jsonrpc.zig");
 const http_transport = @import("../http_transport.zig");
 const methods = @import("../core/methods.zig");
+const connections = @import("../server/connections.zig");
 
 pub const TestServer = struct {
     threaded: *std.Io.Threaded,
@@ -26,6 +27,7 @@ pub const TestServer = struct {
     dispatcher: *jsonrpc.Dispatcher,
     reg: *registry.Registry,
     info: *methods.ServerInfo,
+    conns: *connections.Connections,
     srv: *http_transport.Server,
 
     serve_fut: Io.Future(void),
@@ -60,12 +62,16 @@ pub const TestServer = struct {
 
         try methods.registerCore(self.reg, self.info);
 
+        self.conns = try alloc.create(connections.Connections);
+        self.conns.* = connections.Connections.init(alloc, self.core);
+
         self.srv = try alloc.create(http_transport.Server);
         self.srv.* = .{
             .io = self.io,
             .core = self.core,
             .reg = self.reg,
             .dispatcher = self.dispatcher,
+            .conns = self.conns,
         };
 
         self.listener = try ioz.Listener.bind(self.io, "127.0.0.1", 0);
@@ -83,12 +89,14 @@ pub const TestServer = struct {
     pub fn stop(self: *TestServer) void {
         self.serve_fut.cancel(self.io);
         self.listener.deinit(self.io);
+        self.conns.deinit(self.io);
         self.reg.deinit();
         self.dispatcher.deinit();
         self.threaded.deinit();
 
         const alloc = self.alloc;
         alloc.destroy(self.srv);
+        alloc.destroy(self.conns);
         alloc.destroy(self.info);
         alloc.destroy(self.reg);
         alloc.destroy(self.dispatcher);

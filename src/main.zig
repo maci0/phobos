@@ -7,7 +7,10 @@ pub const json_value = @import("json/value.zig");
 pub const registry = @import("server/registry.zig");
 pub const methods = @import("core/methods.zig");
 pub const http_transport = @import("http_transport.zig");
+pub const connections = @import("server/connections.zig");
+pub const ws_transport = @import("transport/ws.zig");
 pub const testutil_server = @import("testutil/server.zig");
+pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
