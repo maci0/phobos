@@ -11,6 +11,11 @@ const net = std.Io.net;
 /// which close it after the handler returns.
 pub const Handler = *const fn (io: Io, stream: net.Stream) void;
 
+/// A connection handler carrying an opaque context pointer. Used to wire the
+/// HTTP transport (`serveConn`) — which needs the shared server state — into the
+/// accept loop without globals.
+pub const CtxHandler = *const fn (ctx: *anyopaque, io: Io, stream: net.Stream) void;
+
 /// Line framing used by the echo handler / fuzz harness: read one '\n'
 /// delimited line and write back "echo:" ++ line ++ "\n".
 /// Factored out so the fuzz test can exercise the framing without sockets
@@ -84,6 +89,28 @@ pub const Listener = struct {
             // exhaustion), fall back to the sequential `group.async` path.
             group.concurrent(io, connTask, .{ io, stream, handler }) catch
                 group.async(io, connTask, .{ io, stream, handler });
+        }
+    }
+
+    /// Per-connection task body for a context-carrying handler.
+    fn connTaskCtx(ctx: *anyopaque, io: Io, stream: net.Stream, handler: CtxHandler) void {
+        defer stream.close(io);
+        handler(ctx, io, stream);
+    }
+
+    /// Accept loop variant that threads an opaque context to each connection
+    /// handler. This is how the HTTP transport's `serveConn` is wired in: the
+    /// context is the shared `http_transport.Server`.
+    pub fn serveWith(self: *Listener, io: Io, ctx: *anyopaque, handler: CtxHandler) !void {
+        var group: Io.Group = .init;
+        defer group.await(io) catch {};
+        while (true) {
+            const stream = self.server.accept(io) catch |err| switch (err) {
+                error.SocketNotListening, error.Canceled => return,
+                else => return err,
+            };
+            group.concurrent(io, connTaskCtx, .{ ctx, io, stream, handler }) catch
+                group.async(io, connTaskCtx, .{ ctx, io, stream, handler });
         }
     }
 
@@ -195,6 +222,47 @@ test "serve handles two connections concurrently" {
 
     try std.testing.expectEqualStrings("echo:ping_a", out_a[0..len_a]);
     try std.testing.expectEqualStrings("echo:ping_b", out_b[0..len_b]);
+}
+
+// Context-carrying echo handler: prefixes the echo with a per-context tag so the
+// test can prove the opaque context reached the handler.
+const TagCtx = struct { tag: u8 };
+
+fn taggedEcho(ctx: *anyopaque, io: Io, stream: net.Stream) void {
+    const c: *TagCtx = @ptrCast(@alignCast(ctx));
+    var rbuf: [256]u8 = undefined;
+    var r = stream.reader(io, &rbuf);
+    const line = r.interface.takeDelimiterExclusive('\n') catch return;
+    var wbuf: [256]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    w.interface.print("{c}:{s}\n", .{ c.tag, line }) catch return;
+    w.interface.flush() catch return;
+}
+
+test "serveWith threads context to per-connection handler" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var lst = try Listener.bind(io, "127.0.0.1", 0);
+    const bound_port = try lst.port();
+
+    var ctx = TagCtx{ .tag = 'X' };
+    const serveIgnoring = struct {
+        fn f(l: *Listener, pio: Io, c: *anyopaque, h: CtxHandler) void {
+            l.serveWith(pio, c, h) catch {};
+        }
+    }.f;
+    var srv_fut = io.async(serveIgnoring, .{ &lst, io, @as(*anyopaque, @ptrCast(&ctx)), @as(CtxHandler, taggedEcho) });
+
+    var out: [256]u8 = undefined;
+    var out_len: usize = 0;
+    sendLine(io, bound_port, "hi", &out, &out_len);
+
+    srv_fut.cancel(io);
+    lst.deinit(io);
+
+    try std.testing.expectEqualStrings("X:hi", out[0..out_len]);
 }
 
 test "fuzz_listener: random payload round-trips through the echo path" {
