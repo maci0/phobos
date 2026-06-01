@@ -606,6 +606,8 @@ pub const App = struct {
         self.update_ctx.setIo(io);
         // Wire io into the power component so it can emit notify_power_changed.
         self.power_ctx.setIo(io);
+        // Wire io into the job queue so it can emit notify_job_queue_changed.
+        self.job_queue_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,

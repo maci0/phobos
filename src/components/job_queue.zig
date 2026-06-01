@@ -45,6 +45,9 @@ const NotifyBus = notify.NotifyBus;
 pub const JobQueueCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
+    /// io is set after the event loop starts (via setIo). Notifications are
+    /// only emitted when io is non-null (suppressed during App.init / unit tests).
+    io: ?std.Io,
     /// Owned allocator for the in-memory job list (persisted on each change).
     gpa: std.mem.Allocator,
     /// In-memory ordered list of queued jobs (owned by gpa).
@@ -56,6 +59,7 @@ pub const JobQueueCtx = struct {
         var ctx = JobQueueCtx{
             .store = store,
             .bus = bus,
+            .io = null,
             .gpa = alloc,
             .jobs = .empty,
             .queue_state = "paused",
@@ -63,6 +67,12 @@ pub const JobQueueCtx = struct {
         // Load persisted queue on init
         ctx.loadFromStore() catch {};
         return ctx;
+    }
+
+    /// Supply a live io so notifications can be emitted. Called after the App's
+    /// event loop is running (see app.zig httpServer).
+    pub fn setIo(self: *JobQueueCtx, io: std.Io) void {
+        self.io = io;
     }
 
     pub fn deinit(self: *JobQueueCtx) void {
@@ -259,17 +269,14 @@ fn emitQueueChanged(c: *JobQueueCtx, alloc: std.mem.Allocator, action: []const u
     }
     inner.put(alloc, "queue_state", .{ .string = c.queue_state }) catch return;
 
-    // Build params array (Moonraker wraps event data in a 1-element array)
+    // Build params array (Moonraker wraps event data in a 1-element array).
     var params: std.json.Array = .init(alloc);
     params.append(.{ .object = inner }) catch return;
 
-    // Emit is a no-op if the bus has no connections — fire-and-forget
-    // (we have no io reference here; notification is best-effort from store ops)
-    _ = c.bus;
-    // NOTE: emit requires std.Io which we don't have in handler context.
-    // Notifications are emitted by callers that have io context. This is a
-    // limitation of the synchronous handler design. The shapes are faithful;
-    // live emission would require an async-aware redesign.
+    // Emit via emitLocked: all callers are mutating handlers reached under the
+    // held Core lock (Core.run), so plain emit would deadlock. No-op without io.
+    const io = c.io orelse return;
+    c.bus.emitLocked(io, notify.names.job_queue_changed, .{ .array = params }) catch {};
 }
 
 // ---------------------------------------------------------------------------

@@ -11,9 +11,10 @@
 //! Active spool ID is persisted in the DataStore under
 //! namespace "moonraker", key "spoolman.spool_id" (matches spoolman.py).
 //!
-//! notify_active_spool_set is emitted (via NotifyBus + io) whenever the
-//! active spool changes, with payload [{"spool_id": <id|null>}]. Emission
-//! requires a live io; call setIo() after the App event loop starts.
+//! notify_active_spool_set is emitted (via NotifyBus.emitLocked + io) whenever
+//! the active spool changes, with payload [{"spool_id": <id|null>}]. Emission
+//! requires a live io; call setIo() after the App event loop starts. emitLocked
+//! is used because the POST handler runs under the held Core lock.
 //!
 //! NOTE: phobos has no Spoolman HTTP/WS client; ws_connected is always false.
 //! The proxy endpoint returns the v2 "not connected" error shape when
@@ -98,7 +99,10 @@ pub const SpoolmanCtx = struct {
         obj.put(a, "spool_id", val) catch return;
         var arr: std.json.Array = .init(a);
         arr.append(.{ .object = obj }) catch return;
-        self.bus.emit(io, notify.names.active_spool_set, .{ .array = arr }) catch {};
+        // setSpoolId is reached from the POST /server/spoolman/spool_id handler,
+        // which runs under the held Core lock (Core.run). Re-acquiring via emit
+        // would deadlock the non-reentrant mutex; use emitLocked.
+        self.bus.emitLocked(io, notify.names.active_spool_set, .{ .array = arr }) catch {};
     }
 };
 
