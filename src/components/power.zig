@@ -293,11 +293,14 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
     var out: std.json.ObjectMap = .empty;
     switch (params) {
         .object => |obj| {
-            if (obj.count() == 0) return error.InvalidParams;
             var it = obj.iterator();
+            var device_count: usize = 0;
             while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
-                if (std.mem.eql(u8, name, "__batch_action")) continue;
+                // Skip internal keys injected by the transport (_method etc.)
+                // and the per-path batch action discriminator.
+                if (name[0] == '_') continue;
+                device_count += 1;
                 if (ctx.findDevice(name)) |dev| {
                     const state = processRequest(ctx, dev, action, alloc) catch "error";
                     try out.put(alloc, name, .{ .string = state });
@@ -305,11 +308,11 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
                     try out.put(alloc, name, .{ .string = "device_not_found" });
                 }
             }
+            // If nothing was requested (all keys were internal) it's an empty param set.
+            if (device_count == 0) return error.InvalidParams;
         },
         else => return error.InvalidParams,
     }
-    // If nothing was requested (all keys were internal) it's an empty param set.
-    if (out.count() == 0) return error.InvalidParams;
     return .{ .object = out };
 }
 

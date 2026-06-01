@@ -40,6 +40,8 @@ pub const WsTestConn = struct {
     alloc: std.mem.Allocator,
     /// Deterministic-but-nonzero mask source so each frame is masked.
     mask_seed: u32 = 0x1234_5678,
+    /// When set, nextDataFrame uses poll() to bound each readFrame call.
+    read_timeout_secs: ?u32 = null,
 
     /// Close the stream and free buffers.
     pub fn close(self: *WsTestConn) void {
@@ -371,6 +373,11 @@ const DataFrame = struct { opcode: Opcode, data: []u8 };
 
 fn nextDataFrame(c: *WsTestConn) anyerror!DataFrame {
     while (true) {
+        if (c.read_timeout_secs) |secs| {
+            var pfd = [1]std.posix.pollfd{.{ .fd = c.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            const ret = std.posix.poll(&pfd, @intCast(secs * 1000)) catch 0;
+            if (ret == 0) return error.Timeout;
+        }
         const f = try c.readFrame();
         if (f.opcode == .ping) {
             try c.sendFrame(.pong, f.data);
@@ -508,4 +515,170 @@ test "WS: response and notifications never interleave (each frame is intact vali
     }
     try std.testing.expect(got_response);
     try std.testing.expectEqual(@as(usize, notif_count), got_notifs);
+}
+
+// ---------------------------------------------------------------------------
+// Socket-level notification regression tests
+//
+// These tests drive a real emitting handler over HTTP and assert the
+// notification arrives at a connected WebSocket client. This is the exact
+// path that hid the spoolman deadlock (emit vs emitLocked).
+//
+// Notifications are emitted synchronously inside the handler (under the Core
+// lock), so the frame is already in the kernel buffer by the time the HTTP
+// response returns. We set a receive timeout on the underlying socket before
+// each read so a silent emission regression fails with `error.Timeout` instead
+// of hanging.
+// ---------------------------------------------------------------------------
+
+/// Set a receive timeout on the WS client's underlying socket. The next read
+/// that blocks longer than `secs` seconds will return `error.Timeout`.
+fn setReadTimeout(c: *WsTestConn, secs: u32) void {
+    c.read_timeout_secs = secs;
+}
+
+fn clearReadTimeout(c: *WsTestConn) void {
+    c.read_timeout_secs = null;
+}
+
+test "WS: spoolman POST spool_id emits notify_active_spool_set" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+
+    // Round-trip a request to ensure the writer is attached.
+    const env = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env);
+
+    // Trigger the spool_id set handler via HTTP POST.
+    const body = try ts.postJson(alloc, "/server/spoolman/spool_id",
+        \\{"spool_id":42}
+    );
+    defer alloc.free(body);
+
+    // Bounded wait: set a 3-second receive timeout so a regression fails fast.
+    setReadTimeout(c, 3);
+    defer clearReadTimeout(c);
+    const frame = try nextDataFrame(c);
+    defer alloc.free(frame.data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("notify_active_spool_set", obj.get("method").?.string);
+    try std.testing.expect(obj.get("id") == null);
+    const params = obj.get("params").?.array;
+    try std.testing.expectEqual(@as(usize, 1), params.items.len);
+    try std.testing.expectEqual(@as(i64, 42), params.items[0].object.get("spool_id").?.integer);
+}
+
+test "WS: webcam POST item emits notify_webcams_changed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+
+    const env = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env);
+
+    const body = try ts.postJson(alloc, "/server/webcams/item",
+        \\{"name":"test_cam","stream_url":"http://example.com/stream"}
+    );
+    defer alloc.free(body);
+
+    setReadTimeout(c, 3);
+    defer clearReadTimeout(c);
+    const frame = try nextDataFrame(c);
+    defer alloc.free(frame.data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("notify_webcams_changed", obj.get("method").?.string);
+    try std.testing.expect(obj.get("id") == null);
+    const params = obj.get("params").?.array;
+    try std.testing.expectEqual(@as(usize, 1), params.items.len);
+    // Payload is {"webcams": [...]}
+    const webcams = params.items[0].object.get("webcams").?.array;
+    try std.testing.expect(webcams.items.len >= 1);
+    try std.testing.expectEqualStrings("test_cam", webcams.items[0].object.get("name").?.string);
+}
+
+test "WS: job_queue POST job emits notify_job_queue_changed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+
+    const env = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env);
+
+    const body = try ts.postJson(alloc, "/server/job_queue/job",
+        \\{"filenames":["test.gcode"]}
+    );
+    defer alloc.free(body);
+
+    setReadTimeout(c, 3);
+    defer clearReadTimeout(c);
+    const frame = try nextDataFrame(c);
+    defer alloc.free(frame.data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("notify_job_queue_changed", obj.get("method").?.string);
+    try std.testing.expect(obj.get("id") == null);
+    const params = obj.get("params").?.array;
+    try std.testing.expectEqual(@as(usize, 1), params.items.len);
+    const inner = params.items[0].object;
+    try std.testing.expectEqualStrings("jobs_added", inner.get("action").?.string);
+    try std.testing.expectEqualStrings("paused", inner.get("queue_state").?.string);
+    try std.testing.expect(inner.get("updated_queue") != null);
+}
+
+test "WS: power device action=on emits notify_power_changed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Add a device — no config loading in tests.
+    ts.app.power_ctx.addDevice("test_psu", "gpio", "off", false) catch unreachable;
+
+    var c = try connect(ts, alloc);
+    defer c.close();
+
+    const env = try c.call(alloc, "server.websocket.id", null);
+    alloc.free(env);
+
+    const body = try ts.postJson(alloc, "/machine/device_power/device",
+        \\{"device":"test_psu","action":"on"}
+    );
+    defer alloc.free(body);
+
+    setReadTimeout(c, 3);
+    defer clearReadTimeout(c);
+    const frame = try nextDataFrame(c);
+    defer alloc.free(frame.data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
+    try std.testing.expectEqualStrings("notify_power_changed", obj.get("method").?.string);
+    try std.testing.expect(obj.get("id") == null);
+    const params = obj.get("params").?.array;
+    try std.testing.expectEqual(@as(usize, 1), params.items.len);
+    const dev_info = params.items[0].object;
+    try std.testing.expectEqualStrings("test_psu", dev_info.get("device").?.string);
+    try std.testing.expectEqualStrings("on", dev_info.get("status").?.string);
 }

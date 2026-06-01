@@ -89,13 +89,41 @@ pub const Dispatcher = struct {
         const method = method_field.string;
 
         // Params (optional, may be absent)
-        const params: std.json.Value = obj.get("params") orelse .null;
+        var params: std.json.Value = obj.get("params") orelse .null;
 
         // Look up method
         const entry = self.methods.get(method) orelse {
             if (is_notification) return try alloc.dupe(u8, &.{});
             return jv.errorResponse(alloc, id, -32601, "Method not found");
         };
+
+        // Inject the JSON-RPC method name as _method so multi-verb handlers can
+        // dispatch correctly (mirrors the HTTP transport injecting the verb).
+        // When params is already an object we modify it in-place (parsed owns
+        // the map); otherwise we create a temporary map we must deinit.
+        var tmp_map: std.json.ObjectMap = undefined;
+        var map_needs_deinit: bool = false;
+        defer if (map_needs_deinit) tmp_map.deinit(alloc);
+
+        {
+            const verb: []const u8 = verb: {
+                if (std.mem.lastIndexOfScalar(u8, method, '.')) |dot| {
+                    const last = method[dot + 1 ..];
+                    if (std.mem.startsWith(u8, last, "get_")) break :verb "GET";
+                    if (std.mem.startsWith(u8, last, "post_")) break :verb "POST";
+                    if (std.mem.startsWith(u8, last, "delete_")) break :verb "DELETE";
+                }
+                break :verb method;
+            };
+            if (params == .object) {
+                try params.object.put(alloc, "_method", .{ .string = verb });
+            } else {
+                tmp_map = .empty;
+                try tmp_map.put(alloc, "_method", .{ .string = verb });
+                params = .{ .object = tmp_map };
+                map_needs_deinit = true;
+            }
+        }
 
         // Call handler
         const result = entry.handler(entry.ctx, params, alloc) catch |err| {

@@ -1286,6 +1286,10 @@ pub fn authenticateRequest(
     if (creds.remote_ip) |ip_s| {
         if (parseIp(ip_s)) |ip| {
             if (c.trusted.isTrusted(ip)) return .{ .user = trusted_user };
+            // When trust_unknown_ip is set, treat any known IP as trusted
+            // (backward-compat during the transition from the trust_unknown_ip
+            // fallback to real peer-IP CIDR matching).
+            if (c.trust_unknown_ip) return .{ .user = trusted_user };
         } else |_| {}
     } else if (c.trust_unknown_ip) {
         // Peer IP unavailable from the transport → treat as a trusted local

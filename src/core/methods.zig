@@ -32,6 +32,10 @@ pub const ServerInfo = struct {
     /// Startup/runtime warning strings (may contain '\n', substituted with
     /// "<br/>" unless `raw` is requested).
     warnings: []const []const u8 = &.{},
+    /// Dynamic Klippy connection state. Updated by the KlippyCtx on state
+    /// transitions. Defaults match the disconnected spine.
+    klippy_connected: bool = false,
+    klippy_state: []const u8 = "disconnected",
 
     pub fn ctx(self: *ServerInfo) *anyopaque {
         return @ptrCast(self);
@@ -76,8 +80,8 @@ fn substituteNewlines(alloc: std.mem.Allocator, w: []const u8) ![]const u8 {
 pub fn buildServerInfo(info: *const ServerInfo, raw: bool, alloc: std.mem.Allocator) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
 
-    try obj.put(alloc, "klippy_connected", .{ .bool = false });
-    try obj.put(alloc, "klippy_state", .{ .string = "disconnected" });
+    try obj.put(alloc, "klippy_connected", .{ .bool = info.klippy_connected });
+    try obj.put(alloc, "klippy_state", .{ .string = info.klippy_state });
 
     var comps: std.json.Array = .init(alloc);
     for (components) |c| try comps.append(.{ .string = c });

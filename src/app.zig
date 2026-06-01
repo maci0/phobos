@@ -40,6 +40,7 @@ const power_component = @import("components/power.zig");
 const wled_component = @import("components/wled.zig");
 const td1_component = @import("components/td1.zig");
 const printer_component = @import("components/printer.zig");
+const klippy_connection_component = @import("components/klippy_connection.zig");
 const octoprint_component = @import("components/octoprint_compat.zig");
 const zeroconf_component = @import("components/zeroconf.zig");
 const ds = @import("store/datastore.zig");
@@ -72,6 +73,7 @@ const PowerCtx = power_component.PowerCtx;
 const WledCtx = wled_component.WledCtx;
 const Td1Ctx = td1_component.Td1Ctx;
 const PrinterCtx = printer_component.PrinterCtx;
+const KlippyConnectionCtx = klippy_connection_component.KlippyCtx;
 const OctoPrintCtx = octoprint_component.OctoPrintCtx;
 const ZeroconfCtx = zeroconf_component.ZeroconfCtx;
 
@@ -161,6 +163,7 @@ pub const App = struct {
     wled_ctx: *WledCtx,
     td1_ctx: *Td1Ctx,
     printer_ctx: *PrinterCtx,
+    klippy_ctx: *KlippyConnectionCtx,
     octoprint_ctx: *OctoPrintCtx,
     zeroconf_ctx: *ZeroconfCtx,
     /// Absolute datadir whose subfolders back the file_manager roots. Owned and
@@ -235,6 +238,7 @@ pub const App = struct {
         history_ctx.* = HistoryCtx{
             .store = db_ctx.store,
             .bus = bus,
+            .io = null,
         };
 
         // --- Job queue context ---
@@ -380,6 +384,12 @@ pub const App = struct {
         errdefer alloc.destroy(printer_ctx);
         printer_ctx.* = .{};
 
+        // --- Klippy connection context (Unix-socket bridge to Klippy) ---
+        const klippy_ctx = try alloc.create(KlippyConnectionCtx);
+        errdefer alloc.destroy(klippy_ctx);
+        klippy_ctx.* = try KlippyConnectionCtx.init(alloc, bus);
+        klippy_ctx.server_info = info;
+
         // --- OctoPrint compatibility context (/api/*) ---
         const octoprint_ctx = try alloc.create(OctoPrintCtx);
         errdefer alloc.destroy(octoprint_ctx);
@@ -419,6 +429,7 @@ pub const App = struct {
             .wled_ctx = wled_ctx,
             .td1_ctx = td1_ctx,
             .printer_ctx = printer_ctx,
+            .klippy_ctx = klippy_ctx,
             .octoprint_ctx = octoprint_ctx,
             .zeroconf_ctx = zeroconf_ctx,
             .datadir = datadir,
@@ -456,6 +467,8 @@ pub const App = struct {
         self.alloc.destroy(self.wled_ctx);
         self.alloc.destroy(self.td1_ctx);
         self.alloc.destroy(self.printer_ctx);
+        self.klippy_ctx.deinit();
+        self.alloc.destroy(self.klippy_ctx);
         self.alloc.destroy(self.octoprint_ctx);
         self.alloc.destroy(self.zeroconf_ctx);
         self.alloc.destroy(self.analysis_ctx);
@@ -608,6 +621,14 @@ pub const App = struct {
         self.power_ctx.setIo(io);
         // Wire io into the job queue so it can emit notify_job_queue_changed.
         self.job_queue_ctx.setIo(io);
+        // Wire io into the history component so it can emit notify_history_changed.
+        self.history_ctx.setIo(io);
+        // Wire io into the announcements component so it can emit notify_announcement_*.
+        self.announcements_ctx.setIo(io);
+        // Wire io into the webcam component so it can emit notify_webcams_changed.
+        self.webcam_ctx.setIo(io);
+        // Wire io into the klippy connection so it can connect and handshake.
+        self.klippy_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,

@@ -21,6 +21,7 @@ pub const connections = @import("server/connections.zig");
 pub const notify = @import("server/notify.zig");
 pub const ws_transport = @import("transport/ws.zig");
 pub const database_component = @import("components/database.zig");
+pub const klippy_connection = @import("components/klippy_connection.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub const app = @import("app.zig");
@@ -29,26 +30,77 @@ pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;
     const aio = init.io;
 
-    // Parse args: with --dump-api, print the API surface and exit.
+    // Parse CLI args.
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--dump-api")) {
-            return dumpApi(alloc, aio);
+    var config_path: ?[]const u8 = null;
+    var dump_api = false;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--dump-api")) {
+            dump_api = true;
+        } else if ((std.mem.eql(u8, args[i], "-c") or std.mem.eql(u8, args[i], "--config")) and i + 1 < args.len) {
+            i += 1;
+            config_path = args[i];
         }
     }
+
+    if (dump_api) return dumpApi(alloc, aio);
+
+    // Read host/port from config when available, with defaults matching Moonraker.
+    const host, const bind_port = try resolveBindAddr(alloc, aio, config_path);
 
     var server_app = try app.App.init(alloc);
     defer server_app.deinit(aio);
 
     var srv = server_app.httpServer(aio);
 
-    const host = "127.0.0.1";
-    const bind_port: u16 = 7125; // Moonraker's default HTTP port.
+    // Start the background Klippy Unix-socket bridge. Only the real daemon
+    // path calls start(); tests go through App.init/httpServer which only
+    // calls setIo() so no background task is spawned during testing.
+    server_app.klippy_ctx.start();
+
     var listener = try io.Listener.bind(aio, host, bind_port);
     defer listener.deinit(aio);
 
     std.debug.print("phobos listening on http://{s}:{d}\n", .{ host, bind_port });
     try listener.serveWith(aio, @ptrCast(&srv), http_transport.connHandler);
+}
+
+/// Resolve the bind address from a config file (or defaults).
+/// Defaults: host = "127.0.0.1", port = 7125 (Moonraker's documented default).
+pub fn resolveBindAddr(
+    gpa: std.mem.Allocator,
+    aio: std.Io,
+    config_path: ?[]const u8,
+) !struct { []const u8, u16 } {
+    const default_host = "127.0.0.1";
+    const default_port: u16 = 7125;
+
+    const path = config_path orelse return .{ default_host, default_port };
+
+    var cfg = config.ConfigParser.init(gpa);
+    defer cfg.deinit();
+    cfg.parseFile(aio, path) catch |err| {
+        std.debug.print("phobos: warning: could not parse config '{s}': {} — using defaults\n", .{ path, err });
+        return .{ default_host, default_port };
+    };
+
+    return extractBindAddr(&cfg, default_host, default_port);
+}
+
+/// Extract host/port from an already-parsed ConfigParser.
+/// Testable without filesystem access (pair with parseString).
+pub fn extractBindAddr(cfg: *const config.ConfigParser, default_host: []const u8, default_port: u16) !struct { []const u8, u16 } {
+    const host = cfg.get("server", "host") orelse default_host;
+    const port: u16 = if (cfg.hasOption("server", "port"))
+        @intCast(cfg.getInt("server", "port") catch |err| {
+            std.debug.print("phobos: warning: invalid [server] port in config: {} — using default\n", .{err});
+            return .{ host, default_port };
+        })
+    else
+        default_port;
+
+    return .{ host, port };
 }
 
 /// Build an App, enumerate its registrations, and print a deterministic JSON
@@ -312,6 +364,81 @@ test "fuzz_dumpApi: output is always valid JSON" {
             parsed.deinit();
         }
     }.run, .{});
+}
+
+test "extractBindAddr: defaults when [server] section missing" {
+    const alloc = std.testing.allocator;
+    var cfg = config.ConfigParser.init(alloc);
+    defer cfg.deinit();
+
+    const host, const port = try extractBindAddr(&cfg, "127.0.0.1", 7125);
+    try std.testing.expectEqualStrings("127.0.0.1", host);
+    try std.testing.expectEqual(@as(u16, 7125), port);
+}
+
+test "extractBindAddr: reads host and port from [server]" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\[server]
+        \\host: 0.0.0.0
+        \\port = 8080
+        \\
+    ;
+    var cfg = config.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseString(src, "<test>");
+
+    const host, const port = try extractBindAddr(&cfg, "127.0.0.1", 7125);
+    try std.testing.expectEqualStrings("0.0.0.0", host);
+    try std.testing.expectEqual(@as(u16, 8080), port);
+}
+
+test "extractBindAddr: host-only falls back on default port" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\[server]
+        \\host: 0.0.0.0
+        \\
+    ;
+    var cfg = config.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseString(src, "<test>");
+
+    const host, const port = try extractBindAddr(&cfg, "127.0.0.1", 7125);
+    try std.testing.expectEqualStrings("0.0.0.0", host);
+    try std.testing.expectEqual(@as(u16, 7125), port);
+}
+
+test "extractBindAddr: invalid port uses default" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\[server]
+        \\port: notanumber
+        \\
+    ;
+    var cfg = config.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseString(src, "<test>");
+
+    const host, const port = try extractBindAddr(&cfg, "127.0.0.1", 7125);
+    try std.testing.expectEqualStrings("127.0.0.1", host);
+    try std.testing.expectEqual(@as(u16, 7125), port);
+}
+
+test "extractBindAddr: enabled boolean has no effect on bind addr" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\[server]
+        \\enabled: false
+        \\
+    ;
+    var cfg = config.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseString(src, "<test>");
+
+    const host, const port = try extractBindAddr(&cfg, "127.0.0.1", 7125);
+    try std.testing.expectEqualStrings("127.0.0.1", host);
+    try std.testing.expectEqual(@as(u16, 7125), port);
 }
 
 test { std.testing.refAllDecls(@This()); }

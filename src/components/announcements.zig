@@ -51,12 +51,17 @@ const NotifyBus = notify.NotifyBus;
 pub const AnnouncementsCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
+    io: ?std.Io,
     /// Owned allocator for in-memory feed list.
     gpa: std.mem.Allocator,
     /// In-memory list of feed names (includes built-in + stored extras).
     feeds: std.ArrayListUnmanaged([]u8),
     /// Counter for new entry keys (hex sequence).
     next_key: u64,
+
+    pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
+        self.io = io;
+    }
 
     /// Built-in feeds (always present, cannot be deleted).
     pub const builtin_feeds = [_][]const u8{ "moonraker", "klipper" };
@@ -65,6 +70,7 @@ pub const AnnouncementsCtx = struct {
         var ctx = AnnouncementsCtx{
             .store = store,
             .bus = bus,
+            .io = null,
             .gpa = alloc,
             .feeds = .empty,
             .next_key = 0,
@@ -389,12 +395,51 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const key_z = try alloc.dupeZ(u8, key);
     c.store.insertItem(alloc, ns_entries, key_z, .{ .object = new_entry }) catch {};
 
-    // NOTE: notify_announcement_dismissed would be emitted here with {"entry_id": entry_id}
-    // Requires io context not available in synchronous handlers.
+    // Emit notify_announcement_dismissed (uses emitLocked — handler runs under Core lock).
+    emitAnnouncementDismissed(c, alloc, entry_id);
 
     var result: std.json.ObjectMap = .empty;
     try result.put(alloc, "entry_id", .{ .string = entry_id });
     return .{ .object = result };
+}
+
+// ---------------------------------------------------------------------------
+// Notification emission
+// ---------------------------------------------------------------------------
+
+/// Emit `notify_announcement_update` with the current entries list.
+/// Only call when entries actually changed (e.g. after real RSS fetch).
+fn emitAnnouncementUpdate(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
+    const io = ctx.io orelse return;
+    const entries = ctx.listEntries(alloc, false) catch return;
+    if (entries.items.len == 0) return;
+    var inner: std.json.ObjectMap = .empty;
+    inner.put(alloc, "entries", .{ .array = entries }) catch return;
+    var params: std.json.Array = .init(alloc);
+    params.append(.{ .object = inner }) catch return;
+    ctx.bus.emitLocked(io, notify.names.announcement_update, .{ .array = params }) catch {};
+}
+
+/// Emit `notify_announcement_dismissed` for a single entry.
+fn emitAnnouncementDismissed(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator, entry_id: []const u8) void {
+    const io = ctx.io orelse return;
+    var inner: std.json.ObjectMap = .empty;
+    inner.put(alloc, "entry_id", .{ .string = entry_id }) catch return;
+    var params: std.json.Array = .init(alloc);
+    params.append(.{ .object = inner }) catch return;
+    ctx.bus.emitLocked(io, notify.names.announcement_dismissed, .{ .array = params }) catch {};
+}
+
+/// Emit `notify_announcement_wake` for a single entry.
+/// Only call when a dismissed entry's wake_time has been reached (requires
+/// a background timer / event loop, not yet implemented).
+fn emitAnnouncementWake(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator, entry_id: []const u8) void {
+    const io = ctx.io orelse return;
+    var inner: std.json.ObjectMap = .empty;
+    inner.put(alloc, "entry_id", .{ .string = entry_id }) catch return;
+    var params: std.json.Array = .init(alloc);
+    params.append(.{ .object = inner }) catch return;
+    ctx.bus.emitLocked(io, notify.names.announcement_wake, .{ .array = params }) catch {};
 }
 
 /// GET /server/announcements/feeds

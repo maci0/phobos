@@ -367,13 +367,18 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
     return buildResponse(c, alloc);
 }
 
-/// Dispatch for multi-verb /server/job_queue/job (POST=enqueue, DELETE=remove).
+/// Multi-verb dispatch for /server/job_queue/job (POST=enqueue, DELETE=remove).
 pub fn handleJobDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const has_filenames = switch (params) {
-        .object => |obj| obj.get("filenames") != null,
+    // The transport injects "_method" (HTTP verb or JSON-RPC method name).
+    // POST is explicit; absent or anything else defaults to DELETE.
+    const is_post = switch (params) {
+        .object => |o| switch (o.get("_method") orelse std.json.Value{ .null = {} }) {
+            .string => |s| std.ascii.eqlIgnoreCase(s, "POST"),
+            else => false,
+        },
         else => false,
     };
-    if (has_filenames) return handlePostJob(ctx, params, alloc);
+    if (is_post) return handlePostJob(ctx, params, alloc);
     return handleDeleteJob(ctx, params, alloc);
 }
 

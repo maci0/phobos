@@ -201,6 +201,17 @@ pub const NotifyBus = struct {
         return self.fanout(io, method, params, topic);
     }
 
+    /// Like `emitStatus`, but assumes the caller ALREADY holds the `Core` lock.
+    pub fn emitStatusLocked(
+        self: *NotifyBus,
+        io: Io,
+        method: []const u8,
+        params: std.json.Value,
+        topic: []const u8,
+    ) !void {
+        return self.fanout(io, method, params, topic);
+    }
+
     /// Core fan-out. Assumes the Core lock is held. Builds the frame once and
     /// writes it to every (optionally subscription-gated) connection. The
     /// registry is snapshotted first so per-connection write mutexes are never

@@ -331,20 +331,22 @@ pub fn handleParsedAuth(
 
     // Inject the resolved user, remote IP and HTTP method into the params so the
     // access.* handlers can identify the caller (mirrors Moonraker injecting the
-    // current user / ip into the WebRequest). Only for access.* routes to avoid
-    // polluting unrelated handlers.
-    if (std.mem.startsWith(u8, path, "/access/")) {
+    // current user / ip into the WebRequest). User/ip are access.* only; _method
+    // is injected for every route so multi-verb handlers can dispatch correctly.
+    {
         var obj: std.json.ObjectMap = switch (params) {
             .object => |o| o,
             else => .empty,
         };
-        if (resolved_user) |u| {
-            try obj.put(alloc, authz.current_user_key, .{ .string = u });
-        }
-        if (creds.remote_ip) |ip| {
-            try obj.put(alloc, authz.current_ip_key, .{ .string = ip });
-        }
         try obj.put(alloc, "_method", .{ .string = @tagName(verb) });
+        if (std.mem.startsWith(u8, path, "/access/")) {
+            if (resolved_user) |u| {
+                try obj.put(alloc, authz.current_user_key, .{ .string = u });
+            }
+            if (creds.remote_ip) |ip| {
+                try obj.put(alloc, authz.current_ip_key, .{ .string = ip });
+            }
+        }
         params = .{ .object = obj };
     }
 
@@ -405,6 +407,23 @@ pub fn serveConn(srv: *Server, stream: net.Stream) void {
 
 fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     const io = srv.io;
+
+    // Extract the socket peer IP once per connection for trusted-client auth.
+    var peer_ip_buf: [16]u8 = undefined;
+    const peer_ip: ?[]const u8 = blk: {
+        var sa: std.os.linux.sockaddr.in = undefined;
+        var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
+        const rc = std.os.linux.getpeername(stream.socket.handle, @ptrCast(&sa), &slen);
+        if (std.os.linux.errno(rc) != .SUCCESS) break :blk null;
+        const addr_n = std.mem.bigToNative(u32, sa.addr);
+        break :blk std.fmt.bufPrint(&peer_ip_buf, "{d}.{d}.{d}.{d}", .{
+            @as(u8, @truncate(addr_n & 0xff)),
+            @as(u8, @truncate((addr_n >> 8) & 0xff)),
+            @as(u8, @truncate((addr_n >> 16) & 0xff)),
+            @as(u8, @truncate((addr_n >> 24) & 0xff)),
+        }) catch null;
+    };
+
     // 64KB reader buffer: this same buffer backs the WebSocket input after an
     // upgrade (std.http.WebSocket.input == server.reader.in), and
     // `readSmallMessage` requires each WS message fit it (else MessageOversize).
@@ -467,7 +486,12 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         // Extract auth credentials from headers + query (duped into the arena,
         // since the header backing memory is invalidated once the body reader
         // runs). Only meaningful when the authorization component is wired.
-        const creds = extractCreds(&req, target, alloc);
+        var creds = extractCreds(&req, target, alloc);
+        // Plumb the socket peer IP (extracted once per connection above) so
+        // the authorization layer can match trusted-client CIDRs.
+        if (peer_ip) |ip| {
+            creds.remote_ip = alloc.dupe(u8, ip) catch null;
+        }
 
         const body: []const u8 = readBody(&req, alloc) catch &.{};
 

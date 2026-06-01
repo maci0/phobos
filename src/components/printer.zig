@@ -45,51 +45,94 @@ pub const klippy_disconnected_message = "Klippy Host not connected";
 
 /// Stateless context — every handler short-circuits with the disconnected
 /// error until phobos grows a real Klippy connection.
-pub const PrinterCtx = struct {};
+pub const PrinterCtx = struct {
+    /// Optional pointer to the Klippy connection; set by App after init.
+    /// When non-null and Klippy is connected, handlers proxy to Klippy.
+    klippy: ?*@import("klippy_connection.zig").KlippyCtx = null,
+};
 
 // ---------------------------------------------------------------------------
 // Handlers
 //
 // All six proxy to Klippy in Moonraker. With no Klippy connection every one
-// returns the disconnected error. They are distinct functions (rather than one
-// shared stub) so each has its own unit + fuzz coverage and so a future Klippy
-// connection can flesh them out independently.
+// returns the disconnected error. When connected, they call through to the
+// Klippy socket via `KlippyCtx.request()`.
 // ---------------------------------------------------------------------------
 
 /// POST /printer/print/start → printer.print.start
-/// Moonraker: klippy_apis.start_print(filename) → gcode SDCARD_PRINT_FILE.
-pub fn handlePrintStart(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return error.KlippyDisconnected;
+/// Moonraker: klippy_apis.start_print(filename) → gcode/script SDCARD_PRINT_FILE.
+pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+
+    // Extract filename from params; build the gcode command.
+    const filename: []const u8 = if (params == .object)
+        if (params.object.get("filename")) |v|
+            if (v == .string) v.string else ""
+        else
+            ""
+    else
+        "";
+    var script_buf: [512]u8 = undefined;
+    const script = if (filename.len > 0)
+        try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{filename})
+    else
+        return error.InvalidParams;
+
+    // Build params: {"script": "<script>"}
+    var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+    try params_obj.put(alloc, "script", .{ .string = try alloc.dupe(u8, script) });
+    return k.request("gcode/script", .{ .object = params_obj }, alloc);
 }
 
 /// POST /printer/print/pause → printer.print.pause
-/// Moonraker: klippy_apis.pause_print() → gcode PAUSE (job_state pause path).
-pub fn handlePrintPause(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return error.KlippyDisconnected;
+/// Moonraker: klippy_apis.pause_print() → pause_resume/pause.
+pub fn handlePrintPause(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+    return k.request("pause_resume/pause", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
 }
 
 /// POST /printer/print/resume → printer.print.resume
-/// Moonraker: klippy_apis.resume_print() → gcode RESUME.
-pub fn handlePrintResume(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return error.KlippyDisconnected;
+/// Moonraker: klippy_apis.resume_print() → pause_resume/resume.
+pub fn handlePrintResume(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+    return k.request("pause_resume/resume", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
 }
 
 /// POST /printer/print/cancel → printer.print.cancel
-/// Moonraker: klippy_apis.cancel_print() → gcode CANCEL_PRINT.
-pub fn handlePrintCancel(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return error.KlippyDisconnected;
+/// Moonraker: klippy_apis.cancel_print() → pause_resume/cancel.
+pub fn handlePrintCancel(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+    return k.request("pause_resume/cancel", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
 }
 
 /// POST /printer/restart → printer.restart
-/// Moonraker: klippy_apis.do_restart("RESTART").
-pub fn handleRestart(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return error.KlippyDisconnected;
+/// Moonraker: klippy_apis.do_restart("RESTART") → gcode/script RESTART.
+pub fn handleRestart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+    var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+    try params_obj.put(alloc, "script", .{ .string = "RESTART" });
+    return k.request("gcode/script", .{ .object = params_obj }, alloc);
 }
 
 /// POST /printer/firmware_restart → printer.firmware_restart
-/// Moonraker: klippy_apis.do_restart("FIRMWARE_RESTART").
-pub fn handleFirmwareRestart(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return error.KlippyDisconnected;
+/// Moonraker: klippy_apis.do_restart("FIRMWARE_RESTART") → gcode/script FIRMWARE_RESTART.
+pub fn handleFirmwareRestart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+    var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+    try params_obj.put(alloc, "script", .{ .string = "FIRMWARE_RESTART" });
+    return k.request("gcode/script", .{ .object = params_obj }, alloc);
 }
 
 // ---------------------------------------------------------------------------

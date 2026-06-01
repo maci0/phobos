@@ -62,6 +62,11 @@ pub const base_totals_values = [_]f64{ 0, 0, 0, 0, 0, 0 };
 pub const HistoryCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
+    io: ?std.Io,
+
+    pub fn setIo(self: *HistoryCtx, io: std.Io) void {
+        self.io = io;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -328,20 +333,21 @@ pub fn handleGetJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
     return .{ .object = obj };
 }
 
-/// Dispatch handler for the multi-verb /server/history/job endpoint.
-/// Called for both GET (→ get_job) and DELETE (→ delete_job) HTTP routes,
-/// and for both "server.history.get_job" and "server.history.delete_job"
-/// JSON-RPC methods.
-/// Heuristic: if "uid" present and no "all" key → GET; if "all" key present → DELETE.
-/// When called as JSON-RPC the caller uses the correct method name to trigger
-/// the expected semantic; this dispatch is symmetric for both.
+/// Multi-verb dispatch for /server/history/job (GET vs DELETE).
+/// Called for both "server.history.get_job" and "server.history.delete_job"
+/// JSON-RPC methods, and for both HTTP GET/DELETE routes.
+/// The transport injects "_method" so we can distinguish.
 pub fn handleJobDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const has_all = switch (params) {
-        .object => |obj| obj.get("all") != null,
+    // The transport injects "_method" (HTTP verb or JSON-RPC method name).
+    // DELETE is explicit; absent or anything else defaults to GET.
+    const is_delete = switch (params) {
+        .object => |o| switch (o.get("_method") orelse std.json.Value{ .null = {} }) {
+            .string => |s| std.ascii.eqlIgnoreCase(s, "DELETE"),
+            else => false,
+        },
         else => false,
     };
-    if (has_all) return handleDeleteJob(ctx, params, alloc);
-    // Default to GET (get_job). DELETE without "all" must supply "uid".
+    if (is_delete) return handleDeleteJob(ctx, params, alloc);
     return handleGetJob(ctx, params, alloc);
 }
 
@@ -355,8 +361,12 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
     if (all) {
         const all_jobs = try loadAllJobs(c, alloc);
         for (all_jobs) |je| {
+            // Capture the prepped job shape before deleting so we can emit
+            // the notification with full data.
+            const prepped = prepJob(alloc, je.val, je.key) catch null;
             _ = c.store.deleteItem(alloc, ns_history, je.key) catch .null;
             try deleted.append(.{ .string = je.key });
+            if (prepped) |job| emitHistoryChanged(c, alloc, "deleted", job);
         }
     } else {
         const uid_raw = (try getOptStr(params, "uid")) orelse return error.InvalidParams;
@@ -365,16 +375,41 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
         const job_id_tmp = std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_int}) catch return error.InvalidParams;
         const job_id = try alloc.dupe(u8, job_id_tmp);
 
+        // Capture the prepped job before deleting.
+        const val = c.store.getItem(alloc, ns_history, job_id) catch |err| switch (err) {
+            ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
+            else => return err,
+        };
+        const job_to_emit: ?std.json.Value = if (val) |v| prepJob(alloc, v, job_id) catch null else null;
+
         _ = c.store.deleteItem(alloc, ns_history, job_id) catch |err| switch (err) {
             ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
             else => return err,
         };
         try deleted.append(.{ .string = job_id });
+        if (job_to_emit) |job| emitHistoryChanged(c, alloc, "deleted", job);
     }
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "deleted_jobs", .{ .array = deleted });
     return .{ .object = obj };
+}
+
+// ---------------------------------------------------------------------------
+// Notification emission
+// ---------------------------------------------------------------------------
+
+/// Emit `notify_history_changed` with the given action and job payload.
+/// Uses emitLocked — handlers run under the held Core lock.
+fn emitHistoryChanged(ctx: *HistoryCtx, alloc: std.mem.Allocator, action: []const u8, job: std.json.Value) void {
+    const bus = ctx.bus;
+    const io = ctx.io orelse return;
+    var arr: std.json.Array = .init(alloc);
+    var item: std.json.ObjectMap = .empty;
+    item.put(alloc, "action", .{ .string = action }) catch return;
+    item.put(alloc, "job", job) catch return;
+    arr.append(.{ .object = item }) catch return;
+    bus.emitLocked(io, notify.names.history_changed, .{ .array = arr }) catch {};
 }
 
 // ---------------------------------------------------------------------------
@@ -568,7 +603,7 @@ test "handleList: empty store returns count=0 jobs=[]" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const result = try handleList(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(@as(i64, 0), result.object.get("count").?.integer);
     try testing.expectEqual(@as(usize, 0), result.object.get("jobs").?.array.items.len);
@@ -592,7 +627,7 @@ test "handleList: returns jobs in desc order by default" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const result = try handleList(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(@as(i64, 2), result.object.get("count").?.integer);
     const jobs = result.object.get("jobs").?.array;
@@ -620,7 +655,7 @@ test "handleList: limit and start params" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const p = try mkParams(a, "{\"limit\":1,\"start\":1,\"order\":\"asc\"}");
     const result = try handleList(@ptrCast(&ctx), p, a);
     try testing.expectEqual(@as(i64, 1), result.object.get("count").?.integer);
@@ -645,7 +680,7 @@ test "handleGetJob: retrieves stored job" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const p = try mkParams(a, "{\"uid\":\"000001\"}");
     const result = try handleGetJob(@ptrCast(&ctx), p, a);
     const job = result.object.get("job").?.object;
@@ -670,7 +705,7 @@ test "handleGetJob: missing uid → NotFound" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const p = try mkParams(a, "{\"uid\":\"FFFFFF\"}");
     try testing.expectError(error.NotFound, handleGetJob(@ptrCast(&ctx), p, a));
 }
@@ -692,7 +727,7 @@ test "handleDeleteJob: single uid removes job" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const p = try mkParams(a, "{\"uid\":\"000001\"}");
     const result = try handleDeleteJob(@ptrCast(&ctx), p, a);
     const dj = result.object.get("deleted_jobs").?.array;
@@ -718,7 +753,7 @@ test "handleDeleteJob: all=true clears all jobs" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const p = try mkParams(a, "{\"all\":true}");
     const result = try handleDeleteJob(@ptrCast(&ctx), p, a);
     const dj = result.object.get("deleted_jobs").?.array;
@@ -741,7 +776,7 @@ test "handleTotals: returns base totals when none stored" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const result = try handleTotals(@ptrCast(&ctx), .null, a);
     const jt = result.object.get("job_totals").?.object;
     try testing.expect(jt.get("total_jobs") != null);
@@ -764,7 +799,7 @@ test "handleResetTotals: resets and returns last_totals" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
     const result = try handleResetTotals(@ptrCast(&ctx), .null, a);
     try testing.expect(result.object.get("last_totals") != null);
     try testing.expect(result.object.get("last_auxiliary_totals") != null);
@@ -788,7 +823,7 @@ test "registerHistory: wires expected routes and JSON-RPC methods" {
     var conns = NullConns.init(alloc, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
 
     try registerHistory(&reg, &ctx);
 
@@ -825,7 +860,7 @@ test "fuzz handleList: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -858,7 +893,7 @@ test "fuzz handleGetJob: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -885,7 +920,7 @@ test "fuzz handleDeleteJob: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus };
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
