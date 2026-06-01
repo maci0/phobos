@@ -34,6 +34,7 @@ const mqtt_component = @import("components/mqtt.zig");
 const extensions_component = @import("components/extensions.zig");
 const analysis_component = @import("components/analysis.zig");
 const file_manager_component = @import("components/file_manager.zig");
+const machine_component = @import("components/machine.zig");
 const ds = @import("store/datastore.zig");
 
 const Registry = registry.Registry;
@@ -57,6 +58,7 @@ const ExtensionsCtx = extensions_component.ExtensionsCtx;
 const AnalysisCtx = analysis_component.AnalysisCtx;
 const FileCtx = file_manager_component.FileCtx;
 const FileRoot = file_manager_component.Root;
+const MachineCtx = machine_component.MachineCtx;
 
 // ---------------------------------------------------------------------------
 // Null DataStore — used when LMDB is compiled out. Handlers are still
@@ -138,6 +140,7 @@ pub const App = struct {
     extensions_ctx: *ExtensionsCtx,
     analysis_ctx: *AnalysisCtx,
     file_ctx: *FileCtx,
+    machine_ctx: *MachineCtx,
     /// Absolute datadir whose subfolders back the file_manager roots. Owned and
     /// freed in deinit. The root paths in `file_roots` point into the joined
     /// strings owned alongside it.
@@ -311,6 +314,12 @@ pub const App = struct {
         errdefer alloc.destroy(file_ctx);
         file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus };
 
+        // --- Machine context (machine.* + machine.proc_stats) ---
+        // io is wired later via httpServer/setIo so /proc & /sys reads work.
+        const machine_ctx = try alloc.create(MachineCtx);
+        errdefer alloc.destroy(machine_ctx);
+        machine_ctx.* = .{ .gpa = alloc };
+
         var app = App{
             .alloc = alloc,
             .core = core,
@@ -334,6 +343,7 @@ pub const App = struct {
             .extensions_ctx = extensions_ctx,
             .analysis_ctx = analysis_ctx,
             .file_ctx = file_ctx,
+            .machine_ctx = machine_ctx,
             .datadir = datadir,
             .file_roots = file_roots,
             .lmdb_store_ptr = lmdb_ptr,
@@ -360,6 +370,8 @@ pub const App = struct {
         self.alloc.free(self.file_roots);
         self.alloc.free(self.datadir);
         self.alloc.destroy(self.file_ctx);
+        self.machine_ctx.deinit();
+        self.alloc.destroy(self.machine_ctx);
         self.alloc.destroy(self.analysis_ctx);
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
@@ -443,6 +455,9 @@ pub const App = struct {
         // File manager component: server.files.* endpoints.
         try file_manager_component.registerFileManager(self.reg, self.file_ctx);
 
+        // Machine component: machine.* + machine.proc_stats endpoints.
+        try machine_component.registerMachine(self.reg, self.machine_ctx);
+
         // WS-only methods (server.connection.identify, server.websocket.id)
         // are handled inside the WS transport layer per-connection (they need
         // the live *Connection). Register them in the dispatcher so the
@@ -468,6 +483,8 @@ pub const App = struct {
         self.spoolman_ctx.setIo(io);
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
+        // Wire io into the machine component for /proc & /sys reads.
+        self.machine_ctx.setIo(io);
         return .{
             .io = io,
             .core = self.core,
@@ -622,6 +639,20 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.files.copy",
         "server.files.zip",
         "server.files.delete_file",
+        // Machine (machine.* + machine.proc_stats)
+        "machine.system_info",
+        "machine.proc_stats",
+        "machine.reboot",
+        "machine.shutdown",
+        "machine.services.restart",
+        "machine.services.stop",
+        "machine.services.start",
+        "machine.sudo.info",
+        "machine.sudo.password",
+        "machine.peripherals.usb",
+        "machine.peripherals.serial",
+        "machine.peripherals.video",
+        "machine.peripherals.canbus",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",

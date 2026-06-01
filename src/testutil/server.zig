@@ -921,6 +921,157 @@ test "files: path escape attempt is rejected (403/400 error envelope)" {
     try std.testing.expect(std.mem.indexOf(u8, body, "root:") == null);
 }
 
+// ---------------------------------------------------------------------------
+// Machine (machine.* + machine.proc_stats) integration tests — full socket path.
+// ---------------------------------------------------------------------------
+
+test "machine: GET /machine/system_info returns full system_info shape with real cpu/distro" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/system_info");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const si = p.value.object.get("result").?.object.get("system_info").?.object;
+
+    // Required sub-objects present.
+    for ([_][]const u8{ "cpu_info", "sd_info", "distribution", "virtualization", "network", "canbus", "python", "available_services", "service_state", "instance_ids", "provider" }) |k| {
+        try std.testing.expect(si.get(k) != null);
+    }
+    // cpu_info has a real cpu_count (>=1) from /proc/cpuinfo.
+    const cpu = si.get("cpu_info").?.object;
+    try std.testing.expect(cpu.get("cpu_count").?.integer >= 1);
+    try std.testing.expect(cpu.get("cpu_desc") != null);
+    // distribution has a name from /etc/os-release on a real Linux host.
+    const distro = si.get("distribution").?.object;
+    try std.testing.expect(distro.get("name") != null);
+    try std.testing.expect(distro.get("kernel_version") != null);
+    // instance_ids.moonraker present.
+    try std.testing.expectEqualStrings("moonraker", si.get("instance_ids").?.object.get("moonraker").?.string);
+}
+
+test "machine: GET /machine/proc_stats returns the proc_stats shape" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/proc_stats");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?.object;
+    for ([_][]const u8{ "moonraker_stats", "throttled_state", "cpu_temp", "network", "system_cpu_usage", "system_uptime", "system_memory", "websocket_connections" }) |k| {
+        try std.testing.expect(r.get(k) != null);
+    }
+    try std.testing.expect(r.get("moonraker_stats").? == .array);
+    // system_memory populated from /proc/meminfo on a real host.
+    try std.testing.expect(r.get("system_memory").?.object.get("total") != null);
+}
+
+test "machine: POST /machine/reboot and /machine/shutdown return ok ack" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    for ([_][]const u8{ "/machine/reboot", "/machine/shutdown" }) |path| {
+        const body = try ts.postJson(alloc, path, "{}");
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+    }
+}
+
+test "machine: POST /machine/services/* ack for allowed, error for disallowed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Allowed service (klipper) → ok.
+    const ok = try ts.postJson(alloc, "/machine/services/restart",
+        \\{"service":"klipper"}
+    );
+    defer alloc.free(ok);
+    const okp = try resultOf(alloc, ok);
+    defer okp.deinit();
+    try std.testing.expectEqualStrings("ok", okp.value.object.get("result").?.string);
+
+    // Disallowed service (sshd) → error envelope.
+    const bad = try ts.postJson(alloc, "/machine/services/stop",
+        \\{"service":"sshd"}
+    );
+    defer alloc.free(bad);
+    const badp = try resultOf(alloc, bad);
+    defer badp.deinit();
+    try std.testing.expect(badp.value.object.get("error") != null);
+}
+
+test "machine: GET /machine/sudo/info shape" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.get(alloc, "/machine/sudo/info");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?.object;
+    try std.testing.expect(r.get("sudo_access") != null); // null is allowed
+    try std.testing.expect(r.get("linux_user") != null);
+    try std.testing.expectEqual(false, r.get("sudo_requested").?.bool);
+    try std.testing.expect(r.get("request_messages").? == .array);
+}
+
+test "machine: POST /machine/sudo/password acks success" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const body = try ts.postJson(alloc, "/machine/sudo/password",
+        \\{"password":"hunter2"}
+    );
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const r = p.value.object.get("result").?.object;
+    try std.testing.expectEqual(false, r.get("is_restarting").?.bool);
+    try std.testing.expect(r.get("sudo_responses").?.array.items.len >= 1);
+}
+
+test "machine: GET /machine/peripherals/* return correct list shapes" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    const usb = try ts.get(alloc, "/machine/peripherals/usb");
+    defer alloc.free(usb);
+    const up = try resultOf(alloc, usb);
+    defer up.deinit();
+    try std.testing.expect(up.value.object.get("result").?.object.get("usb_devices").? == .array);
+
+    const ser = try ts.get(alloc, "/machine/peripherals/serial");
+    defer alloc.free(ser);
+    const sp = try resultOf(alloc, ser);
+    defer sp.deinit();
+    try std.testing.expect(sp.value.object.get("result").?.object.get("serial_devices").? == .array);
+
+    const vid = try ts.get(alloc, "/machine/peripherals/video");
+    defer alloc.free(vid);
+    const vp = try resultOf(alloc, vid);
+    defer vp.deinit();
+    const vres = vp.value.object.get("result").?.object;
+    try std.testing.expect(vres.get("v4l2_devices").? == .array);
+    try std.testing.expect(vres.get("libcamera_devices").? == .array);
+
+    const can = try ts.get(alloc, "/machine/peripherals/canbus");
+    defer alloc.free(can);
+    const cp = try resultOf(alloc, can);
+    defer cp.deinit();
+    try std.testing.expect(cp.value.object.get("result").?.object.get("can_uuids").? == .array);
+}
+
 test "files: notify_filelist_changed emitted on upload with correct payload" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
