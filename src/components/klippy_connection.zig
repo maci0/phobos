@@ -222,9 +222,9 @@ pub const ReadBuf = struct {
     buf: []u8,
     len: usize,
 
-    /// Allocate a read buffer of `frame_max` bytes.
-    pub fn init(alloc: std.mem.Allocator) !ReadBuf {
-        const buf = try alloc.alloc(u8, frame_max);
+    /// Allocate a read buffer of `max_size` bytes.
+    pub fn init(alloc: std.mem.Allocator, max_size: usize) !ReadBuf {
+        const buf = try alloc.alloc(u8, max_size);
         return .{ .buf = buf, .len = 0 };
     }
 
@@ -329,7 +329,7 @@ pub const KlippyCtx = struct {
             .gpa = gpa,
             .bus = bus,
             .uds_path = "/tmp/klippy_uds",
-            .read_buf = try ReadBuf.init(gpa),
+            .read_buf = try ReadBuf.init(gpa, frame_max),
         };
     }
 
@@ -922,12 +922,20 @@ const NullBus = struct {
     conns_obj: @import("../server/connections.zig").Connections,
     bus: notify.NotifyBus,
 
-    fn init(alloc: std.mem.Allocator) NullBus {
-        var nb: NullBus = undefined;
+    /// Heap-allocated so internal pointers (bus → conns_obj) stay valid
+    /// after the struct leaves this function's stack frame.
+    fn init(alloc: std.mem.Allocator) !*NullBus {
+        const nb = try alloc.create(NullBus);
+        errdefer alloc.destroy(nb);
         nb.core = @import("../server/core.zig").Core.init();
         nb.conns_obj = @import("../server/connections.zig").Connections.init(alloc, &nb.core);
         nb.bus = notify.NotifyBus.init(&nb.core, &nb.conns_obj);
         return nb;
+    }
+
+    fn deinit(self: *NullBus, alloc: std.mem.Allocator) void {
+        self.conns_obj.list.deinit(self.conns_obj.alloc);
+        alloc.destroy(self);
     }
 };
 
@@ -937,7 +945,8 @@ const NullBus = struct {
 
 test "KlippyCtx.init: starts disconnected" {
     const alloc = std.testing.allocator;
-    var nb = NullBus.init(alloc);
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
     try std.testing.expect(!ctx.isConnected());
@@ -946,7 +955,8 @@ test "KlippyCtx.init: starts disconnected" {
 
 test "KlippyCtx.setIo: stores io handle" {
     const alloc = std.testing.allocator;
-    var nb = NullBus.init(alloc);
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
 
@@ -959,7 +969,8 @@ test "KlippyCtx.setIo: stores io handle" {
 
 test "KlippyCtx.nextReqId: monotonic" {
     const alloc = std.testing.allocator;
-    var nb = NullBus.init(alloc);
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
 
@@ -1154,7 +1165,7 @@ test "isNotification: false for response" {
 
 test "ReadBuf: append extracts frame" {
     const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc);
+    var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
     const payload = try rb.append("{\"id\":1}\x03");
     try std.testing.expectEqualStrings("{\"id\":1}", payload);
@@ -1162,7 +1173,7 @@ test "ReadBuf: append extracts frame" {
 
 test "ReadBuf: consume advances buffer" {
     const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc);
+    var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
     _ = try rb.append("hello\x03world\x03");
     try std.testing.expectEqual(@as(usize, 12), rb.len);
@@ -1174,7 +1185,7 @@ test "ReadBuf: consume advances buffer" {
 
 test "ReadBuf: error.NeedMoreData when incomplete" {
     const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc);
+    var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
     try std.testing.expectError(error.NeedMoreData, rb.append("partial"));
     // Second append of empty data also returns NeedMoreData (no \x03 yet).
@@ -1183,7 +1194,7 @@ test "ReadBuf: error.NeedMoreData when incomplete" {
 
 test "ReadBuf: reset clears buffer" {
     const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc);
+    var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
     _ = try rb.append("data\x03");
     rb.consume(5);
@@ -1193,7 +1204,7 @@ test "ReadBuf: reset clears buffer" {
 
 test "ReadBuf: multiple appends accumulate" {
     const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc);
+    var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
     // "hel" has no \x03 → NeedMoreData
     _ = rb.append("hel") catch |err| switch (err) {
@@ -1208,25 +1219,25 @@ test "ReadBuf: multiple appends accumulate" {
 
 test "ReadBuf: error.BufferOverflow" {
     const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc);
+    var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
-    // Fill buffer to frame_max - 1 using no-\x03 chunks.
-    const chunk: [4096]u8 = [_]u8{0x41} ** 4096;
-    const full_chunks = (frame_max - 1) / chunk.len;
+    // Fill buffer to cap - 1 using no-\x03 chunks.
+    const chunk: [64]u8 = [_]u8{0x41} ** 64;
+    const full_chunks = (rb.buf.len - 1) / chunk.len;
     for (0..full_chunks) |_| {
         _ = rb.append(&chunk) catch |err| switch (err) {
             error.NeedMoreData => {},
             else => |e| return e,
         };
     }
-    const rem = (frame_max - 1) - (full_chunks * chunk.len);
+    const rem = (rb.buf.len - 1) - (full_chunks * chunk.len);
     if (rem > 0) {
         _ = rb.append(chunk[0..rem]) catch |err| switch (err) {
             error.NeedMoreData => {},
             else => |e| return e,
         };
     }
-    // Now len == frame_max - 1. Append 2 bytes → overflow.
+    // Now len == buf.len - 1. Append 2 bytes → overflow.
     try std.testing.expectError(error.BufferOverflow, rb.append("xx"));
 }
 
@@ -1236,7 +1247,8 @@ test "ReadBuf: error.BufferOverflow" {
 
 test "KlippyCtx.setState: transition" {
     const alloc = std.testing.allocator;
-    var nb = NullBus.init(alloc);
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
 
@@ -1250,7 +1262,8 @@ test "KlippyCtx.setState: transition" {
 
 test "KlippyCtx.setState: false when already in state" {
     const alloc = std.testing.allocator;
-    var nb = NullBus.init(alloc);
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
 
@@ -1260,7 +1273,8 @@ test "KlippyCtx.setState: false when already in state" {
 
 test "KlippyCtx.setState: shutdown resets flags" {
     const alloc = std.testing.allocator;
-    var nb = NullBus.init(alloc);
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
 
@@ -1269,6 +1283,182 @@ test "KlippyCtx.setState: shutdown resets flags" {
     try std.testing.expect(ctx.setState(.shutdown));
     try std.testing.expect(!ctx.klippy_identified);
     try std.testing.expect(!ctx.klippy_started);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: processStatusUpdateInner / processGcodeResponse
+// ---------------------------------------------------------------------------
+
+test "processStatusUpdateInner: shutdown webhook sets state and emits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+    _ = ctx.setState(.ready);
+    try std.testing.expectEqual(State.ready, ctx.state);
+
+    // Build params: [0.0, {webhooks: {state: "shutdown"}}].
+    var sd: std.json.ObjectMap = .empty;
+    var wh: std.json.ObjectMap = .empty;
+    try wh.put(a, "state", .{ .string = "shutdown" });
+    try sd.put(a, "webhooks", .{ .object = wh });
+    var arr = std.json.Array.init(a);
+    try arr.append(.{ .float = 0.0 });
+    try arr.append(.{ .object = sd });
+    const params = std.json.Value{ .array = arr };
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processStatusUpdateInner(io, params, true);
+    try std.testing.expectEqual(State.shutdown, ctx.state);
+}
+
+test "processStatusUpdateInner: ready webhook sets state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    var sd: std.json.ObjectMap = .empty;
+    var wh: std.json.ObjectMap = .empty;
+    try wh.put(a, "state", .{ .string = "ready" });
+    try sd.put(a, "webhooks", .{ .object = wh });
+    var arr = std.json.Array.init(a);
+    try arr.append(.{ .float = 0.0 });
+    try arr.append(.{ .object = sd });
+    const params = std.json.Value{ .array = arr };
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processStatusUpdateInner(io, params, true);
+    try std.testing.expectEqual(State.ready, ctx.state);
+}
+
+test "processStatusUpdateInner: no webhooks — no crash" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    var sd: std.json.ObjectMap = .empty;
+    try sd.put(a, "toolhead", .{ .object = .empty });
+    var arr = std.json.Array.init(a);
+    try arr.append(.{ .float = 0.0 });
+    try arr.append(.{ .object = sd });
+    const params = std.json.Value{ .array = arr };
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processStatusUpdateInner(io, params, true);
+}
+
+test "processStatusUpdateInner: non-array returns early" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processStatusUpdateInner(io, .{ .object = .empty }, true);
+}
+
+test "processStatusUpdateInner: too-short array returns early" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    var arr = std.json.Array.init(a);
+    try arr.append(.{ .float = 0.0 });
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processStatusUpdateInner(io, .{ .array = arr }, true);
+}
+
+test "processStatusUpdateInner: non-object status_dict returns early" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    var arr = std.json.Array.init(a);
+    try arr.append(.{ .float = 0.0 });
+    try arr.append(.{ .string = "not-an-object" });
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processStatusUpdateInner(io, .{ .array = arr }, true);
+}
+
+test "processGcodeResponse: emits server:gcode_response" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    // Build frame: {"params": "gcode response text"}.
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(a, "params", .{ .string = "ok" });
+    const frame = std.json.Value{ .object = obj };
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processGcodeResponse(io, frame);
+}
+
+test "processGcodeResponse: missing params — no crash" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+
+    const frame = std.json.Value{ .object = .empty };
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try ctx.processGcodeResponse(io, frame);
 }
 
 // ===========================================================================
@@ -1362,7 +1552,7 @@ test "fuzz ReadBuf.append: never crashes on arbitrary bytes" {
             var data: [4096]u8 = undefined;
             smith.bytesWithHash(&data, 0);
 
-            var rb = ReadBuf.init(std.heap.smp_allocator) catch return;
+            var rb = ReadBuf.init(std.heap.smp_allocator, 4096) catch return;
             defer rb.deinit(std.heap.smp_allocator);
 
             // Feed chunks until we get a frame or run out of space.

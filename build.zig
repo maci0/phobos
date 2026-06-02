@@ -34,6 +34,7 @@ pub fn build(b: *std.Build) void {
 
     const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_lmdb, build_opts) });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit).step);
+    b.step("test-artifact", "Build test binary (no run)").dependOn(&unit.step);
 
     const fuzz = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_lmdb, build_opts) });
     const fuzz_run = b.addRunArtifact(fuzz);

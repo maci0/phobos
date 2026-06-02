@@ -17,7 +17,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
-- Tests: **655 pass / 3 skip / 0 fail** (94 fuzz). Verified by running test binary
+- Tests: **663 pass / 3 skip / 0 fail** (94 fuzz). Verified by running test binary
   directly: `./.zig-cache/o/*/test --cache-dir=./.zig-cache`. Note: `zig build test`
   uses `--listen=-` protocol which may hang on this machine (Zig 0.16 build-runner
   quirk); always verify via the direct test binary.
@@ -31,6 +31,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - Default build links the **vendored lmdb** (`vendor/lmdb/`, LMDB 0.9.31).
   - Full suite (lmdb): `timeout 220 zig build test --summary all`
   - No-lmdb (faster, no C compile): `zig build test -Dwith_lmdb=false`
+  - Build test binary without running (avoids `--listen=-` hang):
+    `zig build test-artifact -Dwith_lmdb=false && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
   - Single non-`../`-importing file: `zig test -target x86_64-linux-musl src/<f>.zig`
     (files under `src/components`, `src/testutil` use `../` imports and only build via
     `zig build test`).
@@ -148,30 +150,11 @@ now accept a `KlippyCtx` pointer, check `isConnected()`, and proxy to Klippy via
 `klippy_apis.py`. When disconnected, they return `error.KlippyDisconnected` (503).
 
 **Still needed:**
-- ~~Unix socket connection~~ Done: `net.UnixAddress.init(path).connect(io)`.
-- ~~JSON-RPC handshake: `server.connection.identify` → wait for `identify_response`,
-  then `server.info` → poll until `state != "startup"`~~ Done: `connectAndHandshake`,
-  `pollServerInfo` with 250ms polling up to 100×.
-- ~~`printer.objects.subscribe`~~ Done: subscribes in connectAndHandshake.
-- ~~`notify_klippy_ready` / `notify_klippy_disconnected` / `notify_klippy_shutdown`~~
-  Done: emitReady/emitDisconnected/emitShutdown helpers call `bus.emit()`.
-- ~~`server.info` dynamic updates: `klippy_connected`/`klippy_state`~~
-  Done: ServerInfo fields updated by KlippyCtx.setState(); buildServerInfo reads them.
-- ~~Background task spawns from `main()` (not `httpServer()`) so tests don't crash.~~
-  Done: `server_app.klippy_ctx.start()` called in main.zig after httpServer.
-- ~~`_process_status_update`: parse status dict, emit `notify_status_update`, update
-  `job_queue` live state, record history job entries (skeleton emits, deep parsing TBD)~~
-  Done: pipeline fully wired (webhooks→state, fan-out→connections,
-  print_stats→job_state→history+job_queue). Testing gap: no direct unit tests for
-  processStatusUpdateInner (covered indirectly via job_state + history tests).
-- ~~`_process_gcode_response`: relay gcode responses to pending request futures~~
-  Done: emits server:gcode_response via bus; synchronous request model handles routing.
-- ~~`/klippysocket` WebSocket proxy: accept WS, relay frames to/from Klippy UDS~~ Done: serveBridge registers as a KlippyCtx Bridge, relays raw frames bidirectionally
-- ~~`job_queue` print dispatch (start/pause/resume/cancel gcodes)~~ Done: DispatchFn +
-  setKlippyDispatch/canDispatch, dispatchNextJob/dispatchPause/dispatchResume/dispatchCancel,
-  handleStart/handlePause wired, onJobStateChanged auto-advance. 10 tests green.
-- ~~`history` live job tracking from status updates~~ Done: onJobStateChanged → addJob/finishJob
-  (5 unit tests + 1 fuzz test), MemStore cloneValue deep-copy, vtUpdateItem deep-copy.
+- Real Klippy integration test (Unix socket round-trip with a real Klippy or Klippy
+  simulator).
+- `notify_proc_stat_update` emission (Moonraker's system stats notification).
+- Deep `print_stats` status parsing: filename, total_duration, print_duration,
+  filament_used, state transitions for all Moonraker job states.
 
 ### P1 — the conformance oracle (the real parity proof)
 100% *surface* coverage ≠ byte-identical *behavior*. Build the golden-capture oracle
@@ -213,8 +196,10 @@ surface real per-endpoint shape diffs to fix.
 5. ~~Klippy Unix-socket connection~~ (P0) — Done: connect, identify, subscribe handshake,
    background reconnect task, `server.info` dynamic klippy state, printer.* proxy,
    **`/klippysocket` WS proxy (Bridge relay)**, **`job_queue` dispatch**,
-   **`history` live tracking**.
-   Remaining: deep `_process_status_update`, `_process_gcode_response`.
+   **`history` live tracking**, **processStatusUpdateInner + processGcodeResponse**
+   (8 unit tests: webhooks, fan-out, early-return guards, gcode response emission).
+   Remaining: `notify_proc_stat_update`, deep `print_stats` parsing (filename,
+   durations, filament), real-Klippy integration test.
 6. ~~Fix webcam notification unit tests~~ (P0) — Done: removed deadlocked unit tests;
    socket-level tests in `ws_client.zig` cover notification emission end-to-end.
 7. **Conformance oracle** (P1) — golden-capture boot, replay, normalized-equality
