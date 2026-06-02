@@ -45,6 +45,7 @@ const klippy_connection_component = @import("components/klippy_connection.zig");
 const octoprint_component = @import("components/octoprint_compat.zig");
 const zeroconf_component = @import("components/zeroconf.zig");
 const ds = @import("store/datastore.zig");
+const config_helper = @import("config/confighelper.zig");
 
 const Registry = registry.Registry;
 const Dispatcher = jsonrpc.Dispatcher;
@@ -176,6 +177,9 @@ pub const App = struct {
     file_roots: []FileRoot,
     /// Owns the LMDB environment when with_lmdb=true; void otherwise.
     lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
+    /// Parsed config, populated by setConfig(). Null when no config file was
+    /// loaded (dump-api, tests). Owned; freed in deinit.
+    cfg: ?*config_helper.ConfigParser = null,
 
     pub fn init(alloc: std.mem.Allocator) !App {
         const core = try alloc.create(Core);
@@ -459,6 +463,22 @@ pub const App = struct {
         return app;
     }
 
+    /// Parse a config file and wire it into server.config responses. Safe to
+    /// call even when no --config flag was given; in that case the config
+    /// objects stay empty (server.config still returns the correct shape).
+    pub fn setConfig(self: *App, aio: std.Io, config_path: []const u8) void {
+        const cfg = self.alloc.create(config_helper.ConfigParser) catch {
+            std.debug.print("phobos: warning: OOM parsing config\n", .{});
+            return;
+        };
+        cfg.* = config_helper.ConfigParser.init(self.alloc);
+        cfg.parseFile(aio, config_path) catch |err| {
+            std.debug.print("phobos: warning: could not parse config '{s}': {}\n", .{ config_path, err });
+        };
+        self.cfg = cfg;
+        self.info.cfg = cfg;
+    }
+
     /// Free all owned resources. `io` is required only for the Connections
     /// registry teardown which needs an Io-aware mutex; pass a threaded io or
     /// use `deinitNoIo` in pure unit tests where no event loop is running.
@@ -520,6 +540,10 @@ pub const App = struct {
         self.alloc.destroy(self.reg);
         self.alloc.destroy(self.dispatcher);
         self.alloc.destroy(self.core);
+        if (self.cfg) |cfg| {
+            cfg.deinit();
+            self.alloc.destroy(cfg);
+        }
     }
 
     /// Register ALL currently-implemented endpoints, JSON-RPC methods, and

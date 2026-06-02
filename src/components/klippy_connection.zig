@@ -398,7 +398,7 @@ pub const KlippyCtx = struct {
         while (true) {
             _ = self.setState(.connecting);
             self.connectAndHandshake() catch {
-                // Emit disconnect notification and wait before retry.
+                _ = self.setState(.disconnected);
                 self.emitDisconnected(io);
                 self.closeStream(io);
                 // Sleep ~1s between reconnect attempts using a simple delay.

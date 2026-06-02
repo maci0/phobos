@@ -53,6 +53,10 @@ pub fn main(init: std.process.Init) !void {
     var server_app = try app.App.init(alloc);
     defer server_app.deinit(aio);
 
+    if (config_path) |path| {
+        server_app.setConfig(aio, path);
+    }
+
     var srv = server_app.httpServer(aio);
 
     // Start the background Klippy Unix-socket bridge. Only the real daemon

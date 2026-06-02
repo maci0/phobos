@@ -57,6 +57,8 @@ pub const manifest: []const ManifestEntry = &.{
     .{ .method_pattern = "server.info", .field_path = "failed_components", .rule = .sort_array },
     .{ .method_pattern = "server.info", .field_path = "registered_directories", .rule = .path_relativize },
     .{ .method_pattern = "server.info", .field_path = "warnings", .rule = .structure_compare },
+    .{ .method_pattern = "server.info", .field_path = "klippy_state", .rule = .mask },
+    .{ .method_pattern = "server.info", .field_path = "websocket_count", .rule = .mask },
     // --- server.config ---
     .{ .method_pattern = "server.config", .field_path = "config_file", .rule = .path_relativize },
     // --- generic identity/time fields (mask anything ending with _id or _time) ---
@@ -194,6 +196,12 @@ fn pathMatches(pattern: []const u8, path: []const u8) bool {
     if (pattern.len > 1 and pattern[0] == '*') {
         const suffix = pattern[1..];
         if (std.mem.endsWith(u8, path, suffix)) return true;
+    }
+    // Match by last component of a dotted path (e.g. "result.klippy_state" matches "klippy_state")
+    if (std.mem.indexOfScalar(u8, path, '.') != null) {
+        var it = std.mem.splitBackwardsScalar(u8, path, '.');
+        const last = it.first();
+        if (std.mem.eql(u8, pattern, last)) return true;
     }
     return false;
 }

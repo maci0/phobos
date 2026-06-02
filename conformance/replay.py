@@ -62,8 +62,14 @@ MANIFEST: List[Dict[str, Any]] = [
     {"method": "server.info", "field": "failed_components", "rule": "sort_array"},
     {"method": "server.info", "field": "registered_directories", "rule": "path_relativize"},
     {"method": "server.info", "field": "warnings", "rule": "structure_compare"},
+    {"method": "server.info", "field": "klippy_state", "rule": "mask"},
+    {"method": "server.info", "field": "websocket_count", "rule": "mask"},
     # --- server.config ---
     {"method": "server.config", "field": "config_file", "rule": "path_relativize"},
+    {"method": "server.config", "field": "config", "rule": "structure_compare"},
+    {"method": "server.config", "field": "orig", "rule": "structure_compare"},
+    {"method": "server.config", "field": "files", "rule": "files_compare"},
+    {"method": "server.config", "field": "filename", "rule": "path_relativize"},
     # --- wildcards ---
     {"method": "*", "field": "*_id", "rule": "mask"},
     {"method": "*", "field": "*_time", "rule": "mask"},
@@ -81,6 +87,11 @@ def _field_matches(pattern: str, field: str) -> bool:
         return True
     if pattern.startswith("*") and len(pattern) > 1:
         return field.endswith(pattern[1:])
+    # Match by last component of a dotted path (e.g. "result.klippy_state" matches "klippy_state")
+    if "." in field:
+        last = field.rsplit(".", 1)[-1]
+        if pattern == last:
+            return True
     return False
 
 
@@ -136,7 +147,7 @@ def _norm_sort_array(value: Any) -> Any:
 
 
 def _norm_structure_compare(value: Any) -> Any:
-    """For warnings arrays: keep count and per-element keys, mask all string values."""
+    """For container values: keep count and structure, mask all leaf values."""
     if not isinstance(value, list):
         return value
     result = []
@@ -164,9 +175,50 @@ def _norm_structure_compare(value: Any) -> Any:
     return result
 
 
+def _norm_files_compare(value: Any) -> Any:
+    """For server.config files: keep filenames (path-relativized), mask sections."""
+    if not isinstance(value, list):
+        return value
+    result = []
+    for item in value:
+        if isinstance(item, dict):
+            new_item = {}
+            for k, v in item.items():
+                if k == "filename":
+                    new_item[k] = _norm_path_relativize(v)
+                elif isinstance(v, list):
+                    new_item[k] = sorted(v)
+                else:
+                    new_item[k] = "MASKED"
+            result.append(new_item)
+    return sorted(result, key=lambda x: json.dumps(x, sort_keys=True))
+
+
+def _norm_object_compare(value: Any) -> Any:
+    """For object values: keep structure, mask all leaf values."""
+    if isinstance(value, dict):
+        result = {}
+        for k, v in value.items():
+            if isinstance(v, (str, bool, int, float)):
+                result[k] = "MASKED" if isinstance(v, str) else v
+            elif isinstance(v, dict):
+                result[k] = _norm_object_compare(v)
+            elif isinstance(v, list):
+                result[k] = _norm_structure_compare(v)
+            elif v is None:
+                result[k] = None
+            else:
+                result[k] = "MASKED"
+        return result
+    return value
+
+
 def normalize(obj: Any, method: str, path: str = "") -> Any:
     """Recursively normalize `obj` according to the manifest for `method`."""
     if isinstance(obj, dict):
+        # Check for structure_compare at this path (for object-level masking).
+        if _should_apply(path, method, "structure_compare"):
+            return _norm_object_compare(obj)
         result = {}
         for key, val in obj.items():
             child_path = f"{path}.{key}" if path else key
@@ -174,6 +226,9 @@ def normalize(obj: Any, method: str, path: str = "") -> Any:
         return result
 
     if isinstance(obj, list):
+        # Check for files_compare at this path.
+        if _should_apply(path, method, "files_compare"):
+            return _norm_files_compare(obj)
         # Check for structure_compare at this path.
         if _should_apply(path, method, "structure_compare"):
             return _norm_structure_compare(obj)
@@ -242,7 +297,7 @@ class PhobosRunner:
         self.proc: Optional[subprocess.Popen] = None
 
     def start(self) -> None:
-        """Write config, start phobos, wait for it to accept."""
+        """Write config, start phobos, wait for it to accept and stabilize."""
         cfg_path = self.workdir / "phobos.conf"
         cfg_path.write_text(
             f"[server]\n"
@@ -264,10 +319,29 @@ class PhobosRunner:
                 import socket
                 s = socket.create_connection(("127.0.0.1", self.port), timeout=1)
                 s.close()
-                return
+                break
             except Exception:
                 time.sleep(0.2)
-        raise RuntimeError("phobos did not become ready within 10s")
+        else:
+            raise RuntimeError("phobos did not become ready within 10s")
+
+        # Wait for klippy_state to stabilize (KlippyCtx.start() may briefly
+        # show "connecting" before settling on "disconnected").
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                import urllib.request
+                resp = urllib.request.urlopen(
+                    f"http://127.0.0.1:{self.port}/server/info", timeout=2
+                )
+                import json as _json
+                body = _json.loads(resp.read())
+                state = body.get("result", body).get("klippy_state", "")
+                if state == "disconnected":
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
 
     def stop(self) -> None:
         """Terminate phobos."""
@@ -333,7 +407,9 @@ class ReplayEngine:
                     self.failures.append(f"[{idx}] http_get {path}: {e}")
                     continue
 
-                if not normalized_equal(golden_resp, phobos_resp, method):
+                gr = golden_resp.get("result", golden_resp)
+                pr = phobos_resp.get("result", phobos_resp)
+                if not normalized_equal(gr, pr, method):
                     self.failures.append(
                         f"[{idx}] http_get {path}: not normalized-equal\n"
                         f"  method: {method}\n"

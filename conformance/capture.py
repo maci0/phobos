@@ -97,9 +97,13 @@ class OracleCapture:
         # Ensure Moonraker writes its log somewhere isolated.
         log_path = self.workdir / "moonraker.log"
 
+        # Use `uv run` so Moonraker's Python dependencies are available without
+        # requiring a system-wide installation.
         self.proc = subprocess.Popen(
             [
-                sys.executable, "-m", "moonraker",
+                "uv", "run",
+                "--with", "importlib-metadata",
+                "python", "-m", "moonraker",
                 "-c", str(cfg_path),
                 "-l", str(log_path),
             ],
