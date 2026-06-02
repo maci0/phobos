@@ -521,71 +521,166 @@ pub const KlippyCtx = struct {
         }
     }
 
-    /// Dispatch a received JSON-RPC frame. Responses with an id are ignored
-    /// here (they are consumed by `request()` which holds the stream_mutex);
-    /// only notifications reach this path during the background readLoop.
+    /// Dispatch a received JSON-RPC frame from the background readLoop.
+    /// Handles three kinds of frames:
+    /// 1. Notifications (method, no id) — Klippy pushes spontaneous data.
+    /// 2. Remote-method calls (method + id) — Klippy calls a Moonraker handler
+    ///    (process_status_update, process_gcode_response). We process and ack.
+    /// 3. Responses (result/error + id, no method) — consumed by `request()`,
+    ///    which holds `stream_mutex`; they never reach here.
     fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
         const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
         defer parsed.deinit();
 
-        if (isNotification(parsed.value)) {
-            try self.dispatchNotification(io, parsed.value);
-        }
-        // Responses are consumed by request() — nothing to do here.
+        const frame = parsed.value;
 
-        // Forward the raw frame to all bridge clients.
+        // Remote-method call: has both method AND a non-null id.
+        if (frame.object.get("method")) |method_val| {
+            const method_str = method_val.string;
+            const has_id = if (frame.object.get("id")) |id_val| id_val != .null else false;
+
+            if (has_id) {
+                // Klippy is calling a remote method on us. Dispatch and ack.
+                const id = frame.object.get("id").?;
+                try self.dispatchRemoteMethod(io, method_str, frame);
+                try self.sendAck(io, id);
+            } else {
+                // Notification — no id or null id.
+                try self.dispatchNotification(io, method_str, frame);
+            }
+            self.forwardToBridges(payload);
+            return;
+        }
+
+        // Response frame (result/error + id, no method) — consumed by request().
         self.forwardToBridges(payload);
     }
 
-    /// Dispatch a notification frame from the read loop. Uses `emit` (acquires
-    /// Core lock) since the background task does not hold the Core lock.
-    fn dispatchNotification(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        const method = frame.object.get("method") orelse return;
-        const method_str = method.string;
-        if (std.mem.eql(u8, method_str, "notify_status_update")) {
+    /// Send an empty acknowledgment response for a remote-method call.
+    fn sendAck(self: *KlippyCtx, io: std.Io, id: std.json.Value) !void {
+        var ack_buf: [128]u8 = undefined;
+        const id_str = if (id == .string) id.string else "0";
+        const ack = try std.fmt.bufPrint(&ack_buf,
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}", .{id_str});
+        try self.stream_mutex.lock(io);
+        defer self.stream_mutex.unlock(io);
+        try self.writeFrame(io, ack);
+    }
+
+    /// Dispatch a Klippy-initiated remote method call (has both method and id).
+    fn dispatchRemoteMethod(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
+        if (std.mem.eql(u8, method, "process_status_update")) {
             try self.processStatusUpdate(io, frame);
-        } else if (std.mem.eql(u8, method_str, "notify_gcode_response")) {
+        } else if (std.mem.eql(u8, method, "process_gcode_response")) {
             try self.processGcodeResponse(io, frame);
         }
     }
 
-    /// Dispatch a notification frame from within a `request()` call that
-    /// already holds the Core lock. Uses `emitLocked` variants.
-    fn dispatchNotificationLocked(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        const method = frame.object.get("method") orelse return;
-        const method_str = method.string;
-        if (std.mem.eql(u8, method_str, "notify_status_update")) {
+    /// Dispatch a notification frame from the background read loop.
+    /// Uses `emit` (acquires Core lock) since the background task does not
+    /// hold the Core lock.
+    fn dispatchNotification(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
+        if (std.mem.eql(u8, method, "notify_status_update")) {
+            try self.processStatusUpdate(io, frame);
+        } else if (std.mem.eql(u8, method, "notify_gcode_response")) {
+            try self.processGcodeResponse(io, frame);
+        }
+    }
+
+    /// Dispatch a remote-method call or notification from within a `request()`
+    /// call that already holds the Core lock. Uses `emitLocked` variants.
+    fn dispatchInlineLocked(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
+        if (std.mem.eql(u8, method, "process_status_update")) {
             try self.processStatusUpdateLocked(io, frame);
-        } else if (std.mem.eql(u8, method_str, "notify_gcode_response")) {
+        } else if (std.mem.eql(u8, method, "process_gcode_response")) {
+            try self.processGcodeResponseLocked(io, frame);
+        } else if (std.mem.eql(u8, method, "notify_status_update")) {
+            try self.processStatusUpdateLocked(io, frame);
+        } else if (std.mem.eql(u8, method, "notify_gcode_response")) {
             try self.processGcodeResponseLocked(io, frame);
         }
     }
 
-    /// Process a notify_status_update from Klippy (background task path).
+    /// Process a notify_status_update or process_status_update from Klippy.
+    /// Parses the status dict, checks webhooks for state transitions, and fans
+    /// out per-object to subscribed connections.
     fn processStatusUpdate(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
         const params = frame.object.get("params") orelse return;
-        if (params != .array) return;
-        const arr = params.array;
-        if (arr.items.len < 1) return;
-        _ = try self.bus.emitStatus(io, notify.names.status_update, params, "toolhead");
+        try self.processStatusUpdateInner(io, params, false);
     }
 
-    /// Process a notify_status_update from Klippy (handler path, Core locked).
+    /// Locked variant — caller holds Core lock.
     fn processStatusUpdateLocked(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
         const params = frame.object.get("params") orelse return;
-        if (params != .array) return;
-        const arr = params.array;
-        if (arr.items.len < 1) return;
-        _ = try self.bus.emitStatusLocked(io, notify.names.status_update, params, "toolhead");
+        try self.processStatusUpdateInner(io, params, true);
     }
 
-    /// Process a notify_gcode_response from Klippy (background task path).
+    /// Core status-update processing: parse params, check webhooks, fan out
+    /// per-object. `locked` selects emit vs emitLocked.
+    fn processStatusUpdateInner(self: *KlippyCtx, io: std.Io, params: std.json.Value, locked: bool) !void {
+        // Params is a JSON-RPC array: [eventtime, status_dict].
+        if (params != .array) return;
+        const arr = params.array;
+        if (arr.items.len < 2) return;
+
+        const status_dict = arr.items[1];
+        if (status_dict != .object) return;
+
+        // Check webhooks for state transitions.
+        if (status_dict.object.get("webhooks")) |wh_val| {
+            if (wh_val == .object) {
+                if (wh_val.object.get("state")) |state_val| {
+                    if (state_val == .string) {
+                        const st = state_val.string;
+                        if (std.mem.eql(u8, st, "shutdown")) {
+                            if (self.state != .shutdown) {
+                                _ = self.setState(.shutdown);
+                                if (locked) {
+                                    self.bus.emitLocked(io, notify.names.klippy_shutdown, .null) catch {};
+                                } else {
+                                    self.bus.emit(io, notify.names.klippy_shutdown, .null) catch {};
+                                }
+                            }
+                        } else if (std.mem.eql(u8, st, "ready")) {
+                            if (self.state != .ready) {
+                                _ = self.setState(.ready);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fan out each object to connections subscribed to that object name.
+        var it = status_dict.object.iterator();
+        while (it.next()) |entry| {
+            const obj_name = entry.key_ptr.*;
+            // Build per-object status params: [eventtime, {obj_name: obj_data}].
+            var per_obj_map: std.json.ObjectMap = .empty;
+            try per_obj_map.put(std.heap.smp_allocator, obj_name, entry.value_ptr.*);
+            const per_obj_val = std.json.Value{ .object = per_obj_map };
+
+            var params_arr: std.json.Array = .init(std.heap.smp_allocator);
+            try params_arr.append(arr.items[0]);
+            try params_arr.append(per_obj_val);
+            const params_array = std.json.Value{ .array = params_arr };
+
+            if (locked) {
+                _ = self.bus.emitStatusLocked(io, notify.names.status_update, params_array, obj_name) catch {};
+            } else {
+                _ = self.bus.emitStatus(io, notify.names.status_update, params_array, obj_name) catch {};
+            }
+        }
+    }
+
+    /// Process a notify_gcode_response or process_gcode_response from Klippy.
     fn processGcodeResponse(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
         const params = frame.object.get("params") orelse return;
+        // Moonraker sends "server:gcode_response" event; match it via notify bus.
         _ = try self.bus.emit(io, notify.names.gcode_response, params);
     }
 
-    /// Process a notify_gcode_response from Klippy (handler path, Core locked).
+    /// Locked variant — caller holds Core lock.
     fn processGcodeResponseLocked(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
         const params = frame.object.get("params") orelse return;
         _ = try self.bus.emitLocked(io, notify.names.gcode_response, params);
@@ -702,9 +797,15 @@ pub const KlippyCtx = struct {
                 // request-in-flight model, but be safe).
             }
 
-            // Not our response — dispatch notification inline (caller holds Core lock).
-            if (isNotification(parsed.value)) {
-                try self.dispatchNotificationLocked(io, parsed.value);
+            // Not our response — dispatch inline (caller holds Core lock).
+            if (parsed.value.object.get("method")) |method_val| {
+                const has_id = if (parsed.value.object.get("id")) |id_val| id_val != .null else false;
+                if (has_id) {
+                    try self.dispatchRemoteMethod(io, method_val.string, parsed.value);
+                    try self.sendAck(io, parsed.value.object.get("id").?);
+                } else {
+                    try self.dispatchNotification(io, method_val.string, parsed.value);
+                }
             }
 
             // Forward every frame to bridge clients so /klippysocket sees

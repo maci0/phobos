@@ -13,6 +13,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
+- **Overall implementation progress: ~65%** (64.7% weighted by API item count per component).
+  See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - Tests: **619 pass / 3 skip / 0 fail** (92 fuzz). Verified by running test binary
@@ -26,7 +28,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - This host's **system glibc cannot be linked** by Zig 0.16 (GCC 16 `.sframe` reloc).
   The build defaults the native target to **musl**, so normal commands work — but
   **never run plain `zig build` against a glibc target**.
-- Default build links the **vendored lmdb** (`third_party/lmdb/`, LMDB 0.9.31).
+- Default build links the **vendored lmdb** (`vendor/lmdb/`, LMDB 0.9.31).
   - Full suite (lmdb): `timeout 220 zig build test --summary all`
   - No-lmdb (faster, no C compile): `zig build test -Dwith_lmdb=false`
   - Single non-`../`-importing file: `zig test -target x86_64-linux-musl src/<f>.zig`

@@ -41,12 +41,12 @@ pub fn build(b: *std.Build) void {
 }
 
 /// Compile the vendored liblmdb C sources into `module` and expose its headers.
-/// We vendor `third_party/lmdb/{mdb.c,midl.c}` rather than linking a system
+/// We vendor `vendor/lmdb/{mdb.c,midl.c}` rather than linking a system
 /// liblmdb so the on-disk format is pinned and the build is fully static.
 fn addVendoredLmdb(b: *std.Build, module: *std.Build.Module) void {
-    module.addIncludePath(b.path("third_party/lmdb"));
+    module.addIncludePath(b.path("vendor/lmdb"));
     module.addCSourceFiles(.{
-        .root = b.path("third_party/lmdb"),
+        .root = b.path("vendor/lmdb"),
         .files = &.{ "mdb.c", "midl.c" },
         .flags = &.{
             "-O2",

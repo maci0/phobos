@@ -4,7 +4,7 @@
 //! rather than relying on `@cImport`, which keeps the surface small, lets the
 //! no-lmdb build configuration compile this file out cleanly, and documents
 //! exactly which symbols we depend on. The declarations mirror `lmdb.h` from
-//! the vendored LMDB 0.9.31 (see `third_party/lmdb/`).
+//! the vendored LMDB 0.9.31 (see `vendor/lmdb/`).
 //!
 //! Only used when `build_options.with_lmdb` is true.
 

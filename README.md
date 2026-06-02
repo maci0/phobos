@@ -22,6 +22,8 @@ on a **32-bit ARM Cortex-A7** printer host.
 
 ## Status
 
+- **~65% overall implementation progress** (API surface 100%, implementation depth 64.7%
+  weighted by component — see [coverage heatmap](docs/api/COVERAGE_HEATMAP.md)).
 - **100% of Moonraker's API surface is covered**: 120/120 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
@@ -71,7 +73,7 @@ src/
   core/methods.zig        server.info / server.config
   components/*.zig        one module per Moonraker component
   testutil/               TestServer + HTTP/WS test clients
-third_party/lmdb/         vendored LMDB 0.9.31 C sources
+vendor/lmdb/         vendored LMDB 0.9.31 C sources
 tools/api_scanner/        Moonraker API extractor + drift + coverage tooling
 api/api_surface.json      authoritative API baseline (generated)
 docs/                     specs, plans, API surface, test findings, coverage map
@@ -120,10 +122,11 @@ PYTHONPATH=tools python3 -m api_scanner diff --source vendor/moonraker/moonraker
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — how to build, test, and add a component.
 - [`docs/superpowers/specs/`](docs/superpowers/specs) — design spec.
 - [`docs/api/API_SURFACE.md`](docs/api/API_SURFACE.md) — the API contract.
+- [`docs/api/COVERAGE_HEATMAP.md`](docs/api/COVERAGE_HEATMAP.md) — per-component coverage heatmap and depth scores.
 - [`docs/TEST_RUN_FINDINGS.md`](docs/TEST_RUN_FINDINGS.md) — why upstream's own test suite
   can't be used as the parity oracle.
 
 ## License
 
 The phobos source follows the upstream project's license intent (GPL-3.0-only, matching
-Moonraker). Vendored LMDB under `third_party/lmdb/` retains its original OpenLDAP license.
+Moonraker). Vendored LMDB under `vendor/lmdb/` retains its original OpenLDAP license.
