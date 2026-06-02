@@ -92,6 +92,51 @@ pub const HistoryCtx = struct {
         }
     }
 
+    /// Called on Klippy shutdown while a job is active.
+    /// Finishes the current job with status "klippy_shutdown".
+    pub fn handleKlippyShutdown(self: *HistoryCtx, last_ps: std.json.ObjectMap) void {
+        self.finishJob("klippy_shutdown", last_ps) catch {};
+    }
+
+    /// Called on Klippy disconnect while a job is active.
+    /// Finishes the current job with status "klippy_disconnect".
+    pub fn handleKlippyDisconnect(self: *HistoryCtx, last_ps: std.json.ObjectMap) void {
+        self.finishJob("klippy_disconnect", last_ps) catch {};
+    }
+
+    /// Called on server exit while a job is active.
+    /// Finishes the current job with status "server_exit".
+    pub fn handleServerExit(self: *HistoryCtx, last_ps: std.json.ObjectMap) void {
+        self.finishJob("server_exit", last_ps) catch {};
+    }
+
+    /// On startup, mark any stale "in_progress" jobs as "interrupted".
+    /// Mirrors Moonraker's component_init interrupted-job detection.
+    pub fn markInterruptedJobs(self: *HistoryCtx) !void {
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const all = try loadAllJobs(self, a);
+        for (all) |je| {
+            if (je.val != .object) continue;
+            const status_val = je.val.object.get("status") orelse continue;
+            if (status_val != .string) continue;
+            if (!std.mem.eql(u8, status_val.string, "in_progress")) continue;
+
+            var updated: std.json.ObjectMap = .empty;
+            var it = je.val.object.iterator();
+            while (it.next()) |kv| {
+                if (std.mem.eql(u8, kv.key_ptr.*, "status")) {
+                    try updated.put(a, "status", .{ .string = "interrupted" });
+                } else {
+                    try updated.put(a, kv.key_ptr.*, kv.value_ptr.*);
+                }
+            }
+            try self.store.updateItem(a, ns_history, je.key, .{ .object = updated });
+        }
+    }
+
     /// Create a new job record from print_stats and persist it.
     fn addJob(self: *HistoryCtx, pstats: std.json.ObjectMap) !void {
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
@@ -145,6 +190,25 @@ pub const HistoryCtx = struct {
         const stored = try self.store.getItem(a, ns_history, job_id_str);
         if (stored == null) return;
 
+        // Stats guard (matches Moonraker finish_job guard):
+        // discard print_stats if they belong to a different job or were reset.
+        var p = pstats;
+        const stored_fn = if (stored.?.object.get("filename")) |v| switch (v) { .string => |s| s, else => "" } else "";
+        const stored_td: f64 = switch (stored.?.object.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => 0.0,
+        };
+        const pstat_fn = if (pstats.get("filename")) |v| switch (v) { .string => |s| s, else => "" } else "";
+        const pstat_td: f64 = switch (pstats.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => 0.0,
+        };
+        if (!std.mem.eql(u8, stored_fn, pstat_fn) or pstat_td < stored_td) {
+            p = .empty;
+        }
+
         var job_obj: std.json.ObjectMap = .empty;
         if (stored.?.object.get("start_time")) |st| {
             try job_obj.put(a, "start_time", st);
@@ -153,22 +217,22 @@ pub const HistoryCtx = struct {
         }
 
         const end_time = self.nowSecs();
-        const total_duration: f64 = switch (pstats.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
+        const total_duration: f64 = switch (p.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
             .float => |f| f,
             .integer => |i| @floatFromInt(i),
             else => 0.0,
         };
-        const print_duration: f64 = switch (pstats.get("print_duration") orelse std.json.Value{ .float = 0.0 }) {
+        const print_duration: f64 = switch (p.get("print_duration") orelse std.json.Value{ .float = 0.0 }) {
             .float => |f| f,
             .integer => |i| @floatFromInt(i),
             else => 0.0,
         };
-        const filament_used: f64 = switch (pstats.get("filament_used") orelse std.json.Value{ .float = 0.0 }) {
+        const filament_used: f64 = switch (p.get("filament_used") orelse std.json.Value{ .float = 0.0 }) {
             .float => |f| f,
             .integer => |i| @floatFromInt(i),
             else => 0.0,
         };
-        const filename = if (pstats.get("filename")) |v| switch (v) { .string => |s| s, else => "unknown" } else "unknown";
+        const filename = if (p.get("filename")) |v| switch (v) { .string => |s| s, else => "unknown" } else stored_fn;
 
         // Update job record.
         try job_obj.put(a, "filename", .{ .string = filename });
@@ -1249,6 +1313,274 @@ test "onJobStateChanged paused/resumed: no-op in history" {
     const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
     const stored = try mem.dataStore().getItem(a, "history", id_str);
     try testing.expectEqualStrings("in_progress", stored.?.object.get("status").?.string);
+}
+
+test "handleKlippyShutdown: finishes in-progress job as klippy_shutdown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "print.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    const job_id = ctx.current_job_id.?;
+
+    var last_ps: std.json.ObjectMap = .empty;
+    try last_ps.put(a, "filename", .{ .string = "print.gcode" });
+    try last_ps.put(a, "total_duration", .{ .float = 300.0 });
+    try last_ps.put(a, "print_duration", .{ .float = 250.0 });
+    try last_ps.put(a, "filament_used", .{ .float = 12.5 });
+    ctx.handleKlippyShutdown(last_ps);
+
+    try testing.expectEqual(@as(?u64, null), ctx.current_job_id);
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(stored != null);
+    try testing.expectEqualStrings("klippy_shutdown", stored.?.object.get("status").?.string);
+    try testing.expectEqual(@as(f64, 300.0), stored.?.object.get("total_duration").?.float);
+}
+
+test "handleKlippyDisconnect: finishes in-progress job as klippy_disconnect" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "print.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    const job_id = ctx.current_job_id.?;
+
+    var last_ps: std.json.ObjectMap = .empty;
+    try last_ps.put(a, "filename", .{ .string = "print.gcode" });
+    try last_ps.put(a, "total_duration", .{ .float = 150.0 });
+    ctx.handleKlippyDisconnect(last_ps);
+
+    try testing.expectEqual(@as(?u64, null), ctx.current_job_id);
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(stored != null);
+    try testing.expectEqualStrings("klippy_disconnect", stored.?.object.get("status").?.string);
+}
+
+test "handleServerExit: finishes in-progress job as server_exit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "print.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    const job_id = ctx.current_job_id.?;
+
+    var last_ps: std.json.ObjectMap = .empty;
+    try last_ps.put(a, "filename", .{ .string = "print.gcode" });
+    try last_ps.put(a, "total_duration", .{ .float = 500.0 });
+    ctx.handleServerExit(last_ps);
+
+    try testing.expectEqual(@as(?u64, null), ctx.current_job_id);
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(stored != null);
+    try testing.expectEqualStrings("server_exit", stored.?.object.get("status").?.string);
+}
+
+test "handleKlippyShutdown with no in-progress job is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    const last_ps: std.json.ObjectMap = .empty;
+    ctx.handleKlippyShutdown(last_ps);
+    try testing.expectEqual(@as(?u64, null), ctx.current_job_id);
+}
+
+test "markInterruptedJobs: marks in_progress as interrupted" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var job_obj: std.json.ObjectMap = .empty;
+    try job_obj.put(a, "filename", .{ .string = "stale.gcode" });
+    try job_obj.put(a, "status", .{ .string = "in_progress" });
+    try job_obj.put(a, "start_time", .{ .float = 1000.0 });
+    try job_obj.put(a, "end_time", .{ .float = 0.0 });
+    try job_obj.put(a, "print_duration", .{ .float = 0.0 });
+    try job_obj.put(a, "total_duration", .{ .float = 0.0 });
+    try job_obj.put(a, "filament_used", .{ .float = 0.0 });
+    try job_obj.put(a, "metadata", .{ .object = .empty });
+    try job_obj.put(a, "auxiliary_data", .{ .array = .init(a) });
+    try job_obj.put(a, "user", .{ .string = "" });
+    try mem.dataStore().insertItem(a, "history", "000001", .{ .object = job_obj });
+
+    var done_obj: std.json.ObjectMap = .empty;
+    try done_obj.put(a, "filename", .{ .string = "done.gcode" });
+    try done_obj.put(a, "status", .{ .string = "completed" });
+    try done_obj.put(a, "start_time", .{ .float = 500.0 });
+    try done_obj.put(a, "end_time", .{ .float = 1000.0 });
+    try done_obj.put(a, "print_duration", .{ .float = 400.0 });
+    try done_obj.put(a, "total_duration", .{ .float = 500.0 });
+    try done_obj.put(a, "filament_used", .{ .float = 10.0 });
+    try done_obj.put(a, "metadata", .{ .object = .empty });
+    try done_obj.put(a, "auxiliary_data", .{ .array = .init(a) });
+    try done_obj.put(a, "user", .{ .string = "" });
+    try mem.dataStore().insertItem(a, "history", "000002", .{ .object = done_obj });
+
+    try ctx.markInterruptedJobs();
+
+    const stale = try mem.dataStore().getItem(a, "history", "000001");
+    try testing.expect(stale != null);
+    try testing.expectEqualStrings("interrupted", stale.?.object.get("status").?.string);
+
+    const done = try mem.dataStore().getItem(a, "history", "000002");
+    try testing.expect(done != null);
+    try testing.expectEqualStrings("completed", done.?.object.get("status").?.string);
+}
+
+test "markInterruptedJobs: no in_progress jobs is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    try ctx.markInterruptedJobs();
+}
+
+test "finishJob stats guard: discards stats with wrong filename" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps_start: std.json.ObjectMap = .empty;
+    try ps_start.put(a, "filename", .{ .string = "original.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps_start);
+    const job_id = ctx.current_job_id.?;
+
+    var wrong_ps: std.json.ObjectMap = .empty;
+    try wrong_ps.put(a, "filename", .{ .string = "different.gcode" });
+    try wrong_ps.put(a, "total_duration", .{ .float = 999.0 });
+    try wrong_ps.put(a, "print_duration", .{ .float = 888.0 });
+    try wrong_ps.put(a, "filament_used", .{ .float = 777.0 });
+    ctx.onJobStateChanged(JobEvent.complete, wrong_ps, wrong_ps);
+
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(stored != null);
+    try testing.expectEqualStrings("original.gcode", stored.?.object.get("filename").?.string);
+    try testing.expectEqual(@as(f64, 0.0), stored.?.object.get("total_duration").?.float);
+    try testing.expectEqual(@as(f64, 0.0), stored.?.object.get("print_duration").?.float);
+    try testing.expectEqual(@as(f64, 0.0), stored.?.object.get("filament_used").?.float);
+}
+
+test "finishJob stats guard: discards stats when total_duration went backwards" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps_start: std.json.ObjectMap = .empty;
+    try ps_start.put(a, "filename", .{ .string = "print.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps_start);
+    const job_id = ctx.current_job_id.?;
+
+    // Manually update the stored job to have a higher total_duration.
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    var stored = try mem.dataStore().getItem(a, "history", id_str);
+    try stored.?.object.put(a, "total_duration", .{ .float = 500.0 });
+    try mem.dataStore().updateItem(a, "history", id_str, stored.?);
+
+    // Finish with stats that have lower total_duration (reset).
+    var reset_ps: std.json.ObjectMap = .empty;
+    try reset_ps.put(a, "filename", .{ .string = "print.gcode" });
+    try reset_ps.put(a, "total_duration", .{ .float = 100.0 });
+    try reset_ps.put(a, "print_duration", .{ .float = 90.0 });
+    ctx.onJobStateChanged(JobEvent.complete, reset_ps, reset_ps);
+
+    const final_stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(final_stored != null);
+    try testing.expectEqual(@as(f64, 0.0), final_stored.?.object.get("total_duration").?.float);
+    try testing.expectEqual(@as(f64, 0.0), final_stored.?.object.get("print_duration").?.float);
+}
+
+test "fuzz handleKlippyShutdown/Disconnect/ServerExit: never panics" {
+    const Runner = struct {
+        fn run() void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var bus: NotifyBus = undefined;
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+            var ps: std.json.ObjectMap = .empty;
+            ps.put(a, "filename", .{ .string = "fuzz.gcode" }) catch {};
+            ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+
+            var stats: std.json.ObjectMap = .empty;
+            stats.put(a, "filename", .{ .string = "fuzz.gcode" }) catch {};
+
+            ctx.handleKlippyShutdown(stats);
+            ctx.current_job_id = null;
+
+            // Restart and try disconnect.
+            ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+            ctx.handleKlippyDisconnect(stats);
+            ctx.current_job_id = null;
+
+            // Restart and try server exit.
+            ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+            ctx.handleServerExit(stats);
+            ctx.current_job_id = null;
+
+            // markInterruptedJobs on empty store should not panic.
+            ctx.markInterruptedJobs() catch {};
+        }
+    }.run;
+    Runner();
 }
 
 // ---------------------------------------------------------------------------

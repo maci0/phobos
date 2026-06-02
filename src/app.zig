@@ -43,6 +43,7 @@ const td1_component = @import("components/td1.zig");
 const printer_component = @import("components/printer.zig");
 const klippy_connection_component = @import("components/klippy_connection.zig");
 const octoprint_component = @import("components/octoprint_compat.zig");
+const button_component = @import("components/button.zig");
 const zeroconf_component = @import("components/zeroconf.zig");
 const ds = @import("store/datastore.zig");
 const config_helper = @import("config/confighelper.zig");
@@ -75,6 +76,7 @@ const UpdateSource = update_manager_component.Source;
 const PowerCtx = power_component.PowerCtx;
 const WledCtx = wled_component.WledCtx;
 const Td1Ctx = td1_component.Td1Ctx;
+const ButtonCtx = button_component.ButtonCtx;
 const PrinterCtx = printer_component.PrinterCtx;
 const KlippyConnectionCtx = klippy_connection_component.KlippyCtx;
 const OctoPrintCtx = octoprint_component.OctoPrintCtx;
@@ -166,6 +168,7 @@ pub const App = struct {
     power_ctx: *PowerCtx,
     wled_ctx: *WledCtx,
     td1_ctx: *Td1Ctx,
+    button_ctx: *ButtonCtx,
     printer_ctx: *PrinterCtx,
     klippy_ctx: *KlippyConnectionCtx,
     octoprint_ctx: *OctoPrintCtx,
@@ -263,6 +266,9 @@ pub const App = struct {
         job_state_ctx.history = history_ctx;
         job_state_ctx.job_queue = job_queue_ctx;
 
+        // Mark any jobs left "in_progress" from a previous run as interrupted.
+        history_ctx.markInterruptedJobs() catch {};
+
         // --- Announcements context ---
         const announcements_ctx = try alloc.create(AnnouncementsCtx);
         errdefer alloc.destroy(announcements_ctx);
@@ -291,7 +297,7 @@ pub const App = struct {
         // --- Sensor context (sensors list/info/measurements) ---
         const sensor_ctx = try alloc.create(SensorCtx);
         errdefer alloc.destroy(sensor_ctx);
-        sensor_ctx.* = .{};
+        sensor_ctx.* = SensorCtx.init(alloc, bus);
 
         // --- Authorization context (access.* + auth hook) ---
         const auth_ctx = try alloc.create(AuthCtx);
@@ -396,6 +402,10 @@ pub const App = struct {
         errdefer alloc.destroy(td1_ctx);
         td1_ctx.* = .{};
 
+        const button_ctx = try alloc.create(ButtonCtx);
+        errdefer alloc.destroy(button_ctx);
+        button_ctx.* = ButtonCtx.init(alloc, bus);
+
         // --- Printer context (printer.* — Klippy-disconnected stubs) ---
         const printer_ctx = try alloc.create(PrinterCtx);
         errdefer alloc.destroy(printer_ctx);
@@ -407,6 +417,7 @@ pub const App = struct {
         klippy_ctx.* = try KlippyConnectionCtx.init(alloc, bus);
         klippy_ctx.server_info = info;
         klippy_ctx.job_state = job_state_ctx;
+        klippy_ctx.history = history_ctx;
 
         // Wire Klippy dispatch into the job queue so it can start/pause prints.
         job_queue_ctx.setKlippyDispatch(@ptrCast(klippy_ctx), &jobQueueKlippyDispatch);
@@ -450,6 +461,7 @@ pub const App = struct {
             .power_ctx = power_ctx,
             .wled_ctx = wled_ctx,
             .td1_ctx = td1_ctx,
+            .button_ctx = button_ctx,
             .printer_ctx = printer_ctx,
             .klippy_ctx = klippy_ctx,
             .octoprint_ctx = octoprint_ctx,
@@ -477,12 +489,18 @@ pub const App = struct {
         };
         self.cfg = cfg;
         self.info.cfg = cfg;
+        self.info.config_file_path = config_path;
     }
 
     /// Free all owned resources. `io` is required only for the Connections
     /// registry teardown which needs an Io-aware mutex; pass a threaded io or
     /// use `deinitNoIo` in pure unit tests where no event loop is running.
     pub fn deinit(self: *App, io: std.Io) void {
+        self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
+        // Stop the machine proc_stat timer thread before tearing down
+        // connections (the timer thread may access conns within emitProcStatUpdate).
+        self.machine_ctx.deinit();
+        self.alloc.destroy(self.machine_ctx);
         self.conns.deinit(io);
         self.reg.deinit();
         self.dispatcher.deinit();
@@ -496,14 +514,14 @@ pub const App = struct {
         self.alloc.free(self.file_roots);
         self.alloc.free(self.datadir);
         self.alloc.destroy(self.file_ctx);
-        self.machine_ctx.deinit();
-        self.alloc.destroy(self.machine_ctx);
         self.alloc.destroy(self.update_ctx);
         self.power_ctx.deinit();
         self.alloc.destroy(self.power_ctx);
         self.wled_ctx.deinit();
         self.alloc.destroy(self.wled_ctx);
         self.alloc.destroy(self.td1_ctx);
+        self.button_ctx.deinit();
+        self.alloc.destroy(self.button_ctx);
         self.alloc.destroy(self.printer_ctx);
         self.klippy_ctx.deinit();
         self.alloc.destroy(self.klippy_ctx);
@@ -516,7 +534,7 @@ pub const App = struct {
             self.lmdb_store_ptr.close();
             self.alloc.destroy(self.lmdb_store_ptr);
         }
-        self.sensor_ctx.* = .{};
+        self.sensor_ctx.deinit();
         self.alloc.destroy(self.sensor_ctx);
         self.webcam_ctx.deinit();
         self.alloc.destroy(self.webcam_ctx);
@@ -613,6 +631,9 @@ pub const App = struct {
         // TD-1 component: machine.td1.* endpoints.
         try td1_component.registerTd1(self.reg, self.td1_ctx);
 
+        // Button component: notify_button_event (notification-only).
+        try button_component.registerButton(self.reg, self.button_ctx);
+
         // Printer component: printer.* endpoints (proxied to Klippy). With no
         // Klippy connection every handler returns the 503 disconnected error.
         try printer_component.registerPrinter(self.reg, self.printer_ctx);
@@ -663,6 +684,9 @@ pub const App = struct {
         self.update_ctx.setIo(io);
         // Wire io into the power component so it can emit notify_power_changed.
         self.power_ctx.setIo(io);
+        // Wire io into the button component so it can emit notify_button_event.
+        self.button_ctx.setIo(io);
+        self.sensor_ctx.setIo(io);
         // Wire io into the job queue so it can emit notify_job_queue_changed.
         self.job_queue_ctx.setIo(io);
         // Wire io into the history component so it can emit notify_history_changed.

@@ -1,0 +1,926 @@
+{
+  "moonraker_commit": "9008485",
+  "port": 7020,
+  "stream": [
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/info"
+      },
+      "response": {
+        "result": {
+          "api_version": [
+            1,
+            5,
+            0
+          ],
+          "api_version_string": "1.5.0",
+          "components": [
+            "secrets",
+            "template",
+            "klippy_connection",
+            "jsonrpc",
+            "internal_transport",
+            "application",
+            "websockets",
+            "database",
+            "dbus_manager",
+            "file_manager",
+            "authorization",
+            "klippy_apis",
+            "shell_command",
+            "machine",
+            "data_store",
+            "proc_stats",
+            "job_state",
+            "job_queue",
+            "history",
+            "http_client",
+            "announcements",
+            "webcam",
+            "extensions"
+          ],
+          "failed_components": [],
+          "klippy_connected": false,
+          "klippy_state": "disconnected",
+          "missing_klippy_requirements": [],
+          "moonraker_version": "v0.10.0-20-g9008485",
+          "registered_directories": [
+            "config",
+            "logs",
+            "gcodes"
+          ],
+          "warnings": [],
+          "websocket_count": 0
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/config"
+      },
+      "response": {
+        "result": {
+          "config": {
+            "announcements": {
+              "dev_mode": false,
+              "subscriptions": []
+            },
+            "authorization": {
+              "cors_domains": [],
+              "default_source": "moonraker",
+              "enable_api_key": true,
+              "force_logins": false,
+              "login_timeout": 90,
+              "max_login_attempts": null,
+              "trusted_clients": [
+                "127.0.0.1"
+              ]
+            },
+            "data_store": {
+              "gcode_store_size": 0,
+              "temperature_store_size": 0
+            },
+            "database": {
+              "database_path": null,
+              "enable_database_debug": false
+            },
+            "dbus_manager": {},
+            "extensions": {},
+            "file_manager": {
+              "check_klipper_config_path": true,
+              "config_path": null,
+              "default_metadata_parser_timeout": 20.0,
+              "enable_config_write_access": true,
+              "enable_inotify_warnings": true,
+              "enable_object_processing": false,
+              "enable_observer_warnings": true,
+              "file_system_observer": "inotify",
+              "log_path": null,
+              "queue_gcode_uploads": false
+            },
+            "history": {},
+            "http_client": {},
+            "job_queue": {
+              "automatic_transition": false,
+              "job_transition_delay": 0.01,
+              "job_transition_gcode": "",
+              "load_on_startup": false
+            },
+            "job_state": {},
+            "klippy_apis": {},
+            "machine": {
+              "force_validation": false,
+              "provider": "none",
+              "shutdown_action": "poweroff",
+              "sudo_password": null,
+              "validate_config": true,
+              "validate_service": true
+            },
+            "proc_stats": {},
+            "secrets": {
+              "secrets_path": null
+            },
+            "server": {
+              "enable_debug_logging": false,
+              "host": "127.0.0.1",
+              "klippy_uds_address": "/tmp/phobos-oracle-nonexistent-klippy.sock",
+              "max_upload_size": 1024,
+              "max_websocket_connections": 50,
+              "port": 7020,
+              "route_prefix": null,
+              "ssl_certificate_path": null,
+              "ssl_key_path": null,
+              "ssl_port": 7130
+            },
+            "shell_command": {},
+            "template": {},
+            "webcam": {}
+          },
+          "files": [
+            {
+              "filename": "moonraker.conf",
+              "sections": [
+                "server",
+                "authorization",
+                "machine",
+                "data_store"
+              ]
+            }
+          ],
+          "orig": {
+            "DEFAULT": {},
+            "authorization": {
+              "trusted_clients": "\n127.0.0.1"
+            },
+            "data_store": {
+              "gcode_store_size": "0",
+              "temperature_store_size": "0"
+            },
+            "machine": {
+              "provider": "none"
+            },
+            "server": {
+              "host": "127.0.0.1",
+              "klippy_uds_address": "/tmp/phobos-oracle-nonexistent-klippy.sock",
+              "port": "7020"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "server.info"
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "api_version": [
+            1,
+            5,
+            0
+          ],
+          "api_version_string": "1.5.0",
+          "components": [
+            "secrets",
+            "template",
+            "klippy_connection",
+            "jsonrpc",
+            "internal_transport",
+            "application",
+            "websockets",
+            "database",
+            "dbus_manager",
+            "file_manager",
+            "authorization",
+            "klippy_apis",
+            "shell_command",
+            "machine",
+            "data_store",
+            "proc_stats",
+            "job_state",
+            "job_queue",
+            "history",
+            "http_client",
+            "announcements",
+            "webcam",
+            "extensions"
+          ],
+          "failed_components": [],
+          "klippy_connected": false,
+          "klippy_state": "disconnected",
+          "missing_klippy_requirements": [],
+          "moonraker_version": "v0.10.0-20-g9008485",
+          "registered_directories": [
+            "config",
+            "logs",
+            "gcodes"
+          ],
+          "warnings": [],
+          "websocket_count": 0
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "server.config"
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "config": {
+            "announcements": {
+              "dev_mode": false,
+              "subscriptions": []
+            },
+            "authorization": {
+              "cors_domains": [],
+              "default_source": "moonraker",
+              "enable_api_key": true,
+              "force_logins": false,
+              "login_timeout": 90,
+              "max_login_attempts": null,
+              "trusted_clients": [
+                "127.0.0.1"
+              ]
+            },
+            "data_store": {
+              "gcode_store_size": 0,
+              "temperature_store_size": 0
+            },
+            "database": {
+              "database_path": null,
+              "enable_database_debug": false
+            },
+            "dbus_manager": {},
+            "extensions": {},
+            "file_manager": {
+              "check_klipper_config_path": true,
+              "config_path": null,
+              "default_metadata_parser_timeout": 20.0,
+              "enable_config_write_access": true,
+              "enable_inotify_warnings": true,
+              "enable_object_processing": false,
+              "enable_observer_warnings": true,
+              "file_system_observer": "inotify",
+              "log_path": null,
+              "queue_gcode_uploads": false
+            },
+            "history": {},
+            "http_client": {},
+            "job_queue": {
+              "automatic_transition": false,
+              "job_transition_delay": 0.01,
+              "job_transition_gcode": "",
+              "load_on_startup": false
+            },
+            "job_state": {},
+            "klippy_apis": {},
+            "machine": {
+              "force_validation": false,
+              "provider": "none",
+              "shutdown_action": "poweroff",
+              "sudo_password": null,
+              "validate_config": true,
+              "validate_service": true
+            },
+            "proc_stats": {},
+            "secrets": {
+              "secrets_path": null
+            },
+            "server": {
+              "enable_debug_logging": false,
+              "host": "127.0.0.1",
+              "klippy_uds_address": "/tmp/phobos-oracle-nonexistent-klippy.sock",
+              "max_upload_size": 1024,
+              "max_websocket_connections": 50,
+              "port": 7020,
+              "route_prefix": null,
+              "ssl_certificate_path": null,
+              "ssl_key_path": null,
+              "ssl_port": 7130
+            },
+            "shell_command": {},
+            "template": {},
+            "webcam": {}
+          },
+          "files": [
+            {
+              "filename": "moonraker.conf",
+              "sections": [
+                "server",
+                "authorization",
+                "machine",
+                "data_store"
+              ]
+            }
+          ],
+          "orig": {
+            "DEFAULT": {},
+            "authorization": {
+              "trusted_clients": "\n127.0.0.1"
+            },
+            "data_store": {
+              "gcode_store_size": "0",
+              "temperature_store_size": "0"
+            },
+            "machine": {
+              "provider": "none"
+            },
+            "server": {
+              "host": "127.0.0.1",
+              "klippy_uds_address": "/tmp/phobos-oracle-nonexistent-klippy.sock",
+              "port": "7020"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "ws_jsonrpc",
+      "request": {
+        "id": 101,
+        "jsonrpc": "2.0",
+        "method": "server.info"
+      },
+      "response": {
+        "id": 101,
+        "jsonrpc": "2.0",
+        "result": {
+          "api_version": [
+            1,
+            5,
+            0
+          ],
+          "api_version_string": "1.5.0",
+          "components": [
+            "secrets",
+            "template",
+            "klippy_connection",
+            "jsonrpc",
+            "internal_transport",
+            "application",
+            "websockets",
+            "database",
+            "dbus_manager",
+            "file_manager",
+            "authorization",
+            "klippy_apis",
+            "shell_command",
+            "machine",
+            "data_store",
+            "proc_stats",
+            "job_state",
+            "job_queue",
+            "history",
+            "http_client",
+            "announcements",
+            "webcam",
+            "extensions"
+          ],
+          "failed_components": [],
+          "klippy_connected": false,
+          "klippy_state": "disconnected",
+          "missing_klippy_requirements": [],
+          "moonraker_version": "v0.10.0-20-g9008485",
+          "registered_directories": [
+            "config",
+            "logs",
+            "gcodes"
+          ],
+          "warnings": [],
+          "websocket_count": 1
+        }
+      }
+    },
+    {
+      "kind": "ws_jsonrpc",
+      "request": {
+        "id": 102,
+        "jsonrpc": "2.0",
+        "method": "server.connection.identify",
+        "params": {
+          "client_name": "oracle",
+          "type": "web",
+          "url": "http://localhost",
+          "version": "1.0"
+        }
+      },
+      "response": {
+        "id": 102,
+        "jsonrpc": "2.0",
+        "result": {
+          "connection_id": 139914969614288
+        }
+      }
+    },
+    {
+      "kind": "ws_jsonrpc",
+      "request": {
+        "id": 103,
+        "jsonrpc": "2.0",
+        "method": "server.websocket.id"
+      },
+      "response": {
+        "id": 103,
+        "jsonrpc": "2.0",
+        "result": {
+          "websocket_id": 139914976901024
+        }
+      }
+    },
+    {
+      "kind": "ws_notification",
+      "request": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "method": "notify_proc_stat_update",
+        "params": [
+          {
+            "cpu_temp": 61.875,
+            "moonraker_stats": {
+              "cpu_usage": 1.27,
+              "mem_units": "kB",
+              "memory": 57336,
+              "time": 1780376653.5118635
+            },
+            "network": {
+              "d22b8fca1687": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129756,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "docker0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 117150,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "enp125s0f4u1": {
+                "bandwidth": 34373.28,
+                "rx_bytes": 50164111554,
+                "rx_drop": 557261,
+                "rx_errs": 0,
+                "rx_packets": 43590418,
+                "tx_bytes": 32610754337,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 38508157
+              },
+              "enp14s0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 2,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "lo": {
+                "bandwidth": 34572.95,
+                "rx_bytes": 1289465850,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 2686900,
+                "tx_bytes": 1289465850,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 2686900
+              },
+              "virbr0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr1": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr2": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "ztklhw5udj": {
+                "bandwidth": 0.0,
+                "rx_bytes": 33162138,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 198871,
+                "tx_bytes": 191196649,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 166200
+              }
+            },
+            "system_cpu_usage": {
+              "cpu": 3.09,
+              "cpu0": 23.23,
+              "cpu1": 11.88,
+              "cpu10": 9.09,
+              "cpu11": 3.0,
+              "cpu12": 2.0,
+              "cpu13": 0.0,
+              "cpu14": 3.96,
+              "cpu15": 1.0,
+              "cpu16": 1.0,
+              "cpu17": 2.02,
+              "cpu18": 0.0,
+              "cpu19": 0.0,
+              "cpu2": 2.97,
+              "cpu20": 0.0,
+              "cpu21": 1.98,
+              "cpu22": 0.0,
+              "cpu23": 0.0,
+              "cpu24": 0.0,
+              "cpu25": 0.0,
+              "cpu26": 0.0,
+              "cpu27": 0.0,
+              "cpu28": 0.0,
+              "cpu29": 9.0,
+              "cpu3": 3.96,
+              "cpu30": 0.0,
+              "cpu31": 0.0,
+              "cpu4": 1.98,
+              "cpu5": 3.03,
+              "cpu6": 1.98,
+              "cpu7": 0.0,
+              "cpu8": 6.06,
+              "cpu9": 3.03
+            },
+            "system_memory": {
+              "available": 97589096,
+              "total": 129446704,
+              "used": 31857608
+            },
+            "websocket_connections": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "ws_notification",
+      "request": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "method": "notify_proc_stat_update",
+        "params": [
+          {
+            "cpu_temp": 60.875,
+            "moonraker_stats": {
+              "cpu_usage": 0.19,
+              "mem_units": "kB",
+              "memory": 57352,
+              "time": 1780376654.5127468
+            },
+            "network": {
+              "d22b8fca1687": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129756,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "docker0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 117150,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "enp125s0f4u1": {
+                "bandwidth": 35549.85,
+                "rx_bytes": 50164137434,
+                "rx_drop": 557265,
+                "rx_errs": 0,
+                "rx_packets": 43590469,
+                "tx_bytes": 32610764028,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 38508205
+              },
+              "enp14s0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 2,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "lo": {
+                "bandwidth": 22332.71,
+                "rx_bytes": 1289477023,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 2686951,
+                "tx_bytes": 1289477023,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 2686951
+              },
+              "virbr0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr1": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr2": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "ztklhw5udj": {
+                "bandwidth": 135.92,
+                "rx_bytes": 33162274,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 198872,
+                "tx_bytes": 191196649,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 166200
+              }
+            },
+            "system_cpu_usage": {
+              "cpu": 2.62,
+              "cpu0": 27.27,
+              "cpu1": 10.0,
+              "cpu10": 4.04,
+              "cpu11": 1.98,
+              "cpu12": 3.0,
+              "cpu13": 0.0,
+              "cpu14": 0.0,
+              "cpu15": 1.0,
+              "cpu16": 4.0,
+              "cpu17": 1.0,
+              "cpu18": 0.0,
+              "cpu19": 0.0,
+              "cpu2": 5.05,
+              "cpu20": 0.0,
+              "cpu21": 0.0,
+              "cpu22": 2.0,
+              "cpu23": 0.0,
+              "cpu24": 0.0,
+              "cpu25": 0.0,
+              "cpu26": 0.0,
+              "cpu27": 0.0,
+              "cpu28": 0.0,
+              "cpu29": 9.8,
+              "cpu3": 5.83,
+              "cpu30": 1.0,
+              "cpu31": 0.99,
+              "cpu4": 2.0,
+              "cpu5": 1.0,
+              "cpu6": 0.99,
+              "cpu7": 2.94,
+              "cpu8": 2.97,
+              "cpu9": 3.96
+            },
+            "system_memory": {
+              "available": 97579276,
+              "total": 129446704,
+              "used": 31867428
+            },
+            "websocket_connections": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "ws_notification",
+      "request": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "method": "notify_proc_stat_update",
+        "params": [
+          {
+            "cpu_temp": 64.625,
+            "moonraker_stats": {
+              "cpu_usage": 0.21,
+              "mem_units": "kB",
+              "memory": 57360,
+              "time": 1780376655.5151553
+            },
+            "network": {
+              "d22b8fca1687": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129756,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "docker0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 117150,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "enp125s0f4u1": {
+                "bandwidth": 16467.59,
+                "rx_bytes": 50164151160,
+                "rx_drop": 557265,
+                "rx_errs": 0,
+                "rx_packets": 43590492,
+                "tx_bytes": 32610766813,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 38508234
+              },
+              "enp14s0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 2,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "lo": {
+                "bandwidth": 4268.75,
+                "rx_bytes": 1289479163,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 2686953,
+                "tx_bytes": 1289479163,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 2686953
+              },
+              "virbr0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr1": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr2": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 129820,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "ztklhw5udj": {
+                "bandwidth": 0.0,
+                "rx_bytes": 33162274,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 198872,
+                "tx_bytes": 191196649,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 166200
+              }
+            },
+            "system_cpu_usage": {
+              "cpu": 6.06,
+              "cpu0": 21.21,
+              "cpu1": 18.81,
+              "cpu10": 12.75,
+              "cpu11": 6.06,
+              "cpu12": 7.07,
+              "cpu13": 2.02,
+              "cpu14": 4.0,
+              "cpu15": 6.0,
+              "cpu16": 2.02,
+              "cpu17": 5.05,
+              "cpu18": 4.0,
+              "cpu19": 1.98,
+              "cpu2": 10.1,
+              "cpu20": 2.0,
+              "cpu21": 2.0,
+              "cpu22": 0.99,
+              "cpu23": 1.0,
+              "cpu24": 1.98,
+              "cpu25": 8.0,
+              "cpu26": 2.97,
+              "cpu27": 3.96,
+              "cpu28": 1.0,
+              "cpu29": 10.0,
+              "cpu3": 11.65,
+              "cpu30": 2.0,
+              "cpu31": 1.01,
+              "cpu4": 6.06,
+              "cpu5": 7.07,
+              "cpu6": 4.0,
+              "cpu7": 4.08,
+              "cpu8": 12.24,
+              "cpu9": 7.07
+            },
+            "system_memory": {
+              "available": 97297116,
+              "total": 129446704,
+              "used": 32149588
+            },
+            "websocket_connections": 1
+          }
+        ]
+      }
+    }
+  ]
+}

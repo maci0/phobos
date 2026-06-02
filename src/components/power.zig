@@ -73,6 +73,11 @@ pub const PowerCtx = struct {
     io: ?std.Io,
     /// Configured devices. Owned by the ctx; keys/values allocated with gpa.
     devices: std.StringHashMap(Device),
+    /// Tracks whether the printer is currently printing. When true,
+    /// power operations on devices with locked_while_printing=true are
+    /// rejected with a "locked_while_printing" error matching Moonraker's
+    /// `PrinterPowerLock` in power.py.
+    printing_active: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) PowerCtx {
         return .{
@@ -80,6 +85,7 @@ pub const PowerCtx = struct {
             .bus = bus,
             .io = null,
             .devices = std.StringHashMap(Device).init(alloc),
+            .printing_active = false,
         };
     }
 
@@ -108,6 +114,19 @@ pub const PowerCtx = struct {
         const dev = self.devices.getPtr(name) orelse return error.NotFound;
         self.gpa.free(dev.state);
         dev.state = try self.gpa.dupe(u8, new_state);
+    }
+
+    /// Set whether the printer is currently printing. When `true`, power
+    /// operations on devices with `locked_while_printing=true` are rejected.
+    pub fn setPrintingActive(self: *PowerCtx, active: bool) void {
+        self.printing_active = active;
+    }
+
+    /// Check whether a device is locked due to an active print. Returns
+    /// `error.PrinterLocked` when the device has `locked_while_printing=true`
+    /// and printing is active, matching Moonraker's `PrinterPowerLock`.
+    pub fn checkPrintingLock(self: *const PowerCtx, dev: *const Device) !void {
+        if (dev.locked_while_printing and self.printing_active) return error.PrinterLocked;
     }
 
     /// Add a device (takes ownership of all slices).
@@ -207,6 +226,9 @@ fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.
         // state without touching any hardware.
         return cur;
     }
+    // Enforce the printing lock on mutating actions. Status queries (above)
+    // are exempt. Matches Moonraker's `PrinterPowerLock` in power.py.
+    try ctx.checkPrintingLock(dev);
     // Resolve "toggle" to the opposite of the current state.
     const action: []const u8 = blk: {
         if (!std.mem.eql(u8, req, "toggle")) break :blk req;
@@ -448,6 +470,49 @@ test "handleSingleDevice: POST action=invalid returns InvalidParams" {
     try testing.expectError(error.InvalidParams, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"banana\"}"), a));
 }
 
+test "handleSingleDevice: locked_while_printing blocks mutating actions while printing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
+    ctx.setPrintingActive(true);
+
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\"}"), a));
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"off\"}"), a));
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\"}"), a));
+    // status is allowed even when locked (read-only).
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\"}"), a);
+    try testing.expectEqualStrings("off", v.object.get("psu").?.string);
+    // Device state unchanged.
+    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
+}
+
+test "handleSingleDevice: locked_while_printing allows operations when not printing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
+    // printing_active defaults to false — lock not enforced.
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\"}"), a);
+    try testing.expectEqualStrings("on", v.object.get("psu").?.string);
+}
+
+test "handleSingleDevice: unlocked device unaffected by printing_active" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("fan", "gpio", "off", false); // locked_while_printing=false
+    ctx.setPrintingActive(true);
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"fan\",\"action\":\"on\"}"), a);
+    try testing.expectEqualStrings("on", v.object.get("fan").?.string);
+}
+
 // ---- batch handlers ----
 
 test "handleOn: turns on named device" {
@@ -490,6 +555,25 @@ test "batch handlers: empty params returns InvalidParams" {
     defer ctx.deinit();
     try testing.expectError(error.InvalidParams, handleOn(@ptrCast(&ctx), .null, a));
     try testing.expectError(error.InvalidParams, handleOn(@ptrCast(&ctx), try objParams(a, "{}"), a));
+}
+
+test "batch handlers: locked_while_printing blocks on/off but not status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
+    ctx.setPrintingActive(true);
+
+    // Batch handlers catch errors from processRequest and return "error".
+    const v_on = try handleOn(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
+    try testing.expectEqualStrings("error", v_on.object.get("psu").?.string);
+    const v_off = try handleOff(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
+    try testing.expectEqualStrings("error", v_off.object.get("psu").?.string);
+    // Status is still allowed.
+    const v = try handleStatus(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
+    try testing.expectEqualStrings("off", v.object.get("psu").?.string);
 }
 
 // ---- buildDeviceInfo ----
@@ -560,4 +644,25 @@ test "fuzz_batch: arbitrary batch params never crash handleOn/Off/Status" {
             _ = handleStatus(@ptrCast(&ctx), pv.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "registerPower: wires expected routes and JSON-RPC methods" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try registerPower(&reg, &ctx);
+
+    // GET routes
+    try testing.expect(reg.lookup(.GET, "/machine/device_power/devices") != null);
+    try testing.expect(reg.lookup(.GET, "/machine/device_power/status") != null);
+    try testing.expect(reg.lookup(.GET, "/machine/device_power/device") != null);
+    // POST routes
+    try testing.expect(reg.lookup(.POST, "/machine/device_power/on") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/device_power/off") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/device_power/device") != null);
 }

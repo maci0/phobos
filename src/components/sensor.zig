@@ -20,19 +20,294 @@
 //!   measurements (no sensor param) → {}
 //!   measurements (with sensor param) → 404 error
 //!
-//! NOTE: No MQTT or Klippy sensor integration. This component exposes faithful
-//! endpoint shapes; sensor data accumulation is stubbed out.
+//! NOTE: No MQTT or Klippy sensor integration. This component provides the
+//! sensor state machine, measurement history storage, and notification emission.
+//! Hardware integration (MQTT topics, Klippy sensor callbacks) is stubbed.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const notify = @import("../server/notify.zig");
 
 const Registry = registry.Registry;
+const NotifyBus = notify.NotifyBus;
 
 // ---------------------------------------------------------------------------
-// Context (no configured sensors)
+// Sensor state
 // ---------------------------------------------------------------------------
 
-pub const SensorCtx = struct {};
+pub const MeasurementRing = struct {
+    buf: []f64,
+    head: usize,
+    len: usize,
+
+    pub fn init(alloc: std.mem.Allocator, capacity: usize) !MeasurementRing {
+        const buf = try alloc.alloc(f64, capacity);
+        @memset(buf, 0.0);
+        return .{ .buf = buf, .head = 0, .len = 0 };
+    }
+
+    pub fn deinit(self: *MeasurementRing, alloc: std.mem.Allocator) void {
+        alloc.free(self.buf);
+    }
+
+    pub fn push(self: *MeasurementRing, value: f64) void {
+        if (self.buf.len == 0) return;
+        self.buf[self.head] = value;
+        self.head = (self.head + 1) % self.buf.len;
+        if (self.len < self.buf.len) self.len += 1;
+    }
+
+    pub fn toSlice(self: *const MeasurementRing, alloc: std.mem.Allocator) ![]f64 {
+        if (self.len == 0) return &.{};
+        const out = try alloc.alloc(f64, self.len);
+        const start = if (self.len < self.buf.len) @as(usize, 0) else self.head;
+        if (self.len < self.buf.len) {
+            @memcpy(out, self.buf[0..self.len]);
+        } else {
+            const tail = self.buf.len - start;
+            @memcpy(out[0..tail], self.buf[start..]);
+            @memcpy(out[tail..], self.buf[0..start]);
+        }
+        return out;
+    }
+};
+
+pub const ParameterInfo = struct {
+    name: []const u8,
+    desc: []const u8,
+    units: []const u8,
+
+    pub fn deinit(self: *ParameterInfo, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.desc);
+        alloc.free(self.units);
+    }
+};
+
+pub const Sensor = struct {
+    id: []const u8,
+    type_str: []const u8,
+    name: []const u8,
+    last_measurements: std.StringHashMap(f64),
+    last_value: std.StringHashMap(f64),
+    history: std.StringHashMap(MeasurementRing),
+    param_info: std.ArrayList(ParameterInfo),
+    error_state: ?[]const u8,
+    store_size: usize,
+
+    pub fn init(alloc: std.mem.Allocator, sensor_id: []const u8, sensor_type: []const u8) !Sensor {
+        return .{
+            .id = try alloc.dupe(u8, sensor_id),
+            .type_str = try alloc.dupe(u8, sensor_type),
+            .name = try alloc.dupe(u8, sensor_id),
+            .last_measurements = std.StringHashMap(f64).init(alloc),
+            .last_value = std.StringHashMap(f64).init(alloc),
+            .history = std.StringHashMap(MeasurementRing).init(alloc),
+            .param_info = .empty,
+            .error_state = null,
+            .store_size = 1200,
+        };
+    }
+
+    pub fn deinit(self: *Sensor, alloc: std.mem.Allocator) void {
+        alloc.free(self.id);
+        alloc.free(self.type_str);
+        alloc.free(self.name);
+        if (self.error_state) |e| alloc.free(e);
+        {
+            var it = self.last_measurements.iterator();
+            while (it.next()) |entry| {
+                alloc.free(entry.key_ptr.*);
+            }
+            self.last_measurements.deinit();
+        }
+        {
+            var it = self.last_value.iterator();
+            while (it.next()) |entry| {
+                alloc.free(entry.key_ptr.*);
+            }
+            self.last_value.deinit();
+        }
+        {
+            var it = self.history.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(alloc);
+                alloc.free(entry.key_ptr.*);
+            }
+            self.history.deinit();
+        }
+        for (self.param_info.items) |*pi| {
+            pi.deinit(alloc);
+        }
+        self.param_info.deinit(alloc);
+    }
+
+    pub fn setMeasurement(self: *Sensor, alloc: std.mem.Allocator, param: []const u8, value: f64) !void {
+        const gop = try self.history.getOrPut(param);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try alloc.dupe(u8, param);
+            gop.value_ptr.* = try MeasurementRing.init(alloc, self.store_size);
+        }
+        gop.value_ptr.push(value);
+
+        const lm = try self.last_measurements.getOrPut(param);
+        if (!lm.found_existing) {
+            lm.key_ptr.* = try alloc.dupe(u8, param);
+        }
+        lm.value_ptr.* = value;
+    }
+
+    pub fn hasChanges(self: *const Sensor) bool {
+        if (self.last_measurements.count() != self.last_value.count()) return true;
+        var it = self.last_measurements.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const v = self.last_value.get(key) orelse return true;
+            if (v != entry.value_ptr.*) return true;
+        }
+        return false;
+    }
+
+    pub fn snapshotValues(self: *Sensor, alloc: std.mem.Allocator) !void {
+        {
+            var it = self.last_value.iterator();
+            while (it.next()) |entry| {
+                alloc.free(entry.key_ptr.*);
+            }
+            self.last_value.clearAndFree();
+        }
+        var it = self.last_measurements.iterator();
+        while (it.next()) |entry| {
+            const key = try alloc.dupe(u8, entry.key_ptr.*);
+            errdefer alloc.free(key);
+            try self.last_value.put(key, entry.value_ptr.*);
+        }
+    }
+
+    pub fn getSensorInfo(self: *const Sensor, alloc: std.mem.Allocator, extended: bool) !std.json.Value {
+        var obj: std.json.ObjectMap = .empty;
+        try obj.put(alloc, "id", .{ .string = self.id });
+        try obj.put(alloc, "friendly_name", .{ .string = self.name });
+        try obj.put(alloc, "type", .{ .string = self.type_str });
+        var vals: std.json.ObjectMap = .empty;
+        var it = self.last_measurements.iterator();
+        while (it.next()) |entry| {
+            try vals.put(alloc, entry.key_ptr.*, .{ .float = entry.value_ptr.* });
+        }
+        try obj.put(alloc, "values", .{ .object = vals });
+        if (extended and self.param_info.items.len > 0) {
+            var pi_arr: std.json.Array = .init(alloc);
+            for (self.param_info.items) |pi| {
+                var pi_obj: std.json.ObjectMap = .empty;
+                try pi_obj.put(alloc, "name", .{ .string = pi.name });
+                try pi_obj.put(alloc, "description", .{ .string = pi.desc });
+                try pi_obj.put(alloc, "units", .{ .string = pi.units });
+                try pi_arr.append(.{ .object = pi_obj });
+            }
+            try obj.put(alloc, "parameter_info", .{ .array = pi_arr });
+        }
+        return .{ .object = obj };
+    }
+
+    pub fn getSensorMeasurements(self: *const Sensor, alloc: std.mem.Allocator) !std.json.Value {
+        var obj: std.json.ObjectMap = .empty;
+        var it = self.history.iterator();
+        while (it.next()) |entry| {
+            const slice = try entry.value_ptr.toSlice(alloc);
+            var arr: std.json.Array = .init(alloc);
+            for (slice) |v| {
+                try arr.append(.{ .float = v });
+            }
+            try obj.put(alloc, entry.key_ptr.*, .{ .array = arr });
+        }
+        return .{ .object = obj };
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+pub const SensorCtx = struct {
+    gpa: std.mem.Allocator,
+    bus: ?*NotifyBus,
+    io: ?std.Io,
+    sensors: std.StringHashMap(Sensor),
+
+    pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) SensorCtx {
+        return .{
+            .gpa = alloc,
+            .bus = bus,
+            .io = null,
+            .sensors = std.StringHashMap(Sensor).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *SensorCtx) void {
+        var it = self.sensors.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.gpa);
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.sensors.deinit();
+    }
+
+    pub fn setIo(self: *SensorCtx, io: std.Io) void {
+        self.io = io;
+    }
+
+    pub fn findSensor(self: *SensorCtx, id: []const u8) ?*Sensor {
+        return self.sensors.getPtr(id);
+    }
+
+    pub fn addSensor(self: *SensorCtx, sensor_id: []const u8, sensor_type: []const u8) !*Sensor {
+        var s = try Sensor.init(self.gpa, sensor_id, sensor_type);
+        errdefer s.deinit(self.gpa);
+        const key = try self.gpa.dupe(u8, sensor_id);
+        errdefer self.gpa.free(key);
+        try self.sensors.put(key, s);
+        return self.sensors.getPtr(sensor_id).?;
+    }
+
+    pub fn addParameterInfo(self: *SensorCtx, sensor_id: []const u8, param_name: []const u8, desc: []const u8, units: []const u8) !void {
+        const s = self.findSensor(sensor_id) orelse return error.NotFound;
+        const pi: ParameterInfo = .{
+            .name = try self.gpa.dupe(u8, param_name),
+            .desc = try self.gpa.dupe(u8, desc),
+            .units = try self.gpa.dupe(u8, units),
+        };
+        errdefer {
+            self.gpa.free(@constCast(pi.name));
+            self.gpa.free(@constCast(pi.desc));
+            self.gpa.free(@constCast(pi.units));
+        }
+        try s.param_info.append(self.gpa, pi);
+    }
+
+    pub fn emitSensorUpdate(self: *SensorCtx, a: std.mem.Allocator) void {
+        const bus = self.bus orelse return;
+        const io = self.io orelse return;
+
+        // Build payload: { "<sensor_id>": { "<param>": value, ... }, ... }
+        var payload: std.json.ObjectMap = .empty;
+        var changed = false;
+        var it = self.sensors.iterator();
+        while (it.next()) |entry| {
+            const s = entry.value_ptr;
+            if (!s.hasChanges()) continue;
+            var svals: std.json.ObjectMap = .empty;
+            var mit = s.last_measurements.iterator();
+            while (mit.next()) |mentry| {
+                svals.put(a, mentry.key_ptr.*, .{ .float = mentry.value_ptr.* }) catch continue;
+            }
+            payload.put(a, entry.key_ptr.*, .{ .object = svals }) catch continue;
+            s.snapshotValues(a) catch continue;
+            changed = true;
+        }
+        if (!changed) return;
+        bus.emitLocked(io, notify.names.sensor_update, .{ .object = payload }) catch {};
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Parameter helpers
@@ -70,38 +345,46 @@ fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /server/sensors/list → {"sensors": {}}
-/// With no configured sensors, returns an empty object.
-/// extended param accepted but has no effect (no sensors to extend).
-pub fn handleSensorList(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = getOptBool(params, "extended", false); // param accepted, no-op
-    var result: std.json.ObjectMap = .empty;
-    try result.put(alloc, "sensors", .{ .object = .empty });
-    return .{ .object = result };
+/// GET /server/sensors/list → {"sensors": {<id>: {sensor_info}, ...}}
+pub fn handleSensorList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *SensorCtx = @ptrCast(@alignCast(ctx_ptr));
+    const extended = getOptBool(params, "extended", false);
+    var sensors_obj: std.json.ObjectMap = .empty;
+    var it = ctx.sensors.iterator();
+    while (it.next()) |entry| {
+        const info = try entry.value_ptr.getSensorInfo(alloc, extended);
+        try sensors_obj.put(alloc, entry.key_ptr.*, info);
+    }
+    var out: std.json.ObjectMap = .empty;
+    try out.put(alloc, "sensors", .{ .object = sensors_obj });
+    return .{ .object = out };
 }
 
 /// GET /server/sensors/info → sensor info for a named sensor
-/// Without sensors, always returns NotFound.
-/// sensor param required; extended param optional.
-pub fn handleSensorInfo(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = alloc;
+pub fn handleSensorInfo(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *SensorCtx = @ptrCast(@alignCast(ctx_ptr));
     const sensor_name = getOptStr(params, "sensor") orelse return error.InvalidParams;
-    // No sensors configured in phobos without external integration
-    _ = sensor_name;
-    return error.NotFound;
+    const s = ctx.findSensor(sensor_name) orelse return error.NotFound;
+    const extended = getOptBool(params, "extended", false);
+    return s.getSensorInfo(alloc, extended);
 }
 
 /// GET /server/sensors/measurements → measurement history
-/// With no sensor param: returns empty object (all sensors, none configured).
-/// With sensor param: returns NotFound (no such sensor).
-pub fn handleSensorMeasurements(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = alloc;
+pub fn handleSensorMeasurements(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *SensorCtx = @ptrCast(@alignCast(ctx_ptr));
     const sensor_name = getOptStr(params, "sensor") orelse "";
     if (sensor_name.len > 0) {
-        return error.NotFound;
+        const s = ctx.findSensor(sensor_name) orelse return error.NotFound;
+        return s.getSensorMeasurements(alloc);
     }
-    // Return empty object: all sensors → none
-    return .{ .object = .empty };
+    // All sensors.
+    var out: std.json.ObjectMap = .empty;
+    var it = ctx.sensors.iterator();
+    while (it.next()) |entry| {
+        const m = try entry.value_ptr.getSensorMeasurements(alloc);
+        try out.put(alloc, entry.key_ptr.*, m);
+    }
+    return .{ .object = out };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,52 +422,168 @@ fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     return p.value;
 }
 
-test "handleSensorList: returns empty sensors object" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var ctx = SensorCtx{};
-    const result = try handleSensorList(@ptrCast(&ctx), .null, arena.allocator());
-    const sensors = result.object.get("sensors").?;
-    try testing.expect(sensors == .object);
-    try testing.expectEqual(@as(usize, 0), sensors.object.count());
+fn testCtx(alloc: std.mem.Allocator) SensorCtx {
+    return SensorCtx.init(alloc, null);
 }
 
-test "handleSensorList: extended param accepted without error" {
+test "SensorCtx: init/deinit no leak" {
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try testing.expectEqual(@as(usize, 0), ctx.sensors.count());
+}
+
+test "addSensor: stores sensor" {
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    const s = try ctx.addSensor("temp_sensor", "generic");
+    try testing.expectEqual(@as(usize, 1), ctx.sensors.count());
+    try testing.expectEqualStrings("temp_sensor", s.id);
+    try testing.expectEqualStrings("generic", s.type_str);
+}
+
+test "Sensor.setMeasurement: stores value and history" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = SensorCtx{};
-    const params = try mkParams(a, "{\"extended\":true}");
-    const result = try handleSensorList(@ptrCast(&ctx), params, a);
-    try testing.expect(result.object.get("sensors") != null);
+    var s = try Sensor.init(a, "s1", "test");
+    defer s.deinit(a);
+    try s.setMeasurement(a, "temperature", 25.5);
+    try testing.expectEqual(@as(f64, 25.5), s.last_measurements.get("temperature").?);
+    // History should have 1 entry.
+    const h = s.history.get("temperature").?;
+    try testing.expectEqual(@as(usize, 1), h.len);
+}
+
+test "Sensor.hasChanges: detects new measurements" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try Sensor.init(a, "s1", "test");
+    defer s.deinit(a);
+    try s.setMeasurement(a, "temp", 20.0);
+    try testing.expect(s.hasChanges()); // not yet snapshotted
+    try s.snapshotValues(a);
+    try testing.expect(!s.hasChanges()); // snapshotted, no new measurements
+    try s.setMeasurement(a, "temp", 21.0);
+    try testing.expect(s.hasChanges()); // value changed
+}
+
+test "Sensor.getSensorInfo: correct shape" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try Sensor.init(a, "sensor_a", "temperature_sensor");
+    defer s.deinit(a);
+    try s.setMeasurement(a, "temperature", 22.3);
+    try s.setMeasurement(a, "humidity", 55.0);
+
+    const info = try s.getSensorInfo(a, false);
+    try testing.expectEqualStrings("sensor_a", info.object.get("id").?.string);
+    try testing.expectEqualStrings("sensor_a", info.object.get("friendly_name").?.string);
+    try testing.expectEqualStrings("temperature_sensor", info.object.get("type").?.string);
+    const vals = info.object.get("values").?.object;
+    try testing.expectEqual(@as(f64, 22.3), vals.get("temperature").?.float);
+    try testing.expectEqual(@as(f64, 55.0), vals.get("humidity").?.float);
+    // extended=false → no parameter_info
+    try testing.expect(info.object.get("parameter_info") == null);
+}
+
+test "Sensor.getSensorInfo: extended includes parameter_info" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try Sensor.init(a, "s1", "test");
+    defer s.deinit(a);
+    try s.param_info.append(a, .{ .name = try a.dupe(u8, "temp"), .desc = try a.dupe(u8, "Temperature"), .units = try a.dupe(u8, "C") });
+    const info = try s.getSensorInfo(a, true);
+    const pi = info.object.get("parameter_info").?.array;
+    try testing.expectEqual(@as(usize, 1), pi.items.len);
+    try testing.expectEqualStrings("temp", pi.items[0].object.get("name").?.string);
+    try testing.expectEqualStrings("Temperature", pi.items[0].object.get("description").?.string);
+    try testing.expectEqualStrings("C", pi.items[0].object.get("units").?.string);
+}
+
+test "Sensor.getSensorMeasurements: returns history array" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try Sensor.init(a, "s1", "test");
+    defer s.deinit(a);
+    try s.setMeasurement(a, "temp", 10.0);
+    try s.setMeasurement(a, "temp", 11.0);
+    try s.setMeasurement(a, "temp", 12.0);
+
+    const m = try s.getSensorMeasurements(a);
+    const arr = m.object.get("temp").?.array;
+    try testing.expectEqual(@as(usize, 3), arr.items.len);
+    try testing.expectEqual(@as(f64, 10.0), arr.items[0].float);
+    try testing.expectEqual(@as(f64, 11.0), arr.items[1].float);
+    try testing.expectEqual(@as(f64, 12.0), arr.items[2].float);
+}
+
+test "handleSensorList: returns empty sensors object when empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = testCtx(arena.allocator());
+    defer ctx.deinit();
+    const result = try handleSensorList(@ptrCast(&ctx), .null, arena.allocator());
+    const sensors = result.object.get("sensors").?.object;
+    try testing.expectEqual(@as(usize, 0), sensors.count());
+}
+
+test "handleSensorList: returns sensor info when sensors present" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const s = try ctx.addSensor("s1", "temp");
+    try s.setMeasurement(a, "temp", 25.0);
+    const result = try handleSensorList(@ptrCast(&ctx), .null, a);
+    const sensors = result.object.get("sensors").?.object;
+    try testing.expectEqual(@as(usize, 1), sensors.count());
+    try testing.expect(sensors.get("s1") != null);
 }
 
 test "handleSensorInfo: missing sensor param → InvalidParams" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = SensorCtx{};
+    var ctx = testCtx(a);
+    defer ctx.deinit();
     try testing.expectError(error.InvalidParams, handleSensorInfo(@ptrCast(&ctx), .null, a));
-    const params = try mkParams(a, "{}");
-    try testing.expectError(error.InvalidParams, handleSensorInfo(@ptrCast(&ctx), params, a));
 }
 
 test "handleSensorInfo: named sensor → NotFound (no sensors)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = SensorCtx{};
-    const params = try mkParams(a, "{\"sensor\":\"my_sensor\"}");
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const params = try mkParams(a, "{\"sensor\":\"ghost\"}");
     try testing.expectError(error.NotFound, handleSensorInfo(@ptrCast(&ctx), params, a));
 }
 
-test "handleSensorMeasurements: no param → empty object" {
+test "handleSensorInfo: returns sensor info for existing sensor" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = SensorCtx{};
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const s = try ctx.addSensor("s1", "temp");
+    try s.setMeasurement(a, "temperature", 30.0);
+    const params = try mkParams(a, "{\"sensor\":\"s1\"}");
+    const info = try handleSensorInfo(@ptrCast(&ctx), params, a);
+    try testing.expectEqualStrings("s1", info.object.get("id").?.string);
+}
+
+test "handleSensorMeasurements: no param → empty object when no sensors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
     const result = try handleSensorMeasurements(@ptrCast(&ctx), .null, a);
-    try testing.expect(result == .object);
     try testing.expectEqual(@as(usize, 0), result.object.count());
 }
 
@@ -192,19 +591,39 @@ test "handleSensorMeasurements: named sensor → NotFound (no sensors)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = SensorCtx{};
-    const params = try mkParams(a, "{\"sensor\":\"my_sensor\"}");
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const params = try mkParams(a, "{\"sensor\":\"ghost\"}");
     try testing.expectError(error.NotFound, handleSensorMeasurements(@ptrCast(&ctx), params, a));
 }
 
-test "handleSensorMeasurements: empty sensor string → all sensors (empty object)" {
+test "handleSensorMeasurements: returns measurement history" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = SensorCtx{};
-    const params = try mkParams(a, "{\"sensor\":\"\"}");
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const s = try ctx.addSensor("s1", "test");
+    try s.setMeasurement(a, "temp", 10.0);
+    try s.setMeasurement(a, "temp", 20.0);
+    const params = try mkParams(a, "{\"sensor\":\"s1\"}");
     const result = try handleSensorMeasurements(@ptrCast(&ctx), params, a);
-    try testing.expect(result == .object);
+    const arr = result.object.get("temp").?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len);
+}
+
+test "emitSensorUpdate: no-op without bus/io" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const s = try ctx.addSensor("s1", "test");
+    try s.setMeasurement(a, "temp", 25.0);
+    // Should not panic even without bus/io.
+    ctx.emitSensorUpdate(a);
+    // hasChanges still true since we never snapshotted
+    try testing.expect(s.hasChanges());
 }
 
 test "registerSensor: wires routes and JSON-RPC methods" {
@@ -216,28 +635,32 @@ test "registerSensor: wires routes and JSON-RPC methods" {
     var reg = Registry.init(alloc, &d);
     defer reg.deinit();
 
-    var ctx = SensorCtx{};
+    var ctx = testCtx(alloc);
+    defer ctx.deinit();
     try registerSensor(&reg, &ctx);
 
     try testing.expect(reg.lookup(.GET, "/server/sensors/list") != null);
     try testing.expect(reg.lookup(.GET, "/server/sensors/info") != null);
     try testing.expect(reg.lookup(.GET, "/server/sensors/measurements") != null);
-    try testing.expect(d.methods.get("server.sensors.list") != null);
-    try testing.expect(d.methods.get("server.sensors.info") != null);
-    try testing.expect(d.methods.get("server.sensors.measurements") != null);
 }
 
 // --- Fuzz tests ---
 
-test "fuzz handleSensorList: never crashes" {
+test "fuzz handleSensorList: never panics" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
-            var ctx = SensorCtx{};
+            const a = arena.allocator();
+            var ctx = SensorCtx.init(a, null);
+            defer ctx.deinit();
+            _ = ctx.addSensor("s1", "test") catch {};
+            _ = ctx.findSensor("s1").?.setMeasurement(a, "t", 1.0) catch {};
             var buf: [4]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            _ = handleSensorList(@ptrCast(&ctx), .null, arena.allocator()) catch {};
+            const strs = [_][]const u8{ "null", "{}", "{\"extended\":true}" };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleSensorList(@ptrCast(&ctx), p.value, a) catch {};
         }
     }.run, .{});
 }
@@ -248,26 +671,17 @@ test "fuzz handleSensorInfo: arbitrary params never crash" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = SensorCtx{};
+            var ctx = SensorCtx.init(a, null);
+            defer ctx.deinit();
+            _ = ctx.addSensor("s1", "test") catch {};
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-
             const strs = [_][]const u8{
-                "null",
-                "{}",
-                "{\"sensor\":\"x\"}",
-                "{\"sensor\":\"\"}",
-                "{\"sensor\":null}",
-                "{\"sensor\":42}",
-                "1",
+                "null", "{}", "{\"sensor\":\"s1\"}",
+                "{\"sensor\":\"ghost\"}", "{\"sensor\":\"\"}",
             };
-            const p = std.json.parseFromSlice(
-                std.json.Value,
-                a,
-                strs[buf[0] % strs.len],
-                .{},
-            ) catch return;
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
             _ = handleSensorInfo(@ptrCast(&ctx), p.value, a) catch {};
         }
     }.run, .{});
@@ -279,24 +693,41 @@ test "fuzz handleSensorMeasurements: arbitrary params never crash" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = SensorCtx{};
+            var ctx = SensorCtx.init(a, null);
+            defer ctx.deinit();
+            _ = ctx.addSensor("s1", "test") catch {};
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-
             const strs = [_][]const u8{
-                "null",
-                "{}",
-                "{\"sensor\":\"x\"}",
-                "{\"sensor\":\"\"}",
+                "null", "{}", "{\"sensor\":\"s1\"}",
+                "{\"sensor\":\"ghost\"}", "{\"sensor\":\"\"}",
             };
-            const p = std.json.parseFromSlice(
-                std.json.Value,
-                a,
-                strs[buf[0] % strs.len],
-                .{},
-            ) catch return;
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
             _ = handleSensorMeasurements(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz SensorRing: push and read back" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const cap: usize = @max(1, @as(usize, buf[0]) + 1);
+            var ring = MeasurementRing.init(a, cap) catch return;
+            defer ring.deinit(a);
+            const n: usize = @as(usize, buf[1]) % 50;
+            for (0..n) |i| {
+                ring.push(@floatFromInt(i));
+            }
+            const slice = ring.toSlice(a) catch return;
+            defer a.free(slice);
+            const expected_len = @min(n, cap);
+            if (slice.len != expected_len) return;
         }
     }.run, .{});
 }

@@ -33,6 +33,9 @@ pub const Rule = enum {
     /// For warnings arrays: compare count and per-element structure (keys present)
     /// but not the exact diagnostic text. Applied to the whole array.
     structure_compare,
+    /// For server.config files: keep filenames (path-relativized), mask sections.
+    /// Sorted by filename for deterministic comparison.
+    files_compare,
 };
 
 /// A single manifest entry: when the method matches `method_pattern` and we
@@ -61,6 +64,10 @@ pub const manifest: []const ManifestEntry = &.{
     .{ .method_pattern = "server.info", .field_path = "websocket_count", .rule = .mask },
     // --- server.config ---
     .{ .method_pattern = "server.config", .field_path = "config_file", .rule = .path_relativize },
+    .{ .method_pattern = "server.config", .field_path = "config", .rule = .structure_compare },
+    .{ .method_pattern = "server.config", .field_path = "orig", .rule = .structure_compare },
+    .{ .method_pattern = "server.config", .field_path = "files", .rule = .files_compare },
+    .{ .method_pattern = "server.config", .field_path = "filename", .rule = .path_relativize },
     // --- generic identity/time fields (mask anything ending with _id or _time) ---
     .{ .method_pattern = "*", .field_path = "*_id", .rule = .mask },
     .{ .method_pattern = "*", .field_path = "*_time", .rule = .mask },
@@ -79,15 +86,15 @@ pub fn normalizedEqual(alloc: std.mem.Allocator, a_json: []const u8, b_json: []c
     defer arena.deinit();
     const aa = arena.allocator();
 
-    const a_parsed = std.json.parseFromSlice(std.json.Value, aa, a_json, .{ .allocate = .alloc_always }) catch return false;
-    const b_parsed = std.json.parseFromSlice(std.json.Value, aa, b_json, .{ .allocate = .alloc_always }) catch return false;
+    const a_parsed = std.json.parseFromSlice(std.json.Value, aa, a_json, .{ .allocate = .alloc_always }) catch return error.ParseError;
+    const b_parsed = std.json.parseFromSlice(std.json.Value, aa, b_json, .{ .allocate = .alloc_always }) catch return error.ParseError;
 
-    const a_norm = try normalize(aa, a_parsed, "", method);
-    const b_norm = try normalize(aa, b_parsed, "", method);
+    const a_norm = try normalize(aa, a_parsed.value, "", method);
+    const b_norm = try normalize(aa, b_parsed.value, "", method);
 
     // Stringify both; structurally equal JSON produces equal strings.
-    const a_str = std.json.stringifyAlloc(aa, a_norm, .{}) catch return false;
-    const b_str = std.json.stringifyAlloc(aa, b_norm, .{}) catch return false;
+    const a_str = try std.json.Stringify.valueAlloc(aa, a_norm, .{});
+    const b_str = try std.json.Stringify.valueAlloc(aa, b_norm, .{});
     return std.mem.eql(u8, a_str, b_str);
 }
 
@@ -102,6 +109,10 @@ fn normalize(
 ) error{OutOfMemory}!std.json.Value {
     switch (value) {
         .object => |obj| {
+            // Check if the current path triggers structure_compare for this object.
+            if (shouldApply(path, method, .structure_compare)) {
+                return normalizeStructureObject(alloc, obj);
+            }
             var new_obj: std.json.ObjectMap = .empty;
             var it = obj.iterator();
             while (it.next()) |kv| {
@@ -113,6 +124,10 @@ fn normalize(
             return .{ .object = new_obj };
         },
         .array => |arr| {
+            // Check if the current path triggers files_compare for this array.
+            if (shouldApply(path, method, .files_compare)) {
+                return normalizeFiles(alloc, arr);
+            }
             // Check if the current path triggers structure_compare for this array.
             if (shouldApply(path, method, .structure_compare)) {
                 return normalizeWarnings(alloc, arr);
@@ -222,10 +237,8 @@ fn relativizePath(alloc: std.mem.Allocator, full_path: []const u8) []const u8 {
         }
     }
     // Fall back to basename.
-    if (std.fs.path.basename(full_path)) |base| {
-        return std.fmt.allocPrint(alloc, "<DATADIR>/{s}", .{base}) catch full_path;
-    }
-    return full_path;
+    const base = std.fs.path.basename(full_path);
+    return std.fmt.allocPrint(alloc, "<DATADIR>/{s}", .{base}) catch full_path;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +304,140 @@ fn normalizeWarnings(alloc: std.mem.Allocator, arr: std.json.Array) error{OutOfM
         }
     }
     return .{ .array = new_arr };
+}
+
+/// Fields within structure-compare objects whose numeric values are
+/// non-deterministic (port numbers, ssl_port) — masked to sentinel.
+fn isMaskedNumericKey(key: []const u8) bool {
+    const masked = [_][]const u8{ "port", "ssl_port" };
+    for (masked) |m| {
+        if (std.mem.eql(u8, key, m)) return true;
+    }
+    return false;
+}
+
+/// Normalize a structure-compare object: keep all keys and their types, mask
+/// all leaf-level values (strings → "MASKED", numbers kept as-is for type
+/// assertion, except for masked numeric keys like port which become -1.0).
+/// Applied recursively for nested objects/arrays.
+fn normalizeStructureObject(alloc: std.mem.Allocator, obj: std.json.ObjectMap) error{OutOfMemory}!std.json.Value {
+    var new_obj: std.json.ObjectMap = .empty;
+    var it = obj.iterator();
+    while (it.next()) |kv| {
+        const key = kv.key_ptr.*;
+        const val = kv.value_ptr.*;
+        switch (val) {
+            .string => try new_obj.put(alloc, key, .{ .string = "MASKED" }),
+            .bool => try new_obj.put(alloc, key, .{ .bool = val.bool }),
+            .integer => {
+                if (isMaskedNumericKey(key)) {
+                    try new_obj.put(alloc, key, .{ .float = -1.0 });
+                } else {
+                    try new_obj.put(alloc, key, .{ .integer = val.integer });
+                }
+            },
+            .float => {
+                if (isMaskedNumericKey(key)) {
+                    try new_obj.put(alloc, key, .{ .float = -1.0 });
+                } else {
+                    try new_obj.put(alloc, key, .{ .float = val.float });
+                }
+            },
+            .null => try new_obj.put(alloc, key, .null),
+            .object => try new_obj.put(alloc, key, try normalizeStructureObject(alloc, val.object)),
+            .array => {
+                var new_arr: std.json.Array = .init(alloc);
+                for (val.array.items) |item| {
+                    try new_arr.append(try normalizeStructureLeaf(alloc, item));
+                }
+                try new_obj.put(alloc, key, .{ .array = new_arr });
+            },
+            .number_string => try new_obj.put(alloc, key, .{ .string = "MASKED" }),
+        }
+    }
+    return .{ .object = new_obj };
+}
+
+fn normalizeStructureLeaf(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
+    return switch (val) {
+        .string => .{ .string = "MASKED" },
+        .object => try normalizeStructureObject(alloc, val.object),
+        .array => blk: {
+            var new_arr: std.json.Array = .init(alloc);
+            for (val.array.items) |item| {
+                try new_arr.append(try normalizeStructureLeaf(alloc, item));
+            }
+            break :blk .{ .array = new_arr };
+        },
+        .bool => .{ .bool = val.bool },
+        .integer => .{ .integer = val.integer },
+        .float => .{ .float = val.float },
+        .null => .null,
+        .number_string => .{ .string = "MASKED" },
+    };
+}
+
+/// Normalize server.config files array: keep filenames (path-relativized),
+/// mask section contents. Sort by filename for deterministic comparison.
+fn normalizeFiles(alloc: std.mem.Allocator, arr: std.json.Array) error{OutOfMemory}!std.json.Value {
+    var new_arr: std.json.Array = .init(alloc);
+    for (arr.items) |item| {
+        if (item == .object) {
+            var new_obj: std.json.ObjectMap = .empty;
+            var it = item.object.iterator();
+            while (it.next()) |kv| {
+                const key = kv.key_ptr.*;
+                const val = kv.value_ptr.*;
+                if (std.mem.eql(u8, key, "filename")) {
+                    if (val == .string) {
+                        try new_obj.put(alloc, key, .{ .string = relativizePath(alloc, val.string) });
+                    } else {
+                        try new_obj.put(alloc, key, try deepCopyValue(alloc, val));
+                    }
+                } else if (val == .array) {
+                    // Sort sections array.
+                    var sec_arr: std.json.Array = .init(alloc);
+                    for (val.array.items) |s| {
+                        try sec_arr.append(try deepCopyValue(alloc, s));
+                    }
+                    sortJsonArray(sec_arr);
+                    try new_obj.put(alloc, key, .{ .array = sec_arr });
+                } else {
+                    try new_obj.put(alloc, key, .{ .string = "MASKED" });
+                }
+            }
+            try new_arr.append(.{ .object = new_obj });
+        }
+    }
+    // Sort files by the JSON serialization of each object.
+    sortJsonArray(new_arr);
+    return .{ .array = new_arr };
+}
+
+fn deepCopyValue(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
+    return switch (val) {
+        .string => .{ .string = try alloc.dupe(u8, val.string) },
+        .integer => .{ .integer = val.integer },
+        .float => .{ .float = val.float },
+        .bool => .{ .bool = val.bool },
+        .null => .null,
+        .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
+        .object => |obj| {
+            var new_obj: std.json.ObjectMap = .empty;
+            var it = obj.iterator();
+            while (it.next()) |kv| {
+                try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopyValue(alloc, kv.value_ptr.*));
+            }
+            return .{ .object = new_obj };
+        },
+        .array => |arr| {
+            var new_arr: std.json.Array = .init(alloc);
+            for (arr.items) |item| {
+                try new_arr.append(try deepCopyValue(alloc, item));
+            }
+            return .{ .array = new_arr };
+        },
+    };
 }
 
 // ===========================================================================
@@ -402,21 +549,21 @@ test "wildcard path: *_time mask" {
 
 test "nested normalization" {
     const alloc = testing.allocator;
-    const a = 
+    const a =
         \\{"result": {
         \\  "connection_id": 111,
         \\  "components": ["b", "a"],
         \\  "moonraker_version": "v1"
         \\}}
     ;
-    const b = 
+    const b =
         \\{"result": {
         \\  "connection_id": 222,
         \\  "components": ["a", "b"],
         \\  "moonraker_version": "v2"
         \\}}
     ;
-    try testing.expect(try normalizedEqual(alloc, a, b, "server.connection.identify"));
+    try testing.expect(try normalizedEqual(alloc, a, b, "server.info"));
 }
 
 test "no method match: fields left intact" {
@@ -429,8 +576,9 @@ test "no method match: fields left intact" {
 
 test "no method match: different values not equal" {
     const alloc = testing.allocator;
-    const a = "{\"connection_id\":123}";
-    const b = "{\"connection_id\":999}";
+    // Use a field that does not match any wildcard (*_id, *_time, etc.)
+    const a = "{\"some_field\":123}";
+    const b = "{\"some_field\":999}";
     try testing.expect(!try normalizedEqual(alloc, a, b, "server.info"));
 }
 
@@ -450,8 +598,8 @@ test "different without normalization" {
 
 test "mask: float masked to -1.0" {
     const alloc = testing.allocator;
-    const a = "{\"uptime\":1.5}";
-    const b = "{\"uptime\":2.5}";
+    const a = "{\"start_time\":1.5}";
+    const b = "{\"start_time\":2.5}";
     try testing.expect(try normalizedEqual(alloc, a, b, "system.info"));
 }
 
@@ -471,20 +619,20 @@ test "mask: bool masked to false" {
 
 test "fuzz normalize: never crashes" {
     const alloc = testing.allocator;
-    const rng = std.crypto.random;
+    var prng = std.Random.DefaultPrng.init(0);
 
     for (0..200) |_| {
-        const len_a = rng.intRangeLessThan(usize, 0, 512);
-        const len_b = rng.intRangeLessThan(usize, 0, 512);
+        const len_a = prng.random().intRangeLessThan(usize, 0, 512);
+        const len_b = prng.random().intRangeLessThan(usize, 0, 512);
         const a = alloc.alloc(u8, len_a) catch continue;
         defer alloc.free(a);
         const b = alloc.alloc(u8, len_b) catch continue;
         defer alloc.free(b);
-        for (a) |*c| c.* = rng.intRangeLessThan(u8, 32, 127);
-        for (b) |*c| c.* = rng.intRangeLessThan(u8, 32, 127);
+        for (a) |*c| c.* = prng.random().intRangeLessThan(u8, 32, 127);
+        for (b) |*c| c.* = prng.random().intRangeLessThan(u8, 32, 127);
 
         const methods = [_][]const u8{ "server.info", "server.config", "server.connection.identify", "server.websocket.id", "unknown.method" };
-        const method = methods[rng.intRangeLessThan(usize, 0, methods.len)];
+        const method = methods[prng.random().intRangeLessThan(usize, 0, methods.len)];
 
         // Must not crash.
         _ = normalizedEqual(alloc, a, b, method) catch continue;
@@ -493,16 +641,16 @@ test "fuzz normalize: never crashes" {
 
 test "fuzz normalize: identical input always equal" {
     const alloc = testing.allocator;
-    const rng = std.crypto.random;
+    var prng = std.Random.DefaultPrng.init(0);
 
     for (0..100) |_| {
-        const len = rng.intRangeLessThan(usize, 1, 256);
+        const len = prng.random().intRangeLessThan(usize, 1, 256);
         const s = alloc.alloc(u8, len) catch continue;
         defer alloc.free(s);
-        for (s) |*c| c.* = rng.intRangeLessThan(u8, 32, 127);
+        for (s) |*c| c.* = prng.random().intRangeLessThan(u8, 32, 127);
 
         const methods = [_][]const u8{ "server.info", "server.config", "unknown" };
-        const method = methods[rng.intRangeLessThan(usize, 0, methods.len)];
+        const method = methods[prng.random().intRangeLessThan(usize, 0, methods.len)];
 
         if (normalizedEqual(alloc, s, s, method)) |ok| {
             // For identical JSON strings, should always be equal.

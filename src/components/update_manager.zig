@@ -481,7 +481,7 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     const app = try getStr(params, "name");
     const src = ctx.findSource(app) orelse return error.NotFound;
-    _ = src;
+    if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
     const proc_id = nextProcId();
     ctx.busy = true;
@@ -686,7 +686,7 @@ test "handleRecover: git source ok; system source InvalidParams; missing name" {
     try testing.expectError(error.InvalidParams, handleRecover(@ptrCast(&ctx), .null, a));
 }
 
-test "handleRollback: known source ok; unknown NotFound" {
+test "handleRollback: known source ok; unknown NotFound; non-git InvalidParams" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -694,6 +694,8 @@ test "handleRollback: known source ok; unknown NotFound" {
     try testing.expectEqualStrings("ok", (try handleRollback(@ptrCast(&ctx), try objParams(a, "{\"name\":\"moonraker\"}"), a)).string);
     try testing.expectError(error.NotFound, handleRollback(@ptrCast(&ctx), try objParams(a, "{\"name\":\"ghost\"}"), a));
     try testing.expectError(error.InvalidParams, handleRollback(@ptrCast(&ctx), .null, a));
+    // system is not a git repo — rollback must reject.
+    try testing.expectError(error.InvalidParams, handleRollback(@ptrCast(&ctx), try objParams(a, "{\"name\":\"system\"}"), a));
 }
 
 // ---- buildResponseNotification ----
@@ -772,4 +774,26 @@ test "fuzz_handlers: arbitrary name params never crash update/recover/rollback" 
             _ = handleRefresh(@ptrCast(&ctx), pv, a) catch {};
         }
     }.run, .{});
+}
+
+test "registerUpdateManager: wires expected routes and JSON-RPC methods" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+
+    var ctx = testCtx();
+    try registerUpdateManager(&reg, &ctx);
+
+    try testing.expect(reg.lookup(.GET, "/machine/update/status") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/refresh") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/upgrade") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/full") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/moonraker") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/klipper") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/system") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/client") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/recover") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/rollback") != null);
 }

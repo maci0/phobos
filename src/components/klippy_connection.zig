@@ -321,6 +321,10 @@ pub const KlippyCtx = struct {
     /// to detect print state transitions.
     job_state: ?*@import("job_state.zig").JobStateCtx = null,
 
+    /// History component (set by App after init). Called on disconnect/shutdown
+    /// to finish the current job with the appropriate status.
+    history: ?*@import("history.zig").HistoryCtx = null,
+
     pub fn init(
         gpa: std.mem.Allocator,
         bus: *notify.NotifyBus,
@@ -461,6 +465,21 @@ pub const KlippyCtx = struct {
         try self.writeFrame(io, sub_frame);
         // Ignore the subscribe response — it's an ack.
         _ = try self.readFrame(io);
+
+        // Phase 4: register remote methods so Klippy pushes
+        // process_status_update and process_gcode_response back to us.
+        {
+            const rm_id = self.nextReqId(&rid_buf);
+            const rm_frame = try buildRegisterMethodRequest("process_status_update", rm_id, &sub_buf);
+            try self.writeFrame(io, rm_frame);
+            _ = try self.readFrame(io);
+        }
+        {
+            const rm_id = self.nextReqId(&rid_buf);
+            const rm_frame = try buildRegisterMethodRequest("process_gcode_response", rm_id, &sub_buf);
+            try self.writeFrame(io, rm_frame);
+            _ = try self.readFrame(io);
+        }
     }
 
     /// Poll server.info every 250ms up to 100 times until Klippy exits startup.
@@ -857,10 +876,24 @@ pub const KlippyCtx = struct {
 
     fn emitDisconnected(self: *KlippyCtx, io: std.Io) void {
         self.bus.emit(io, notify.names.klippy_disconnected, .null) catch {};
+        // Notify job_state to update internal state to error.
+        if (self.job_state) |js| js.handleDisconnect();
+        // Finish the current job as klippy_disconnect.
+        if (self.history) |h| {
+            if (self.job_state) |js| {
+                h.handleKlippyDisconnect(js.getLastStats());
+            }
+        }
     }
 
     fn emitShutdown(self: *KlippyCtx, io: std.Io) void {
         self.bus.emit(io, notify.names.klippy_shutdown, .null) catch {};
+        // Finish the current job as klippy_shutdown.
+        if (self.history) |h| {
+            if (self.job_state) |js| {
+                h.handleKlippyShutdown(js.getLastStats());
+            }
+        }
     }
 };
 

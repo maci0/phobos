@@ -61,6 +61,10 @@ pub const JobStateCtx = struct {
     last_print_stats: std.json.ObjectMap,
     last_event: JobEvent,
 
+    /// Callback for job_state:layer_changed events (cur_layer, total_layer).
+    /// Set by components that need layer progress tracking.
+    layer_changed: ?*const fn (i64, i64) void = null,
+
     /// Cross-component pointers — set by App after init.
     history: ?*@import("history.zig").HistoryCtx = null,
     job_queue: ?*@import("job_queue.zig").JobQueueCtx = null,
@@ -77,6 +81,21 @@ pub const JobStateCtx = struct {
     pub fn deinit(self: *JobStateCtx) void {
         // last_print_stats uses .empty (smp_allocator); no explicit deinit needed.
         _ = self;
+    }
+
+    /// Called when Klippy disconnects or shuts down while a job is active.
+    /// Updates internal state to error so that getLastStats() reflects the
+    /// forced error. Does NOT fire a JobEvent — the caller (klippy_connection
+    /// or history) is responsible for calling the appropriate history handler
+    /// (handleKlippyDisconnect / handleKlippyShutdown).
+    pub fn handleDisconnect(self: *JobStateCtx) void {
+        const state_val = self.last_print_stats.get("state") orelse return;
+        if (state_val != .string) return;
+        const state = state_val.string;
+        if (!std.mem.eql(u8, state, "printing") and !std.mem.eql(u8, state, "paused")) return;
+
+        self.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "error" }) catch {};
+        self.last_event = .@"error";
     }
 
     /// Called when Klippy delivers a status update containing print_stats.
@@ -141,6 +160,30 @@ pub const JobStateCtx = struct {
 
             if (effective_event != .standby) {
                 self.sendJobEvent(effective_event, prev_ps, new_ps);
+            }
+        }
+
+        // Emit job_state:layer_changed when print_stats.info.current_layer
+        // is present (mirrors Moonraker job_state._status_update).
+        if (ps.get("info")) |info_val| {
+            if (info_val == .object) {
+                if (info_val.object.get("current_layer")) |cl_val| {
+                    const cur_layer: i64 = switch (cl_val) {
+                        .integer => |i| i,
+                        .float => |f| @intFromFloat(f),
+                        else => -1,
+                    };
+                    if (cur_layer >= 0) {
+                        const total_layer: i64 = if (info_val.object.get("total_layer")) |tl| switch (tl) {
+                            .integer => |i| i,
+                            .float => |f| @intFromFloat(f),
+                            else => 0,
+                        } else 0;
+                        if (self.layer_changed) |cb| {
+                            cb(cur_layer, total_layer);
+                        }
+                    }
+                }
             }
         }
 
@@ -439,9 +482,145 @@ test "getLastStats getLastEvent" {
     _ = stats;
 }
 
+test "handleDisconnect: printing to error" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+
+    js.handleDisconnect();
+
+    try testing.expectEqual(JobEvent.@"error", js.last_event);
+    try testing.expectEqualStrings("error", js.last_print_stats.get("state").?.string);
+}
+
+test "handleDisconnect: paused to error" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
+    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+
+    js.handleDisconnect();
+
+    try testing.expectEqual(JobEvent.@"error", js.last_event);
+}
+
+test "handleDisconnect: standby no-op" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "standby" });
+    js.last_event = .standby;
+
+    js.handleDisconnect();
+
+    try testing.expectEqual(JobEvent.standby, js.last_event); // unchanged
+}
+
+test "handleDisconnect: complete no-op" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "complete" });
+    js.last_event = .complete;
+
+    js.handleDisconnect();
+
+    try testing.expectEqual(JobEvent.complete, js.last_event); // unchanged
+}
+
+test "handleDisconnect: no state field no-op" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    js.handleDisconnect(); // no state in last_print_stats
+
+    try testing.expectEqual(JobEvent.standby, js.last_event);
+}
+
 // ---------------------------------------------------------------------------
 // Fuzz tests
 // ---------------------------------------------------------------------------
+
+// Shared test state for layer_changed callback capture.
+var test_layer_changed_cur: i64 = -1;
+var test_layer_changed_total: i64 = -1;
+fn testLayerChangedCb(cur: i64, total: i64) void {
+    test_layer_changed_cur = cur;
+    test_layer_changed_total = total;
+}
+
+test "statusUpdate emits layer_changed when info.current_layer present" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    test_layer_changed_cur = -1;
+    test_layer_changed_total = -1;
+    js.layer_changed = testLayerChangedCb;
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+
+    var info_obj: std.json.ObjectMap = .empty;
+    try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = 42 });
+    try info_obj.put(std.heap.smp_allocator, "total_layer", .{ .integer = 200 });
+
+    var ps_map: std.json.ObjectMap = .empty;
+    try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
+    const ps_val = std.json.Value{ .object = ps_map };
+
+    js.statusUpdate(ps_val);
+
+    try testing.expectEqual(@as(i64, 42), test_layer_changed_cur);
+    try testing.expectEqual(@as(i64, 200), test_layer_changed_total);
+}
+
+test "statusUpdate layer_changed: no callback set, no crash" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+
+    var info_obj: std.json.ObjectMap = .empty;
+    try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = 10 });
+
+    var ps_map: std.json.ObjectMap = .empty;
+    try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
+    const ps_val = std.json.Value{ .object = ps_map };
+
+    js.statusUpdate(ps_val); // must not crash with null callback
+}
+
+test "statusUpdate layer_changed: no info key, no callback" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    test_layer_changed_cur = -1;
+    js.layer_changed = testLayerChangedCb;
+
+    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "standby" });
+
+    var ps_map: std.json.ObjectMap = .empty;
+    try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+    try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = 1.0 });
+    const ps_val = std.json.Value{ .object = ps_map };
+
+    js.statusUpdate(ps_val);
+
+    try testing.expectEqual(@as(i64, -1), test_layer_changed_cur); // not called
+}
 
 test "fuzz job_state statusUpdate" {
     const bus: @import("../server/notify.zig").NotifyBus = undefined;
@@ -452,11 +631,18 @@ test "fuzz job_state statusUpdate" {
     const states = [_][]const u8{ "standby", "printing", "paused", "complete", "error", "cancelled" };
     for (states) |from| {
         try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = from });
-        for (states) |to| {
+        for (states, 0..) |to, idx| {
             var ps_map: std.json.ObjectMap = .empty;
             try ps_map.put(std.heap.smp_allocator, "state", .{ .string = to });
             try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "fuzz.gcode" });
             try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = @floatFromInt(@intFromEnum(js.last_event)) });
+            // Exercise layer_changed path on even iterations.
+            if (idx % 2 == 0) {
+                var info_obj: std.json.ObjectMap = .empty;
+                try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = @as(i64, @intCast(idx)) });
+                try info_obj.put(std.heap.smp_allocator, "total_layer", .{ .integer = 200 });
+                try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
+            }
             const ps_val = std.json.Value{ .object = ps_map };
             js.statusUpdate(ps_val);
         }

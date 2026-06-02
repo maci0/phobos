@@ -100,6 +100,26 @@ pub const WledCtx = struct {
         self.gpa.free(s.status);
         s.status = try self.gpa.dupe(u8, new_status);
     }
+
+    /// Apply control parameters to a strip (brightness, preset, intensity,
+    /// speed). Any param set to a non-negative value is applied; -1 means
+    /// "keep current". Turns the strip on.
+    pub fn setStripControl(
+        self: *WledCtx,
+        name: []const u8,
+        brightness: i64,
+        preset: i64,
+        intensity: i64,
+        speed: i64,
+    ) !void {
+        const s = self.strips.getPtr(name) orelse return error.NotFound;
+        if (brightness >= 0) s.brightness = brightness;
+        if (preset >= 0) s.preset = preset;
+        if (intensity >= 0) s.intensity = intensity;
+        if (speed >= 0) s.speed = speed;
+        self.gpa.free(s.status);
+        s.status = try self.gpa.dupe(u8, "on");
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -121,6 +141,20 @@ fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
 
 fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
     return getOptStr(params, field) orelse error.InvalidParams;
+}
+
+fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
+    switch (params) {
+        .object => |obj| {
+            const v = obj.get(field) orelse return default_val;
+            return switch (v) {
+                .integer => |i| i,
+                .float => |f| @intFromFloat(f),
+                else => default_val,
+            };
+        },
+        else => return default_val,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +251,15 @@ pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
         break :blk al;
     } else "status";
 
-    const req: []const u8 = if (std.mem.eql(u8, action, "control")) "on" else action;
-    _ = try processRequest(ctx, strip, req);
+    if (std.mem.eql(u8, action, "control")) {
+        const brightness = getOptInt(params, "brightness", -1);
+        const preset = getOptInt(params, "preset", -1);
+        const intensity = getOptInt(params, "intensity", -1);
+        const speed = getOptInt(params, "speed", -1);
+        try ctx.setStripControl(strip_name, brightness, preset, intensity, speed);
+    } else {
+        _ = try processRequest(ctx, strip, action);
+    }
     // Re-fetch after potential state change.
     const updated = ctx.findStrip(strip_name) orelse strip;
     var out: std.json.ObjectMap = .empty;
@@ -409,6 +450,68 @@ test "handleSingleStrip: POST invalid action returns InvalidParams" {
     try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"dance\"}"), a));
 }
 
+test "handleSingleStrip: POST action=control applies brightness and turns on" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"brightness\":128}"), a);
+    const s = v.object.get("leds").?.object;
+    try testing.expectEqualStrings("on", s.get("status").?.string);
+    try testing.expectEqual(@as(i64, 128), s.get("brightness").?.integer);
+    // Other params unchanged.
+    try testing.expectEqual(@as(i64, -1), s.get("preset").?.integer);
+    try testing.expectEqual(@as(i64, -1), s.get("intensity").?.integer);
+    try testing.expectEqual(@as(i64, -1), s.get("speed").?.integer);
+}
+
+test "handleSingleStrip: POST action=control with preset and intensity" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"preset\":3,\"intensity\":200}"), a);
+    const s = v.object.get("leds").?.object;
+    try testing.expectEqualStrings("on", s.get("status").?.string);
+    try testing.expectEqual(@as(i64, 3), s.get("preset").?.integer);
+    try testing.expectEqual(@as(i64, 200), s.get("intensity").?.integer);
+}
+
+test "handleSingleStrip: POST action=control with all params" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"brightness\":200,\"preset\":5,\"intensity\":180,\"speed\":50}"), a);
+    const s = v.object.get("leds").?.object;
+    try testing.expectEqualStrings("on", s.get("status").?.string);
+    try testing.expectEqual(@as(i64, 200), s.get("brightness").?.integer);
+    try testing.expectEqual(@as(i64, 5), s.get("preset").?.integer);
+    try testing.expectEqual(@as(i64, 180), s.get("intensity").?.integer);
+    try testing.expectEqual(@as(i64, 50), s.get("speed").?.integer);
+}
+
+test "handleSingleStrip: POST action=control with no params still turns on" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, -1);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\"}"), a);
+    const s = v.object.get("leds").?.object;
+    try testing.expectEqualStrings("on", s.get("status").?.string);
+    // Default values preserved (no params applied).
+    try testing.expectEqual(@as(i64, 255), s.get("brightness").?.integer);
+    try testing.expectEqual(@as(i64, -1), s.get("preset").?.integer);
+}
+
 // ---- batch handlers ----
 
 test "handleBatchOn: turns on known strip" {
@@ -524,4 +627,24 @@ test "fuzz_batch_wled: arbitrary params never crash batch handlers" {
             _ = handleBatchStatus(@ptrCast(&ctx), pv.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "registerWled: wires expected routes and JSON-RPC methods" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try registerWled(&reg, &ctx);
+
+    try testing.expect(reg.lookup(.GET, "/machine/wled/strips") != null);
+    try testing.expect(reg.lookup(.GET, "/machine/wled/status") != null);
+    try testing.expect(reg.lookup(.GET, "/machine/wled/strip") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/wled/on") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/wled/off") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/wled/toggle") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/wled/strip") != null);
 }

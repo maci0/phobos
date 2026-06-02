@@ -13,16 +13,25 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~67%** (66.8% weighted by API item count per component).
+- **Overall implementation progress: ~74%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
-  (machine depth up from 30%→50%: proc_stat timer thread + real /proc /sys reads)
+  (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
+  notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
+  full ButtonCtx with addButton/sendEvent/emitButtonEvent/notification_sent guard.
+  gcode_metadata depth: findObjectHeight (was stubbed, now 6 slicer patterns + G1 Z fallback),
+  filament_weight_total, nozzle_diameter — 19 new unit tests + 9 new fuzz tests.
+  file_manager depth up from 85%→90%.)
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
-- Tests: **663 pass / 3 skip / 0 fail** (94 fuzz). Verified by running test binary
-  directly: `./.zig-cache/o/*/test --cache-dir=./.zig-cache`. Note: `zig build test`
+- Tests: **810 pass / 3 skip / 0 fail** (109 fuzz). Verified by running test binary
+  directly: `./.zig-cache/o/*/test`. Note: `zig build test`
   uses `--listen=-` protocol which may hang on this machine (Zig 0.16 build-runner
   quirk); always verify via the direct test binary.
-  The 3 skips are: 3 lmdb-specific tests (not applicable with `-Dwith_lmdb=false`).
+  The 3 skips are: 1 lmdb-specific test (not applicable with `-Dwith_lmdb=false`) +
+  2 `SkipZigTest` guards (lmdb drop-in requires Moonraker data.mdb fixture, fuzz
+  end-to-end requires klippysocket).
+- All register functions now have unit tests verifying all expected routes are wired
+  in the Registry (machine, update_manager, power, wled, td1, button).
 - Peak RSS for the full test run ≈ 12–18 MB.
 
 ### Build / test / run — IMPORTANT host quirks
@@ -178,16 +187,24 @@ surface real per-endpoint shape diffs to fix.
 - **mqtt** — endpoints return "not configured"; no MQTT client.
 - **spoolman/announcements** — operate on stored data; no real spoolman HTTP / RSS fetch.
 - **file_manager metadata** — record shape correct; deep gcode parsing (slicer/layers/
-  thumbnails) partial.
+  thumbnails) now implements findObjectHeight (6 slicer patterns + G1 Z fallback),
+  filament_weight_total (7 patterns), nozzle_diameter (3 patterns). Still missing:
+  thumbnail extraction, full slicer_version parsing.
 - **LDAP** auth source omitted (moonraker-source-only scope).
-- **sensor** — `notify_sensor_update` deferred (SensorCtx empty struct; only relevant
-  when MQTT/Klippy sensor integration lands).
+- **sensor** — ~~`notify_sensor_update` deferred (SensorCtx empty struct; only relevant
+  when MQTT/Klippy sensor integration lands).~~ DONE: real SensorCtx with sensors
+  StringHashMap, MeasurementRing history, change detection, emitSensorUpdate via
+  emitLocked, param_info tracking. 15 unit + 4 fuzz tests.
+- **button** — ~~notification-only, GPIO stubbed.~~ DONE: full ButtonCtx with
+  addButton/sendEvent/emitButtonEvent/notification_sent guard, 10 unit + 3 fuzz tests.
 
 ### P2 — misc
 - ~~Read host/port from config in `main()`.~~ Done: `-c`/`--config`, `extractBindAddr`, 5 tests.
 - Re-enable the lmdb drop-in test by shipping/locating a real Moonraker `data.mdb`
   fixture (currently `SkipZigTest`).
-- Memory baseline: measure RSS of running phobos daemon vs stock Moonraker.
+- ~~Memory baseline: measure RSS of running phobos daemon vs stock Moonraker.~~
+  Done: phobos daemon RSS = 5.4 MB (VmSize 7992 kB, 1 thread) vs stock Moonraker
+  ~80-150 MB (Python asyncio, multiple threads).
 
 ---
 
@@ -214,8 +231,13 @@ surface real per-endpoint shape diffs to fix.
    join in deinit, null io before join, `std.os.linux.nanosleep` (not posix).
 9. **Conformance oracle** (P1) — golden-capture boot, replay, normalized-equality
    asserts. Capstone parity proof.
-10. **P2 cleanup** — memory baseline (RSS vs stock Moonraker), re-enable lmdb drop-in
-    test, subsystem depth (machine reboot/shutdown, update_manager git/pip/apt,
-    power/wled/td1 GPIO, mqtt, spoolman HTTP, file_manager gcode parsing).
+10. **P2 cleanup** — ~~memory baseline (RSS vs stock Moonraker)~~ Done: 5.4 MB RSS,
+    re-enable lmdb drop-in test, subsystem depth (machine reboot/shutdown,
+    update_manager git/pip/apt, power/wled/td1 GPIO, mqtt, spoolman HTTP,
+    ~~file_manager gcode parsing~~ → findObjectHeight, filament_weight_total,
+    nozzle_diameter implemented; thumbnails + slicer_version remain).
+11. **Conformance oracle follow-up** — see P1 above. Without a running Moonraker
+    installation, build a static-capture-based oracle: ship expected response
+    shapes per endpoint and assert phobos matches (mask volatile fields).
 
 Keep the coverage gate at 100% and the full suite green after every step.

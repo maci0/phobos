@@ -25,6 +25,8 @@ pub const klippy_connection = @import("components/klippy_connection.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub const app = @import("app.zig");
+pub const oracle_normalize = @import("oracle/normalize.zig");
+pub const oracle_replay = @import("oracle/replay.zig");
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.gpa;

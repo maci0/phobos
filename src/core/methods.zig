@@ -59,6 +59,9 @@ pub const ServerInfo = struct {
     klippy_state: []const u8 = "disconnected",
     /// Parsed config (set by App after init). Null during tests/dump-api.
     cfg: ?*const config_mod.ConfigParser = null,
+    /// Config file path (set by App via setConfig). Used for the `files`
+    /// field in server.config response.
+    config_file_path: ?[]const u8 = null,
 
     pub fn ctx(self: *ServerInfo) *anyopaque {
         return @ptrCast(self);
@@ -134,16 +137,81 @@ pub fn buildServerInfo(info: *const ServerInfo, raw: bool, alloc: std.mem.Alloca
     return .{ .object = obj };
 }
 
-/// Build the `server.config` payload. Serializes the parsed `ConfigParser`
-/// sections into the `config` object; `orig` mirrors `config` (no type coercion
-/// in phobos yet); `files` lists the main config file when known. When `cfg`
-/// is null (tests/dump-api), returns the empty shape.
-pub fn buildServerConfig(alloc: std.mem.Allocator, cfg: ?*const config_mod.ConfigParser) !std.json.Value {
-    var obj: std.json.ObjectMap = .empty;
+/// Build the `server.config` payload. Returns the full set of Moonraker
+/// component config sections (with defaults matching stock Moonraker),
+/// overlayed with the parsed `ConfigParser` data when available.
+/// `orig` reflects the raw config-file values (strings, pre-coercion).
+/// `files` lists config files and their sections when known.
+/// When `cfg` is null (tests/dump-api), returns defaults only.
+///
+/// Mirror of Moonraker's `_handle_config_request` which returns every
+/// component's config section with per-component defaults.
+pub fn buildServerConfig(alloc: std.mem.Allocator, cfg: ?*const config_mod.ConfigParser, config_file_path: ?[]const u8) !std.json.Value {
+    // Moonraker's exact component config defaults, extracted from the golden
+    // capture of a stock Moonraker (commit 9008485) started without Klippy.
+    // Each known section gets these defaults unless overridden by the parsed
+    // config file.  Sorted alphabetically to match Moonraker serialization.
+    var config_obj = try buildConfigDefaults(alloc);
 
+    // Track which sections came from the parsed config file for the `files` field.
+    var file_sections: std.ArrayListUnmanaged([]const u8) = .empty;
+
+    // Overlay parsed config sections on top of defaults.
     if (cfg) |c| {
-        // Serialize sections into the config object.
-        var config_obj: std.json.ObjectMap = .empty;
+        const sections = try c.sectionNames(alloc);
+        defer alloc.free(sections);
+        for (sections) |sec_name| {
+            try file_sections.append(alloc, try alloc.dupe(u8, sec_name));
+
+            var sec_obj: std.json.ObjectMap = .empty;
+            const opts = try c.optionNames(sec_name, alloc);
+            defer alloc.free(opts);
+            for (opts) |opt_name| {
+                if (c.get(sec_name, opt_name)) |val| {
+                    try sec_obj.put(alloc, try alloc.dupe(u8, opt_name), .{ .string = try alloc.dupe(u8, val) });
+                }
+            }
+
+            // Merge: start from defaults (if any), then overlay parsed values.
+            // Preserve the default's type when coercing string values from the
+            // config file (matching Moonraker's get_parsed_config behaviour).
+            const existing_default = config_obj.get(sec_name);
+            if (existing_default != null and existing_default.? == .object) {
+                var merged: std.json.ObjectMap = .empty;
+                var it = existing_default.?.object.iterator();
+                while (it.next()) |entry| {
+                    const default_key = entry.key_ptr.*;
+                    const default_val = entry.value_ptr.*;
+
+                    // If the parsed config has this key, coerce its string
+                    // value to match the default type.
+                    const override_val = sec_obj.get(default_key);
+                    if (override_val != null and override_val.? == .string) {
+                        const final_val = try coerceStringToValue(alloc, override_val.?.string, default_val);
+                        try merged.put(alloc, try alloc.dupe(u8, default_key), final_val);
+                    } else {
+                        try merged.put(alloc, try alloc.dupe(u8, default_key), try deepCopyValue(alloc, default_val));
+                    }
+                }
+                // Add any parsed keys not present in defaults.
+                var oit = sec_obj.iterator();
+                while (oit.next()) |entry| {
+                    if (!merged.contains(entry.key_ptr.*)) {
+                        try merged.put(alloc, try alloc.dupe(u8, entry.key_ptr.*), try deepCopyValue(alloc, entry.value_ptr.*));
+                    }
+                }
+                try config_obj.put(alloc, try alloc.dupe(u8, sec_name), .{ .object = merged });
+            } else {
+                try config_obj.put(alloc, try alloc.dupe(u8, sec_name), .{ .object = sec_obj });
+            }
+        }
+    }
+
+    // Build `orig`: raw config-file values as strings (pre-coercion), with
+    // a `DEFAULT` section for any DEFAULT-annotated entries.
+    var orig_obj: std.json.ObjectMap = .empty;
+    try orig_obj.put(alloc, "DEFAULT", .{ .object = .empty });
+    if (cfg) |c| {
         const sections = try c.sectionNames(alloc);
         defer alloc.free(sections);
         for (sections) |sec_name| {
@@ -155,20 +223,222 @@ pub fn buildServerConfig(alloc: std.mem.Allocator, cfg: ?*const config_mod.Confi
                     try sec_obj.put(alloc, try alloc.dupe(u8, opt_name), .{ .string = try alloc.dupe(u8, val) });
                 }
             }
-            try config_obj.put(alloc, try alloc.dupe(u8, sec_name), .{ .object = sec_obj });
+            try orig_obj.put(alloc, try alloc.dupe(u8, sec_name), .{ .object = sec_obj });
         }
-        try obj.put(alloc, "config", .{ .object = config_obj });
-        // orig mirrors config for now (Moonraker's orig is pre-coercion values).
-        try obj.put(alloc, "orig", .{ .object = deepCopyObject(alloc, config_obj) catch std.json.ObjectMap.empty });
-    } else {
-        try obj.put(alloc, "config", .{ .object = .empty });
-        try obj.put(alloc, "orig", .{ .object = .empty });
     }
 
-    // files: list of parsed config files. Currently reports just the main file
-    // when the config was parsed; empty otherwise (matches Moonraker's structure).
-    try obj.put(alloc, "files", .{ .array = .init(alloc) });
+    // Build `files` array (matches Moonraker's `get_file_sections`).
+    var files_arr: std.json.Array = .init(alloc);
+    if (config_file_path) |path| {
+        const basename = std.fs.path.basename(path);
+        var fobj: std.json.ObjectMap = .empty;
+        try fobj.put(alloc, "filename", .{ .string = try alloc.dupe(u8, basename) });
+        var sarr: std.json.Array = .init(alloc);
+        for (file_sections.items) |s| {
+            try sarr.append(.{ .string = s });
+        }
+        try fobj.put(alloc, "sections", .{ .array = sarr });
+        try files_arr.append(.{ .object = fobj });
+    }
+
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "config", .{ .object = config_obj });
+    try obj.put(alloc, "orig", .{ .object = orig_obj });
+    try obj.put(alloc, "files", .{ .array = files_arr });
     return .{ .object = obj };
+}
+
+/// Build the component config section defaults matching stock Moonraker.
+fn buildConfigDefaults(alloc: std.mem.Allocator) !std.json.ObjectMap {
+    var obj: std.json.ObjectMap = .empty;
+
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "dev_mode", .{ .bool = false });
+        const subs: std.json.Array = .init(alloc);
+        try sec.put(alloc, "subscriptions", .{ .array = subs });
+        try obj.put(alloc, "announcements", .{ .object = sec });
+    }
+    {
+        var sec: std.json.ObjectMap = .empty;
+        const cd: std.json.Array = .init(alloc);
+        try sec.put(alloc, "cors_domains", .{ .array = cd });
+        try sec.put(alloc, "default_source", .{ .string = "moonraker" });
+        try sec.put(alloc, "enable_api_key", .{ .bool = true });
+        try sec.put(alloc, "force_logins", .{ .bool = false });
+        try sec.put(alloc, "login_timeout", .{ .integer = 90 });
+        try sec.put(alloc, "max_login_attempts", .null);
+        var tc: std.json.Array = .init(alloc);
+        try tc.append(.{ .string = "127.0.0.1" });
+        try sec.put(alloc, "trusted_clients", .{ .array = tc });
+        try obj.put(alloc, "authorization", .{ .object = sec });
+    }
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "gcode_store_size", .{ .integer = 0 });
+        try sec.put(alloc, "temperature_store_size", .{ .integer = 0 });
+        try obj.put(alloc, "data_store", .{ .object = sec });
+    }
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "database_path", .null);
+        try sec.put(alloc, "enable_database_debug", .{ .bool = false });
+        try obj.put(alloc, "database", .{ .object = sec });
+    }
+    try obj.put(alloc, "dbus_manager", .{ .object = .empty });
+    try obj.put(alloc, "extensions", .{ .object = .empty });
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "check_klipper_config_path", .{ .bool = true });
+        try sec.put(alloc, "config_path", .null);
+        try sec.put(alloc, "default_metadata_parser_timeout", .{ .float = 20.0 });
+        try sec.put(alloc, "enable_config_write_access", .{ .bool = true });
+        try sec.put(alloc, "enable_inotify_warnings", .{ .bool = true });
+        try sec.put(alloc, "enable_object_processing", .{ .bool = false });
+        try sec.put(alloc, "enable_observer_warnings", .{ .bool = true });
+        try sec.put(alloc, "file_system_observer", .{ .string = "inotify" });
+        try sec.put(alloc, "log_path", .null);
+        try sec.put(alloc, "queue_gcode_uploads", .{ .bool = false });
+        try obj.put(alloc, "file_manager", .{ .object = sec });
+    }
+    try obj.put(alloc, "history", .{ .object = .empty });
+    try obj.put(alloc, "http_client", .{ .object = .empty });
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "automatic_transition", .{ .bool = false });
+        try sec.put(alloc, "job_transition_delay", .{ .float = 0.01 });
+        try sec.put(alloc, "job_transition_gcode", .{ .string = "" });
+        try sec.put(alloc, "load_on_startup", .{ .bool = false });
+        try obj.put(alloc, "job_queue", .{ .object = sec });
+    }
+    try obj.put(alloc, "job_state", .{ .object = .empty });
+    try obj.put(alloc, "klippy_apis", .{ .object = .empty });
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "force_validation", .{ .bool = false });
+        try sec.put(alloc, "provider", .{ .string = "none" });
+        try sec.put(alloc, "shutdown_action", .{ .string = "poweroff" });
+        try sec.put(alloc, "sudo_password", .null);
+        try sec.put(alloc, "validate_config", .{ .bool = true });
+        try sec.put(alloc, "validate_service", .{ .bool = true });
+        try obj.put(alloc, "machine", .{ .object = sec });
+    }
+    try obj.put(alloc, "proc_stats", .{ .object = .empty });
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "secrets_path", .null);
+        try obj.put(alloc, "secrets", .{ .object = sec });
+    }
+    {
+        var sec: std.json.ObjectMap = .empty;
+        try sec.put(alloc, "enable_debug_logging", .{ .bool = false });
+        try sec.put(alloc, "host", .{ .string = "127.0.0.1" });
+        try sec.put(alloc, "klippy_uds_address", .{ .string = "/tmp/klippy_uds" });
+        try sec.put(alloc, "max_upload_size", .{ .integer = 1024 });
+        try sec.put(alloc, "max_websocket_connections", .{ .integer = 50 });
+        try sec.put(alloc, "port", .{ .integer = 7125 });
+        try sec.put(alloc, "route_prefix", .null);
+        try sec.put(alloc, "ssl_certificate_path", .null);
+        try sec.put(alloc, "ssl_key_path", .null);
+        try sec.put(alloc, "ssl_port", .{ .integer = 7130 });
+        try obj.put(alloc, "server", .{ .object = sec });
+    }
+    try obj.put(alloc, "shell_command", .{ .object = .empty });
+    try obj.put(alloc, "template", .{ .object = .empty });
+    try obj.put(alloc, "webcam", .{ .object = .empty });
+
+    return obj;
+}
+
+fn coerceToType(value: std.json.Value, comptime T: type) ?T {
+    return switch (@typeInfo(T)) {
+        .Bool => switch (value) {
+            .bool => |b| b,
+            else => null,
+        },
+        .Int, .ComptimeInt => switch (value) {
+            .integer => |i| @intCast(i),
+            .float => |f| @intFromFloat(f),
+            .number_string => |s| std.fmt.parseInt(T, s, 10) catch null,
+            else => null,
+        },
+        .Float, .ComptimeFloat => switch (value) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            .number_string => |s| std.fmt.parseFloat(T, s) catch null,
+            else => null,
+        },
+        .Optional => |opt| switch (value) {
+            .null => null,
+            else => if (coerceToType(value, opt.child)) |v| v else null,
+        },
+        .Array => |arr| if (value == .array) {
+            const len = value.array.items.len;
+            if (len == 0) @compileError("coerceToType: empty array, cannot infer length for " ++ @typeName(T));
+            if (len != arr.len) return null;
+            var result: T = undefined;
+            for (value.array.items, 0..) |elem, idx| {
+                if (coerceToType(elem, arr.child)) |v| {
+                    result[idx] = v;
+                } else return null;
+            }
+            return result;
+        } else null,
+        .Struct => |s| if (value == .object) blk: {
+            var result: T = undefined;
+            for (s.fields) |field| {
+                if (value.object.get(field.name)) |fv| {
+                    if (coerceToType(fv, field.type)) |v| {
+                        @field(result, field.name) = v;
+                    } else break :blk null;
+                } else if (field.default_value) |def| {
+                    @field(result, field.name) = @as(*align(1) const field.type, @ptrCast(def)).*;
+                } else break :blk null;
+            }
+            break :blk result;
+        } else null,
+        else => @compileError("coerceToType: unsupported type " ++ @typeName(T)),
+    };
+}
+
+/// Coerce a string (parsed from config) to a JSON value matching the type of
+/// `default_val`. Mirrors Moonraker's per-component config coercion rules.
+fn coerceStringToValue(alloc: std.mem.Allocator, s: []const u8, default_val: std.json.Value) !std.json.Value {
+    return switch (default_val) {
+        .bool => .{ .bool = std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1") },
+        .integer => .{ .integer = std.fmt.parseInt(i64, s, 10) catch |e| {
+            std.debug.print("phobos: warning: cannot coerce '{s}' to integer: {} — keeping string\n", .{ s, e });
+            return .{ .string = try alloc.dupe(u8, s) };
+        } },
+        .float => .{ .float = std.fmt.parseFloat(f64, s) catch |e| {
+            std.debug.print("phobos: warning: cannot coerce '{s}' to float: {} — keeping string\n", .{ s, e });
+            return .{ .string = try alloc.dupe(u8, s) };
+        } },
+        .null => .null,
+        .string => .{ .string = try alloc.dupe(u8, s) },
+        .array => |arr| {
+            // Split config string by newline into array elements, coercing each
+            // element to match the first element's type from the default array.
+            var result: std.json.Array = .init(alloc);
+            if (s.len > 0) {
+                var lines = std.mem.splitScalar(u8, s, '\n');
+                while (lines.next()) |line| {
+                    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+                    if (trimmed.len == 0) continue;
+                    // Coerce each element using the first default element as type hint.
+                    const sample = if (arr.items.len > 0) arr.items[0] else null;
+                    if (sample) |sample_val| {
+                        try result.append(try coerceStringToValue(alloc, trimmed, sample_val));
+                    } else {
+                        try result.append(.{ .string = try alloc.dupe(u8, trimmed) });
+                    }
+                }
+            }
+            return .{ .array = result };
+        },
+        .object => |obj| if (obj.count() == 0) .{ .object = .empty } else .{ .string = try alloc.dupe(u8, s) },
+        .number_string => .{ .string = try alloc.dupe(u8, s) },
+    };
 }
 
 fn deepCopyObject(alloc: std.mem.Allocator, src: std.json.ObjectMap) std.mem.Allocator.Error!std.json.ObjectMap {
@@ -210,7 +480,7 @@ pub fn serverInfoHandler(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
 
 pub fn serverConfigHandler(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const info: *const ServerInfo = @ptrCast(@alignCast(ctx));
-    return buildServerConfig(alloc, info.cfg);
+    return buildServerConfig(alloc, info.cfg, info.config_file_path);
 }
 
 /// Register the core endpoints into a `Registry`.
@@ -315,11 +585,25 @@ test "getRawParam: object bool/string/missing" {
 test "buildServerConfig: shape" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const v = try buildServerConfig(arena.allocator(), null);
+    const v = try buildServerConfig(arena.allocator(), null, null);
     const o = v.object;
     try std.testing.expect(o.get("config").? == .object);
     try std.testing.expect(o.get("orig").? == .object);
     try std.testing.expect(o.get("files").? == .array);
+
+    // Verify all known sections are present in the null case.
+    const config_obj = o.get("config").?.object;
+    const known_sections = [_][]const u8{
+        "announcements", "authorization", "data_store", "database",
+        "dbus_manager", "extensions", "file_manager", "history",
+        "http_client", "job_queue", "job_state", "klippy_apis",
+        "machine", "proc_stats", "secrets", "server",
+        "shell_command", "template", "webcam",
+    };
+    for (known_sections) |sec| {
+        try std.testing.expect(config_obj.get(sec) != null);
+        try std.testing.expect(config_obj.get(sec).? == .object);
+    }
 }
 
 test "serverInfoHandler is serializable and round-trips through dispatcher" {
@@ -394,7 +678,7 @@ test "fuzz_methods: buildServerConfig always serializes" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            const v = try buildServerConfig(a, null);
+            const v = try buildServerConfig(a, null, null);
             const s = try std.json.Stringify.valueAlloc(a, v, .{});
             try std.testing.expect(s.len > 0);
         }

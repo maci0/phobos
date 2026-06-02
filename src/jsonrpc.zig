@@ -97,15 +97,18 @@ pub const Dispatcher = struct {
             return jv.errorResponse(alloc, id, -32601, "Method not found");
         };
 
-        // Inject the JSON-RPC method name as _method so multi-verb handlers can
-        // dispatch correctly (mirrors the HTTP transport injecting the verb).
-        // When params is already an object we modify it in-place (parsed owns
-        // the map); otherwise we create a temporary map we must deinit.
-        var tmp_map: std.json.ObjectMap = undefined;
-        var map_needs_deinit: bool = false;
-        defer if (map_needs_deinit) tmp_map.deinit(alloc);
+        // Handler allocations go into an arena so they are freed after the
+        // response is serialized.  The outer allocator is used only for
+        // parsing and the final response bytes.
+        var handler_arena = std.heap.ArenaAllocator.init(alloc);
+        defer handler_arena.deinit();
+        const handler_alloc = handler_arena.allocator();
 
-        {
+        // Inject the HTTP verb as _method when params is an object, so
+        // multi-verb handlers can dispatch correctly (mirrors the HTTP
+        // transport behaviour). Non-object params are passed through
+        // as-is; multi-verb endpoints always receive objects in practice.
+        if (params == .object) {
             const verb: []const u8 = verb: {
                 if (std.mem.lastIndexOfScalar(u8, method, '.')) |dot| {
                     const last = method[dot + 1 ..];
@@ -115,18 +118,11 @@ pub const Dispatcher = struct {
                 }
                 break :verb method;
             };
-            if (params == .object) {
-                try params.object.put(alloc, "_method", .{ .string = verb });
-            } else {
-                tmp_map = .empty;
-                try tmp_map.put(alloc, "_method", .{ .string = verb });
-                params = .{ .object = tmp_map };
-                map_needs_deinit = true;
-            }
+            try params.object.put(handler_alloc, "_method", .{ .string = verb });
         }
 
         // Call handler
-        const result = entry.handler(entry.ctx, params, alloc) catch |err| {
+        const result = entry.handler(entry.ctx, params, handler_alloc) catch |err| {
             if (is_notification) return try alloc.dupe(u8, &.{});
             // Moonraker's JsonRPC.execute_method maps a ServerError to its
             // status_code verbatim (except 404→-32601, 401→-32602). The

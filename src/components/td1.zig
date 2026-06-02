@@ -219,3 +219,17 @@ test "fuzz_td1_reboot: handleReboot never panics on arbitrary serial values" {
         }
     }.run, .{});
 }
+
+test "registerTd1: wires expected routes" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+
+    var ctx: Td1Ctx = .{};
+    try registerTd1(&reg, &ctx);
+
+    try testing.expect(reg.lookup(.GET, "/machine/td1/data") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/td1/reboot") != null);
+}

@@ -74,6 +74,33 @@ pub const default_allowed_services = [_][]const u8{
     "ratos-configurator",
 };
 
+/// All Moonraker-compatible service names that phobos registers or stubs.
+/// Used by buildAvailableServices, buildServiceState, and isServiceAllowed.
+pub const available_services = [_][]const u8{
+    "announce",
+    "data_store",
+    "device_power",
+    "file_manager",
+    "history",
+    "history_totals",
+    "job_queue",
+    "job_state",
+    "klipper",
+    "klippy_state",
+    "machine",
+    "moonraker",
+    "mqtt",
+    "octoprint_compat",
+    "proc_stats",
+    "shell_command",
+    "spoolman",
+    "td1",
+    "test",
+    "update_manager",
+    "webcam",
+    "wled",
+};
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -94,6 +121,31 @@ pub const MachineCtx = struct {
     proc_stat_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Handle for the proc_stat timer thread, joined in deinit.
     proc_stat_thread: ?std.Thread = null,
+    /// In-memory service state: allowed_service → { active_state, sub_state }.
+    /// Populated on first access; tracks starts/stops/restarts requested via
+    /// the service action handlers. No real systemd calls are made.
+    services: std.StringHashMap(ServiceEntry) = std.StringHashMap(ServiceEntry).init(std.heap.smp_allocator),
+
+    pub const ServiceEntry = struct {
+        active_state: ServiceActive,
+        sub_state: ServiceSub,
+
+        fn active(state: ServiceActive, sub: ServiceSub) ServiceEntry {
+            return .{ .active_state = state, .sub_state = sub };
+        }
+    };
+
+    pub const ServiceActive = enum { active, inactive };
+    pub const ServiceSub = enum { running, dead };
+
+    pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus, conns: ?*anyopaque) MachineCtx {
+        return .{
+            .gpa = alloc,
+            .bus = bus,
+            .conns = @alignCast(@ptrCast(conns)),
+            .services = std.StringHashMap(ServiceEntry).init(alloc),
+        };
+    }
 
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
@@ -105,14 +157,24 @@ pub const MachineCtx = struct {
 
     pub fn deinit(self: *MachineCtx) void {
         self.proc_stat_stop.store(true, .release);
-        // Clear io so the timer thread sees null and returns early.
+        // Clear io/conns/bus so the timer thread returns early even if it
+        // already passed the while-condition. This prevents use-after-free
+        // when App tears down connections before joining the machine thread.
         self.io = null;
+        self.conns = null;
+        self.bus = null;
         if (self.proc_stat_thread) |th| {
             th.join();
             self.proc_stat_thread = null;
         }
         if (self.sudo_password) |p| self.gpa.free(p);
         self.sudo_password = null;
+        // Free service entry keys (StringHashMap stores slices, not owned copies).
+        var it = self.services.iterator();
+        while (it.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.services.deinit();
     }
 };
 
@@ -121,13 +183,17 @@ pub const MachineCtx = struct {
 // ---------------------------------------------------------------------------
 
 /// Background thread spawned via std.Thread.spawn. Emits `notify_proc_stat_update`
-/// every second until `proc_stat_stop` is set.
+/// every second until `proc_stat_stop` is set.  First emission is immediate
+/// (matching Moonraker's behaviour of emitting on websocket connect).
 fn procStatTimerThread(self: *MachineCtx) void {
+    var first: bool = true;
     while (!self.proc_stat_stop.load(.acquire)) {
-        // Sleep 1 second using Linux nanosleep.
-        var req: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
-        _ = std.os.linux.nanosleep(&req, null);
-        if (self.proc_stat_stop.load(.acquire)) break;
+        if (!first) {
+            var req: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
+            _ = std.os.linux.nanosleep(&req, null);
+            if (self.proc_stat_stop.load(.acquire)) break;
+        }
+        first = false;
         if (self.io) |io| {
             emitProcStatUpdate(self, io) catch {};
         } else break;
@@ -191,7 +257,10 @@ fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
     try event_data.put(alloc, "network", network);
     try event_data.put(alloc, "system_cpu_usage", sys_cpu);
     try event_data.put(alloc, "system_memory", sys_mem);
-    const ws_count: i64 = if (self.conns) |c| @intCast(c.count(io)) else 0;
+    const ws_count: i64 = if (self.conns) |c| blk: {
+        const raw: usize = c.count(io);
+        break :blk std.math.cast(i64, raw) orelse 0;
+    } else 0;
     try event_data.put(alloc, "websocket_connections", .{ .integer = ws_count });
 
     // JSON-RPC params: [event_data].
@@ -547,6 +616,55 @@ fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Val
 }
 
 // ===========================================================================
+// available_services / service_state builders
+// ===========================================================================
+
+/// Returns the sorted list of all Moonraker-compatible service names that
+/// phobos registers or stubs. Mirrors the `available_services` key in
+/// Moonraker's machine._handle_info():
+///   sorted([name for name, comp in self.server.components.items() if comp])
+pub fn buildAvailableServices(_: *const MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
+    const list = &available_services;
+    var arr: std.json.Array = .init(alloc);
+    for (list) |s| {
+        try arr.append(.{ .string = s });
+    }
+    return .{ .array = arr };
+}
+
+/// Returns a state map for all known services, reading from the in-memory
+/// service-state HashMap. Matches Moonraker's systemd shape:
+///   { "moonraker": { "active_state": "active", "sub_state": "running" }, ... }
+/// Services not yet tracked default to active/running.
+pub fn buildServiceState(ctx: *const MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
+    const list = &available_services;
+    var obj: std.json.ObjectMap = .empty;
+    for (list) |s| {
+        const entry = buildServiceEntry(ctx, s, alloc);
+        try obj.put(alloc, s, entry);
+    }
+    return .{ .object = obj };
+}
+
+fn buildServiceEntry(ctx: *const MachineCtx, name: []const u8, alloc: std.mem.Allocator) std.json.Value {
+    const state: struct { active: []const u8, sub: []const u8 } = if (ctx.services.get(name)) |e|
+        .{ .active = @tagName(e.active_state), .sub = @tagName(e.sub_state) }
+    else
+        .{ .active = "active", .sub = "running" };
+    var entry: std.json.ObjectMap = .empty;
+    entry.put(alloc, "active_state", .{ .string = state.active }) catch return errorOut();
+    entry.put(alloc, "sub_state", .{ .string = state.sub }) catch return errorOut();
+    return .{ .object = entry };
+}
+
+fn errorOut() std.json.Value {
+    var entry: std.json.ObjectMap = .empty;
+    entry.put(std.heap.smp_allocator, "active_state", .{ .string = "active" }) catch unreachable;
+    entry.put(std.heap.smp_allocator, "sub_state", .{ .string = "running" }) catch unreachable;
+    return .{ .object = entry };
+}
+
+// ===========================================================================
 // system_info handler
 // ===========================================================================
 
@@ -571,9 +689,8 @@ pub fn handleSystemInfo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.A
     try sys.put(alloc, "network", .{ .object = .empty });
     try sys.put(alloc, "canbus", .{ .object = .empty });
     try sys.put(alloc, "python", try buildPython(alloc));
-    // available_services / service_state require systemd. Empty (no dbus).
-    try sys.put(alloc, "available_services", .{ .array = .init(alloc) });
-    try sys.put(alloc, "service_state", .{ .object = .empty });
+    try sys.put(alloc, "available_services", try buildAvailableServices(ctx, alloc));
+    try sys.put(alloc, "service_state", try buildServiceState(ctx, alloc));
     try sys.put(alloc, "provider", .{ .string = "systemd_dbus" });
 
     // instance_ids: Moonraker's unit names. Defaults match a standard install.
@@ -806,10 +923,13 @@ pub fn handleShutdown(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) an
 // ===========================================================================
 
 /// True if a service name is allowed (matches machine.py `is_service_allowed`):
-/// the default allowed list, or anything matching moonraker[_-]?\d* /
-/// klipper[_-]?\d*.
+/// the default allowed list, any phobos-registered service, or anything
+/// matching moonraker[_-]?\d* / klipper[_-]?\d*.
 pub fn isServiceAllowed(name: []const u8) bool {
     for (default_allowed_services) |s| {
+        if (std.mem.eql(u8, s, name)) return true;
+    }
+    for (available_services) |s| {
         if (std.mem.eql(u8, s, name)) return true;
     }
     return prefixWithOptIndex(name, "moonraker") or prefixWithOptIndex(name, "klipper");
@@ -828,14 +948,62 @@ fn prefixWithOptIndex(name: []const u8, base: []const u8) bool {
     return true;
 }
 
-/// Shared handler for the three service actions. STUB: validates the `service`
-/// param against the allow-list and returns "ok"; never runs systemctl / dbus.
-/// Disallowed services error like Moonraker ("Service '<x>' not allowed").
-pub fn handleServiceAction(_: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+/// Shared helper for the three service action endpoints. Validates the `service`
+/// param against the allow-list, updates the in-memory service state, and
+/// returns "ok". Does not run systemctl/dbus.
+fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, action: ServiceAction) !std.json.Value {
     const name = try getStr(params, "service");
     if (!isServiceAllowed(name)) return error.Forbidden;
-    // STUB: a real implementation would call SystemdDbusProvider.do_service_action.
+
+    // If the service already has an entry, update it in-place to avoid
+    // leaking the old key (StringHashMap.put does not free it).
+    switch (action) {
+        .start => {
+            const entry = MachineCtx.ServiceEntry.active(.active, .running);
+            if (ctx.services.getPtr(name)) |existing| {
+                existing.* = entry;
+            } else {
+                try ctx.services.put(try ctx.gpa.dupe(u8, name), entry);
+            }
+        },
+        .stop => {
+            const entry = MachineCtx.ServiceEntry.active(.inactive, .dead);
+            if (ctx.services.getPtr(name)) |existing| {
+                existing.* = entry;
+            } else {
+                try ctx.services.put(try ctx.gpa.dupe(u8, name), entry);
+            }
+        },
+        .restart => {
+            const entry = MachineCtx.ServiceEntry.active(.active, .running);
+            if (ctx.services.getPtr(name)) |existing| {
+                existing.* = entry;
+            } else {
+                try ctx.services.put(try ctx.gpa.dupe(u8, name), entry);
+            }
+        },
+    }
     return .{ .string = "ok" };
+}
+
+const ServiceAction = enum { start, stop, restart };
+
+/// POST /machine/services/start → "ok"
+pub fn handleServiceStart(ctx_ptr: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
+    return doServiceAction(ctx, params, .start);
+}
+
+/// POST /machine/services/stop → "ok"
+pub fn handleServiceStop(ctx_ptr: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
+    return doServiceAction(ctx, params, .stop);
+}
+
+/// POST /machine/services/restart → "ok"
+pub fn handleServiceRestart(ctx_ptr: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
+    return doServiceAction(ctx, params, .restart);
 }
 
 // ===========================================================================
@@ -1072,9 +1240,9 @@ pub fn registerMachine(reg: *Registry, ctx: *MachineCtx) !void {
     try reg.registerEndpoint(.{ .path = "/machine/reboot", .methods = &.{.POST} }, c, handleReboot);
     try reg.registerEndpoint(.{ .path = "/machine/shutdown", .methods = &.{.POST} }, c, handleShutdown);
 
-    try reg.registerEndpoint(.{ .path = "/machine/services/restart", .methods = &.{.POST} }, c, handleServiceAction);
-    try reg.registerEndpoint(.{ .path = "/machine/services/stop", .methods = &.{.POST} }, c, handleServiceAction);
-    try reg.registerEndpoint(.{ .path = "/machine/services/start", .methods = &.{.POST} }, c, handleServiceAction);
+    try reg.registerEndpoint(.{ .path = "/machine/services/restart", .methods = &.{.POST} }, c, handleServiceRestart);
+    try reg.registerEndpoint(.{ .path = "/machine/services/stop", .methods = &.{.POST} }, c, handleServiceStop);
+    try reg.registerEndpoint(.{ .path = "/machine/services/start", .methods = &.{.POST} }, c, handleServiceStart);
 
     try reg.registerEndpoint(.{ .path = "/machine/sudo/info", .methods = &.{.GET} }, c, handleSudoInfo);
     try reg.registerEndpoint(.{ .path = "/machine/sudo/password", .methods = &.{.POST} }, c, handleSudoPassword);
@@ -1332,14 +1500,89 @@ test "handleReboot/handleShutdown: ack ok" {
     try testing.expectEqualStrings("ok", (try handleShutdown(undefined, .null, a)).string);
 }
 
-test "handleServiceAction: allowed ok, disallowed Forbidden" {
+test "service handlers: start/stop/restart update state; disallowed Forbidden" {
+    var c = MachineCtx.init(testing.allocator, null, null);
+    defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const ok = try handleServiceAction(undefined, try objParams(a, "{\"service\":\"klipper\"}"), a);
+
+    // start: should set active/running
+    const ok = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
     try testing.expectEqualStrings("ok", ok.string);
-    try testing.expectError(error.Forbidden, handleServiceAction(undefined, try objParams(a, "{\"service\":\"sshd\"}"), a));
-    try testing.expectError(error.InvalidParams, handleServiceAction(undefined, .null, a));
+    try testing.expect(c.services.get("klipper") != null);
+    try testing.expectEqual(MachineCtx.ServiceActive.active, c.services.get("klipper").?.active_state);
+    try testing.expectEqual(MachineCtx.ServiceSub.running, c.services.get("klipper").?.sub_state);
+
+    // stop: should set inactive/dead
+    _ = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+    try testing.expectEqual(MachineCtx.ServiceActive.inactive, c.services.get("klipper").?.active_state);
+    try testing.expectEqual(MachineCtx.ServiceSub.dead, c.services.get("klipper").?.sub_state);
+
+    // restart: should set active/running
+    _ = try handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+    try testing.expectEqual(MachineCtx.ServiceActive.active, c.services.get("klipper").?.active_state);
+    try testing.expectEqual(MachineCtx.ServiceSub.running, c.services.get("klipper").?.sub_state);
+
+    // disallowed service
+    try testing.expectError(error.Forbidden, handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
+    try testing.expectError(error.Forbidden, handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
+    try testing.expectError(error.Forbidden, handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
+
+    // missing param
+    try testing.expectError(error.InvalidParams, handleServiceStart(@ptrCast(&c), .null, a));
+    try testing.expectError(error.InvalidParams, handleServiceStop(@ptrCast(&c), .null, a));
+    try testing.expectError(error.InvalidParams, handleServiceRestart(@ptrCast(&c), .null, a));
+
+    // available_services: mqtt should be allowed now
+    const mqtt_ok = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"mqtt\"}"), a);
+    try testing.expectEqualStrings("ok", mqtt_ok.string);
+    try testing.expect(c.services.get("mqtt") != null);
+}
+
+test "buildServiceState: reflects tracked service states" {
+    var c = MachineCtx.init(testing.allocator, null, null);
+    defer c.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Default: all services active/running
+    const s0 = try buildServiceState(&c, a);
+    try testing.expect(s0.object.get("klipper") != null);
+    try testing.expectEqualStrings("active", s0.object.get("klipper").?.object.get("active_state").?.string);
+    try testing.expectEqualStrings("running", s0.object.get("klipper").?.object.get("sub_state").?.string);
+
+    // After stop: state changes
+    _ = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+    const s1 = try buildServiceState(&c, a);
+    try testing.expectEqualStrings("inactive", s1.object.get("klipper").?.object.get("active_state").?.string);
+    try testing.expectEqualStrings("dead", s1.object.get("klipper").?.object.get("sub_state").?.string);
+
+    // Other service still default
+    try testing.expectEqualStrings("active", s1.object.get("mqtt").?.object.get("active_state").?.string);
+}
+
+test "buildServiceState: all available_services present" {
+    var c = testCtx(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ss = try buildServiceState(&c, a);
+    const o = ss.object;
+    for (available_services) |s| {
+        try testing.expect(o.get(s) != null);
+    }
+}
+
+test "buildAvailableServices: all available_services present in array" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = testCtx(a);
+    const v = try buildAvailableServices(&c, a);
+    try testing.expect(v == .array);
+    try testing.expectEqual(available_services.len, v.array.items.len);
 }
 
 test "handleSudoInfo: shape" {
@@ -1395,6 +1638,30 @@ test "peripherals: empty/default shapes with io=null" {
 
     const can = try handleCanbus(@ptrCast(&c), .null, a);
     try testing.expect(can.object.get("can_uuids").? == .array);
+}
+
+test "registerMachine: wires routes and JSON-RPC methods" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try registerMachine(&reg, &ctx);
+
+    const routes = [_][]const u8{
+        "/machine/system_info", "/machine/proc_stats",
+        "/machine/reboot", "/machine/shutdown",
+        "/machine/services/restart", "/machine/services/stop", "/machine/services/start",
+        "/machine/sudo/info", "/machine/sudo/password",
+        "/machine/peripherals/usb", "/machine/peripherals/serial",
+        "/machine/peripherals/video", "/machine/peripherals/canbus",
+    };
+    for (routes) |path| {
+        try testing.expect((reg.lookup(.GET, path) != null) or (reg.lookup(.POST, path) != null));
+    }
 }
 
 // ---- fuzz: proc parsers must never crash on malformed/truncated input ----

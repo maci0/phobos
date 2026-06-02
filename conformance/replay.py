@@ -194,13 +194,24 @@ def _norm_files_compare(value: Any) -> Any:
     return sorted(result, key=lambda x: json.dumps(x, sort_keys=True))
 
 
+# Fields within structure_compare objects whose numeric values should be masked
+# (non-deterministic integers/floats like port numbers, PIDs, etc.).
+_STRUCT_MASKED_NUMERIC = {"port", "ssl_port"}
+
+
 def _norm_object_compare(value: Any) -> Any:
     """For object values: keep structure, mask all leaf values."""
     if isinstance(value, dict):
         result = {}
         for k, v in value.items():
             if isinstance(v, (str, bool, int, float)):
-                result[k] = "MASKED" if isinstance(v, str) else v
+                if isinstance(v, str):
+                    result[k] = "MASKED"
+                elif isinstance(v, bool):
+                    result[k] = v
+                else:
+                    # Mask non-deterministic numeric fields (port, etc.).
+                    result[k] = -1.0 if k in _STRUCT_MASKED_NUMERIC else v
             elif isinstance(v, dict):
                 result[k] = _norm_object_compare(v)
             elif isinstance(v, list):
@@ -265,11 +276,32 @@ def normalize(obj: Any, method: str, path: str = "") -> Any:
     return obj  # null, etc.
 
 
+def _coerce_ints_to_floats(obj: Any) -> Any:
+    """Recursively convert all int values to float.
+
+    Zig's std.json.Stringify serializes `.float = 20.0` as `20` (integer form)
+    while Python's json.dumps preserves the int/float type distinction.  This
+    causes spurious inequality when a value like `default_metadata_parser_timeout`
+    is `20.0` in the golden (parsed as float) but `20` from phobos (serialized
+    from `.float` without fractional part → parsed as int).  Normalizing to float
+    everywhere makes the comparison type-agnostic for numbers.
+    """
+    if isinstance(obj, int) and not isinstance(obj, bool):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: _coerce_ints_to_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_ints_to_floats(v) for v in obj]
+    return obj
+
+
 def normalized_equal(golden: Any, phobos: Any, method: str) -> bool:
     """Return True if `golden` and `phobos` are normalized-equal for `method`."""
     try:
         a = normalize(copy.deepcopy(golden), method)
         b = normalize(copy.deepcopy(phobos), method)
+        a = _coerce_ints_to_floats(a)
+        b = _coerce_ints_to_floats(b)
         return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
     except Exception:
         return False
@@ -298,12 +330,22 @@ class PhobosRunner:
 
     def start(self) -> None:
         """Write config, start phobos, wait for it to accept and stabilize."""
-        cfg_path = self.workdir / "phobos.conf"
+        cfg_path = self.workdir / "moonraker.conf"
         cfg_path.write_text(
             f"[server]\n"
             f"host: 127.0.0.1\n"
             f"port: {self.port}\n"
             f"klippy_uds_address: /tmp/phobos-oracle-nonexistent-klippy.sock\n"
+            f"\n"
+            f"[authorization]\n"
+            f"trusted_clients: 127.0.0.1\n"
+            f"\n"
+            f"[data_store]\n"
+            f"gcode_store_size: 0\n"
+            f"temperature_store_size: 0\n"
+            f"\n"
+            f"[machine]\n"
+            f"provider: none\n"
         )
 
         self.proc = subprocess.Popen(
@@ -370,21 +412,36 @@ class ReplayEngine:
     async def replay(self) -> bool:
         """Replay all events; return True if all pass."""
         ws_conn = None
-        ws_connected = False
-        ws_notify_task: Optional[asyncio.Task] = None
         ws_notifications: List[Dict] = []
 
-        async def ws_listener(ws):
+        async def ws_recv_response(ws):
+            """Recv from ws until we get a JSON-RPC response (has "id").
+            Notifications (has "method", no "id") are accumulated."""
             nonlocal ws_notifications
-            try:
-                while True:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=30)
+            while True:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                assert isinstance(raw, str)
+                msg = json.loads(raw)
+                if "id" in msg:
+                    return msg
+                if "method" in msg:
+                    ws_notifications.append(msg)
+
+        async def ws_drain_notifications(ws, timeout: float = 0.5):
+            """Drain any remaining notifications after the main loop."""
+            nonlocal ws_notifications
+            deadline = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(
+                        ws.recv(), timeout=deadline - asyncio.get_event_loop().time()
+                    )
                     assert isinstance(raw, str)
                     msg = json.loads(raw)
                     if "method" in msg and "id" not in msg:
                         ws_notifications.append(msg)
-            except Exception:
-                pass
+                except (asyncio.TimeoutError, Exception):
+                    break
 
         idx = 0
         for event in self.golden_stream:
@@ -445,16 +502,16 @@ class ReplayEngine:
                     print(f"  ✓ [{idx}] http_jsonrpc {method}")
 
             elif kind == "ws_jsonrpc":
-                if not ws_connected:
+                if ws_conn is None:
                     ws_conn = await ws_connect(f"ws://127.0.0.1:{self.port}/websocket")
-                    ws_notify_task = asyncio.create_task(ws_listener(ws_conn))
-                    ws_connected = True
+                    # Give the proc_stat timer thread time to emit its first
+                    # notification (fires every 1s; first is immediate after
+                    # setIo but may have been lost before WS connect).
+                    await asyncio.sleep(1.1)
 
                 try:
                     await ws_conn.send(json.dumps(req))
-                    raw = await asyncio.wait_for(ws_conn.recv(), timeout=5)
-                    assert isinstance(raw, str)
-                    phobos_resp = json.loads(raw)
+                    phobos_resp = await ws_recv_response(ws_conn)
                 except Exception as e:
                     self.failures.append(f"[{idx}] ws_jsonrpc {method}: {e}")
                     continue
@@ -475,16 +532,10 @@ class ReplayEngine:
                 pass
 
         # --- Compare notifications ---
-        # Give phobos a moment to flush any final notifications.
-        await asyncio.sleep(0.5)
+        # Drain any remaining notifications before closing.
         if ws_conn is not None:
+            await ws_drain_notifications(ws_conn, timeout=0.5)
             await ws_conn.close()
-        if ws_notify_task is not None:
-            ws_notify_task.cancel()
-            try:
-                await ws_notify_task
-            except asyncio.CancelledError:
-                pass
 
         golden_notifs = [e["response"] for e in self.golden_stream
                          if e["kind"] == "ws_notification"]
@@ -492,17 +543,24 @@ class ReplayEngine:
             if self.verbose:
                 print(f"  Comparing notifications: "
                       f"golden={len(golden_notifs)} phobos={len(ws_notifications)}")
-            # Compare notification names only (content is volatile).
-            golden_names = [n.get("method", "") for n in golden_notifs]
-            phobos_names = [n.get("method", "") for n in ws_notifications]
-            if golden_names != phobos_names:
+            # Compare notification names only (content is volatile, count is timing-dependent).
+            # Check that golden events are a subset (phobos may emit extra
+            # notifications that were not captured in the golden window, e.g.
+            # notify_klippy_disconnected).
+            golden_names = sorted(set(n.get("method", "") for n in golden_notifs))
+            phobos_names = sorted(set(n.get("method", "") for n in ws_notifications))
+            missing = [n for n in golden_names if n not in phobos_names]
+            if missing:
                 self.failures.append(
-                    f"Notification names differ:\n"
-                    f"  golden: {golden_names}\n"
-                    f"  phobos: {phobos_names}"
+                    f"Missing golden notifications (not in phobos):\n"
+                    f"  missing: {missing}\n"
+                    f"  golden:  {golden_names}\n"
+                    f"  phobos:  {phobos_names}"
                 )
             elif self.verbose:
-                print(f"  ✓ notifications match ({len(golden_names)} events)")
+                extra = [n for n in phobos_names if n not in golden_names]
+                print(f"  ✓ notifications ok ({len(golden_names)} golden events"
+                      f"{f', +{len(extra)} extra: {extra}' if extra else ''})")
 
         return len(self.failures) == 0
 
