@@ -47,7 +47,8 @@ pub fn main(init: std.process.Init) !void {
     if (dump_api) return dumpApi(alloc, aio);
 
     // Read host/port from config when available, with defaults matching Moonraker.
-    const host, const bind_port = try resolveBindAddr(alloc, aio, config_path);
+    const host, const bind_port = try resolveBindAddr(alloc, init.arena.allocator(), aio, config_path);
+    std.debug.print("phobos: bind host='{s}' port={d}\n", .{ host, bind_port });
 
     var server_app = try app.App.init(alloc);
     defer server_app.deinit(aio);
@@ -70,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
 /// Defaults: host = "127.0.0.1", port = 7125 (Moonraker's documented default).
 pub fn resolveBindAddr(
     gpa: std.mem.Allocator,
+    arena_alloc: std.mem.Allocator,
     aio: std.Io,
     config_path: ?[]const u8,
 ) !struct { []const u8, u16 } {
@@ -85,7 +87,9 @@ pub fn resolveBindAddr(
         return .{ default_host, default_port };
     };
 
-    return extractBindAddr(&cfg, default_host, default_port);
+    const host, const port = try extractBindAddr(&cfg, default_host, default_port);
+    // Duplicate into arena_alloc: cfg.deinit() frees the original.
+    return .{ try arena_alloc.dupe(u8, host), port };
 }
 
 /// Extract host/port from an already-parsed ConfigParser.

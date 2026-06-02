@@ -38,8 +38,10 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const notify = @import("../server/notify.zig");
 
 const Registry = registry.Registry;
+const NotifyBus = notify.NotifyBus;
 const Dir = std.Io.Dir;
 
 // ---------------------------------------------------------------------------
@@ -83,18 +85,154 @@ pub const default_allowed_services = [_][]const u8{
 pub const MachineCtx = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
+    bus: ?*NotifyBus = null,
+    /// Optional reference to the live connection registry for websocket_connections count.
+    conns: ?*@import("../server/connections.zig").Connections = null,
     /// Set when a sudo password has been supplied. Owned by the ctx allocator.
     sudo_password: ?[]const u8 = null,
+    /// Proc stat timer stop flag. Set by deinit, polled by the timer thread.
+    proc_stat_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Handle for the proc_stat timer thread, joined in deinit.
+    proc_stat_thread: ?std.Thread = null,
 
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
+        // Start the periodic proc_stat emission if a bus is wired.
+        if (self.bus != null) {
+            self.proc_stat_thread = std.Thread.spawn(.{}, procStatTimerThread, .{self}) catch null;
+        }
     }
 
     pub fn deinit(self: *MachineCtx) void {
+        self.proc_stat_stop.store(true, .release);
+        // Clear io so the timer thread sees null and returns early.
+        self.io = null;
+        if (self.proc_stat_thread) |th| {
+            th.join();
+            self.proc_stat_thread = null;
+        }
         if (self.sudo_password) |p| self.gpa.free(p);
         self.sudo_password = null;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Proc stat timer — periodic notify_proc_stat_update emission
+// ---------------------------------------------------------------------------
+
+/// Background thread spawned via std.Thread.spawn. Emits `notify_proc_stat_update`
+/// every second until `proc_stat_stop` is set.
+fn procStatTimerThread(self: *MachineCtx) void {
+    while (!self.proc_stat_stop.load(.acquire)) {
+        // Sleep 1 second using Linux nanosleep.
+        var req: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
+        _ = std.os.linux.nanosleep(&req, null);
+        if (self.proc_stat_stop.load(.acquire)) break;
+        if (self.io) |io| {
+            emitProcStatUpdate(self, io) catch {};
+        } else break;
+    }
+}
+
+/// Read system files and emit `notify_proc_stat_update` on the bus.
+/// Reuses the same parser functions as handleProcStats.
+fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
+    const bus = self.bus orelse return;
+    const alloc = std.heap.smp_allocator;
+
+    var cpu_temp: std.json.Value = .null;
+    var network: std.json.Value = .{ .object = .empty };
+    var sys_cpu: std.json.Value = .{ .object = .empty };
+    var sys_mem: std.json.Value = .{ .object = .empty };
+    var mem: i64 = 0;
+
+    // Read CPU temperature.
+    if (readFile(io, alloc, TEMPERATURE_PATH)) |txt| {
+        if (parseCpuTemp(txt)) |t| cpu_temp = .{ .float = t };
+    }
+
+    // Read network stats.
+    if (readFile(io, alloc, NET_DEV_PATH)) |txt| {
+        network = try parseNetDev(alloc, txt);
+    }
+
+    // Read system CPU usage.
+    if (readFile(io, alloc, CPU_STAT_PATH)) |txt| {
+        sys_cpu = try parseCpuStat(alloc, txt);
+    }
+
+    // Read system memory.
+    if (readFile(io, alloc, MEMINFO_PATH)) |txt| {
+        sys_mem = try parseSystemMemory(alloc, txt);
+    }
+
+    // Read process RSS (kB) for moonraker_stats.memory.
+    if (readFile(io, alloc, "/proc/self/statm")) |txt| {
+        mem = parseProcMem(txt);
+    }
+
+    // Process CPU usage since last tick (thread-local tracking).
+    const cpu_usage = procCpuUsage();
+
+    // Build moonraker_stats: a single-sample array of {time, cpu_usage, memory, mem_units}.
+    var sample: std.json.ObjectMap = .empty;
+    try sample.put(alloc, "time", .{ .float = nowSeconds() });
+    try sample.put(alloc, "cpu_usage", .{ .float = cpu_usage });
+    try sample.put(alloc, "memory", .{ .integer = mem });
+    try sample.put(alloc, "mem_units", .{ .string = "kB" });
+
+    var samples: std.json.Array = .init(alloc);
+    try samples.append(.{ .object = sample });
+
+    // Event payload: mirrors Moonraker's proc_stats:proc_stat_update shape.
+    var event_data: std.json.ObjectMap = .empty;
+    try event_data.put(alloc, "moonraker_stats", .{ .array = samples });
+    try event_data.put(alloc, "cpu_temp", cpu_temp);
+    try event_data.put(alloc, "network", network);
+    try event_data.put(alloc, "system_cpu_usage", sys_cpu);
+    try event_data.put(alloc, "system_memory", sys_mem);
+    const ws_count: i64 = if (self.conns) |c| @intCast(c.count(io)) else 0;
+    try event_data.put(alloc, "websocket_connections", .{ .integer = ws_count });
+
+    // JSON-RPC params: [event_data].
+    var params_arr: std.json.Array = .init(alloc);
+    try params_arr.append(.{ .object = event_data });
+
+    _ = try bus.emit(io, notify.names.proc_stat_update, .{ .array = params_arr });
+}
+
+/// Parse RSS (resident set size in kB) from /proc/self/statm field 1.
+fn parseProcMem(text: []const u8) i64 {
+    var fields = std.mem.tokenizeAny(u8, text, " \t\r\n");
+    _ = fields.next(); // size
+    const rss_str = fields.next() orelse return 0;
+    const pages = std.fmt.parseInt(i64, rss_str, 10) catch return 0;
+    return pages * 4; // 4 kB pages → kB
+}
+
+/// Process CPU usage since last call (thread-local state). Returns 0 on first
+/// call, then the percentage of one CPU core consumed between successive calls.
+fn procCpuUsage() f64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.PROCESS_CPUTIME_ID, &ts);
+    const proc_now = @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+    const wall_now = nowSeconds();
+
+    const S = struct {
+        var last_wall: f64 = 0;
+        var last_proc: f64 = 0;
+    };
+
+    const usage: f64 = if (S.last_wall > 0 and wall_now > S.last_wall) blk: {
+        const wall_diff = wall_now - S.last_wall;
+        const proc_diff = proc_now - S.last_proc;
+        break :blk if (wall_diff > 0) @round(100.0 * (proc_diff / wall_diff) * 100.0) / 100.0 else 0.0;
+    } else 0.0;
+
+    S.last_wall = wall_now;
+    S.last_proc = proc_now;
+    return usage;
+}
 
 // ---------------------------------------------------------------------------
 // Param helpers

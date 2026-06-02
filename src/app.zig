@@ -357,7 +357,7 @@ pub const App = struct {
         // io is wired later via httpServer/setIo so /proc & /sys reads work.
         const machine_ctx = try alloc.create(MachineCtx);
         errdefer alloc.destroy(machine_ctx);
-        machine_ctx.* = .{ .gpa = alloc };
+        machine_ctx.* = .{ .gpa = alloc, .bus = bus, .conns = conns };
 
         // --- Update manager context (machine.update.*) ---
         // The default source set (system + moonraker + klipper git repos) is a

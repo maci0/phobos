@@ -486,8 +486,7 @@ fn countLeadingSpaces(s: []const u8) usize {
 }
 
 fn findSeparator(s: []const u8) ?usize {
-    for (s, 0..) |c, i| if (c == ':' or c == '=') return i;
-    return null;
+    return std.mem.indexOfAny(u8, s, ":=");
 }
 
 /// Glob expander using std.Io.Dir.  Returns sorted owned paths.

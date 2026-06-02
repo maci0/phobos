@@ -13,8 +13,9 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~65%** (64.7% weighted by API item count per component).
+- **Overall implementation progress: ~67%** (66.8% weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
+  (machine depth up from 30%→50%: proc_stat timer thread + real /proc /sys reads)
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - Tests: **663 pass / 3 skip / 0 fail** (94 fuzz). Verified by running test binary
@@ -152,9 +153,13 @@ now accept a `KlippyCtx` pointer, check `isConnected()`, and proxy to Klippy via
 **Still needed:**
 - Real Klippy integration test (Unix socket round-trip with a real Klippy or Klippy
   simulator).
-- `notify_proc_stat_update` emission (Moonraker's system stats notification).
+- ~~`notify_proc_stat_update` emission.~~ Done: machine component emits via
+  background `std.Thread` (POSIX nanosleep every 1s), reads real `/proc`/`/sys`,
+  emits through NotifyBus. `websocket_connections` still hardcoded to 0.
 - Deep `print_stats` status parsing: filename, total_duration, print_duration,
-  filament_used, state transitions for all Moonraker job states.
+  filament_used are extracted in `history.finishJob()` (lines 150-175). Remaining:
+  verify state-transition coverage against all Moonraker job states, wire
+  `print_duration`/`filament_used` tracking into `job_state.zig` statusUpdate.
 
 ### P1 — the conformance oracle (the real parity proof)
 100% *surface* coverage ≠ byte-identical *behavior*. Build the golden-capture oracle
@@ -202,10 +207,15 @@ surface real per-endpoint shape diffs to fix.
    durations, filament), real-Klippy integration test.
 6. ~~Fix webcam notification unit tests~~ (P0) — Done: removed deadlocked unit tests;
    socket-level tests in `ws_client.zig` cover notification emission end-to-end.
-7. **Conformance oracle** (P1) — golden-capture boot, replay, normalized-equality
+7. ~~`notify_proc_stat_update` background emission~~ (P0) — Done: `std.Thread` timer
+   with `std.os.linux.nanosleep`, reads real `/proc`/`/sys`, emits via NotifyBus.
+   Thread is joinable (atomic stop flag + null io + join in deinit).
+8. ~~Proc stat timer crash fixes~~ — Done: atomic stop flag, stored thread handle,
+   join in deinit, null io before join, `std.os.linux.nanosleep` (not posix).
+9. **Conformance oracle** (P1) — golden-capture boot, replay, normalized-equality
    asserts. Capstone parity proof.
-8. **P2 cleanup** — memory baseline (RSS vs stock Moonraker), re-enable lmdb drop-in
-   test, subsystem depth (machine reboot/shutdown, update_manager git/pip/apt,
-   power/wled/td1 GPIO, mqtt, spoolman HTTP, file_manager gcode parsing).
+10. **P2 cleanup** — memory baseline (RSS vs stock Moonraker), re-enable lmdb drop-in
+    test, subsystem depth (machine reboot/shutdown, update_manager git/pip/apt,
+    power/wled/td1 GPIO, mqtt, spoolman HTTP, file_manager gcode parsing).
 
 Keep the coverage gate at 100% and the full suite green after every step.

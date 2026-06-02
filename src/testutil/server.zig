@@ -1132,6 +1132,8 @@ test "update: POST /machine/update/refresh returns status and emits notify_updat
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+    defer conns.detachWriter(ts.io, cid);
+    defer conns.remove(ts.io, cid);
 
     const body = try ts.postJson(alloc, "/machine/update/refresh", "{}");
     defer alloc.free(body);
@@ -1170,6 +1172,8 @@ test "update: POST /machine/update/upgrade emits notify_update_response and acks
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+    defer conns.detachWriter(ts.io, cid);
+    defer conns.remove(ts.io, cid);
 
     const body = try ts.postJson(alloc, "/machine/update/moonraker", "{}");
     defer alloc.free(body);
@@ -1317,6 +1321,8 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+    defer conns.detachWriter(ts.io, cid);
+    defer conns.remove(ts.io, cid);
 
     // Add a device via the power_ctx directly (no config loading in tests).
     ts.app.power_ctx.addDevice("test_psu", "gpio", "off", false) catch unreachable;
@@ -1655,6 +1661,8 @@ test "files: notify_filelist_changed emitted on upload with correct payload" {
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+    defer conns.detachWriter(ts.io, cid);
+    defer conns.remove(ts.io, cid);
 
     const up = try ts.uploadFile(alloc, "gcodes", null, "notif.gcode", "G28\n");
     defer alloc.free(up);

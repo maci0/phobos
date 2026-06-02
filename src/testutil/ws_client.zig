@@ -118,13 +118,26 @@ pub const WsTestConn = struct {
     pub fn callRaw(self: *WsTestConn, alloc: std.mem.Allocator, request_json: []const u8) ![]u8 {
         try self.sendFrame(.text, request_json);
         var frame = try self.readFrame();
-        defer self.alloc.free(frame.data);
-        // Tolerate an interleaved ping by replying pong and reading again.
-        while (frame.opcode == .ping) {
-            try self.sendFrame(.pong, frame.data);
+        // Tolerate interleaved server->client frames that are not the response.
+        // Limit retries to avoid infinite loops on a broken stream.
+        var retries: usize = 64;
+        while (retries > 0) {
+            retries -= 1;
+            // Handle ping frames: reply pong and read again.
+            while (frame.opcode == .ping) {
+                try self.sendFrame(.pong, frame.data);
+                self.alloc.free(frame.data);
+                frame = try self.readFrame();
+            }
+            // Skip frames that lack an "id" (JSON-RPC notifications); the
+            // simplest check is a substring search for `"id"` since every
+            // valid JSON-RPC response/request MUST have an "id" key, while
+            // notifications omit it.
+            if (std.mem.indexOf(u8, frame.data, "\"id\"")) |_| break;
             self.alloc.free(frame.data);
             frame = try self.readFrame();
         }
+        defer self.alloc.free(frame.data);
         return alloc.dupe(u8, frame.data);
     }
 
@@ -388,6 +401,20 @@ fn nextDataFrame(c: *WsTestConn) anyerror!DataFrame {
     }
 }
 
+/// Like `nextDataFrame` but skips `notify_proc_stat_update` frames emitted by
+/// the machine component's background proc_stat timer. The skip is a substring
+/// match — avoids a full JSON parse on every frame.
+fn nextDataFrameSkipProcStat(c: *WsTestConn) anyerror!DataFrame {
+    while (true) {
+        const f = try nextDataFrame(c);
+        if (std.mem.indexOf(u8, f.data, "notify_proc_stat_update") != null) {
+            c.alloc.free(f.data);
+            continue;
+        }
+        return f;
+    }
+}
+
 test "WS: client receives a server-emitted notification with the Moonraker wire shape" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
@@ -405,7 +432,7 @@ test "WS: client receives a server-emitted notification with the Moonraker wire 
     defer arena.deinit();
     try ts.emit(notify.names.gcode_response, try arrayParam(arena.allocator(), "ok\n"));
 
-    const frame = try nextDataFrame(c);
+    const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -440,7 +467,7 @@ test "WS: notifications arrive in emit order" {
 
     const want = [_][]const u8{ "first", "second", "third" };
     for (want) |w| {
-        const frame = try nextDataFrame(c);
+        const frame = try nextDataFrameSkipProcStat(c);
         defer alloc.free(frame.data);
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
         defer parsed.deinit();
@@ -493,11 +520,11 @@ test "WS: response and notifications never interleave (each frame is intact vali
     fut.await(ts.io);
 
     // We expect notif_count notifications plus exactly one response (id:99),
-    // each a self-contained valid JSON object, in some order.
+    // each a self-contained valid JSON object, in some order. Background
+    // proc_stat_update frames are skipped without counting.
     var got_response = false;
     var got_notifs: usize = 0;
-    var read: usize = 0;
-    while (read < notif_count + 1) : (read += 1) {
+    while (got_notifs < notif_count or !got_response) {
         const frame = try nextDataFrame(c);
         defer alloc.free(frame.data);
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -508,6 +535,8 @@ test "WS: response and notifications never interleave (each frame is intact vali
             try std.testing.expectEqual(@as(i64, 99), idv.integer);
             try std.testing.expect(obj.get("result") != null);
             got_response = true;
+        } else if (std.mem.eql(u8, obj.get("method").?.string, "notify_proc_stat_update")) {
+            // Skip background proc_stat_update frames.
         } else {
             try std.testing.expectEqualStrings("notify_gcode_response", obj.get("method").?.string);
             got_notifs += 1;
@@ -562,7 +591,7 @@ test "WS: spoolman POST spool_id emits notify_active_spool_set" {
     // Bounded wait: set a 3-second receive timeout so a regression fails fast.
     setReadTimeout(c, 3);
     defer clearReadTimeout(c);
-    const frame = try nextDataFrame(c);
+    const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -594,7 +623,7 @@ test "WS: webcam POST item emits notify_webcams_changed" {
 
     setReadTimeout(c, 3);
     defer clearReadTimeout(c);
-    const frame = try nextDataFrame(c);
+    const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -629,7 +658,7 @@ test "WS: job_queue POST job emits notify_job_queue_changed" {
 
     setReadTimeout(c, 3);
     defer clearReadTimeout(c);
-    const frame = try nextDataFrame(c);
+    const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -667,7 +696,7 @@ test "WS: power device action=on emits notify_power_changed" {
 
     setReadTimeout(c, 3);
     defer clearReadTimeout(c);
-    const frame = try nextDataFrame(c);
+    const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
