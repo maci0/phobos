@@ -5,3 +5,5 @@ zig-out/
 /vendor/
 # Conformance golden captures are large; track selectively later
 /conformance/golden/*.raw
+# Python bytecode
+__pycache__/
