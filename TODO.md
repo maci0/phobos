@@ -15,12 +15,11 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
-- Tests: **619 pass / 5 skip / 0 fail** (92 fuzz). Verified by running test binary
+- Tests: **619 pass / 3 skip / 0 fail** (92 fuzz). Verified by running test binary
   directly: `./.zig-cache/o/*/test --cache-dir=./.zig-cache`. Note: `zig build test`
   uses `--listen=-` protocol which may hang on this machine (Zig 0.16 build-runner
   quirk); always verify via the direct test binary.
-  The 5 skips are: 2 webcam notification unit tests (known deadlock, see §4),
-  1 lmdb drop-in test (missing `data.mdb` fixture), 2 unused.
+  The 3 skips are: 3 lmdb-specific tests (not applicable with `-Dwith_lmdb=false`).
 - Peak RSS for the full test run ≈ 12–18 MB.
 
 ### Build / test / run — IMPORTANT host quirks
@@ -116,16 +115,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 
 ## 4. REMAINING WORK (prioritized)
 
-### P0 — webcam notification unit tests (known deadlock, deferred)
-`src/components/webcam.zig` has `emitWebcamsChanged` helper + `setIo` plumbed, and
-socket-level tests (`testutil/ws_client.zig`) verify notification delivery over real
-sockets. Two unit tests doing `core.run(io, handler, ...)` → handler → `emitLocked`
-→ `fanout` → `connections.mutex.lockUncancelable(io)` are skipped (`SkipZigTest`).
-Root cause: nested `Io.Mutex.lockUncancelable` calls from the main test thread (not a
-`Threaded` pool thread) deadlock. Production is unaffected — handlers run on pool
-threads. Fixing this requires either a pool-thread test harness or removing the unit
-tests. The socket-level tests in `ws_client.zig` already cover notification emission
-end-to-end, so these two unit tests are intentionally skipped.
+### P0 — webcam notification unit tests (done — removed; covered by socket tests)
+`src/components/webcam.zig` has `emitWebcamsChanged` helper + `setIo` plumbed.
 
 ### P0 — Klippy Unix-socket bridge
 `printer.*` returns the exact 503 "Klippy Host not connected" shape. No Unix-socket
@@ -169,7 +160,7 @@ now accept a `KlippyCtx` pointer, check `isConnected()`, and proxy to Klippy via
 - `_process_status_update`: parse status dict, emit `notify_status_update`, update
   `job_queue` live state, record history job entries (skeleton emits, deep parsing TBD)
 - `_process_gcode_response`: relay gcode responses to pending request futures
-- `/klippysocket` WebSocket proxy: accept WS, relay frames to/from Klippy UDS
+- ~~`/klippysocket` WebSocket proxy: accept WS, relay frames to/from Klippy UDS~~ Done: serveBridge registers as a KlippyCtx Bridge, relays raw frames bidirectionally
 - `job_queue` print dispatch (start/pause/resume/cancel gcodes)
 - `history` live job tracking from status updates
 
@@ -211,11 +202,12 @@ surface real per-endpoint shape diffs to fix.
    `-c`/`--config` CLI flag, `extractBindAddr` with 5 tests, `--dump-api`).
 4. ~~Klippy bridge skeleton.~~ Done: framing, KlippyCtx struct, 12 tests green.
 5. ~~Klippy Unix-socket connection~~ (P0) — Done: connect, identify, subscribe handshake,
-   background reconnect task, `server.info` dynamic klippy state, printer.* proxy.
-   Remaining: `/klippysocket` WS proxy, deep `_process_status_update`, `_process_gcode_response`,
+   background reconnect task, `server.info` dynamic klippy state, printer.* proxy,
+   **`/klippysocket` WS proxy (Bridge relay)**.
+   Remaining: deep `_process_status_update`, `_process_gcode_response`,
    `job_queue` dispatch, `history` live tracking.
-6. **Fix webcam notification unit tests** (P0) — rewrite to avoid Core-lock
-   re-entrancy, or remove (socket-level tests already cover this path).
+6. ~~Fix webcam notification unit tests~~ (P0) — Done: removed deadlocked unit tests;
+   socket-level tests in `ws_client.zig` cover notification emission end-to-end.
 7. **Conformance oracle** (P1) — golden-capture boot, replay, normalized-equality
    asserts. Capstone parity proof.
 8. **P2 cleanup** — memory baseline (RSS vs stock Moonraker), re-enable lmdb drop-in

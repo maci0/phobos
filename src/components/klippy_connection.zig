@@ -265,6 +265,17 @@ pub const ReadBuf = struct {
 // Context
 // ---------------------------------------------------------------------------
 
+/// Callback signature for a /klippysocket bridge to receive raw frames from
+/// Klippy. The function must serialize its own access to the target WebSocket.
+pub const BridgeWriteFn = *const fn (ctx: *anyopaque, payload: []const u8) anyerror!void;
+
+/// A registered bridge client. KlippyCtx forwards every received frame to all
+/// bridges so that /klippysocket WS clients see the raw Klippy stream.
+pub const Bridge = struct {
+    ctx: *anyopaque,
+    write_fn: BridgeWriteFn,
+};
+
 pub const KlippyCtx = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
@@ -302,6 +313,10 @@ pub const KlippyCtx = struct {
     /// background holds stream_mutex → releases → acquires Core for emit).
     stream_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
+    /// Registered /klippysocket bridge WebSocket connections. Every frame
+    /// received from Klippy is forwarded to every registered bridge writer.
+    bridges: std.ArrayListUnmanaged(Bridge) = .empty,
+
     pub fn init(
         gpa: std.mem.Allocator,
         bus: *notify.NotifyBus,
@@ -327,6 +342,39 @@ pub const KlippyCtx = struct {
     /// True when Klippy is connected and ready for requests.
     pub fn isConnected(self: *const KlippyCtx) bool {
         return self.state == .ready;
+    }
+
+    /// Register a bridge client that will receive every frame from Klippy.
+    /// The caller owns `ctx` and must ensure it outlives the registration.
+    pub fn addBridge(self: *KlippyCtx, bridge: Bridge) !void {
+        try self.bridges.append(self.gpa, bridge);
+    }
+
+    /// Remove a previously registered bridge client.
+    pub fn removeBridge(self: *KlippyCtx, bridge: Bridge) void {
+        for (self.bridges.items, 0..) |b, i| {
+            if (b.ctx == bridge.ctx and b.write_fn == bridge.write_fn) {
+                _ = self.bridges.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Forward a raw frame (without the \\x03 delimiter) to every registered bridge.
+    fn forwardToBridges(self: *KlippyCtx, raw_payload: []const u8) void {
+        for (self.bridges.items) |b| {
+            b.write_fn(b.ctx, raw_payload) catch {};
+        }
+    }
+
+    /// Send a raw payload (without \\x03 framing) to the Klippy Unix socket.
+    /// Acquires stream_mutex for the duration. For use by /klippysocket bridges.
+    pub fn sendRaw(self: *KlippyCtx, payload: []const u8) !void {
+        if (!self.isConnected()) return error.KlippyDisconnected;
+        const io = self.io.?;
+        try self.stream_mutex.lock(io);
+        defer self.stream_mutex.unlock(io);
+        try self.writeFrame(io, payload);
     }
 
     /// Start the background Klippy connection task. Must be called after setIo().
@@ -484,6 +532,9 @@ pub const KlippyCtx = struct {
             try self.dispatchNotification(io, parsed.value);
         }
         // Responses are consumed by request() — nothing to do here.
+
+        // Forward the raw frame to all bridge clients.
+        self.forwardToBridges(payload);
     }
 
     /// Dispatch a notification frame from the read loop. Uses `emit` (acquires
@@ -630,7 +681,8 @@ pub const KlippyCtx = struct {
             // Check whether this is our response (matching id).
             if (parsed.value.object.get("id")) |id_val| {
                 if (id_val == .string and std.mem.eql(u8, id_val.string, rid)) {
-                    // Our response.
+                    // Our response. Forward to bridges before returning.
+                    self.forwardToBridges(payload);
                     if (parsed.value.object.get("error")) |_| {
                         return error.KlippyRequestFailed;
                     }
@@ -654,6 +706,10 @@ pub const KlippyCtx = struct {
             if (isNotification(parsed.value)) {
                 try self.dispatchNotificationLocked(io, parsed.value);
             }
+
+            // Forward every frame to bridge clients so /klippysocket sees
+            // responses and notifications alike.
+            self.forwardToBridges(payload);
         }
     }
 

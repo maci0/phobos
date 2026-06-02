@@ -24,6 +24,7 @@ const Core = @import("../server/core.zig").Core;
 const jsonrpc = @import("../jsonrpc.zig");
 const jv = @import("../json/value.zig");
 const connections = @import("../server/connections.zig");
+const klippy_connection = @import("../components/klippy_connection.zig");
 
 const Connections = connections.Connections;
 const Connection = connections.Connection;
@@ -179,26 +180,83 @@ pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket) void {
     serveLoop(srv, ws, conn) catch {};
 }
 
-/// Serve the `/klippysocket` bridge socket (Moonraker's `BridgeSocket`). In
-/// Moonraker this proxies raw frames to/from Klippy's unix-domain socket. Phobos
-/// has no Klippy connection, so a full bridge is impossible: we faithfully
-/// accept the upgrade (so the route is real and covered) and then immediately
-/// close the socket with code 1001 + reason "Klippy Disconnected" — exactly what
-/// BridgeSocket does when the Klippy stream is unavailable
-/// (websockets.py:462 `self.close_socket(1001, "Klippy Disconnected")`).
+/// Serve the `/klippysocket` bridge socket (Moonraker's `BridgeSocket`).
+/// Relays raw \\x03-delimited JSON-RPC frames between the WebSocket client and
+/// the Klippy Unix-domain socket.
 ///
-/// NOTE: this is a minimal placeholder. A real bridge requires a live Klippy
-/// unix socket, which phobos does not yet have.
-pub fn serveBridge(io: Io, ws: *std.http.Server.WebSocket) void {
-    _ = io;
-    // Close frame payload: 2-byte big-endian status code (1001) + UTF-8 reason.
-    var payload: [2 + 19]u8 = undefined;
-    std.mem.writeInt(u16, payload[0..2], 1001, .big);
-    const reason = "Klippy Disconnected";
-    @memcpy(payload[2..][0..reason.len], reason);
-    ws.writeMessage(payload[0 .. 2 + reason.len], .connection_close) catch {};
-    ws.flush() catch {};
+/// When Klippy is not connected the socket is closed with code 1001 + reason
+/// "Klippy Disconnected", matching Moonraker's `BridgeSocket.close_socket`.
+pub fn serveBridge(io: Io, ws: *std.http.Server.WebSocket, klippy: *klippy_connection.KlippyCtx) void {
+    // When no Klippy connection, close immediately (Moonraker-compatible).
+    if (!klippy.isConnected()) {
+        var payload: [2 + 19]u8 = undefined;
+        std.mem.writeInt(u16, payload[0..2], 1001, .big);
+        const reason = "Klippy Disconnected";
+        @memcpy(payload[2..][0..reason.len], reason);
+        ws.writeMessage(payload[0 .. 2 + reason.len], .connection_close) catch {};
+        ws.flush() catch {};
+        return;
+    }
+
+    var bw = BridgeWsWriter{
+        .ws = ws,
+        .io = io,
+        .write_mutex = std.Io.Mutex.init,
+    };
+    const bridge = klippy_connection.Bridge{
+        .ctx = @ptrCast(&bw),
+        .write_fn = BridgeWsWriter.writeBridge,
+    };
+
+    klippy.addBridge(bridge) catch {
+        // Failed to register — close the socket.
+        ws.writeMessage(&.{}, .connection_close) catch {};
+        ws.flush() catch {};
+        return;
+    };
+    defer klippy.removeBridge(bridge);
+
+    // Relay WS text/binary messages to Klippy.
+    while (true) {
+        const msg = ws.readSmallMessage() catch |err| switch (err) {
+            error.ConnectionClose => return,
+            else => return,
+        };
+        switch (msg.opcode) {
+            .text, .binary => {
+                klippy.sendRaw(msg.data) catch |err| switch (err) {
+                    error.KlippyDisconnected => {
+                        ws.writeMessage(&.{}, .connection_close) catch {};
+                        ws.flush() catch {};
+                        return;
+                    },
+                    else => continue,
+                };
+            },
+            .ping => {
+                bw.write_mutex.lockUncancelable(io);
+                defer bw.write_mutex.unlock(io);
+                ws.writeMessage(msg.data, .pong) catch return;
+            },
+            else => return,
+        }
+    }
 }
+
+/// Per-bridge write adapter. Serialises writes from KlippyCtx's background
+/// thread and handler threads so WS frames never interleave.
+const BridgeWsWriter = struct {
+    ws: *std.http.Server.WebSocket,
+    io: Io,
+    write_mutex: std.Io.Mutex,
+
+    fn writeBridge(ctx: *anyopaque, payload: []const u8) anyerror!void {
+        const self: *BridgeWsWriter = @ptrCast(@alignCast(ctx));
+        self.write_mutex.lockUncancelable(self.io);
+        defer self.write_mutex.unlock(self.io);
+        try self.ws.writeMessage(payload, .text);
+    }
+};
 
 /// Adapter exposing a `std.http.Server.WebSocket` as a `connections.WriteFn`.
 /// The write mutex that serializes frames is the connection's, taken inside

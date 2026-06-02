@@ -22,6 +22,7 @@ const connections = @import("server/connections.zig");
 const ws = @import("transport/ws.zig");
 const authz = @import("components/authorization.zig");
 const file_manager = @import("components/file_manager.zig");
+const klippy_connection = @import("components/klippy_connection.zig");
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -82,6 +83,9 @@ pub const Server = struct {
     file_ctx: ?*file_manager.FileCtx = null,
     /// Absolute datadir; used only for diagnostics around the file routes.
     datadir: ?[]const u8 = null,
+    /// Klippy Unix-socket bridge context. When set, /klippysocket WebSocket
+    /// connections relay frames to/from the live Klippy process.
+    klippy_ctx: ?*klippy_connection.KlippyCtx = null,
 };
 
 /// Credentials carried by an HTTP request, extracted from headers and query.
@@ -444,11 +448,20 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
             .websocket => |key| {
                 const upgrade_path = pathOf(req.head.target);
 
-                // /klippysocket = Moonraker's BridgeSocket. Accept the upgrade
-                // then close 1001 "Klippy Disconnected" (no Klippy to bridge).
+                // /klippysocket = Moonraker's BridgeSocket. Relay frames between
+                // the WS client and the live Klippy Unix socket.
                 if (std.mem.eql(u8, upgrade_path, "/klippysocket")) {
                     var bridge = req.respondWebSocket(.{ .key = key orelse "" }) catch return;
-                    ws.serveBridge(io, &bridge);
+                    const kc = srv.klippy_ctx orelse {
+                        // No KlippyCtx wired — close with 1001.
+                        var payload: [2 + 19]u8 = undefined;
+                        std.mem.writeInt(u16, payload[0..2], 1001, .big);
+                        @memcpy(payload[2..][0..19], "Klippy Disconnected");
+                        bridge.writeMessage(&payload, .connection_close) catch {};
+                        bridge.flush() catch {};
+                        return;
+                    };
+                    ws.serveBridge(io, &bridge, kc);
                     return;
                 }
 

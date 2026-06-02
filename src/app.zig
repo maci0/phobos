@@ -638,6 +638,7 @@ pub const App = struct {
             .auth = self.auth_ctx,
             .file_ctx = self.file_ctx,
             .datadir = self.datadir,
+            .klippy_ctx = self.klippy_ctx,
         };
     }
 };
