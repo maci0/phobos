@@ -22,6 +22,7 @@ const http_transport = @import("http_transport.zig");
 const db_component = @import("components/database.zig");
 const history_component = @import("components/history.zig");
 const job_queue_component = @import("components/job_queue.zig");
+const job_state_component = @import("components/job_state.zig");
 const announcements_component = @import("components/announcements.zig");
 const data_store_component = @import("components/data_store.zig");
 const server_misc_component = @import("components/server_misc.zig");
@@ -53,6 +54,7 @@ const ServerInfo = methods.ServerInfo;
 const DbCtx = db_component.DbCtx;
 const HistoryCtx = history_component.HistoryCtx;
 const JobQueueCtx = job_queue_component.JobQueueCtx;
+const JobStateCtx = job_state_component.JobStateCtx;
 const AnnouncementsCtx = announcements_component.AnnouncementsCtx;
 const DataStoreCtx = data_store_component.DataStoreCtx;
 const ServerMiscCtx = server_misc_component.ServerMiscCtx;
@@ -145,6 +147,7 @@ pub const App = struct {
     db_ctx: *DbCtx,
     history_ctx: *HistoryCtx,
     job_queue_ctx: *JobQueueCtx,
+    job_state_ctx: *JobStateCtx,
     announcements_ctx: *AnnouncementsCtx,
     data_store_ctx: *DataStoreCtx,
     server_misc_ctx: *ServerMiscCtx,
@@ -239,12 +242,22 @@ pub const App = struct {
             .store = db_ctx.store,
             .bus = bus,
             .io = null,
+            .current_job_id = null,
+            .job_user = "No User",
         };
 
         // --- Job queue context ---
         const job_queue_ctx = try alloc.create(JobQueueCtx);
         errdefer alloc.destroy(job_queue_ctx);
         job_queue_ctx.* = try JobQueueCtx.init(alloc, db_ctx.store, bus);
+
+        // --- Job state context ---
+        const job_state_ctx = try alloc.create(JobStateCtx);
+        errdefer alloc.destroy(job_state_ctx);
+        job_state_ctx.* = try JobStateCtx.init(alloc, bus);
+        // Cross-wire: JobState → History + JobQueue for state-change events.
+        job_state_ctx.history = history_ctx;
+        job_state_ctx.job_queue = job_queue_ctx;
 
         // --- Announcements context ---
         const announcements_ctx = try alloc.create(AnnouncementsCtx);
@@ -389,6 +402,10 @@ pub const App = struct {
         errdefer alloc.destroy(klippy_ctx);
         klippy_ctx.* = try KlippyConnectionCtx.init(alloc, bus);
         klippy_ctx.server_info = info;
+        klippy_ctx.job_state = job_state_ctx;
+
+        // Wire Klippy dispatch into the job queue so it can start/pause prints.
+        job_queue_ctx.setKlippyDispatch(@ptrCast(klippy_ctx), &jobQueueKlippyDispatch);
 
         // --- OctoPrint compatibility context (/api/*) ---
         const octoprint_ctx = try alloc.create(OctoPrintCtx);
@@ -411,6 +428,7 @@ pub const App = struct {
             .db_ctx = db_ctx,
             .history_ctx = history_ctx,
             .job_queue_ctx = job_queue_ctx,
+            .job_state_ctx = job_state_ctx,
             .announcements_ctx = announcements_ctx,
             .data_store_ctx = data_store_ctx,
             .server_misc_ctx = server_misc_ctx,
@@ -492,6 +510,8 @@ pub const App = struct {
         self.alloc.destroy(self.announcements_ctx);
         self.job_queue_ctx.deinit();
         self.alloc.destroy(self.job_queue_ctx);
+        self.job_state_ctx.deinit();
+        self.alloc.destroy(self.job_state_ctx);
         self.alloc.destroy(self.history_ctx);
         self.alloc.destroy(self.bus);
         self.alloc.destroy(self.conns);
@@ -648,6 +668,14 @@ pub const App = struct {
 /// intercept those method names before the dispatcher is consulted.
 fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     return error.WsOnlyMethod;
+}
+
+/// Dispatches a gcode request to Klippy on behalf of the job_queue component.
+/// This is the adapter that bridges job_queue's anyopaque dispatch to
+/// KlippyCtx.request(). Called via JobQueueCtx.setKlippyDispatch.
+fn jobQueueKlippyDispatch(klippy_opaque: *anyopaque, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const k: *KlippyConnectionCtx = @ptrCast(@alignCast(klippy_opaque));
+    return k.request(method, params, alloc);
 }
 
 // --- tests ---------------------------------------------------------------

@@ -17,7 +17,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
-- Tests: **619 pass / 3 skip / 0 fail** (92 fuzz). Verified by running test binary
+- Tests: **655 pass / 3 skip / 0 fail** (94 fuzz). Verified by running test binary
   directly: `./.zig-cache/o/*/test --cache-dir=./.zig-cache`. Note: `zig build test`
   uses `--listen=-` protocol which may hang on this machine (Zig 0.16 build-runner
   quirk); always verify via the direct test binary.
@@ -159,12 +159,19 @@ now accept a `KlippyCtx` pointer, check `isConnected()`, and proxy to Klippy via
   Done: ServerInfo fields updated by KlippyCtx.setState(); buildServerInfo reads them.
 - ~~Background task spawns from `main()` (not `httpServer()`) so tests don't crash.~~
   Done: `server_app.klippy_ctx.start()` called in main.zig after httpServer.
-- `_process_status_update`: parse status dict, emit `notify_status_update`, update
-  `job_queue` live state, record history job entries (skeleton emits, deep parsing TBD)
-- `_process_gcode_response`: relay gcode responses to pending request futures
+- ~~`_process_status_update`: parse status dict, emit `notify_status_update`, update
+  `job_queue` live state, record history job entries (skeleton emits, deep parsing TBD)~~
+  Done: pipeline fully wired (webhooks→state, fan-out→connections,
+  print_stats→job_state→history+job_queue). Testing gap: no direct unit tests for
+  processStatusUpdateInner (covered indirectly via job_state + history tests).
+- ~~`_process_gcode_response`: relay gcode responses to pending request futures~~
+  Done: emits server:gcode_response via bus; synchronous request model handles routing.
 - ~~`/klippysocket` WebSocket proxy: accept WS, relay frames to/from Klippy UDS~~ Done: serveBridge registers as a KlippyCtx Bridge, relays raw frames bidirectionally
-- `job_queue` print dispatch (start/pause/resume/cancel gcodes)
-- `history` live job tracking from status updates
+- ~~`job_queue` print dispatch (start/pause/resume/cancel gcodes)~~ Done: DispatchFn +
+  setKlippyDispatch/canDispatch, dispatchNextJob/dispatchPause/dispatchResume/dispatchCancel,
+  handleStart/handlePause wired, onJobStateChanged auto-advance. 10 tests green.
+- ~~`history` live job tracking from status updates~~ Done: onJobStateChanged → addJob/finishJob
+  (5 unit tests + 1 fuzz test), MemStore cloneValue deep-copy, vtUpdateItem deep-copy.
 
 ### P1 — the conformance oracle (the real parity proof)
 100% *surface* coverage ≠ byte-identical *behavior*. Build the golden-capture oracle
@@ -205,9 +212,9 @@ surface real per-endpoint shape diffs to fix.
 4. ~~Klippy bridge skeleton.~~ Done: framing, KlippyCtx struct, 12 tests green.
 5. ~~Klippy Unix-socket connection~~ (P0) — Done: connect, identify, subscribe handshake,
    background reconnect task, `server.info` dynamic klippy state, printer.* proxy,
-   **`/klippysocket` WS proxy (Bridge relay)**.
-   Remaining: deep `_process_status_update`, `_process_gcode_response`,
-   `job_queue` dispatch, `history` live tracking.
+   **`/klippysocket` WS proxy (Bridge relay)**, **`job_queue` dispatch**,
+   **`history` live tracking**.
+   Remaining: deep `_process_status_update`, `_process_gcode_response`.
 6. ~~Fix webcam notification unit tests~~ (P0) — Done: removed deadlocked unit tests;
    socket-level tests in `ws_client.zig` cover notification emission end-to-end.
 7. **Conformance oracle** (P1) — golden-capture boot, replay, normalized-equality

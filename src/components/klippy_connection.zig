@@ -317,6 +317,10 @@ pub const KlippyCtx = struct {
     /// received from Klippy is forwarded to every registered bridge writer.
     bridges: std.ArrayListUnmanaged(Bridge) = .empty,
 
+    /// Job state component (set by App after init). Called on status updates
+    /// to detect print state transitions.
+    job_state: ?*@import("job_state.zig").JobStateCtx = null,
+
     pub fn init(
         gpa: std.mem.Allocator,
         bus: *notify.NotifyBus,
@@ -669,6 +673,13 @@ pub const KlippyCtx = struct {
                 _ = self.bus.emitStatusLocked(io, notify.names.status_update, params_array, obj_name) catch {};
             } else {
                 _ = self.bus.emitStatus(io, notify.names.status_update, params_array, obj_name) catch {};
+            }
+        }
+
+        // Feed print_stats into the job state machine (job_state component).
+        if (self.job_state) |js| {
+            if (status_dict.object.get("print_stats")) |ps| {
+                js.statusUpdate(ps);
             }
         }
     }

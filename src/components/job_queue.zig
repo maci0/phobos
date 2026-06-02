@@ -42,6 +42,10 @@ const NotifyBus = notify.NotifyBus;
 // Context
 // ---------------------------------------------------------------------------
 
+/// Function signature for dispatching a gcode request to Klippy.
+/// Set by app.zig after both JobQueueCtx and KlippyCtx are created.
+pub const DispatchFn = *const fn (ctx: *anyopaque, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value;
+
 pub const JobQueueCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
@@ -54,6 +58,11 @@ pub const JobQueueCtx = struct {
     jobs: std.ArrayListUnmanaged(QueuedJob),
     /// Current queue state string.
     queue_state: []const u8,
+    /// Opaque pointer to KlippyCtx for print dispatch. Set by app.zig via
+    /// setKlippyDispatch (avoids circular @import with klippy_connection.zig).
+    klippy: ?*anyopaque = null,
+    /// Dispatch function that calls into KlippyCtx to send gcode scripts.
+    dispatchFn: ?DispatchFn = null,
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
         var ctx = JobQueueCtx{
@@ -63,6 +72,8 @@ pub const JobQueueCtx = struct {
             .gpa = alloc,
             .jobs = .empty,
             .queue_state = "paused",
+            .klippy = null,
+            .dispatchFn = null,
         };
         // Load persisted queue on init
         ctx.loadFromStore() catch {};
@@ -75,9 +86,111 @@ pub const JobQueueCtx = struct {
         self.io = io;
     }
 
+    /// Wire Klippy dispatch so the queue can send gcode commands (start/pause)
+    /// to Klippy. Called by app.zig after both contexts are created.
+    pub fn setKlippyDispatch(self: *JobQueueCtx, klippy_ptr: *anyopaque, dispatch_fn: DispatchFn) void {
+        self.klippy = klippy_ptr;
+        self.dispatchFn = dispatch_fn;
+    }
+
+    /// Returns true when Klippy is wired and connected.
+    pub fn canDispatch(self: *const JobQueueCtx) bool {
+        return self.klippy != null and self.dispatchFn != null;
+    }
+
     pub fn deinit(self: *JobQueueCtx) void {
         for (self.jobs.items) |*j| j.deinit(self.gpa);
         self.jobs.deinit(self.gpa);
+    }
+
+    /// Called by JobStateCtx when a job state transition is detected.
+    /// On complete: if automatic, pop the completed job and advance to next.
+    /// On abort (error/cancelled): set state to paused.
+    pub fn onJobStateChanged(self: *JobQueueCtx, event: anytype, _: std.json.ObjectMap, _: std.json.ObjectMap) void {
+        switch (event) {
+            .complete => {
+                // Remove the completed job from the front of the queue.
+                if (self.jobs.items.len > 0) {
+                    self.jobs.items[0].deinit(self.gpa);
+                    _ = self.jobs.orderedRemove(0);
+                }
+                if (self.jobs.items.len > 0) {
+                    self.queue_state = "ready";
+                    // Auto-advance: dispatch next job to Klippy.
+                    if (self.canDispatch()) {
+                        self.dispatchNextJob() catch {};
+                    }
+                } else {
+                    self.queue_state = "paused";
+                }
+                var arena = std.heap.ArenaAllocator.init(self.gpa);
+                defer arena.deinit();
+                self.saveToStore(arena.allocator());
+                emitQueueChanged(self, arena.allocator(), "state_changed", true);
+            },
+            .@"error" => {
+                if (self.jobs.items.len > 0) {
+                    self.queue_state = "paused";
+                    var arena = std.heap.ArenaAllocator.init(self.gpa);
+                    defer arena.deinit();
+                    self.saveToStore(arena.allocator());
+                    emitQueueChanged(self, arena.allocator(), "state_changed", false);
+                }
+            },
+            .cancelled => {
+                if (self.jobs.items.len > 0) {
+                    self.queue_state = "paused";
+                    var arena = std.heap.ArenaAllocator.init(self.gpa);
+                    defer arena.deinit();
+                    self.saveToStore(arena.allocator());
+                    emitQueueChanged(self, arena.allocator(), "state_changed", false);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Dispatch start-gcode for the front job to Klippy.
+    fn dispatchNextJob(self: *JobQueueCtx) !void {
+        if (self.jobs.items.len == 0) return;
+        const front = &self.jobs.items[0];
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var script_buf: [512]u8 = undefined;
+        const script = try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{front.filename});
+
+        var params_obj = try std.json.ObjectMap.init(a, &.{}, &.{});
+        try params_obj.put(a, "script", .{ .string = try a.dupe(u8, script) });
+        _ = try self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = params_obj }, a);
+    }
+
+    /// Dispatch pause command to Klippy.
+    fn dispatchPause(self: *JobQueueCtx) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const empty = try std.json.ObjectMap.init(a, &.{}, &.{});
+        _ = try self.dispatchFn.?(self.klippy.?, "pause_resume/pause", .{ .object = empty }, a);
+    }
+
+    /// Dispatch resume command to Klippy.
+    fn dispatchResume(self: *JobQueueCtx) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const empty = try std.json.ObjectMap.init(a, &.{}, &.{});
+        _ = try self.dispatchFn.?(self.klippy.?, "pause_resume/resume", .{ .object = empty }, a);
+    }
+
+    /// Dispatch cancel command to Klippy.
+    fn dispatchCancel(self: *JobQueueCtx) !void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const empty = try std.json.ObjectMap.init(a, &.{}, &.{});
+        _ = try self.dispatchFn.?(self.klippy.?, "pause_resume/cancel", .{ .object = empty }, a);
     }
 
     /// Persist current queue to store.
@@ -386,6 +499,10 @@ pub fn handleJobDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
 pub fn handlePause(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
     c.queue_state = "paused";
+    // Dispatch pause gcode to Klippy when connected.
+    if (c.canDispatch()) {
+        c.dispatchPause() catch {};
+    }
     c.saveToStore(alloc);
     emitQueueChanged(c, alloc, "state_changed", false);
     return buildResponse(c, alloc);
@@ -394,9 +511,12 @@ pub fn handlePause(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
 /// POST /server/job_queue/start
 pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
-    // Without Klippy we can only transition to "ready" if jobs are queued.
     if (c.jobs.items.len > 0) {
         c.queue_state = "ready";
+        // Dispatch start gcode for the front job to Klippy when connected.
+        if (c.canDispatch()) {
+            c.dispatchNextJob() catch {};
+        }
     } else {
         c.queue_state = "paused";
     }
@@ -892,8 +1012,280 @@ test "registerJobQueue: wires expected routes and JSON-RPC methods" {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch tests (Klippy gcode bridge)
+// ---------------------------------------------------------------------------
+
+/// Test dispatcher that captures the last dispatch call for verification.
+const TestDispatchCapture = struct {
+    called: bool = false,
+    method: []const u8 = "",
+    has_params: bool = false,
+
+    fn handler(ctx: *anyopaque, method: []const u8, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+        const cap: *TestDispatchCapture = @ptrCast(@alignCast(ctx));
+        cap.called = true;
+        cap.method = method;
+        cap.has_params = params != .null;
+        return .null;
+    }
+};
+
+test "setKlippyDispatch: canDispatch reflects wiring" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    try testing.expect(!ctx.canDispatch());
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    try testing.expect(ctx.canDispatch());
+}
+
+test "dispatchNextJob: builds correct gcode and calls dispatcher" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    // Add a job to the queue.
+    const fname = try testing.allocator.dupe(u8, "test.gcode");
+    const jid = try testing.allocator.dupe(u8, "JOB001");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 100.0 });
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchNextJob();
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("gcode/script", cap.method);
+    try testing.expect(cap.has_params);
+}
+
+test "dispatchPause: calls pause_resume/pause" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchPause();
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("pause_resume/pause", cap.method);
+}
+
+test "dispatchResume: calls pause_resume/resume" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchResume();
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("pause_resume/resume", cap.method);
+}
+
+test "dispatchCancel: calls pause_resume/cancel" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchCancel();
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("pause_resume/cancel", cap.method);
+}
+
+test "handleStart: dispatches next job when wired and queued" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    try ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "printme.gcode"),
+        .job_id = try a.dupe(u8, "JOB002"),
+        .time_added = 200.0,
+    });
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    const result = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("gcode/script", cap.method);
+}
+
+test "handlePause: dispatches pause when wired" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    const result = try handlePause(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("pause_resume/pause", cap.method);
+}
+
+test "handleStart: does not dispatch when not wired" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    try ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "printme.gcode"),
+        .job_id = try a.dupe(u8, "JOB003"),
+        .time_added = 300.0,
+    });
+
+    // No dispatch wired — handleStart should still work, just not dispatch.
+    const result = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+}
+
+test "onJobStateChanged complete: auto-advances and dispatches next" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    // Queue two jobs.
+    const fname1 = try testing.allocator.dupe(u8, "job1.gcode");
+    const jid1 = try testing.allocator.dupe(u8, "JOB010");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname1, .job_id = jid1, .time_added = 10.0 });
+
+    const fname2 = try testing.allocator.dupe(u8, "job2.gcode");
+    const jid2 = try testing.allocator.dupe(u8, "JOB011");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname2, .job_id = jid2, .time_added = 20.0 });
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    // Simulate the current job completing.
+    ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
+
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len); // front job removed
+    try testing.expectEqualStrings("ready", ctx.queue_state);
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("gcode/script", cap.method);
+}
+
+test "onJobStateChanged complete: last job sets paused, no dispatch" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    const fname = try testing.allocator.dupe(u8, "onlyjob.gcode");
+    const jid = try testing.allocator.dupe(u8, "JOB020");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 30.0 });
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
+
+    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
+    try testing.expectEqualStrings("paused", ctx.queue_state);
+    try testing.expect(!cap.called); // No dispatch, queue is empty.
+}
+
+/// Enum mirroring JobEvent for test dispatch testing (avoid cross-component import).
+const JobEvent = enum {
+    standby,
+    started,
+    paused,
+    resumed,
+    complete,
+    @"error",
+    cancelled,
+};
+
+// ---------------------------------------------------------------------------
 // Fuzz tests
 // ---------------------------------------------------------------------------
+
+test "fuzz dispatchNextJob/setKlippyDispatch/onJobStateChanged: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var cap = TestDispatchCapture{};
+            ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+
+            // Optionally add a job.
+            if (buf[0] & 1 == 0) {
+                const fname = a.dupe(u8, "fuzz.gcode") catch return;
+                const jid = a.dupe(u8, "FUZZ01") catch return;
+                ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 100.0 }) catch return;
+            }
+
+            // Exercise dispatch.
+            _ = ctx.dispatchNextJob() catch {};
+
+            // Exercise state transitions.
+            const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
+            ctx.onJobStateChanged(events[buf[1] % events.len], .empty, .empty);
+        }
+    }.run, .{});
+}
 
 test "fuzz handlePostJob: never panics" {
     try testing.fuzz({}, struct {

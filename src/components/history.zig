@@ -63,9 +63,215 @@ pub const HistoryCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
     io: ?std.Io,
+    /// Current in-progress job_id (numeric), if any.
+    current_job_id: ?u64,
+    /// Username attributed to the current job.
+    job_user: []const u8,
 
     pub fn setIo(self: *HistoryCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Called by JobStateCtx when a job state transition is detected.
+    /// `locked` indicates whether the caller holds the Core lock (and thus
+    /// emitLocked should be used vs emit).
+    pub fn onJobStateChanged(self: *HistoryCtx, event: anytype, prev_ps: std.json.ObjectMap, new_ps: std.json.ObjectMap) void {
+        switch (event) {
+            .started => {
+                // Finish any previous in-progress job.
+                if (self.current_job_id != null) {
+                    self.finishJob("cancelled", prev_ps) catch {};
+                }
+                self.addJob(new_ps) catch {};
+            },
+            .complete => self.finishJob("completed", new_ps) catch {},
+            .@"error" => self.finishJob("error", new_ps) catch {},
+            .cancelled => self.finishJob("cancelled", prev_ps) catch {},
+            .standby => self.finishJob("cancelled", prev_ps) catch {},
+            else => {},
+        }
+    }
+
+    /// Create a new job record from print_stats and persist it.
+    fn addJob(self: *HistoryCtx, pstats: std.json.ObjectMap) !void {
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const filename = if (pstats.get("filename")) |v| switch (v) { .string => |s| s, else => "unknown" } else "unknown";
+        const start_time = self.nowSecs();
+
+        // Build job record.
+        var job_obj: std.json.ObjectMap = .empty;
+        try job_obj.put(a, "filename", .{ .string = filename });
+        try job_obj.put(a, "status", .{ .string = "in_progress" });
+        try job_obj.put(a, "start_time", .{ .float = start_time });
+        try job_obj.put(a, "end_time", .{ .float = 0.0 });
+        try job_obj.put(a, "print_duration", .{ .float = 0.0 });
+        try job_obj.put(a, "total_duration", .{ .float = 0.0 });
+        try job_obj.put(a, "filament_used", .{ .float = 0.0 });
+        try job_obj.put(a, "metadata", .{ .object = .empty });
+        try job_obj.put(a, "auxiliary_data", .{ .array = .init(a) });
+        try job_obj.put(a, "user", .{ .string = self.job_user });
+
+        const job_id_u64 = try self.nextJobId(a);
+        self.current_job_id = job_id_u64;
+
+        var id_buf: [16]u8 = undefined;
+        const job_id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_u64});
+
+        try self.store.insertItem(a, ns_history, job_id_str, .{ .object = job_obj });
+
+        // Update totals.
+        self.incrementTotalJobs(a) catch {};
+
+        // Emit.
+        const prepped = try prepJob(a, .{ .object = job_obj }, job_id_str);
+        emitHistoryChanged(self, a, "added", prepped);
+    }
+
+    /// Finish the current in-progress job with the given status.
+    fn finishJob(self: *HistoryCtx, status: []const u8, pstats: std.json.ObjectMap) !void {
+        const job_id_u64 = self.current_job_id orelse return;
+        self.current_job_id = null;
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var id_buf: [16]u8 = undefined;
+        const job_id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_u64});
+
+        const stored = try self.store.getItem(a, ns_history, job_id_str);
+        if (stored == null) return;
+
+        var job_obj: std.json.ObjectMap = .empty;
+        if (stored.?.object.get("start_time")) |st| {
+            try job_obj.put(a, "start_time", st);
+        } else {
+            try job_obj.put(a, "start_time", .{ .float = 0.0 });
+        }
+
+        const end_time = self.nowSecs();
+        const total_duration: f64 = switch (pstats.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => 0.0,
+        };
+        const print_duration: f64 = switch (pstats.get("print_duration") orelse std.json.Value{ .float = 0.0 }) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => 0.0,
+        };
+        const filament_used: f64 = switch (pstats.get("filament_used") orelse std.json.Value{ .float = 0.0 }) {
+            .float => |f| f,
+            .integer => |i| @floatFromInt(i),
+            else => 0.0,
+        };
+        const filename = if (pstats.get("filename")) |v| switch (v) { .string => |s| s, else => "unknown" } else "unknown";
+
+        // Update job record.
+        try job_obj.put(a, "filename", .{ .string = filename });
+        try job_obj.put(a, "status", .{ .string = status });
+        try job_obj.put(a, "end_time", .{ .float = end_time });
+        try job_obj.put(a, "print_duration", .{ .float = print_duration });
+        try job_obj.put(a, "total_duration", .{ .float = total_duration });
+        try job_obj.put(a, "filament_used", .{ .float = filament_used });
+        try job_obj.put(a, "metadata", .{ .object = .empty });
+        try job_obj.put(a, "auxiliary_data", .{ .array = .init(a) });
+        try job_obj.put(a, "user", .{ .string = self.job_user });
+
+        try self.store.updateItem(a, ns_history, job_id_str, .{ .object = job_obj });
+
+        // Update totals: total_time += total_duration, total_print_time += print_duration,
+        // total_filament_used += filament_used, longest_job/longest_print = max.
+        self.updateTotalsOnFinish(a, total_duration, print_duration, filament_used) catch {};
+
+        // Emit.
+        const prepped = try prepJob(a, .{ .object = job_obj }, job_id_str);
+        emitHistoryChanged(self, a, "finished", prepped);
+    }
+
+    /// Find the next available job ID (max existing + 1, or 1 if none).
+    fn nextJobId(self: *HistoryCtx, alloc: std.mem.Allocator) !u64 {
+        const all = try loadAllJobs(self, alloc);
+        var max_id: u64 = 0;
+        for (all) |je| {
+            const id = std.fmt.parseInt(u64, je.key, 16) catch continue;
+            if (id > max_id) max_id = id;
+        }
+        return max_id + 1;
+    }
+
+    /// Increment the total_jobs counter in totals.
+    fn incrementTotalJobs(self: *HistoryCtx, alloc: std.mem.Allocator) !void {
+        const totals = try loadTotals(self, alloc);
+        if (totals == .object) {
+            if (totals.object.get("total_jobs")) |v| {
+                const cur: f64 = switch (v) {
+                    .float => |f| f,
+                    .integer => |i| @floatFromInt(i),
+                    else => 0.0,
+                };
+                var new_obj: std.json.ObjectMap = .empty;
+                var it = totals.object.iterator();
+                while (it.next()) |kv| {
+                    try new_obj.put(alloc, kv.key_ptr.*, kv.value_ptr.*);
+                }
+                try new_obj.put(alloc, "total_jobs", .{ .float = cur + 1.0 });
+                try saveTotals(self, alloc, .{ .object = new_obj });
+            }
+        }
+    }
+
+    /// Update totals after a job finishes.
+    fn updateTotalsOnFinish(self: *HistoryCtx, alloc: std.mem.Allocator, total_dur: f64, print_dur: f64, filament: f64) !void {
+        const totals = try loadTotals(self, alloc);
+        if (totals != .object) return;
+
+        var new_obj: std.json.ObjectMap = .empty;
+        var it = totals.object.iterator();
+        while (it.next()) |kv| {
+            try new_obj.put(alloc, kv.key_ptr.*, kv.value_ptr.*);
+        }
+
+        // total_time
+        if (new_obj.get("total_time")) |v| {
+            const cur: f64 = switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => 0.0 };
+            try new_obj.put(alloc, "total_time", .{ .float = cur + total_dur });
+        }
+        // total_print_time
+        if (new_obj.get("total_print_time")) |v| {
+            const cur: f64 = switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => 0.0 };
+            try new_obj.put(alloc, "total_print_time", .{ .float = cur + print_dur });
+        }
+        // total_filament_used
+        if (new_obj.get("total_filament_used")) |v| {
+            const cur: f64 = switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => 0.0 };
+            try new_obj.put(alloc, "total_filament_used", .{ .float = cur + filament });
+        }
+        // longest_job
+        if (new_obj.get("longest_job")) |v| {
+            const cur: f64 = switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => 0.0 };
+            if (total_dur > cur) {
+                try new_obj.put(alloc, "longest_job", .{ .float = total_dur });
+            }
+        }
+        // longest_print
+        if (new_obj.get("longest_print")) |v| {
+            const cur: f64 = switch (v) { .float => |f| f, .integer => |i| @floatFromInt(i), else => 0.0 };
+            if (print_dur > cur) {
+                try new_obj.put(alloc, "longest_print", .{ .float = print_dur });
+            }
+        }
+        try saveTotals(self, alloc, .{ .object = new_obj });
+    }
+
+    fn nowSecs(self: *HistoryCtx) f64 {
+        _ = self;
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+        return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
     }
 };
 
@@ -519,14 +725,21 @@ const MemStore = struct {
     fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getOrCreate(ns) catch return ds.Error.OutOfMemory;
-        n.data.put(key, value) catch return ds.Error.OutOfMemory;
+        // Deep-copy the key so the HashMap owns stable memory even when the
+        // caller's buffer goes out of scope (e.g. addJob stack buffer).
+        const owned_key = self.alloc.dupe(u8, key) catch return ds.Error.OutOfMemory;
+        // Clone the value by serializing to JSON and re-parsing into MemStore-owned
+        // memory, so that ObjectMap keys and string values outlive the caller's arena.
+        const owned_value = cloneValue(self.alloc, value) catch return ds.Error.OutOfMemory;
+        n.data.put(owned_key, owned_value) catch return ds.Error.OutOfMemory;
     }
 
     fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return ds.Error.NamespaceNotFound;
         if (!n.data.contains(key)) return ds.Error.KeyNotFound;
-        n.data.put(key, value) catch return ds.Error.OutOfMemory;
+        const owned_value = cloneValue(self.alloc, value) catch return ds.Error.OutOfMemory;
+        n.data.put(key, owned_value) catch return ds.Error.OutOfMemory;
     }
 
     fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
@@ -569,6 +782,40 @@ const MemStore = struct {
     }
 };
 
+fn cloneValue(alloc: std.mem.Allocator, value: std.json.Value) std.mem.Allocator.Error!std.json.Value {
+    return switch (value) {
+        .null => value,
+        .bool => value,
+        .integer => value,
+        .float => value,
+        .number_string => {
+            const s = try alloc.dupe(u8, value.number_string);
+            return .{ .number_string = s };
+        },
+        .string => {
+            const s = try alloc.dupe(u8, value.string);
+            return .{ .string = s };
+        },
+        .array => {
+            var arr: std.json.Array = .init(alloc);
+            for (value.array.items) |item| {
+                try arr.append(try cloneValue(alloc, item));
+            }
+            return .{ .array = arr };
+        },
+        .object => {
+            var obj: std.json.ObjectMap = .empty;
+            var it = value.object.iterator();
+            while (it.next()) |kv| {
+                const owned_key = try alloc.dupe(u8, kv.key_ptr.*);
+                const owned_val = try cloneValue(alloc, kv.value_ptr.*);
+                try obj.put(alloc, owned_key, owned_val);
+            }
+            return .{ .object = obj };
+        },
+    };
+}
+
 // Null NotifyBus stub for tests (no connections needed).
 const NullCore = @import("../server/core.zig").Core;
 const NullConns = @import("../server/connections.zig").Connections;
@@ -603,7 +850,7 @@ test "handleList: empty store returns count=0 jobs=[]" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const result = try handleList(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(@as(i64, 0), result.object.get("count").?.integer);
     try testing.expectEqual(@as(usize, 0), result.object.get("jobs").?.array.items.len);
@@ -627,7 +874,7 @@ test "handleList: returns jobs in desc order by default" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const result = try handleList(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(@as(i64, 2), result.object.get("count").?.integer);
     const jobs = result.object.get("jobs").?.array;
@@ -655,7 +902,7 @@ test "handleList: limit and start params" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const p = try mkParams(a, "{\"limit\":1,\"start\":1,\"order\":\"asc\"}");
     const result = try handleList(@ptrCast(&ctx), p, a);
     try testing.expectEqual(@as(i64, 1), result.object.get("count").?.integer);
@@ -680,7 +927,7 @@ test "handleGetJob: retrieves stored job" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const p = try mkParams(a, "{\"uid\":\"000001\"}");
     const result = try handleGetJob(@ptrCast(&ctx), p, a);
     const job = result.object.get("job").?.object;
@@ -705,7 +952,7 @@ test "handleGetJob: missing uid → NotFound" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const p = try mkParams(a, "{\"uid\":\"FFFFFF\"}");
     try testing.expectError(error.NotFound, handleGetJob(@ptrCast(&ctx), p, a));
 }
@@ -727,7 +974,7 @@ test "handleDeleteJob: single uid removes job" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const p = try mkParams(a, "{\"uid\":\"000001\"}");
     const result = try handleDeleteJob(@ptrCast(&ctx), p, a);
     const dj = result.object.get("deleted_jobs").?.array;
@@ -753,7 +1000,7 @@ test "handleDeleteJob: all=true clears all jobs" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const p = try mkParams(a, "{\"all\":true}");
     const result = try handleDeleteJob(@ptrCast(&ctx), p, a);
     const dj = result.object.get("deleted_jobs").?.array;
@@ -776,7 +1023,7 @@ test "handleTotals: returns base totals when none stored" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const result = try handleTotals(@ptrCast(&ctx), .null, a);
     const jt = result.object.get("job_totals").?.object;
     try testing.expect(jt.get("total_jobs") != null);
@@ -799,7 +1046,7 @@ test "handleResetTotals: resets and returns last_totals" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
     const result = try handleResetTotals(@ptrCast(&ctx), .null, a);
     try testing.expect(result.object.get("last_totals") != null);
     try testing.expect(result.object.get("last_auxiliary_totals") != null);
@@ -823,7 +1070,7 @@ test "registerHistory: wires expected routes and JSON-RPC methods" {
     var conns = NullConns.init(alloc, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
 
     try registerHistory(&reg, &ctx);
 
@@ -842,7 +1089,206 @@ test "registerHistory: wires expected routes and JSON-RPC methods" {
 }
 
 // ---------------------------------------------------------------------------
+// Live job tracking tests (onJobStateChanged → addJob / finishJob)
+// ---------------------------------------------------------------------------
+
+const JobEvent = enum {
+    standby,
+    started,
+    paused,
+    resumed,
+    complete,
+    @"error",
+    cancelled,
+};
+
+test "onJobStateChanged started: creates job, sets current_job_id, emits added" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "live_test.gcode" });
+
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+
+    // current_job_id should be set.
+    try testing.expect(ctx.current_job_id != null);
+    // The job should be stored in the history namespace.
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{ctx.current_job_id.?});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(stored != null);
+}
+
+test "onJobStateChanged complete: finishes job, clears current_job_id" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    // First start a job.
+    var ps_start: std.json.ObjectMap = .empty;
+    try ps_start.put(a, "filename", .{ .string = "live_test.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps_start);
+
+    const job_id = ctx.current_job_id.?;
+
+    // Now complete it.
+    var ps_done: std.json.ObjectMap = .empty;
+    try ps_done.put(a, "filename", .{ .string = "live_test.gcode" });
+    try ps_done.put(a, "total_duration", .{ .float = 3600.0 });
+    try ps_done.put(a, "print_duration", .{ .float = 3500.0 });
+    try ps_done.put(a, "filament_used", .{ .float = 42.5 });
+
+    ctx.onJobStateChanged(JobEvent.complete, ps_start, ps_done);
+
+    // current_job_id should be cleared.
+    try testing.expect(ctx.current_job_id == null);
+
+    // The stored job should have status "completed".
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expect(stored != null);
+    try testing.expectEqualStrings("completed", stored.?.object.get("status").?.string);
+    try testing.expect(stored.?.object.get("total_duration").?.float == 3600.0);
+}
+
+test "onJobStateChanged started when previous in-progress: cancels previous, starts new" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    // Start first job.
+    var ps1: std.json.ObjectMap = .empty;
+    try ps1.put(a, "filename", .{ .string = "first.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps1);
+    const first_id = ctx.current_job_id.?;
+
+    // Start second job — should cancel first.
+    var ps2: std.json.ObjectMap = .empty;
+    try ps2.put(a, "filename", .{ .string = "second.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, ps1, ps2);
+
+    // First job should now be "cancelled".
+    var id_buf1: [16]u8 = undefined;
+    const id_str1 = try std.fmt.bufPrint(&id_buf1, "{X:0>6}", .{first_id});
+    const stored1 = try mem.dataStore().getItem(a, "history", id_str1);
+    try testing.expect(stored1 != null);
+    try testing.expectEqualStrings("cancelled", stored1.?.object.get("status").?.string);
+
+    // Second job should be "in_progress" with a different job id.
+    try testing.expect(ctx.current_job_id != null);
+    try testing.expect(ctx.current_job_id.? != first_id);
+}
+
+test "onJobStateChanged error: finishes job with error status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "fail.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    const job_id = ctx.current_job_id.?;
+
+    ctx.onJobStateChanged(JobEvent.@"error", ps, ps);
+
+    try testing.expect(ctx.current_job_id == null);
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expectEqualStrings("error", stored.?.object.get("status").?.string);
+}
+
+test "onJobStateChanged paused/resumed: no-op in history" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "pauseme.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    const job_id = ctx.current_job_id.?;
+
+    // Pause — should be no-op (current_job_id stays set, no new storage).
+    ctx.onJobStateChanged(JobEvent.paused, ps, ps);
+    try testing.expect(ctx.current_job_id != null);
+
+    // Resume — also no-op.
+    ctx.onJobStateChanged(JobEvent.resumed, ps, ps);
+    try testing.expect(ctx.current_job_id != null);
+
+    // Job is still in_progress.
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id});
+    const stored = try mem.dataStore().getItem(a, "history", id_str);
+    try testing.expectEqualStrings("in_progress", stored.?.object.get("status").?.string);
+}
+
+// ---------------------------------------------------------------------------
 // Fuzz tests
+
+test "fuzz onJobStateChanged: never panics on arbitrary state transitions" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var bus: NotifyBus = undefined;
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+            const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const event = events[buf[0] % events.len];
+
+            var ps: std.json.ObjectMap = .empty;
+            try ps.put(a, "filename", .{ .string = "fuzz.gcode" });
+            if (buf[1] & 1 == 0) {
+                try ps.put(a, "total_duration", .{ .float = @as(f64, @floatFromInt(buf[2])) });
+            }
+            if (buf[3] & 1 == 0) {
+                try ps.put(a, "print_duration", .{ .float = @as(f64, @floatFromInt(buf[4])) });
+            }
+            if (buf[5] & 1 == 0) {
+                try ps.put(a, "filament_used", .{ .float = @as(f64, @floatFromInt(buf[6])) });
+            }
+
+            ctx.onJobStateChanged(event, .empty, ps);
+        }
+    }.run, .{});
+}
+
+// ---------------------------------------------------------------------------
+// Fuzz tests (handlers)
 // ---------------------------------------------------------------------------
 
 test "fuzz handleList: never panics on arbitrary params" {
@@ -860,7 +1306,7 @@ test "fuzz handleList: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -893,7 +1339,7 @@ test "fuzz handleGetJob: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -920,7 +1366,7 @@ test "fuzz handleDeleteJob: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null };
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
