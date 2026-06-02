@@ -128,9 +128,7 @@ pub const goldenCases: []const GoldenCase = &.{
     .{ .method = "machine.wled.strips", .params_json = "{}", .expected_response = "" },
     .{ .method = "server.spoolman.status", .params_json = "{}", .expected_response = "" },
     .{ .method = "machine.td1.data", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.mqtt.status", .params_json = "{}", .expected_response = "" },
     .{ .method = "server.extensions.list", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.analysis.stats", .params_json = "{}", .expected_response = "" },
 };
 
 // ===========================================================================

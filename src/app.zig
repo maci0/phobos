@@ -697,6 +697,10 @@ pub const App = struct {
         self.webcam_ctx.setIo(io);
         // Wire io into the klippy connection so it can connect and handshake.
         self.klippy_ctx.setIo(io);
+        // Wire connections and io into ServerInfo so server.info reports live
+        // websocket_count.
+        self.info.conns = self.conns;
+        self.info.io = io;
         return .{
             .io = io,
             .core = self.core,

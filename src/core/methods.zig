@@ -9,6 +9,7 @@ const std = @import("std");
 const build_options = @import("build_options");
 const registry = @import("../server/registry.zig");
 const config_mod = @import("../config/confighelper.zig");
+const Connections = @import("../server/connections.zig").Connections;
 
 /// `(major, minor, patch)` returned both as the `api_version` array and the
 /// `api_version_string`. Matches Moonraker `API_VERSION = (1, 5, 0)`.
@@ -48,7 +49,8 @@ pub const components = [_][]const u8{
 /// `server.info` payload needs (websocket count, warnings). Allocated and held
 /// by the application for the lifetime of the process.
 pub const ServerInfo = struct {
-    /// Number of currently-connected websocket clients.
+    /// Number of currently-connected websocket clients. Updated from the
+    /// live Connections registry when available; falls back to 0 in tests.
     websocket_count: u64 = 0,
     /// Startup/runtime warning strings (may contain '\n', substituted with
     /// "<br/>" unless `raw` is requested).
@@ -62,6 +64,12 @@ pub const ServerInfo = struct {
     /// Config file path (set by App via setConfig). Used for the `files`
     /// field in server.config response.
     config_file_path: ?[]const u8 = null,
+    /// Live connection registry (set by App.httpServer). When non-null,
+    /// `serverInfoHandler` queries the live websocket count.
+    conns: ?*Connections = null,
+    /// Live io handle (set by App.httpServer). Needed to lock the
+    /// Connections mutex for count queries.
+    io: ?std.Io = null,
 
     pub fn ctx(self: *ServerInfo) *anyopaque {
         return @ptrCast(self);
@@ -474,7 +482,13 @@ fn deepCopyValue(alloc: std.mem.Allocator, src: std.json.Value) std.mem.Allocato
 // --- handlers (registry/dispatcher entry points) -------------------------
 
 pub fn serverInfoHandler(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const info: *const ServerInfo = @ptrCast(@alignCast(ctx));
+    const info: *ServerInfo = @ptrCast(@alignCast(ctx));
+    // Snapshot live websocket count when connections are wired.
+    if (info.conns) |c| {
+        if (info.io) |io| {
+            info.websocket_count = @intCast(c.count(io));
+        }
+    }
     return buildServerInfo(info, getRawParam(params), alloc);
 }
 

@@ -13,14 +13,16 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~74%** (est., weighted by API item count per component).
+- **Overall implementation progress: ~76%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
   (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
   notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
   full ButtonCtx with addButton/sendEvent/emitButtonEvent/notification_sent guard.
   gcode_metadata depth: findObjectHeight (was stubbed, now 6 slicer patterns + G1 Z fallback),
-  filament_weight_total, nozzle_diameter — 19 new unit tests + 9 new fuzz tests.
-  file_manager depth up from 85%→90%.)
+  filament_weight_total, nozzle_diameter, thumbnails, slicer_version — 19 new unit tests
+  + 9 new fuzz tests. file_manager depth up from 85%→90%.
+  websocket_count now live from Connections registry in server.info + proc_stats.
+  Golden cases pruned: removed server.mqtt.status/server.analysis.stats (not in Moonraker API).)
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - Tests: **810 pass / 3 skip / 0 fail** (109 fuzz). Verified by running test binary
@@ -164,7 +166,9 @@ now accept a `KlippyCtx` pointer, check `isConnected()`, and proxy to Klippy via
   simulator).
 - ~~`notify_proc_stat_update` emission.~~ Done: machine component emits via
   background `std.Thread` (POSIX nanosleep every 1s), reads real `/proc`/`/sys`,
-  emits through NotifyBus. `websocket_connections` still hardcoded to 0.
+  emits through NotifyBus. `websocket_connections` is live from the Connections
+  registry (counted via `conns.count(io)` in `serverInfoHandler` and the proc_stat
+  timer).
 - Deep `print_stats` status parsing: filename, total_duration, print_duration,
   filament_used are extracted in `history.finishJob()` (lines 150-175). Remaining:
   verify state-transition coverage against all Moonraker job states, wire
@@ -188,8 +192,9 @@ surface real per-endpoint shape diffs to fix.
 - **spoolman/announcements** — operate on stored data; no real spoolman HTTP / RSS fetch.
 - **file_manager metadata** — record shape correct; deep gcode parsing (slicer/layers/
   thumbnails) now implements findObjectHeight (6 slicer patterns + G1 Z fallback),
-  filament_weight_total (7 patterns), nozzle_diameter (3 patterns). Still missing:
-  thumbnail extraction, full slicer_version parsing.
+  filament_weight_total (7 patterns), nozzle_diameter (3 patterns), thumbnail
+  extraction from `; thumbnail begin … end` blocks, slicer_version for all five
+  slicer families (PrusaSlicer, Cura, Simplify3D, IdeaMaker, KISSlicer).
 - **LDAP** auth source omitted (moonraker-source-only scope).
 - **sensor** — ~~`notify_sensor_update` deferred (SensorCtx empty struct; only relevant
   when MQTT/Klippy sensor integration lands).~~ DONE: real SensorCtx with sensors
@@ -235,7 +240,9 @@ surface real per-endpoint shape diffs to fix.
     re-enable lmdb drop-in test, subsystem depth (machine reboot/shutdown,
     update_manager git/pip/apt, power/wled/td1 GPIO, mqtt, spoolman HTTP,
     ~~file_manager gcode parsing~~ → findObjectHeight, filament_weight_total,
-    nozzle_diameter implemented; thumbnails + slicer_version remain).
+    nozzle_diameter, thumbnails, slicer_version all implemented;
+    ~~websocket_connections live count~~ → wired via Connections.conns in server.info +
+    proc_stats).
 11. **Conformance oracle follow-up** — see P1 above. Without a running Moonraker
     installation, build a static-capture-based oracle: ship expected response
     shapes per endpoint and assert phobos matches (mask volatile fields).
