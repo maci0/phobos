@@ -36,6 +36,10 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   job_queue notify_job_queue_changed emission wired.
   job_queue depth up from 70%→80%: transition_gcode injection, transition_delay
   storage, loading queue state, pause_job_queue/start_job_queue remote methods registered.
+  mqtt depth: pub API (publishTopic/subscribeTopic/unsubscribe/close), setters
+  (setInstanceName/setClientId/setDefaultQos), instance_name/client_id/default_qos
+  config, retain/timeout parsed, server.mqtt.publish_mqtt_topic remote method,
+  MqttNotConfigured/ServiceUnavailable error handling.
   printer.* proxied methods with full gcode/script param building.
   device_power, wled, td1 API components registered with in-memory state tracking.
   Golden cases pruned: removed server.mqtt.status/server.analysis.stats (not in Moonraker API).
@@ -44,15 +48,15 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   peripherals), update_manager (update_moonraker/klipper/system/full), wled (strips),
   webcam (delete/test/validate), announcements (list_feeds/delete_feed/update/
   feed_dispatch_multi), power (devices), rss (parser).
-- **API surface coverage: 100%** — methods 122/122, static endpoints 123/123,
+- **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - **Conformance oracle: 54/54 events pass normalized equality** (conformance/replay.py
   against golden capture from vendored Moonraker 9008485). Tools: `conformance/capture.py`
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **~972 pass / 2 skip / 0 fail** (~167 fuzz) with `-Dwith_lmdb=true`;
-  **~957 pass / 5 skip / 0 fail** (~165 fuzz) with `-Dwith_lmdb=false`.
+- Tests: **1002 pass / 2 skip / 0 fail** (171 fuzz) with `-Dwith_lmdb=true`;
+  **987 pass / 5 skip / 0 fail** (169 fuzz) with `-Dwith_lmdb=false`.
   The 2 skips (lmdb) are update_manager git tests (need a real repo).
   The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
   Note: `zig build test` uses `--listen=-` protocol which may hang on this
