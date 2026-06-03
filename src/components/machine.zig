@@ -2064,6 +2064,98 @@ test "fuzz_machine_handlers: system_info/proc_stats never crash with arbitrary p
     }.run, .{});
 }
 
+test "fuzz_machine_handlers_reboot_shutdown: never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var c = MachineCtx{ .gpa = a, .io = null };
+            _ = handleReboot(@ptrCast(&c), .null, a) catch {};
+            _ = handleShutdown(@ptrCast(&c), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz_machine_handlers_services: never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var c = MachineCtx{ .gpa = a, .io = null };
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"service\":\"klipper\"}",
+                "{\"name\":\"klipper\"}",
+                "{\"service\":\"moonraker\"}",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleServiceStart(@ptrCast(&c), p.value, a) catch {};
+            _ = handleServiceStop(@ptrCast(&c), p.value, a) catch {};
+            _ = handleServiceRestart(@ptrCast(&c), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz_machine_handlers_sudo: never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var c = MachineCtx{ .gpa = a, .io = null };
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"check_access\":true}",
+                "{\"check_access\":false}",
+                "{\"password\":\"test123\"}",
+                "{\"password\":\"\"}",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleSudoInfo(@ptrCast(&c), p.value, a) catch {};
+            _ = handleSudoPassword(@ptrCast(&c), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz_machine_handlers_peripherals: never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var c = MachineCtx{ .gpa = a, .io = null };
+
+            var b: [8]u8 = undefined;
+            smith.bytesWithHash(&b, 1);
+            const canbus_strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"interface\":\"can0\"}",
+                "{\"interface\":\"can1\"}",
+            };
+            const can_p = std.json.parseFromSlice(std.json.Value, a, canbus_strs[b[0] % canbus_strs.len], .{}) catch return;
+            _ = handleUsb(@ptrCast(&c), .null, a) catch {};
+            _ = handleSerial(@ptrCast(&c), .null, a) catch {};
+            _ = handleVideo(@ptrCast(&c), .null, a) catch {};
+            _ = handleCanbus(@ptrCast(&c), can_p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
 test "hexDecodeAlloc: basic decode" {
     const a = testing.allocator;
     const out = try hexDecodeAlloc(a, "48656c6c6f");

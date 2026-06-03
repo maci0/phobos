@@ -1016,3 +1016,114 @@ test "fuzz handleWebcamGet: arbitrary params never crash" {
         }
     }.run, .{});
 }
+
+test "fuzz handleWebcamDelete: arbitrary params never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var nb = NullBus.init(a);
+            var ctx = makeCtx(a, &nb) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"name\":\"cam1\"}",
+                "{\"uid\":\"abc123\"}",
+                "{\"uid\":\"nonexistent\"}",
+            };
+            const p = std.json.parseFromSlice(
+                std.json.Value,
+                a,
+                strs[buf[0] % strs.len],
+                .{},
+            ) catch return;
+            _ = handleWebcamDelete(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleWebcamTest: arbitrary params never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var nb = NullBus.init(a);
+            var ctx = makeCtx(a, &nb) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"name\":\"cam1\"}",
+                "{\"uid\":\"abc123\"}",
+            };
+            const p = std.json.parseFromSlice(
+                std.json.Value,
+                a,
+                strs[buf[0] % strs.len],
+                .{},
+            ) catch return;
+            _ = handleWebcamTest(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz Webcam.validate: never panics on arbitrary field values" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const name = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const icon = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const aspect_ratio = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const location = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const service = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const stream_url = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const snapshot_url = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const source = a.dupe(u8, &buf) catch return;
+            smith.bytesWithHash(&buf, 0);
+            const uid = a.dupe(u8, &buf) catch return;
+
+            var cam = Webcam{
+                .name = name,
+                .enabled = smith.valueWithHash(bool, 0),
+                .icon = icon,
+                .aspect_ratio = aspect_ratio,
+                .target_fps = smith.valueWithHash(i64, 0),
+                .target_fps_idle = smith.valueWithHash(i64, 0),
+                .location = location,
+                .service = service,
+                .stream_url = stream_url,
+                .snapshot_url = snapshot_url,
+                .flip_horizontal = smith.valueWithHash(bool, 0),
+                .flip_vertical = smith.valueWithHash(bool, 0),
+                .rotation = smith.valueRangeLessThanWithHash(i64, 0, 360, 0),
+                .source = source,
+                .extra_data = .empty,
+                .uid = uid,
+            };
+            _ = cam.validate() catch {};
+        }
+    }.run, .{});
+}

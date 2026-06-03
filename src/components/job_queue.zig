@@ -1386,3 +1386,133 @@ test "fuzz handleJump: never panics" {
         }
     }.run, .{});
 }
+
+test "fuzz handleStatus: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            // Optionally populate the queue.
+            if (buf[0] & 1 == 0) {
+                ctx.jobs.append(ctx.gpa, .{ .filename = a.dupe(u8, "fuzz.gcode") catch return, .job_id = a.dupe(u8, "FUZZ01") catch return, .time_added = 100.0 }) catch return;
+            }
+            _ = handleStatus(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handlePause: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            // capture dispatch calls
+            var cap = TestDispatchCapture{};
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+            ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            if (buf[0] & 1 == 0) {
+                ctx.jobs.append(ctx.gpa, .{ .filename = a.dupe(u8, "fuzz.gcode") catch return, .job_id = a.dupe(u8, "FUZZ01") catch return, .time_added = 100.0 }) catch return;
+            }
+            _ = handlePause(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleStart: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var cap = TestDispatchCapture{};
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+            ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            if (buf[0] & 1 == 0) {
+                ctx.jobs.append(ctx.gpa, .{ .filename = a.dupe(u8, "fuzz.gcode") catch return, .job_id = a.dupe(u8, "FUZZ01") catch return, .time_added = 100.0 }) catch return;
+            }
+            _ = handleStart(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleJobDispatch: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "{}",
+                "{\"method\":\"status\"}",
+                "{\"method\":\"start\"}",
+                "{\"method\":\"pause\"}",
+                "{\"method\":\"delete_job\"}",
+                "{\"method\":\"jump\"}",
+                "{\"method\":\"post_job\"}",
+                "null",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleJobDispatch(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}

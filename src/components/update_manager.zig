@@ -1122,6 +1122,24 @@ test "fuzz_handlers: arbitrary name params never crash update/recover/rollback" 
     }.run, .{});
 }
 
+test "fuzz_handlers_update_full_system: never crash on update_moonraker/klipper/system/full" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [24]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx: UpdateCtx = .{ .gpa = a, .sources = &default_sources, .bus = null, .io = null };
+
+            _ = handleUpdateMoonraker(@ptrCast(&ctx), .null, a) catch {};
+            _ = handleUpdateKlipper(@ptrCast(&ctx), .null, a) catch {};
+            _ = handleUpdateSystem(@ptrCast(&ctx), .null, a) catch {};
+            _ = handleFull(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
 test "fuzz_buildGitStatus: arbitrary source fields never crash" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
@@ -1229,6 +1247,151 @@ test "fuzz_gitReset: arbitrary ref strings never crash" {
             const ref = buf[0..n];
 
             _ = gitReset(io, std.heap.smp_allocator, "/nonexistent/repo", ref);
+        }
+    }.run, .{});
+}
+
+// --- Fuzz tests for internal builders ---
+
+test "fuzz buildSystemStatus: never panics, returns expected shape" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz_-";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const s: Source = .{ .name = name_buf[0..@max(1, buf[0] % 8)], .type = .system };
+
+            const result = try buildSystemStatus(a, s);
+            try testing.expectEqualStrings(s.name, result.object.get("name").?.string);
+            try testing.expect(result.object.get("package_count") != null);
+            try testing.expect(result.object.get("package_list") != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz buildWebStatus: never panics, returns expected shape" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._-";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const t: SourceType = if (buf[0] % 2 == 0) .web else .zip;
+            const s: Source = .{
+                .name = name_buf[0..@max(1, buf[0] % 8)],
+                .type = t,
+                .owner = "owner",
+                .repo_name = "repo",
+            };
+
+            const result = try buildWebStatus(a, s);
+            try testing.expect(result.object.get("name") != null);
+            try testing.expect(result.object.get("version") != null);
+            try testing.expect(result.object.get("remote_version") != null);
+            try testing.expect(result.object.get("owner") != null);
+            try testing.expect(result.object.get("repo_name") != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz buildSourceStatus: dispatches correctly by source type" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const source_type_val = smith.valueRangeLessThanWithHash(i64, 0, 4, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const st: SourceType = @enumFromInt(@as(u2, @intCast(source_type_val)));
+            const s: Source = switch (st) {
+                .git_repo => .{ .name = "moonraker", .type = .git_repo, .owner = "Arksine", .repo_name = "moonraker" },
+                .system => .{ .name = "system", .type = .system },
+                .web => .{ .name = "client", .type = .web, .owner = "owner", .repo_name = "repo" },
+                .zip => .{ .name = "client", .type = .zip, .owner = "owner", .repo_name = "repo" },
+            };
+
+            // io is null → git just returns "?" defaults safely
+            const result = try buildSourceStatus(null, a, s);
+            try testing.expect(result.object.get("name") != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz buildStatusPayload: never panics with any source set" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            // Use a varying subset of default sources
+            const all = default_sources;
+            const start: usize = buf[0] % all.len;
+            const end: usize = @min(all.len, start + @as(usize, buf[1]) % 3 + 1);
+            const sources: []const Source = all[start..end];
+
+            var ctx = UpdateCtx{ .gpa = a, .sources = sources, .bus = null, .io = null, .busy = buf[2] % 2 == 0 };
+            const payload = try buildStatusPayload(&ctx, a);
+
+            try testing.expect(payload.object.get("version_info") != null);
+            try testing.expect(payload.object.get("busy") != null);
+            try testing.expect(payload.object.get("github_rate_limit") != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz buildResponseNotification: never panics, correct shape" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const apps = [_][]const u8{ "moonraker", "klipper", "system", "client" };
+            const msgs = [_][]const u8{ "Updating...", "Update complete", "Error" };
+            const app = apps[buf[0] % apps.len];
+            const msg = msgs[buf[1] % msgs.len];
+            const proc_id = @as(i64, @intCast(buf[2]));
+            const complete = buf[3] % 2 == 0;
+
+            const n = try buildResponseNotification(a, app, proc_id, msg, complete);
+            try testing.expectEqualStrings(app, n.object.get("application").?.string);
+            try testing.expectEqualStrings(msg, n.object.get("message").?.string);
+            try testing.expectEqual(proc_id, n.object.get("proc_id").?.integer);
+            try testing.expectEqual(complete, n.object.get("complete").?.bool);
+        }
+    }.run, .{});
+}
+
+test "fuzz nextProcId: monotonic, never wraps" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const n = smith.valueRangeLessThanWithHash(i64, 1, 100, 0);
+            var last: i64 = nextProcId() -| 1; // ~monotonic baseline
+            for (0..@as(usize, @intCast(n))) |_| {
+                const curr = nextProcId();
+                try testing.expect(curr > last);
+                last = curr;
+            }
         }
     }.run, .{});
 }

@@ -1124,3 +1124,134 @@ test "fuzz handleDismiss: never panics" {
         }
     }.run, .{});
 }
+
+test "fuzz handleListFeeds: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = handleListFeeds(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleDeleteFeed: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"name\":\"klipper\"}",
+                "{\"name\":\"custom\"}",
+                "{\"name\":\"nonexistent\"}",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleDeleteFeed(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleUpdate: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"subscriptions\":[\"klipper\"]}",
+                "{\"subscriptions\":[\"klipper\",\"moonraker\"]}",
+                "{\"subscriptions\":[]}",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleUpdate(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleFeedDispatchMulti: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "{}",
+                "{\"method\":\"list\"}",
+                "{\"method\":\"update\"}",
+                "{\"method\":\"dismiss\"}",
+                "{\"method\":\"feeds\"}",
+                "{\"method\":\"post_feed\"}",
+                "{\"method\":\"delete_feed\"}",
+                "null",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleFeedDispatchMulti(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}

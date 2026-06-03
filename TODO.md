@@ -13,7 +13,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~80%** (est., weighted by API item count per component).
+- **Overall implementation progress: ~82%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
   (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
   notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
@@ -31,7 +31,12 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   job_queue notify_job_queue_changed emission wired.
   printer.* proxied methods with full gcode/script param building.
   device_power, wled, td1 API components registered with in-memory state tracking.
-  Golden cases pruned: removed server.mqtt.status/server.analysis.stats (not in Moonraker API).)
+  Golden cases pruned: removed server.mqtt.status/server.analysis.stats (not in Moonraker API).
+  **Fuzz test gap closed:** every public JSON-RPC handler now has both a unit test
+  AND a fuzz test. Added 17 fuzz tests across machine (reboot/shutdown/services/sudo/
+  peripherals), update_manager (update_moonraker/klipper/system/full), wled (strips),
+  webcam (delete/test/validate), announcements (list_feeds/delete_feed/update/
+  feed_dispatch_multi), power (devices).
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - **Conformance oracle: 54/54 events pass normalized equality** (conformance/replay.py
@@ -39,8 +44,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **904 pass / 2 skip / 0 fail** (123 fuzz) with `-Dwith_lmdb=true`;
-  **889 pass / 5 skip / 0 fail** (121 fuzz) with `-Dwith_lmdb=false`.
+- Tests: **~932 pass / 2 skip / 0 fail** (~155 fuzz) with `-Dwith_lmdb=true`;
+  **~917 pass / 5 skip / 0 fail** (~153 fuzz) with `-Dwith_lmdb=false`.
   The 2 skips (lmdb) are update_manager git tests (need a real repo).
   The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
   Note: `zig build test` uses `--listen=-` protocol which may hang on this
@@ -260,6 +265,22 @@ _norm_structure_compare array item masking (Python).
 - ~~Memory baseline: measure RSS of running phobos daemon vs stock Moonraker.~~
   Done: phobos daemon RSS = 5.4 MB (VmSize 7992 kB, 1 thread) vs stock Moonraker
   ~80-150 MB (Python asyncio, multiple threads).
+- ~~**Fuzz test gap:** every public JSON-RPC handler now has a unit test AND a fuzz test.~~
+  Done: 17 fuzz tests added across machine (11), update_manager (4), wled (1), webcam (3),
+  announcements (4), power (1). Total: ~932 tests (~155 fuzz).
+
+### P3 — remaining depth gaps (non-blocking, requires hardware/external services)
+- **mqtt** — real MQTT client connection, TLS, keepalive, reconnect. Current: endpoints
+  return "not configured" with in-memory message store + subscription tracking.
+- **power/wled/td1** — real GPIO sysfs/wiringPi, network WLED control, TD1 UART.
+  Current: in-memory state tracking with notification emission, stubbed I/O.
+- **spoolman/announcements** — real HTTP proxy to spoolman, RSS feed fetching with
+  ETag/If-Modified-Since, background refresh timers.
+  Current: CRUD on stored data, notification emission on mutations.
+- **Klippy integration test** — full Unix-socket round-trip with a real Klippy (or
+  Klippy simulator) to validate the bridge end-to-end. The bridge skeleton
+  (connect/identify/subscribe/reconnect/proxy) is complete but untested against
+  real Klippy.
 
 ---
 
@@ -285,13 +306,15 @@ _norm_structure_compare array item masking (Python).
    state flags. 13 unit tests + fuzz test.
 10. ~~Conformance oracle~~ (P1) — Done: 54/54 events pass normalized equality.
    Golden capture + replay harness complete. Normalizer bugs fixed (Zig + Python).
-11. **P2 cleanup** — memory baseline (Done: 5.4 MB RSS), re-enable lmdb drop-in
-    test (Done: fixture generated via tools/generate_lmdb_fixture.py, test passes),
-    subsystem depth: machine sudo validation (Done),
-    machine services systemctl (Done), update_manager git fetch/reset (Done),
-    power/wled/td1 GPIO (stubbed, requires hardware), mqtt client (stubbed),
-    spoolman HTTP proxy (stubbed), file_manager gcode parsing (Done),
-    octoprint_compat live state (Done).
+11. ~~P2 cleanup~~ — Done: memory baseline (5.4 MB RSS), re-enable lmdb drop-in
+    test, subsystem depth: machine sudo validation, machine services systemctl,
+    update_manager git fetch/reset, file_manager gcode parsing, octoprint_compat
+    live state, **every handler fuzzed** (17 new fuzz tests across machine,
+    update_manager, wled, webcam, announcements, power).
 12. ~~Conformance oracle follow-up~~ — merged into (10).
+13. **P3 remaining depth gaps** — real MQTT client (TLS/keepalive/reconnect),
+    GPIO/WLED/TD1 hardware I/O, spoolman/announcements HTTP/RSS fetch,
+    Klippy integration test (real Klippy or simulator). All non-blocking;
+    require hardware or external services.
 
 Keep the coverage gate at 100% and the full suite green after every step.

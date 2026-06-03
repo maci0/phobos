@@ -655,3 +655,80 @@ test "fuzz job_state fromString" {
         _ = JobEvent.fromString(s);
     }
 }
+
+test "fuzz checkIdle" {
+    const inputs = [_][]const u8{ "standby", "complete", "cancelled", "error", "printing", "paused", "", "unknown", "STANDBY" };
+    for (inputs) |s| {
+        _ = checkIdle(s);
+    }
+}
+
+test "fuzz checkResumed" {
+    // Exercise checkResumed with various state combos.
+    const states = [_][]const u8{ "paused", "printing", "standby", "complete" };
+    const fnames = [_][]const u8{ "a.gcode", "b.gcode", "a.gcode" };
+    const durs = [_]f64{ 1.0, 100.0, 200.0, -1.0 };
+
+    for (states) |prev_state| {
+        for (states) |new_state| {
+            for (fnames) |pf| {
+                for (fnames) |nf| {
+                    for (durs) |pd| {
+                        for (durs) |nd| {
+                            var prev: std.json.ObjectMap = .empty;
+                            prev.put(std.heap.smp_allocator, "state", .{ .string = prev_state }) catch continue;
+                            prev.put(std.heap.smp_allocator, "filename", .{ .string = pf }) catch continue;
+                            prev.put(std.heap.smp_allocator, "total_duration", .{ .float = pd }) catch continue;
+
+                            var newm: std.json.ObjectMap = .empty;
+                            newm.put(std.heap.smp_allocator, "state", .{ .string = new_state }) catch continue;
+                            newm.put(std.heap.smp_allocator, "filename", .{ .string = nf }) catch continue;
+                            newm.put(std.heap.smp_allocator, "total_duration", .{ .float = nd }) catch continue;
+
+                            _ = checkResumed(prev, newm);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "fuzz JobEvent methods" {
+    // Enumerate all enum values — finished/aborted/isPrinting must not crash.
+    const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
+    for (events) |e| {
+        _ = e.finished();
+        _ = e.aborted();
+        _ = e.isPrinting();
+    }
+}
+
+test "fuzz handleDisconnect" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    const states = [_][]const u8{ "standby", "printing", "paused", "complete", "error", "cancelled", "unknown" };
+    for (states) |s| {
+        js.last_print_stats.clearRetainingCapacity();
+        js.last_event = .standby;
+        js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = s }) catch continue;
+        js.handleDisconnect();
+        _ = js.getLastEvent();
+        _ = js.getLastStats();
+    }
+}
+
+test "fuzz getLastStats/getLastEvent" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
+    for (events) |e| {
+        js.last_event = e;
+        _ = js.getLastStats();
+        _ = js.getLastEvent();
+    }
+}

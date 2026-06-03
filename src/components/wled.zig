@@ -784,6 +784,22 @@ test "fuzz_batch_wled: arbitrary params never crash batch handlers" {
     }.run, .{});
 }
 
+test "fuzz_handleStrips: arbitrary params never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+            ctx.addStrip("leds", 10, "", -1, -1, null, false) catch {};
+            _ = handleStrips(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
 test "registerWled: wires expected routes and JSON-RPC methods" {
     const jsonrpc = @import("../jsonrpc.zig");
     var d = jsonrpc.Dispatcher.init(testing.allocator);
@@ -802,4 +818,154 @@ test "registerWled: wires expected routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/machine/wled/off") != null);
     try testing.expect(reg.lookup(.POST, "/machine/wled/toggle") != null);
     try testing.expect(reg.lookup(.POST, "/machine/wled/strip") != null);
+}
+
+// --- Fuzz tests for internal functions ---
+
+test "fuzz buildStripInfo: never panics, returns all keys" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var cd = [_]u8{buf[0], buf[1]};
+            const s: Strip = .{
+                .name = "t",
+                .status = if (buf[2] % 2 == 0) "on" else "off",
+                .chain_count = @as(i64, @intCast(buf[3])),
+                .chain_data = cd[0..],
+                .preset = @as(i64, @intCast(buf[4])) - 1,
+                .initial_preset = @as(i64, @intCast(buf[5])) - 1,
+                .initial_colors = null,
+                .brightness = @as(i64, @intCast(buf[6])),
+                .intensity = @as(i64, @intCast(buf[7])) - 1,
+                .speed = -1,
+                .error_state = null,
+                .send_full_chain_data = buf[0] % 2 == 0,
+            };
+
+            const info = try buildStripInfo(a, &s);
+            try testing.expect(info.object.get("strip") != null);
+            try testing.expect(info.object.get("status") != null);
+            try testing.expect(info.object.get("chain_count") != null);
+            try testing.expect(info.object.get("preset") != null);
+            try testing.expect(info.object.get("brightness") != null);
+            try testing.expect(info.object.get("intensity") != null);
+            try testing.expect(info.object.get("speed") != null);
+            try testing.expect(info.object.get("error") != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz processRequest: never panics, handles all actions" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.addStrip("s", 10, "", -1, -1, null, false) catch return;
+            const strip = ctx.findStrip("s") orelse return;
+            const actions = [_][]const u8{ "on", "off", "toggle", "status", "bad" };
+            const action = actions[buf[0] % actions.len];
+
+            _ = processRequest(&ctx, strip, action) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz addStrip/findStrip: round-trip consistency" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz_-";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const name = name_buf[0..@min(6, @max(1, buf[0] % 8))];
+
+            ctx.addStrip(name, @as(i64, @intCast(buf[1])), "", -1, @as(i64, @intCast(buf[2])), null, buf[3] % 2 == 0) catch {};
+
+            const found = ctx.findStrip(name);
+            if (found) |s| {
+                try testing.expectEqualStrings(name, s.name);
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz setStatus/setStripControl: never panics" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.addStrip("leds", 10, "", -1, -1, null, false) catch return;
+
+            const new_status = if (buf[0] % 2 == 0) "on" else "off";
+            ctx.setStatus("leds", new_status) catch return;
+            try testing.expectEqualStrings(new_status, ctx.findStrip("leds").?.status);
+
+            // setStripControl with arbitrary values
+            ctx.setStripControl(
+                "leds",
+                @as(i64, @intCast(buf[1])),
+                @as(i64, @intCast(buf[2])) - 1,
+                @as(i64, @intCast(buf[3])) - 1,
+                @as(i64, @intCast(buf[4])) - 1,
+            ) catch return;
+        }
+    }.run, .{});
+}
+
+test "fuzz wledOn/wledOff/wledControl: Strip methods never panic" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.addStrip("s", 10, "", -1, -1, null, false) catch return;
+            var strip = ctx.findStrip("s") orelse return;
+
+            const preset = @as(i64, @intCast(buf[0])) - 1;
+            strip.wledOn(preset);
+            try testing.expectEqual(preset, strip.preset);
+
+            const b = @as(i64, @intCast(buf[1]));
+            const i = @as(i64, @intCast(buf[2])) - 1;
+            const sp = @as(i64, @intCast(buf[3])) - 1;
+            strip.wledControl(b, i, sp);
+            // Values >= 0 are applied, -1 keeps current
+            if (b >= 0) try testing.expectEqual(b, strip.brightness);
+            if (i >= 0) try testing.expectEqual(i, strip.intensity);
+            if (sp >= 0) try testing.expectEqual(sp, strip.speed);
+
+            strip.wledOff(); // no-op, never panics
+        }
+    }.run, .{});
 }

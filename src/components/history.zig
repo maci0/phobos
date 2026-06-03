@@ -1708,3 +1708,120 @@ test "fuzz handleDeleteJob: never panics on arbitrary params" {
         }
     }.run, .{});
 }
+
+test "fuzz handleTotals: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = handleTotals(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleResetTotals: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = handleResetTotals(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz handleJobDispatch: never panics on arbitrary method" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            try insertJob(&mem, a, "000001", "{\"filename\":\"a.gcode\",\"status\":\"completed\"}");
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "{}",
+                "{\"method\":\"list\"}",
+                "{\"method\":\"get_job\"}",
+                "{\"method\":\"delete_job\"}",
+                "{\"method\":\"totals\"}",
+                "{\"method\":\"reset_totals\"}",
+                "null",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            _ = handleJobDispatch(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz markInterruptedJobs: never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            // Optionally insert in-progress jobs.
+            if (buf[0] & 3 == 0) {
+                try insertJob(&mem, a, "000001", "{\"filename\":\"a.gcode\",\"status\":\"in_progress\"}");
+            }
+            if (buf[1] & 3 == 0) {
+                try insertJob(&mem, a, "000002", "{\"filename\":\"b.gcode\",\"status\":\"in_progress\"}");
+            }
+            if (buf[2] & 3 == 0) {
+                try insertJob(&mem, a, "000003", "{\"filename\":\"c.gcode\",\"status\":\"completed\"}");
+            }
+            ctx.markInterruptedJobs() catch {};
+        }
+    }.run, .{});
+}

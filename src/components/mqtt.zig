@@ -708,3 +708,160 @@ test "fuzz registerMqtt: never panics with registered routes" {
         }
     }.run, .{});
 }
+
+// --- Fuzz tests for internal functions ---
+
+test "fuzz validateQos: never panics, correct boundary behaviour" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const val = smith.valueRangeLessThanWithHash(i64, -10, 10, 0);
+            const result = validateQos(val);
+            if (val >= 0 and val <= 2) {
+                _ = result catch unreachable;
+            } else {
+                _ = result catch |err| {
+                    try testing.expectEqual(error.InvalidParams, err);
+                };
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz getOptStr/getStr: never panics on arbitrary JSON objects" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const candidates = [_][]const u8{
+                "null",
+                "{}",
+                "{\"k\": \"v\"}",
+                "{\"k\": 42}",
+                "{\"k\": true}",
+                "{\"k\": null}",
+            };
+            const p = std.json.parseFromSlice(
+                std.json.Value,
+                a,
+                candidates[buf[0] % candidates.len],
+                .{},
+            ) catch return;
+
+            // getOptStr never panics
+            _ = getOptStr(p.value, "k");
+            _ = getOptStr(p.value, "missing");
+
+            // getStr may error but never panics
+            _ = getStr(p.value, "k") catch {};
+            _ = getStr(p.value, "missing") catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz getOptInt: never panics on arbitrary JSON" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const candidates = [_][]const u8{
+                "null",
+                "{}",
+                "{\"k\": 0}",
+                "{\"k\": -1}",
+                "{\"k\": 100}",
+                "{\"k\": 3.14}",
+                "{\"k\": \"string\"}",
+            };
+            const p = std.json.parseFromSlice(
+                std.json.Value,
+                a,
+                candidates[buf[0] % candidates.len],
+                .{},
+            ) catch return;
+
+            _ = getOptInt(p.value, "k", 0);
+            _ = getOptInt(p.value, "missing", 99);
+        }
+    }.run, .{});
+}
+
+test "fuzz storeMessage/getMessage: never panics, round-trip consistent" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._/";
+            var name_buf: [16]u8 = undefined;
+            for (buf[0..@min(12, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const topic = name_buf[0..@min(8, @max(1, buf[0] % 10))];
+
+            const payloads = [_]std.json.Value{
+                .null,
+                .{ .integer = @as(i64, @intCast(buf[1])) },
+                .{ .float = @as(f64, @floatFromInt(buf[2])) },
+                .{ .bool = buf[3] % 2 == 0 },
+            };
+            const payload = payloads[buf[4] % payloads.len];
+
+            try ctx.storeMessage(topic, payload);
+            const retrieved = ctx.getMessage(topic);
+            try testing.expect(retrieved != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz addSubscription/hasSubscription: idempotent, never false-positive" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._/+";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const topic = name_buf[0..@min(6, @max(1, buf[0] % 8))];
+
+            // Before adding: not subscribed
+            try testing.expect(!ctx.hasSubscription(topic));
+
+            // Add once
+            try ctx.addSubscription(topic);
+            try testing.expect(ctx.hasSubscription(topic));
+
+            // Multiple adds are idempotent
+            const n = buf[1] % 5;
+            for (0..n) |_| {
+                try ctx.addSubscription(topic);
+            }
+            try testing.expect(ctx.hasSubscription(topic));
+
+            // Different topic unaffected
+            try testing.expect(!ctx.hasSubscription("other"));
+        }
+    }.run, .{});
+}

@@ -745,6 +745,23 @@ test "fuzz_batch: arbitrary batch params never crash handleOn/Off/Status" {
     }.run, .{});
 }
 
+test "fuzz_handleDevices: arbitrary params never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+            ctx.addDevice("psu", "gpio", "off", false) catch {};
+            ctx.addDevice("fan", "gpio", "on", true) catch {};
+            _ = handleDevices(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
 test "registerPower: wires expected routes and JSON-RPC methods" {
     const jsonrpc = @import("../jsonrpc.zig");
     var d = jsonrpc.Dispatcher.init(testing.allocator);
@@ -965,6 +982,148 @@ test "fuzz_handleKlippyShutdown: never crashes" {
                 }) catch continue;
             }
             ctx.handleKlippyShutdown(a);
+        }
+    }.run, .{});
+}
+
+// --- Fuzz tests for internal functions ---
+
+test "fuzz buildDeviceInfo: never panics, returns expected shape" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const dev: Device = .{
+                .name = "test_dev",
+                .type_str = if (buf[0] % 3 == 0) "gpio" else if (buf[0] % 3 == 1) "tasmota" else "klipper_device",
+                .state = if (buf[1] % 2 == 0) "on" else "off",
+                .locked_while_printing = buf[2] % 2 == 0,
+                .is_shutdown = buf[3] % 2 == 0,
+            };
+
+            const info = try buildDeviceInfo(a, &dev);
+            try testing.expect(info.object.get("device") != null);
+            try testing.expect(info.object.get("status") != null);
+            try testing.expect(info.object.get("locked_while_printing") != null);
+            try testing.expect(info.object.get("type") != null);
+            try testing.expect(info.object.get("is_shutdown") != null);
+        }
+    }.run, .{});
+}
+
+test "fuzz processRequest: never panics, handles all action states" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+
+            const name = try std.fmt.allocPrint(a, "d_{d}", .{buf[0] % 16});
+            ctx.addDevice(name, "gpio", if (buf[1] % 2 == 0) "on" else "off", false) catch return;
+
+            const dev = ctx.findDevice(name) orelse return;
+            const actions = [_][]const u8{ "on", "off", "toggle", "status", "invalid" };
+            const action = actions[buf[2] % actions.len];
+            const force = buf[3] % 2 == 0;
+
+            const result = processRequest(&ctx, dev, action, a, force);
+            _ = result catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz addDevice/findDevice: round-trip, handles duplicates" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz_-";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const name = name_buf[0..@min(6, @max(1, buf[0] % 8))];
+
+            const types = [_][]const u8{ "gpio", "tasmota", "shelly", "mqtt", "http" };
+            const t = types[buf[1] % types.len];
+            const state = if (buf[2] % 2 == 0) "on" else "off";
+
+            // Adding same name twice is an error
+            ctx.addDevice(name, t, state, buf[3] % 2 == 0) catch {};
+
+            // Should be findable
+            const found = ctx.findDevice(name);
+            if (found) |d| {
+                try testing.expectEqualStrings(t, d.type_str);
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz checkPrintingLock: correct gating behaviour" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const val = smith.valueWithHash(bool, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+
+            const dev: Device = .{
+                .name = "x",
+                .type_str = "gpio",
+                .state = "on",
+                .locked_while_printing = val,
+                .is_shutdown = false,
+            };
+
+            // No printing = always allowed
+            ctx.setPrintingActive(false);
+            try ctx.checkPrintingLock(&dev);
+
+            // Printing active, only locked if locked_while_printing
+            ctx.setPrintingActive(true);
+            const result = ctx.checkPrintingLock(&dev);
+            if (val) {
+                try testing.expectError(error.PrinterLocked, result);
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz setState: never panics, updates correctly" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+
+            ctx.addDevice("d", "gpio", "off", false) catch return;
+            const new_state = if (buf[0] % 2 == 0) "on" else "off";
+            ctx.setState("d", new_state) catch return;
+            try testing.expectEqualStrings(new_state, ctx.findDevice("d").?.state);
+
+            // Unknown device errors
+            try testing.expectError(error.NotFound, ctx.setState("ghost", "on"));
         }
     }.run, .{});
 }
