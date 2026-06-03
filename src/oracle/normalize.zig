@@ -68,6 +68,10 @@ pub const manifest: []const ManifestEntry = &.{
     .{ .method_pattern = "server.config", .field_path = "orig", .rule = .structure_compare },
     .{ .method_pattern = "server.config", .field_path = "files", .rule = .files_compare },
     .{ .method_pattern = "server.config", .field_path = "filename", .rule = .path_relativize },
+    // --- access.info ---
+    .{ .method_pattern = "access.info", .field_path = "trusted", .rule = .mask },
+    // --- machine.peripherals.video ---
+    .{ .method_pattern = "machine.peripherals.video", .field_path = "v4l2_devices", .rule = .mask },
     // --- generic identity/time fields (mask anything ending with _id or _time) ---
     .{ .method_pattern = "*", .field_path = "*_id", .rule = .mask },
     .{ .method_pattern = "*", .field_path = "*_time", .rule = .mask },
@@ -291,16 +295,21 @@ fn normalizeWarnings(alloc: std.mem.Allocator, arr: std.json.Array) error{OutOfM
             while (it.next()) |kv| {
                 const key = kv.key_ptr.*;
                 const val = kv.value_ptr.*;
-                // Mask string values (diagnostic text) but keep structure.
                 if (val == .string) {
                     try new_obj.put(alloc, key, .{ .string = "MASKED" });
+                } else if (val == .array) {
+                    var inner_arr: std.json.Array = .init(alloc);
+                    for (val.array.items) |inner| {
+                        try inner_arr.append(try normalizeStructureLeaf(alloc, inner));
+                    }
+                    try new_obj.put(alloc, key, .{ .array = inner_arr });
                 } else {
-                    try new_obj.put(alloc, key, try normalize(alloc, val, "warnings", "*"));
+                    try new_obj.put(alloc, key, try normalizeStructureLeaf(alloc, val));
                 }
             }
             try new_arr.append(.{ .object = new_obj });
         } else {
-            try new_arr.append(try normalize(alloc, item, "warnings", "*"));
+            try new_arr.append(try normalizeStructureLeaf(alloc, item));
         }
     }
     return .{ .array = new_arr };

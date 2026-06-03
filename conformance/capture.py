@@ -259,28 +259,93 @@ class OracleCapture:
 # Request sequence
 # ---------------------------------------------------------------------------
 async def run_sequence(cap: OracleCapture) -> None:
-    """Execute the spine request sequence against the running Moonraker."""
+    """Execute the comprehensive request sequence against the running Moonraker.
 
-    # --- HTTP REST ---
-    await cap.http_get("/server/info")
-    await cap.http_get("/server/config")
+    Only includes methods validated against the pinned vendored Moonraker
+    (commit 9008485).  Newer components (sensor, spoolman, notifier, wled,
+    td1, device_power, update_manager, octoprint_compat) are not present in
+    the pinned commit and are excluded from the golden capture.
+    """
 
-    # --- HTTP JSON-RPC ---
-    await cap.http_post_jsonrpc("server.info")
-    await cap.http_post_jsonrpc("server.config")
+    # ── Phase 1: HTTP REST read-only endpoints ──
+    rest_gets = [
+        # server
+        "/server/info",
+        "/server/config",
+        "/server/temperature_store",
+        "/server/gcode_store",
+        "/server/history/list",
+        "/server/history/totals",
+        "/server/job_queue/status",
+        "/server/files/list",
+        "/server/files/roots",
+        "/server/files/thumbnails?filename=",
+        "/server/files/directory?path=gcodes",
+        "/server/announcements/list",
+        "/server/announcements/feeds",
+        "/server/webcams/list",
+        "/server/extensions/list",
+        "/server/database/list",
+        # access
+        "/access/info",
+        "/access/users/list",
+        "/access/user",
+        # machine
+        "/machine/proc_stats",
+        "/machine/system_info",
+        "/machine/peripherals/serial",
+        "/machine/peripherals/usb",
+        "/machine/peripherals/video",
+        "/machine/sudo/info",
+    ]
+    for path in rest_gets:
+        await cap.http_get(path)
 
-    # --- WebSocket JSON-RPC ---
-    await cap.ws_request("server.info", req_id=101)
+    # ── Phase 2: HTTP JSON-RPC read-only methods ──
+    jsonrpc_gets = [
+        "server.info",
+        "server.config",
+        "server.temperature_store",
+        "server.gcode_store",
+        "server.history.list",
+        "server.history.totals",
+        "server.job_queue.status",
+        "server.files.list",
+        "server.files.roots",
+        "server.announcements.list",
+        "server.announcements.feeds",
+        "server.webcams.list",
+        "server.extensions.list",
+        "server.database.list",
+        "access.info",
+        "access.users.list",
+        "machine.proc_stats",
+        "machine.system_info",
+        "machine.peripherals.serial",
+        "machine.peripherals.usb",
+        "machine.peripherals.video",
+        "machine.sudo.info",
+    ]
+    req_id = 1
+    for method in jsonrpc_gets:
+        await cap.http_post_jsonrpc(method, req_id=req_id)
+        req_id += 1
+
+    # ── Phase 3: HTTP JSON-RPC with params ──
+    await cap.http_post_jsonrpc("server.files.thumbnails", {"filename": ""}, req_id=req_id); req_id += 1
+
+    # ── Phase 4: WebSocket JSON-RPC ──
+    ws_req_id = 9900
+    await cap.ws_request("server.info", req_id=ws_req_id); ws_req_id += 1
     await cap.ws_request("server.connection.identify", {
         "client_name": "oracle",
         "version": "1.0",
         "type": "web",
         "url": "http://localhost",
-    }, req_id=102)
-    await cap.ws_request("server.websocket.id", req_id=103)
+    }, req_id=ws_req_id); ws_req_id += 1
+    await cap.ws_request("server.websocket.id", req_id=ws_req_id); ws_req_id += 1
 
-    # --- Notifications ---
-    # Let the WS listener run for a few seconds to capture notify_proc_stat_update.
+    # ── Phase 5: Captured notifications ──
     await cap.ws_capture_notifications(3.5)
 
 

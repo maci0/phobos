@@ -325,6 +325,10 @@ pub const KlippyCtx = struct {
     /// to finish the current job with the appropriate status.
     history: ?*@import("history.zig").HistoryCtx = null,
 
+    /// OctoPrint compat component (set by App after init). Called on status
+    /// updates and Klippy state changes for /api/ state reporting.
+    octoprint: ?*@import("octoprint_compat.zig").OctoPrintCtx = null,
+
     pub fn init(
         gpa: std.mem.Allocator,
         bus: *notify.NotifyBus,
@@ -701,6 +705,13 @@ pub const KlippyCtx = struct {
                 js.statusUpdate(ps);
             }
         }
+
+        // Feed print_stats into the octoprint compat state tracker.
+        if (self.octoprint) |oc| {
+            if (status_dict.object.get("print_stats")) |ps| {
+                oc.statusUpdate(ps);
+            }
+        }
     }
 
     /// Process a notify_gcode_response or process_gcode_response from Klippy.
@@ -872,6 +883,7 @@ pub const KlippyCtx = struct {
 
     fn emitReady(self: *KlippyCtx, io: std.Io) void {
         self.bus.emit(io, notify.names.klippy_ready, .null) catch {};
+        if (self.octoprint) |oc| oc.setKlippyReady();
     }
 
     fn emitDisconnected(self: *KlippyCtx, io: std.Io) void {
@@ -884,6 +896,7 @@ pub const KlippyCtx = struct {
                 h.handleKlippyDisconnect(js.getLastStats());
             }
         }
+        if (self.octoprint) |oc| oc.setKlippyDisconnected();
     }
 
     fn emitShutdown(self: *KlippyCtx, io: std.Io) void {
@@ -894,6 +907,7 @@ pub const KlippyCtx = struct {
                 h.handleKlippyShutdown(js.getLastStats());
             }
         }
+        if (self.octoprint) |oc| oc.setKlippyDisconnected();
     }
 };
 

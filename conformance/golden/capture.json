@@ -171,6 +171,1284 @@
       }
     },
     {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/temperature_store"
+      },
+      "response": {
+        "result": {}
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/gcode_store"
+      },
+      "response": {
+        "result": {
+          "gcode_store": []
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/history/list"
+      },
+      "response": {
+        "result": {
+          "count": 0,
+          "jobs": []
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/history/totals"
+      },
+      "response": {
+        "result": {
+          "auxiliary_totals": [],
+          "job_totals": {
+            "longest_job": 0.0,
+            "longest_print": 0.0,
+            "total_filament_used": 0.0,
+            "total_jobs": 0.0,
+            "total_print_time": 0.0,
+            "total_time": 0.0
+          }
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/job_queue/status"
+      },
+      "response": {
+        "result": {
+          "queue_state": "paused",
+          "queued_jobs": []
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/files/list"
+      },
+      "response": {
+        "result": []
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/files/roots"
+      },
+      "response": {
+        "result": [
+          {
+            "name": "config",
+            "path": "/home/maci/printer_data/config",
+            "permissions": "rw"
+          },
+          {
+            "name": "logs",
+            "path": "/home/maci/printer_data/logs",
+            "permissions": "r"
+          },
+          {
+            "name": "gcodes",
+            "path": "/home/maci/printer_data/gcodes",
+            "permissions": "rw"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/files/thumbnails?filename="
+      },
+      "response": {
+        "result": []
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/files/directory?path=gcodes"
+      },
+      "response": {
+        "result": {
+          "dirs": [],
+          "disk_usage": {
+            "free": 414895222784,
+            "total": 2997370052608,
+            "used": 2440461946880
+          },
+          "files": [],
+          "root_info": {
+            "name": "gcodes",
+            "permissions": "rw"
+          }
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/announcements/list"
+      },
+      "response": {
+        "result": {
+          "entries": [],
+          "feeds": [
+            "moonraker",
+            "klipper"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/announcements/feeds"
+      },
+      "response": {
+        "result": {
+          "feeds": [
+            "moonraker",
+            "klipper"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/webcams/list"
+      },
+      "response": {
+        "result": {
+          "webcams": []
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/extensions/list"
+      },
+      "response": {
+        "result": {
+          "agents": []
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/server/database/list"
+      },
+      "response": {
+        "result": {
+          "backups": [],
+          "namespaces": [
+            "gcode_metadata",
+            "moonraker",
+            "announcements"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/access/info"
+      },
+      "response": {
+        "result": {
+          "available_sources": [
+            "moonraker"
+          ],
+          "default_source": "moonraker",
+          "login_required": false,
+          "trusted": true
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/access/users/list"
+      },
+      "response": {
+        "result": {
+          "users": []
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/access/user"
+      },
+      "response": {
+        "result": {
+          "created_on": 1780403143.2959177,
+          "source": "moonraker",
+          "username": "_TRUSTED_USER_"
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/machine/proc_stats"
+      },
+      "response": {
+        "result": {
+          "cpu_temp": 59.375,
+          "moonraker_stats": [
+            {
+              "cpu_usage": -0.0,
+              "mem_units": "kB",
+              "memory": 55244,
+              "time": 1780403143.1553273
+            }
+          ],
+          "network": {
+            "d22b8fca1687": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142850,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "docker0": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 128924,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "enp125s0f4u1": {
+              "bandwidth": 0.0,
+              "rx_bytes": 52740186507,
+              "rx_drop": 612800,
+              "rx_errs": 0,
+              "rx_packets": 46304126,
+              "tx_bytes": 34740508108,
+              "tx_drop": 0,
+              "tx_errs": 0,
+              "tx_packets": 40990150
+            },
+            "enp14s0": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 2,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "lo": {
+              "bandwidth": 0.0,
+              "rx_bytes": 1359746976,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 3065788,
+              "tx_bytes": 1359746976,
+              "tx_drop": 0,
+              "tx_errs": 0,
+              "tx_packets": 3065788
+            },
+            "virbr0": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142914,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "virbr1": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142914,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "virbr2": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142914,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "ztklhw5udj": {
+              "bandwidth": 0.0,
+              "rx_bytes": 36223065,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 214729,
+              "tx_bytes": 192176195,
+              "tx_drop": 0,
+              "tx_errs": 0,
+              "tx_packets": 168117
+            }
+          },
+          "system_cpu_usage": {},
+          "system_memory": {
+            "available": 99566256,
+            "total": 129446704,
+            "used": 29880448
+          },
+          "system_uptime": 294035.3175599,
+          "throttled_state": null,
+          "websocket_connections": 0
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/machine/system_info"
+      },
+      "response": {
+        "result": {
+          "system_info": {
+            "available_services": [],
+            "canbus": {},
+            "cpu_info": {
+              "bits": "64bit",
+              "cpu_count": 32,
+              "cpu_desc": "AMD Ryzen 9 9950X 16-Core Processor",
+              "hardware_desc": "",
+              "memory_units": "kB",
+              "model": "",
+              "processor": "x86_64",
+              "serial_number": "",
+              "total_memory": 129446704
+            },
+            "distribution": {
+              "codename": "n/a",
+              "id": "cachyos",
+              "kernel_version": "7.0.10-2-cachyos",
+              "like": "arch",
+              "name": "CachyOS",
+              "release_info": {
+                "id": "arch",
+                "name": ""
+              },
+              "version": "rolling",
+              "version_parts": {
+                "build_number": "",
+                "major": "",
+                "minor": ""
+              }
+            },
+            "instance_ids": {
+              "klipper": "klipper",
+              "moonraker": "moonraker"
+            },
+            "network": {
+              "enp125s0f4u1": {
+                "ip_addresses": [
+                  {
+                    "address": "192.168.0.77",
+                    "family": "ipv4",
+                    "is_link_local": false
+                  },
+                  {
+                    "address": "2401:7400:c804:aa80:f18e:7ba2:5a61:2f3b",
+                    "family": "ipv6",
+                    "is_link_local": false
+                  },
+                  {
+                    "address": "fe80::884c:494d:e062:d16f",
+                    "family": "ipv6",
+                    "is_link_local": true
+                  }
+                ],
+                "mac_address": "30:23:03:05:23:a2"
+              }
+            },
+            "provider": "none",
+            "python": {
+              "version": [
+                3,
+                12,
+                12,
+                "final",
+                0
+              ],
+              "version_string": "3.12.12 (main, Feb  3 2026, 22:51:04) [Clang 21.1.4 ]"
+            },
+            "sd_info": {},
+            "service_state": {},
+            "virtualization": {
+              "virt_identifier": "unknown",
+              "virt_type": "unknown"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/machine/peripherals/serial"
+      },
+      "response": {
+        "result": {
+          "serial_devices": [
+            {
+              "device_name": "ttyS15",
+              "device_path": "/dev/ttyS15",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS6",
+              "device_path": "/dev/ttyS6",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS23",
+              "device_path": "/dev/ttyS23",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS13",
+              "device_path": "/dev/ttyS13",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS31",
+              "device_path": "/dev/ttyS31",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS4",
+              "device_path": "/dev/ttyS4",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS21",
+              "device_path": "/dev/ttyS21",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS11",
+              "device_path": "/dev/ttyS11",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS2",
+              "device_path": "/dev/ttyS2",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS28",
+              "device_path": "/dev/ttyS28",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS0",
+              "device_path": "/dev/ttyS0",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS18",
+              "device_path": "/dev/ttyS18",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS9",
+              "device_path": "/dev/ttyS9",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS26",
+              "device_path": "/dev/ttyS26",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS16",
+              "device_path": "/dev/ttyS16",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS7",
+              "device_path": "/dev/ttyS7",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS24",
+              "device_path": "/dev/ttyS24",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS14",
+              "device_path": "/dev/ttyS14",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS5",
+              "device_path": "/dev/ttyS5",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS22",
+              "device_path": "/dev/ttyS22",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS12",
+              "device_path": "/dev/ttyS12",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS30",
+              "device_path": "/dev/ttyS30",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS3",
+              "device_path": "/dev/ttyS3",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS20",
+              "device_path": "/dev/ttyS20",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS10",
+              "device_path": "/dev/ttyS10",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS29",
+              "device_path": "/dev/ttyS29",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS1",
+              "device_path": "/dev/ttyS1",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS19",
+              "device_path": "/dev/ttyS19",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS27",
+              "device_path": "/dev/ttyS27",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS17",
+              "device_path": "/dev/ttyS17",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS8",
+              "device_path": "/dev/ttyS8",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS25",
+              "device_path": "/dev/ttyS25",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/machine/peripherals/usb"
+      },
+      "response": {
+        "result": {
+          "usb_devices": [
+            {
+              "bus_num": 5,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7b:00.0",
+              "subclass": null,
+              "usb_location": "5:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 1,
+              "class": "Miscellaneous Device",
+              "description": "Foxconn / Hon Hai",
+              "device_num": 2,
+              "manufacturer": "MediaTek Inc.",
+              "product": "Wireless_Device",
+              "product_id": "e13a",
+              "protocol": "Interface Association",
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "1:2",
+              "vendor_id": "0489"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:13:00.0",
+              "subclass": null,
+              "usb_location": "3:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": "Miscellaneous Device",
+              "description": "ASUSTek Computer, Inc.",
+              "device_num": 5,
+              "manufacturer": "Generic",
+              "product": "USB Audio",
+              "product_id": "1b9b",
+              "protocol": "Interface Association",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:5",
+              "vendor_id": "0b05"
+            },
+            {
+              "bus_num": 10,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:7d:00.4",
+              "subclass": null,
+              "usb_location": "10:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 1,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:11:00.0",
+              "subclass": null,
+              "usb_location": "1:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc. ASM1074 High-Speed hub",
+              "device_num": 2,
+              "manufacturer": "ASUS TEK.",
+              "product": "ASM107x",
+              "product_id": "2074",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:2",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": "Application Specific Interface",
+              "description": "VIA Labs, Inc.",
+              "device_num": 10,
+              "manufacturer": "VIA Labs, Inc.",
+              "product": "USB Billboard Device",
+              "product_id": "8883",
+              "protocol": null,
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "3:10",
+              "vendor_id": "2109"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "VIA Labs, Inc.",
+              "device_num": 5,
+              "manufacturer": "VIA Labs, Inc.",
+              "product": "USB3.0 Hub",
+              "product_id": "0817",
+              "protocol": null,
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "4:5",
+              "vendor_id": "2109"
+            },
+            {
+              "bus_num": 10,
+              "class": null,
+              "description": "Realtek Semiconductor Corp. RTL8153 Gigabit Ethernet Adapter",
+              "device_num": 2,
+              "manufacturer": "Belkin",
+              "product": "Belkin USB-C LAN",
+              "product_id": "8153",
+              "protocol": null,
+              "serial": "0523A2000000",
+              "subclass": null,
+              "usb_location": "10:2",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. RTS5411 Hub",
+              "device_num": 8,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 2.0 Hub",
+              "product_id": "5411",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:8",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "Blue Microphones Yeti Stereo Microphone",
+              "device_num": 13,
+              "manufacturer": "Blue Microphones",
+              "product": "Yeti Stereo Microphone",
+              "product_id": "9e84",
+              "protocol": null,
+              "serial": "797_2019/09/17_14926",
+              "subclass": null,
+              "usb_location": "3:13",
+              "vendor_id": "b58e"
+            },
+            {
+              "bus_num": 8,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:7d:00.3",
+              "subclass": null,
+              "usb_location": "8:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "8BitDo",
+              "device_num": 4,
+              "manufacturer": "8BitDo",
+              "product": "Ultimate Wireless Controller",
+              "product_id": "3109",
+              "protocol": null,
+              "serial": "5317d8d817e4",
+              "subclass": null,
+              "usb_location": "3:4",
+              "vendor_id": "2dc8"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc.",
+              "device_num": 3,
+              "manufacturer": "ASMT",
+              "product": "ASMT2307",
+              "product_id": "3174",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:3",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "Cambridge Silicon Radio, Ltd CSRA64210 [TaoTronics Headset BH-22 in charging mode]",
+              "device_num": 9,
+              "manufacturer": "Audioengine",
+              "product": "Audioengine HD3",
+              "product_id": "1243",
+              "protocol": null,
+              "serial": "B40020170802",
+              "subclass": null,
+              "usb_location": "3:9",
+              "vendor_id": "0a12"
+            },
+            {
+              "bus_num": 6,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:7b:00.0",
+              "subclass": null,
+              "usb_location": "6:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:13:00.0",
+              "subclass": null,
+              "usb_location": "4:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "ASUSTek Computer, Inc.",
+              "device_num": 12,
+              "manufacturer": "AsusTek Computer Inc.",
+              "product": "AURA LED Controller",
+              "product_id": "1aa6",
+              "protocol": null,
+              "serial": "9876543210",
+              "subclass": null,
+              "usb_location": "3:12",
+              "vendor_id": "0b05"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. Hub",
+              "device_num": 6,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 3.0 Hub",
+              "product_id": "0411",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:6",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "Logitech, Inc.",
+              "device_num": 14,
+              "manufacturer": "Logitech",
+              "product": "USB Receiver",
+              "product_id": "c54d",
+              "protocol": null,
+              "serial": "336D347B3234",
+              "subclass": null,
+              "usb_location": "3:14",
+              "vendor_id": "046d"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. RTS5411 Hub",
+              "device_num": 6,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 2.0 Hub",
+              "product_id": "5411",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:6",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 11,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7e:00.0",
+              "subclass": null,
+              "usb_location": "11:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 2,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:11:00.0",
+              "subclass": null,
+              "usb_location": "2:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc.",
+              "device_num": 3,
+              "manufacturer": "ASMT",
+              "product": "ASMT2307",
+              "product_id": "2174",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:3",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": null,
+              "device_num": 15,
+              "manufacturer": "RAMA WORKS",
+              "product": "RAMA WORKS U80-A",
+              "product_id": "080a",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:15",
+              "vendor_id": "5241"
+            },
+            {
+              "bus_num": 9,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7d:00.4",
+              "subclass": null,
+              "usb_location": "9:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. Hub",
+              "device_num": 4,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 3.0 Hub",
+              "product_id": "0411",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:4",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": "Miscellaneous Device",
+              "description": "Elgato Systems GmbH",
+              "device_num": 11,
+              "manufacturer": "Elgato",
+              "product": "Game Capture HD60 S+",
+              "product_id": "006b",
+              "protocol": "Interface Association",
+              "serial": "0007E95724000",
+              "subclass": null,
+              "usb_location": "3:11",
+              "vendor_id": "0fd9"
+            },
+            {
+              "bus_num": 7,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7d:00.3",
+              "subclass": null,
+              "usb_location": "7:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc. ASM1074 SuperSpeed hub",
+              "device_num": 2,
+              "manufacturer": "ASUS TEK.",
+              "product": "ASM107x",
+              "product_id": "3074",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:2",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "VIA Labs, Inc.",
+              "device_num": 7,
+              "manufacturer": "VIA Labs, Inc.",
+              "product": "USB2.0 Hub",
+              "product_id": "2817",
+              "protocol": "TT per port",
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "3:7",
+              "vendor_id": "2109"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/machine/peripherals/video"
+      },
+      "response": {
+        "result": {
+          "libcamera_devices": [],
+          "v4l2_devices": [
+            {
+              "alt_name": "Game Capture HD60 S+: Game Capt",
+              "camera_name": "Game Capture HD60 S+: Game Capt",
+              "capabilities": [
+                "VIDEO_CAPTURE",
+                "EXT_PIX_FORMAT",
+                "STREAMING"
+              ],
+              "device_name": "video0",
+              "device_path": "/dev/video0",
+              "driver_name": "uvcvideo",
+              "hardware_bus": "usb-0000:13:00.0-5.1.1.2",
+              "modes": [
+                {
+                  "description": "YUYV 4:2:2",
+                  "flags": [],
+                  "format": "YUYV",
+                  "resolutions": [
+                    "1920x1080"
+                  ]
+                },
+                {
+                  "description": "Y/UV 4:2:0",
+                  "flags": [],
+                  "format": "NV12",
+                  "resolutions": [
+                    "1920x1080"
+                  ]
+                },
+                {
+                  "description": "Planar YUV 4:2:0",
+                  "flags": [],
+                  "format": "YU12",
+                  "resolutions": [
+                    "1920x1080"
+                  ]
+                }
+              ],
+              "path_by_hardware": "/dev/v4l/by-path/pci-0000:13:00.0-usbv2-0:5.1.1.2:1.0-video-index0",
+              "path_by_id": "/dev/v4l/by-id/usb-Elgato_Game_Capture_HD60_S+_0007E95724000-video-index0",
+              "usb_location": "3:11",
+              "version": "7.0.10"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_get",
+      "request": {
+        "path": "/machine/sudo/info"
+      },
+      "response": {
+        "result": {
+          "linux_user": "maci",
+          "request_messages": [],
+          "sudo_access": null,
+          "sudo_requested": false
+        }
+      }
+    },
+    {
       "kind": "http_jsonrpc",
       "request": {
         "id": 1,
@@ -230,12 +1508,12 @@
     {
       "kind": "http_jsonrpc",
       "request": {
-        "id": 1,
+        "id": 2,
         "jsonrpc": "2.0",
         "method": "server.config"
       },
       "response": {
-        "id": 1,
+        "id": 2,
         "jsonrpc": "2.0",
         "result": {
           "config": {
@@ -347,14 +1625,1345 @@
       }
     },
     {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "server.temperature_store"
+      },
+      "response": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "server.gcode_store"
+      },
+      "response": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "result": {
+          "gcode_store": []
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "server.history.list"
+      },
+      "response": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "result": {
+          "count": 0,
+          "jobs": []
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "server.history.totals"
+      },
+      "response": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "result": {
+          "auxiliary_totals": [],
+          "job_totals": {
+            "longest_job": 0.0,
+            "longest_print": 0.0,
+            "total_filament_used": 0.0,
+            "total_jobs": 0.0,
+            "total_print_time": 0.0,
+            "total_time": 0.0
+          }
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "server.job_queue.status"
+      },
+      "response": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "result": {
+          "queue_state": "paused",
+          "queued_jobs": []
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "server.files.list"
+      },
+      "response": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "result": []
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "server.files.roots"
+      },
+      "response": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "name": "config",
+            "path": "/home/maci/printer_data/config",
+            "permissions": "rw"
+          },
+          {
+            "name": "logs",
+            "path": "/home/maci/printer_data/logs",
+            "permissions": "r"
+          },
+          {
+            "name": "gcodes",
+            "path": "/home/maci/printer_data/gcodes",
+            "permissions": "rw"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "server.announcements.list"
+      },
+      "response": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "result": {
+          "entries": [],
+          "feeds": [
+            "moonraker",
+            "klipper"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "server.announcements.feeds"
+      },
+      "response": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "result": {
+          "feeds": [
+            "moonraker",
+            "klipper"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "server.webcams.list"
+      },
+      "response": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "result": {
+          "webcams": []
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "server.extensions.list"
+      },
+      "response": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "result": {
+          "agents": []
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "server.database.list"
+      },
+      "response": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "result": {
+          "backups": [],
+          "namespaces": [
+            "gcode_metadata",
+            "moonraker",
+            "announcements"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "access.info"
+      },
+      "response": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "result": {
+          "available_sources": [
+            "moonraker"
+          ],
+          "default_source": "moonraker",
+          "login_required": false,
+          "trusted": true
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "access.users.list"
+      },
+      "response": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "result": {
+          "users": []
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "machine.proc_stats"
+      },
+      "response": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "result": {
+          "cpu_temp": 61.5,
+          "moonraker_stats": [
+            {
+              "cpu_usage": -0.0,
+              "mem_units": "kB",
+              "memory": 55244,
+              "time": 1780403143.1553273
+            }
+          ],
+          "network": {
+            "d22b8fca1687": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142850,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "docker0": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 128924,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "enp125s0f4u1": {
+              "bandwidth": 0.0,
+              "rx_bytes": 52740186507,
+              "rx_drop": 612800,
+              "rx_errs": 0,
+              "rx_packets": 46304126,
+              "tx_bytes": 34740508108,
+              "tx_drop": 0,
+              "tx_errs": 0,
+              "tx_packets": 40990150
+            },
+            "enp14s0": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 2,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "lo": {
+              "bandwidth": 0.0,
+              "rx_bytes": 1359746976,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 3065788,
+              "tx_bytes": 1359746976,
+              "tx_drop": 0,
+              "tx_errs": 0,
+              "tx_packets": 3065788
+            },
+            "virbr0": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142914,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "virbr1": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142914,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "virbr2": {
+              "bandwidth": 0.0,
+              "rx_bytes": 0,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 0,
+              "tx_bytes": 0,
+              "tx_drop": 142914,
+              "tx_errs": 0,
+              "tx_packets": 0
+            },
+            "ztklhw5udj": {
+              "bandwidth": 0.0,
+              "rx_bytes": 36223065,
+              "rx_drop": 0,
+              "rx_errs": 0,
+              "rx_packets": 214729,
+              "tx_bytes": 192176195,
+              "tx_drop": 0,
+              "tx_errs": 0,
+              "tx_packets": 168117
+            }
+          },
+          "system_cpu_usage": {},
+          "system_memory": {
+            "available": 99566256,
+            "total": 129446704,
+            "used": 29880448
+          },
+          "system_uptime": 294035.401967201,
+          "throttled_state": null,
+          "websocket_connections": 0
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "machine.system_info"
+      },
+      "response": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "result": {
+          "system_info": {
+            "available_services": [],
+            "canbus": {},
+            "cpu_info": {
+              "bits": "64bit",
+              "cpu_count": 32,
+              "cpu_desc": "AMD Ryzen 9 9950X 16-Core Processor",
+              "hardware_desc": "",
+              "memory_units": "kB",
+              "model": "",
+              "processor": "x86_64",
+              "serial_number": "",
+              "total_memory": 129446704
+            },
+            "distribution": {
+              "codename": "n/a",
+              "id": "cachyos",
+              "kernel_version": "7.0.10-2-cachyos",
+              "like": "arch",
+              "name": "CachyOS",
+              "release_info": {
+                "id": "arch",
+                "name": ""
+              },
+              "version": "rolling",
+              "version_parts": {
+                "build_number": "",
+                "major": "",
+                "minor": ""
+              }
+            },
+            "instance_ids": {
+              "klipper": "klipper",
+              "moonraker": "moonraker"
+            },
+            "network": {
+              "enp125s0f4u1": {
+                "ip_addresses": [
+                  {
+                    "address": "192.168.0.77",
+                    "family": "ipv4",
+                    "is_link_local": false
+                  },
+                  {
+                    "address": "2401:7400:c804:aa80:f18e:7ba2:5a61:2f3b",
+                    "family": "ipv6",
+                    "is_link_local": false
+                  },
+                  {
+                    "address": "fe80::884c:494d:e062:d16f",
+                    "family": "ipv6",
+                    "is_link_local": true
+                  }
+                ],
+                "mac_address": "30:23:03:05:23:a2"
+              }
+            },
+            "provider": "none",
+            "python": {
+              "version": [
+                3,
+                12,
+                12,
+                "final",
+                0
+              ],
+              "version_string": "3.12.12 (main, Feb  3 2026, 22:51:04) [Clang 21.1.4 ]"
+            },
+            "sd_info": {},
+            "service_state": {},
+            "virtualization": {
+              "virt_identifier": "unknown",
+              "virt_type": "unknown"
+            }
+          }
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "method": "machine.peripherals.serial"
+      },
+      "response": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "result": {
+          "serial_devices": [
+            {
+              "device_name": "ttyS15",
+              "device_path": "/dev/ttyS15",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS6",
+              "device_path": "/dev/ttyS6",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS23",
+              "device_path": "/dev/ttyS23",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS13",
+              "device_path": "/dev/ttyS13",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS31",
+              "device_path": "/dev/ttyS31",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS4",
+              "device_path": "/dev/ttyS4",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS21",
+              "device_path": "/dev/ttyS21",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS11",
+              "device_path": "/dev/ttyS11",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS2",
+              "device_path": "/dev/ttyS2",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS28",
+              "device_path": "/dev/ttyS28",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS0",
+              "device_path": "/dev/ttyS0",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS18",
+              "device_path": "/dev/ttyS18",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS9",
+              "device_path": "/dev/ttyS9",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS26",
+              "device_path": "/dev/ttyS26",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS16",
+              "device_path": "/dev/ttyS16",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS7",
+              "device_path": "/dev/ttyS7",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS24",
+              "device_path": "/dev/ttyS24",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS14",
+              "device_path": "/dev/ttyS14",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS5",
+              "device_path": "/dev/ttyS5",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS22",
+              "device_path": "/dev/ttyS22",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS12",
+              "device_path": "/dev/ttyS12",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS30",
+              "device_path": "/dev/ttyS30",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS3",
+              "device_path": "/dev/ttyS3",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS20",
+              "device_path": "/dev/ttyS20",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS10",
+              "device_path": "/dev/ttyS10",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS29",
+              "device_path": "/dev/ttyS29",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS1",
+              "device_path": "/dev/ttyS1",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS19",
+              "device_path": "/dev/ttyS19",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS27",
+              "device_path": "/dev/ttyS27",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS17",
+              "device_path": "/dev/ttyS17",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS8",
+              "device_path": "/dev/ttyS8",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            },
+            {
+              "device_name": "ttyS25",
+              "device_path": "/dev/ttyS25",
+              "device_type": "hardware_uart",
+              "driver_name": "port",
+              "path_by_hardware": null,
+              "path_by_id": null,
+              "usb_location": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 20,
+        "jsonrpc": "2.0",
+        "method": "machine.peripherals.usb"
+      },
+      "response": {
+        "id": 20,
+        "jsonrpc": "2.0",
+        "result": {
+          "usb_devices": [
+            {
+              "bus_num": 5,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7b:00.0",
+              "subclass": null,
+              "usb_location": "5:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 1,
+              "class": "Miscellaneous Device",
+              "description": "Foxconn / Hon Hai",
+              "device_num": 2,
+              "manufacturer": "MediaTek Inc.",
+              "product": "Wireless_Device",
+              "product_id": "e13a",
+              "protocol": "Interface Association",
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "1:2",
+              "vendor_id": "0489"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:13:00.0",
+              "subclass": null,
+              "usb_location": "3:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": "Miscellaneous Device",
+              "description": "ASUSTek Computer, Inc.",
+              "device_num": 5,
+              "manufacturer": "Generic",
+              "product": "USB Audio",
+              "product_id": "1b9b",
+              "protocol": "Interface Association",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:5",
+              "vendor_id": "0b05"
+            },
+            {
+              "bus_num": 10,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:7d:00.4",
+              "subclass": null,
+              "usb_location": "10:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 1,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:11:00.0",
+              "subclass": null,
+              "usb_location": "1:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc. ASM1074 High-Speed hub",
+              "device_num": 2,
+              "manufacturer": "ASUS TEK.",
+              "product": "ASM107x",
+              "product_id": "2074",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:2",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": "Application Specific Interface",
+              "description": "VIA Labs, Inc.",
+              "device_num": 10,
+              "manufacturer": "VIA Labs, Inc.",
+              "product": "USB Billboard Device",
+              "product_id": "8883",
+              "protocol": null,
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "3:10",
+              "vendor_id": "2109"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "VIA Labs, Inc.",
+              "device_num": 5,
+              "manufacturer": "VIA Labs, Inc.",
+              "product": "USB3.0 Hub",
+              "product_id": "0817",
+              "protocol": null,
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "4:5",
+              "vendor_id": "2109"
+            },
+            {
+              "bus_num": 10,
+              "class": null,
+              "description": "Realtek Semiconductor Corp. RTL8153 Gigabit Ethernet Adapter",
+              "device_num": 2,
+              "manufacturer": "Belkin",
+              "product": "Belkin USB-C LAN",
+              "product_id": "8153",
+              "protocol": null,
+              "serial": "0523A2000000",
+              "subclass": null,
+              "usb_location": "10:2",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. RTS5411 Hub",
+              "device_num": 8,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 2.0 Hub",
+              "product_id": "5411",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:8",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "Blue Microphones Yeti Stereo Microphone",
+              "device_num": 13,
+              "manufacturer": "Blue Microphones",
+              "product": "Yeti Stereo Microphone",
+              "product_id": "9e84",
+              "protocol": null,
+              "serial": "797_2019/09/17_14926",
+              "subclass": null,
+              "usb_location": "3:13",
+              "vendor_id": "b58e"
+            },
+            {
+              "bus_num": 8,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:7d:00.3",
+              "subclass": null,
+              "usb_location": "8:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "8BitDo",
+              "device_num": 4,
+              "manufacturer": "8BitDo",
+              "product": "Ultimate Wireless Controller",
+              "product_id": "3109",
+              "protocol": null,
+              "serial": "5317d8d817e4",
+              "subclass": null,
+              "usb_location": "3:4",
+              "vendor_id": "2dc8"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc.",
+              "device_num": 3,
+              "manufacturer": "ASMT",
+              "product": "ASMT2307",
+              "product_id": "3174",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:3",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "Cambridge Silicon Radio, Ltd CSRA64210 [TaoTronics Headset BH-22 in charging mode]",
+              "device_num": 9,
+              "manufacturer": "Audioengine",
+              "product": "Audioengine HD3",
+              "product_id": "1243",
+              "protocol": null,
+              "serial": "B40020170802",
+              "subclass": null,
+              "usb_location": "3:9",
+              "vendor_id": "0a12"
+            },
+            {
+              "bus_num": 6,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:7b:00.0",
+              "subclass": null,
+              "usb_location": "6:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:13:00.0",
+              "subclass": null,
+              "usb_location": "4:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "ASUSTek Computer, Inc.",
+              "device_num": 12,
+              "manufacturer": "AsusTek Computer Inc.",
+              "product": "AURA LED Controller",
+              "product_id": "1aa6",
+              "protocol": null,
+              "serial": "9876543210",
+              "subclass": null,
+              "usb_location": "3:12",
+              "vendor_id": "0b05"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. Hub",
+              "device_num": 6,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 3.0 Hub",
+              "product_id": "0411",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:6",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": "Logitech, Inc.",
+              "device_num": 14,
+              "manufacturer": "Logitech",
+              "product": "USB Receiver",
+              "product_id": "c54d",
+              "protocol": null,
+              "serial": "336D347B3234",
+              "subclass": null,
+              "usb_location": "3:14",
+              "vendor_id": "046d"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. RTS5411 Hub",
+              "device_num": 6,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 2.0 Hub",
+              "product_id": "5411",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:6",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 11,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7e:00.0",
+              "subclass": null,
+              "usb_location": "11:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 2,
+              "class": "Hub",
+              "description": "Linux Foundation 3.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0003",
+              "protocol": null,
+              "serial": "0000:11:00.0",
+              "subclass": null,
+              "usb_location": "2:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc.",
+              "device_num": 3,
+              "manufacturer": "ASMT",
+              "product": "ASMT2307",
+              "product_id": "2174",
+              "protocol": "TT per port",
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:3",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": null,
+              "description": null,
+              "device_num": 15,
+              "manufacturer": "RAMA WORKS",
+              "product": "RAMA WORKS U80-A",
+              "product_id": "080a",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "3:15",
+              "vendor_id": "5241"
+            },
+            {
+              "bus_num": 9,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7d:00.4",
+              "subclass": null,
+              "usb_location": "9:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "Realtek Semiconductor Corp. Hub",
+              "device_num": 4,
+              "manufacturer": "Generic",
+              "product": "4-Port USB 3.0 Hub",
+              "product_id": "0411",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:4",
+              "vendor_id": "0bda"
+            },
+            {
+              "bus_num": 3,
+              "class": "Miscellaneous Device",
+              "description": "Elgato Systems GmbH",
+              "device_num": 11,
+              "manufacturer": "Elgato",
+              "product": "Game Capture HD60 S+",
+              "product_id": "006b",
+              "protocol": "Interface Association",
+              "serial": "0007E95724000",
+              "subclass": null,
+              "usb_location": "3:11",
+              "vendor_id": "0fd9"
+            },
+            {
+              "bus_num": 7,
+              "class": "Hub",
+              "description": "Linux Foundation 2.0 root hub",
+              "device_num": 1,
+              "manufacturer": "Linux 7.0.10-2-cachyos xhci-hcd",
+              "product": "xHCI Host Controller",
+              "product_id": "0002",
+              "protocol": "Single TT",
+              "serial": "0000:7d:00.3",
+              "subclass": null,
+              "usb_location": "7:1",
+              "vendor_id": "1d6b"
+            },
+            {
+              "bus_num": 4,
+              "class": "Hub",
+              "description": "ASMedia Technology Inc. ASM1074 SuperSpeed hub",
+              "device_num": 2,
+              "manufacturer": "ASUS TEK.",
+              "product": "ASM107x",
+              "product_id": "3074",
+              "protocol": null,
+              "serial": null,
+              "subclass": null,
+              "usb_location": "4:2",
+              "vendor_id": "174c"
+            },
+            {
+              "bus_num": 3,
+              "class": "Hub",
+              "description": "VIA Labs, Inc.",
+              "device_num": 7,
+              "manufacturer": "VIA Labs, Inc.",
+              "product": "USB2.0 Hub",
+              "product_id": "2817",
+              "protocol": "TT per port",
+              "serial": "000000000",
+              "subclass": null,
+              "usb_location": "3:7",
+              "vendor_id": "2109"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "method": "machine.peripherals.video"
+      },
+      "response": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "result": {
+          "libcamera_devices": [],
+          "v4l2_devices": [
+            {
+              "alt_name": "Game Capture HD60 S+: Game Capt",
+              "camera_name": "Game Capture HD60 S+: Game Capt",
+              "capabilities": [
+                "VIDEO_CAPTURE",
+                "EXT_PIX_FORMAT",
+                "STREAMING"
+              ],
+              "device_name": "video0",
+              "device_path": "/dev/video0",
+              "driver_name": "uvcvideo",
+              "hardware_bus": "usb-0000:13:00.0-5.1.1.2",
+              "modes": [
+                {
+                  "description": "YUYV 4:2:2",
+                  "flags": [],
+                  "format": "YUYV",
+                  "resolutions": [
+                    "1920x1080"
+                  ]
+                },
+                {
+                  "description": "Y/UV 4:2:0",
+                  "flags": [],
+                  "format": "NV12",
+                  "resolutions": [
+                    "1920x1080"
+                  ]
+                },
+                {
+                  "description": "Planar YUV 4:2:0",
+                  "flags": [],
+                  "format": "YU12",
+                  "resolutions": [
+                    "1920x1080"
+                  ]
+                }
+              ],
+              "path_by_hardware": "/dev/v4l/by-path/pci-0000:13:00.0-usbv2-0:5.1.1.2:1.0-video-index0",
+              "path_by_id": "/dev/v4l/by-id/usb-Elgato_Game_Capture_HD60_S+_0007E95724000-video-index0",
+              "usb_location": "3:11",
+              "version": "7.0.10"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 22,
+        "jsonrpc": "2.0",
+        "method": "machine.sudo.info"
+      },
+      "response": {
+        "id": 22,
+        "jsonrpc": "2.0",
+        "result": {
+          "linux_user": "maci",
+          "request_messages": [],
+          "sudo_access": null,
+          "sudo_requested": false
+        }
+      }
+    },
+    {
+      "kind": "http_jsonrpc",
+      "request": {
+        "id": 23,
+        "jsonrpc": "2.0",
+        "method": "server.files.thumbnails",
+        "params": {
+          "filename": ""
+        }
+      },
+      "response": {
+        "id": 23,
+        "jsonrpc": "2.0",
+        "result": []
+      }
+    },
+    {
       "kind": "ws_jsonrpc",
       "request": {
-        "id": 101,
+        "id": 9900,
         "jsonrpc": "2.0",
         "method": "server.info"
       },
       "response": {
-        "id": 101,
+        "id": 9900,
         "jsonrpc": "2.0",
         "result": {
           "api_version": [
@@ -406,7 +3015,7 @@
     {
       "kind": "ws_jsonrpc",
       "request": {
-        "id": 102,
+        "id": 9901,
         "jsonrpc": "2.0",
         "method": "server.connection.identify",
         "params": {
@@ -417,25 +3026,25 @@
         }
       },
       "response": {
-        "id": 102,
+        "id": 9901,
         "jsonrpc": "2.0",
         "result": {
-          "connection_id": 139914969614288
+          "connection_id": 139710460132336
         }
       }
     },
     {
       "kind": "ws_jsonrpc",
       "request": {
-        "id": 103,
+        "id": 9902,
         "jsonrpc": "2.0",
         "method": "server.websocket.id"
       },
       "response": {
-        "id": 103,
+        "id": 9902,
         "jsonrpc": "2.0",
         "result": {
-          "websocket_id": 139914976901024
+          "websocket_id": 139710460132336
         }
       }
     },
@@ -447,12 +3056,12 @@
         "method": "notify_proc_stat_update",
         "params": [
           {
-            "cpu_temp": 61.875,
+            "cpu_temp": 62.0,
             "moonraker_stats": {
-              "cpu_usage": 1.27,
+              "cpu_usage": 5.58,
               "mem_units": "kB",
-              "memory": 57336,
-              "time": 1780376653.5118635
+              "memory": 62512,
+              "time": 1780403144.1560242
             },
             "network": {
               "d22b8fca1687": {
@@ -462,7 +3071,7 @@
                 "rx_errs": 0,
                 "rx_packets": 0,
                 "tx_bytes": 0,
-                "tx_drop": 129756,
+                "tx_drop": 142850,
                 "tx_errs": 0,
                 "tx_packets": 0
               },
@@ -473,20 +3082,20 @@
                 "rx_errs": 0,
                 "rx_packets": 0,
                 "tx_bytes": 0,
-                "tx_drop": 117150,
+                "tx_drop": 128924,
                 "tx_errs": 0,
                 "tx_packets": 0
               },
               "enp125s0f4u1": {
-                "bandwidth": 34373.28,
-                "rx_bytes": 50164111554,
-                "rx_drop": 557261,
+                "bandwidth": 44625.96,
+                "rx_bytes": 52740222108,
+                "rx_drop": 612800,
                 "rx_errs": 0,
-                "rx_packets": 43590418,
-                "tx_bytes": 32610754337,
+                "rx_packets": 46304197,
+                "tx_bytes": 34740517186,
                 "tx_drop": 0,
                 "tx_errs": 0,
-                "tx_packets": 38508157
+                "tx_packets": 40990215
               },
               "enp14s0": {
                 "bandwidth": 0.0,
@@ -500,15 +3109,15 @@
                 "tx_packets": 0
               },
               "lo": {
-                "bandwidth": 34572.95,
-                "rx_bytes": 1289465850,
+                "bandwidth": 196620.3,
+                "rx_bytes": 1359845403,
                 "rx_drop": 0,
                 "rx_errs": 0,
-                "rx_packets": 2686900,
-                "tx_bytes": 1289465850,
+                "rx_packets": 3066384,
+                "tx_bytes": 1359845403,
                 "tx_drop": 0,
                 "tx_errs": 0,
-                "tx_packets": 2686900
+                "tx_packets": 3066384
               },
               "virbr0": {
                 "bandwidth": 0.0,
@@ -517,7 +3126,7 @@
                 "rx_errs": 0,
                 "rx_packets": 0,
                 "tx_bytes": 0,
-                "tx_drop": 129820,
+                "tx_drop": 142914,
                 "tx_errs": 0,
                 "tx_packets": 0
               },
@@ -528,7 +3137,7 @@
                 "rx_errs": 0,
                 "rx_packets": 0,
                 "tx_bytes": 0,
-                "tx_drop": 129820,
+                "tx_drop": 142914,
                 "tx_errs": 0,
                 "tx_packets": 0
               },
@@ -539,39 +3148,361 @@
                 "rx_errs": 0,
                 "rx_packets": 0,
                 "tx_bytes": 0,
-                "tx_drop": 129820,
+                "tx_drop": 142914,
                 "tx_errs": 0,
                 "tx_packets": 0
               },
               "ztklhw5udj": {
                 "bandwidth": 0.0,
-                "rx_bytes": 33162138,
+                "rx_bytes": 36223065,
                 "rx_drop": 0,
                 "rx_errs": 0,
-                "rx_packets": 198871,
-                "tx_bytes": 191196649,
+                "rx_packets": 214729,
+                "tx_bytes": 192176195,
                 "tx_drop": 0,
                 "tx_errs": 0,
-                "tx_packets": 166200
+                "tx_packets": 168117
               }
             },
             "system_cpu_usage": {
-              "cpu": 3.09,
-              "cpu0": 23.23,
-              "cpu1": 11.88,
-              "cpu10": 9.09,
-              "cpu11": 3.0,
-              "cpu12": 2.0,
-              "cpu13": 0.0,
-              "cpu14": 3.96,
+              "cpu": 2.63,
+              "cpu0": 22.0,
+              "cpu1": 10.89,
+              "cpu10": 5.1,
+              "cpu11": 2.0,
+              "cpu12": 0.0,
+              "cpu13": 6.86,
+              "cpu14": 3.0,
               "cpu15": 1.0,
-              "cpu16": 1.0,
-              "cpu17": 2.02,
+              "cpu16": 2.02,
+              "cpu17": 6.0,
+              "cpu18": 1.98,
+              "cpu19": 0.0,
+              "cpu2": 6.06,
+              "cpu20": 0.0,
+              "cpu21": 0.0,
+              "cpu22": 0.0,
+              "cpu23": 0.0,
+              "cpu24": 0.0,
+              "cpu25": 0.0,
+              "cpu26": 4.0,
+              "cpu27": 0.0,
+              "cpu28": 0.0,
+              "cpu29": 0.0,
+              "cpu3": 1.01,
+              "cpu30": 0.0,
+              "cpu31": 0.0,
+              "cpu4": 1.0,
+              "cpu5": 1.01,
+              "cpu6": 1.98,
+              "cpu7": 1.0,
+              "cpu8": 4.95,
+              "cpu9": 3.96
+            },
+            "system_memory": {
+              "available": 99544348,
+              "total": 129446704,
+              "used": 29902356
+            },
+            "websocket_connections": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "ws_notification",
+      "request": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "method": "notify_proc_stat_update",
+        "params": [
+          {
+            "cpu_temp": 61.0,
+            "moonraker_stats": {
+              "cpu_usage": 0.2,
+              "mem_units": "kB",
+              "memory": 62512,
+              "time": 1780403145.1572876
+            },
+            "network": {
+              "d22b8fca1687": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142850,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "docker0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 128924,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "enp125s0f4u1": {
+                "bandwidth": 22966.81,
+                "rx_bytes": 52740241681,
+                "rx_drop": 612804,
+                "rx_errs": 0,
+                "rx_packets": 46304236,
+                "tx_bytes": 34740520605,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 40990253
+              },
+              "enp14s0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 2,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "lo": {
+                "bandwidth": 4265.32,
+                "rx_bytes": 1359847538,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 3066386,
+                "tx_bytes": 1359847538,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 3066386
+              },
+              "virbr0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142914,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr1": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142914,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr2": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142914,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "ztklhw5udj": {
+                "bandwidth": 135.85,
+                "rx_bytes": 36223201,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 214730,
+                "tx_bytes": 192176195,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 168117
+              }
+            },
+            "system_cpu_usage": {
+              "cpu": 1.59,
+              "cpu0": 9.0,
+              "cpu1": 4.0,
+              "cpu10": 2.0,
+              "cpu11": 2.0,
+              "cpu12": 1.0,
+              "cpu13": 5.05,
+              "cpu14": 1.01,
+              "cpu15": 2.94,
+              "cpu16": 1.98,
+              "cpu17": 5.05,
               "cpu18": 0.0,
               "cpu19": 0.0,
-              "cpu2": 2.97,
+              "cpu2": 1.01,
+              "cpu20": 0.99,
+              "cpu21": 0.0,
+              "cpu22": 0.0,
+              "cpu23": 0.0,
+              "cpu24": 0.0,
+              "cpu25": 0.0,
+              "cpu26": 0.99,
+              "cpu27": 0.0,
+              "cpu28": 0.0,
+              "cpu29": 0.99,
+              "cpu3": 2.02,
+              "cpu30": 0.0,
+              "cpu31": 0.0,
+              "cpu4": 1.98,
+              "cpu5": 2.94,
+              "cpu6": 0.0,
+              "cpu7": 1.01,
+              "cpu8": 5.05,
+              "cpu9": 3.03
+            },
+            "system_memory": {
+              "available": 99540640,
+              "total": 129446704,
+              "used": 29906064
+            },
+            "websocket_connections": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "ws_notification",
+      "request": {},
+      "response": {
+        "jsonrpc": "2.0",
+        "method": "notify_proc_stat_update",
+        "params": [
+          {
+            "cpu_temp": 60.125,
+            "moonraker_stats": {
+              "cpu_usage": 0.21,
+              "mem_units": "kB",
+              "memory": 62512,
+              "time": 1780403146.1592577
+            },
+            "network": {
+              "d22b8fca1687": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142850,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "docker0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 128924,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "enp125s0f4u1": {
+                "bandwidth": 18973.0,
+                "rx_bytes": 52740258709,
+                "rx_drop": 612804,
+                "rx_errs": 0,
+                "rx_packets": 46304265,
+                "tx_bytes": 34740522591,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 40990281
+              },
+              "enp14s0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 2,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "lo": {
+                "bandwidth": 4580.1,
+                "rx_bytes": 1359849833,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 3066391,
+                "tx_bytes": 1359849833,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 3066391
+              },
+              "virbr0": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142914,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr1": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142914,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "virbr2": {
+                "bandwidth": 0.0,
+                "rx_bytes": 0,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 0,
+                "tx_bytes": 0,
+                "tx_drop": 142914,
+                "tx_errs": 0,
+                "tx_packets": 0
+              },
+              "ztklhw5udj": {
+                "bandwidth": 0.0,
+                "rx_bytes": 36223201,
+                "rx_drop": 0,
+                "rx_errs": 0,
+                "rx_packets": 214730,
+                "tx_bytes": 192176195,
+                "tx_drop": 0,
+                "tx_errs": 0,
+                "tx_packets": 168117
+              }
+            },
+            "system_cpu_usage": {
+              "cpu": 1.62,
+              "cpu0": 8.0,
+              "cpu1": 7.92,
+              "cpu10": 5.88,
+              "cpu11": 0.0,
+              "cpu12": 2.0,
+              "cpu13": 4.04,
+              "cpu14": 1.0,
+              "cpu15": 0.0,
+              "cpu16": 0.0,
+              "cpu17": 0.0,
+              "cpu18": 0.0,
+              "cpu19": 0.0,
+              "cpu2": 3.96,
               "cpu20": 0.0,
-              "cpu21": 1.98,
+              "cpu21": 0.0,
               "cpu22": 0.0,
               "cpu23": 0.0,
               "cpu24": 0.0,
@@ -579,343 +3510,21 @@
               "cpu26": 0.0,
               "cpu27": 0.0,
               "cpu28": 0.0,
-              "cpu29": 9.0,
-              "cpu3": 3.96,
+              "cpu29": 0.0,
+              "cpu3": 2.02,
               "cpu30": 0.0,
               "cpu31": 0.0,
-              "cpu4": 1.98,
-              "cpu5": 3.03,
+              "cpu4": 1.0,
+              "cpu5": 1.01,
               "cpu6": 1.98,
-              "cpu7": 0.0,
-              "cpu8": 6.06,
-              "cpu9": 3.03
+              "cpu7": 1.98,
+              "cpu8": 4.0,
+              "cpu9": 3.92
             },
             "system_memory": {
-              "available": 97589096,
+              "available": 99533004,
               "total": 129446704,
-              "used": 31857608
-            },
-            "websocket_connections": 1
-          }
-        ]
-      }
-    },
-    {
-      "kind": "ws_notification",
-      "request": {},
-      "response": {
-        "jsonrpc": "2.0",
-        "method": "notify_proc_stat_update",
-        "params": [
-          {
-            "cpu_temp": 60.875,
-            "moonraker_stats": {
-              "cpu_usage": 0.19,
-              "mem_units": "kB",
-              "memory": 57352,
-              "time": 1780376654.5127468
-            },
-            "network": {
-              "d22b8fca1687": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129756,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "docker0": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 117150,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "enp125s0f4u1": {
-                "bandwidth": 35549.85,
-                "rx_bytes": 50164137434,
-                "rx_drop": 557265,
-                "rx_errs": 0,
-                "rx_packets": 43590469,
-                "tx_bytes": 32610764028,
-                "tx_drop": 0,
-                "tx_errs": 0,
-                "tx_packets": 38508205
-              },
-              "enp14s0": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 2,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "lo": {
-                "bandwidth": 22332.71,
-                "rx_bytes": 1289477023,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 2686951,
-                "tx_bytes": 1289477023,
-                "tx_drop": 0,
-                "tx_errs": 0,
-                "tx_packets": 2686951
-              },
-              "virbr0": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129820,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "virbr1": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129820,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "virbr2": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129820,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "ztklhw5udj": {
-                "bandwidth": 135.92,
-                "rx_bytes": 33162274,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 198872,
-                "tx_bytes": 191196649,
-                "tx_drop": 0,
-                "tx_errs": 0,
-                "tx_packets": 166200
-              }
-            },
-            "system_cpu_usage": {
-              "cpu": 2.62,
-              "cpu0": 27.27,
-              "cpu1": 10.0,
-              "cpu10": 4.04,
-              "cpu11": 1.98,
-              "cpu12": 3.0,
-              "cpu13": 0.0,
-              "cpu14": 0.0,
-              "cpu15": 1.0,
-              "cpu16": 4.0,
-              "cpu17": 1.0,
-              "cpu18": 0.0,
-              "cpu19": 0.0,
-              "cpu2": 5.05,
-              "cpu20": 0.0,
-              "cpu21": 0.0,
-              "cpu22": 2.0,
-              "cpu23": 0.0,
-              "cpu24": 0.0,
-              "cpu25": 0.0,
-              "cpu26": 0.0,
-              "cpu27": 0.0,
-              "cpu28": 0.0,
-              "cpu29": 9.8,
-              "cpu3": 5.83,
-              "cpu30": 1.0,
-              "cpu31": 0.99,
-              "cpu4": 2.0,
-              "cpu5": 1.0,
-              "cpu6": 0.99,
-              "cpu7": 2.94,
-              "cpu8": 2.97,
-              "cpu9": 3.96
-            },
-            "system_memory": {
-              "available": 97579276,
-              "total": 129446704,
-              "used": 31867428
-            },
-            "websocket_connections": 1
-          }
-        ]
-      }
-    },
-    {
-      "kind": "ws_notification",
-      "request": {},
-      "response": {
-        "jsonrpc": "2.0",
-        "method": "notify_proc_stat_update",
-        "params": [
-          {
-            "cpu_temp": 64.625,
-            "moonraker_stats": {
-              "cpu_usage": 0.21,
-              "mem_units": "kB",
-              "memory": 57360,
-              "time": 1780376655.5151553
-            },
-            "network": {
-              "d22b8fca1687": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129756,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "docker0": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 117150,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "enp125s0f4u1": {
-                "bandwidth": 16467.59,
-                "rx_bytes": 50164151160,
-                "rx_drop": 557265,
-                "rx_errs": 0,
-                "rx_packets": 43590492,
-                "tx_bytes": 32610766813,
-                "tx_drop": 0,
-                "tx_errs": 0,
-                "tx_packets": 38508234
-              },
-              "enp14s0": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 2,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "lo": {
-                "bandwidth": 4268.75,
-                "rx_bytes": 1289479163,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 2686953,
-                "tx_bytes": 1289479163,
-                "tx_drop": 0,
-                "tx_errs": 0,
-                "tx_packets": 2686953
-              },
-              "virbr0": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129820,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "virbr1": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129820,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "virbr2": {
-                "bandwidth": 0.0,
-                "rx_bytes": 0,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 0,
-                "tx_bytes": 0,
-                "tx_drop": 129820,
-                "tx_errs": 0,
-                "tx_packets": 0
-              },
-              "ztklhw5udj": {
-                "bandwidth": 0.0,
-                "rx_bytes": 33162274,
-                "rx_drop": 0,
-                "rx_errs": 0,
-                "rx_packets": 198872,
-                "tx_bytes": 191196649,
-                "tx_drop": 0,
-                "tx_errs": 0,
-                "tx_packets": 166200
-              }
-            },
-            "system_cpu_usage": {
-              "cpu": 6.06,
-              "cpu0": 21.21,
-              "cpu1": 18.81,
-              "cpu10": 12.75,
-              "cpu11": 6.06,
-              "cpu12": 7.07,
-              "cpu13": 2.02,
-              "cpu14": 4.0,
-              "cpu15": 6.0,
-              "cpu16": 2.02,
-              "cpu17": 5.05,
-              "cpu18": 4.0,
-              "cpu19": 1.98,
-              "cpu2": 10.1,
-              "cpu20": 2.0,
-              "cpu21": 2.0,
-              "cpu22": 0.99,
-              "cpu23": 1.0,
-              "cpu24": 1.98,
-              "cpu25": 8.0,
-              "cpu26": 2.97,
-              "cpu27": 3.96,
-              "cpu28": 1.0,
-              "cpu29": 10.0,
-              "cpu3": 11.65,
-              "cpu30": 2.0,
-              "cpu31": 1.01,
-              "cpu4": 6.06,
-              "cpu5": 7.07,
-              "cpu6": 4.0,
-              "cpu7": 4.08,
-              "cpu8": 12.24,
-              "cpu9": 7.07
-            },
-            "system_memory": {
-              "available": 97297116,
-              "total": 129446704,
-              "used": 32149588
+              "used": 29913700
             },
             "websocket_connections": 1
           }

@@ -53,7 +53,7 @@ pub const DeviceType = enum {
 };
 
 /// A configured power device. State is tracked in memory; real hardware control
-/// is STUBBED (noted at set_power).
+/// is STUBBED (noted at processRequest).
 pub const Device = struct {
     name: []const u8,
     type_str: []const u8,
@@ -61,6 +61,24 @@ pub const Device = struct {
     locked_while_printing: bool,
     /// KlipperDevice-specific field; always false for other types.
     is_shutdown: bool,
+    /// Power off device when Klippy enters shutdown state.
+    off_when_shutdown: bool = false,
+    /// Delay (seconds) before powering off on Klippy shutdown.
+    off_when_shutdown_delay: f64 = 0.0,
+    /// Power on device when a job is queued.
+    on_when_queued: bool = false,
+    /// Send FIRMWARE_RESTART to Klippy after power-on.
+    klipper_restart: bool = false,
+    /// Delay (seconds) before sending FIRMWARE_RESTART.
+    restart_delay: f64 = 0.0,
+    /// Systemd services bound to this device (start on power-on, stop on power-off).
+    bound_services: ?[]const u8 = null,
+    /// Desired initial state on startup ("on" | "off" | null).
+    initial_state: ?[]const u8 = null,
+    /// When set, suppresses bound-service/restart logic on external change.
+    restrict_actions: bool = false,
+    /// Auto-off timer: seconds before automatic power-off (0 = disabled).
+    timer: f64 = 0.0,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,9 +111,12 @@ pub const PowerCtx = struct {
         var it = self.devices.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
-            self.gpa.free(entry.value_ptr.name);
-            self.gpa.free(entry.value_ptr.type_str);
-            self.gpa.free(entry.value_ptr.state);
+            const dev = entry.value_ptr;
+            self.gpa.free(dev.name);
+            self.gpa.free(dev.type_str);
+            self.gpa.free(dev.state);
+            if (dev.bound_services) |bs| self.gpa.free(bs);
+            if (dev.initial_state) |is| self.gpa.free(is);
         }
         self.devices.deinit();
     }
@@ -137,21 +158,97 @@ pub const PowerCtx = struct {
         initial_state: []const u8,
         locked_while_printing: bool,
     ) !void {
-        const k = try self.gpa.dupe(u8, name);
-        errdefer self.gpa.free(k);
-        const dev: Device = .{
-            .name = try self.gpa.dupe(u8, name),
-            .type_str = try self.gpa.dupe(u8, type_str),
-            .state = try self.gpa.dupe(u8, initial_state),
+        return self.addDeviceFull(.{
+            .name = name,
+            .type_str = type_str,
+            .state = initial_state,
             .locked_while_printing = locked_while_printing,
             .is_shutdown = false,
+        });
+    }
+
+    /// Add a device with full configuration (takes ownership of all slices).
+    pub fn addDeviceFull(self: *PowerCtx, opts: Device) !void {
+        const k = try self.gpa.dupe(u8, opts.name);
+        errdefer self.gpa.free(k);
+        const dev: Device = .{
+            .name = try self.gpa.dupe(u8, opts.name),
+            .type_str = try self.gpa.dupe(u8, opts.type_str),
+            .state = try self.gpa.dupe(u8, opts.state),
+            .locked_while_printing = opts.locked_while_printing,
+            .is_shutdown = opts.is_shutdown,
+            .off_when_shutdown = opts.off_when_shutdown,
+            .off_when_shutdown_delay = opts.off_when_shutdown_delay,
+            .on_when_queued = opts.on_when_queued,
+            .klipper_restart = opts.klipper_restart,
+            .restart_delay = opts.restart_delay,
+            .bound_services = if (opts.bound_services) |bs| try self.gpa.dupe(u8, bs) else null,
+            .initial_state = if (opts.initial_state) |is| try self.gpa.dupe(u8, is) else null,
+            .restrict_actions = opts.restrict_actions,
+            .timer = opts.timer,
         };
         errdefer {
             self.gpa.free(dev.name);
             self.gpa.free(dev.type_str);
             self.gpa.free(dev.state);
+            if (dev.bound_services) |bs| self.gpa.free(bs);
+            if (dev.initial_state) |is| self.gpa.free(is);
         }
         try self.devices.put(k, dev);
+    }
+
+    /// Handle Klippy shutdown: power off all devices with off_when_shutdown=true.
+    /// Called when notify_klippy_shutdown is emitted.
+    pub fn handleKlippyShutdown(self: *PowerCtx, alloc: std.mem.Allocator) void {
+        var it = self.devices.iterator();
+        while (it.next()) |entry| {
+            const dev = entry.value_ptr;
+            if (dev.off_when_shutdown) {
+                self.setState(dev.name, "off") catch {};
+                dev.is_shutdown = true;
+                self.gpa.free(dev.state);
+                dev.state = self.gpa.dupe(u8, "off") catch continue;
+                emitPowerChanged(self, alloc, dev);
+            }
+        }
+    }
+
+    /// Handle job queued: power on all devices with on_when_queued=true.
+    /// Called when notify_job_queue_changed with action="jobs_added" is emitted.
+    pub fn handleJobQueued(self: *PowerCtx, alloc: std.mem.Allocator) void {
+        var it = self.devices.iterator();
+        while (it.next()) |entry| {
+            const dev = entry.value_ptr;
+            if (dev.on_when_queued) {
+                self.setState(dev.name, "on") catch {};
+                self.gpa.free(dev.state);
+                dev.state = self.gpa.dupe(u8, "on") catch continue;
+                emitPowerChanged(self, alloc, dev);
+            }
+        }
+    }
+
+    /// Set device power (remote method callable from Klippy macros).
+    /// Accepts force parameter to bypass the printing lock.
+    pub fn setDevicePower(
+        self: *PowerCtx,
+        device_name: []const u8,
+        state: []const u8,
+        force: bool,
+        alloc: std.mem.Allocator,
+    ) !void {
+        const dev = self.findDevice(device_name) orelse return error.NotFound;
+        if (!force) {
+            try self.checkPrintingLock(dev);
+        }
+        // Normalize state: accept "true"/"false" strings as on/off.
+        const action: []const u8 = if (std.mem.eql(u8, state, "true"))
+            "on"
+        else if (std.mem.eql(u8, state, "false"))
+            "off"
+        else
+            state;
+        _ = try processRequest(self, dev, action, alloc, force);
     }
 };
 
@@ -218,7 +315,7 @@ fn emitPowerChanged(ctx: *PowerCtx, alloc: std.mem.Allocator, dev: *const Device
 /// STUB: no real GPIO/network control is performed. State is updated in memory.
 /// Returns the resulting state string (points into ctx-owned memory or a
 /// literal — caller must not free).
-fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator) ![]const u8 {
+fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {
     const cur = dev.state;
     if (std.mem.eql(u8, req, "status")) {
         // STUB: in Moonraker this calls refresh_status() on the device to read
@@ -228,7 +325,9 @@ fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.
     }
     // Enforce the printing lock on mutating actions. Status queries (above)
     // are exempt. Matches Moonraker's `PrinterPowerLock` in power.py.
-    try ctx.checkPrintingLock(dev);
+    if (!force) {
+        try ctx.checkPrintingLock(dev);
+    }
     // Resolve "toggle" to the opposite of the current state.
     const action: []const u8 = blk: {
         if (!std.mem.eql(u8, req, "toggle")) break :blk req;
@@ -291,7 +390,7 @@ pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
         break :blk al;
     } else "status";
 
-    const result_state = try processRequest(ctx, dev, action, alloc);
+    const result_state = try processRequest(ctx, dev, action, alloc, false);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, dev_name, .{ .string = result_state });
     return .{ .object = obj };
@@ -324,7 +423,7 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
                 if (name[0] == '_') continue;
                 device_count += 1;
                 if (ctx.findDevice(name)) |dev| {
-                    const state = processRequest(ctx, dev, action, alloc) catch "error";
+                    const state = processRequest(ctx, dev, action, alloc, false) catch "error";
                     try out.put(alloc, name, .{ .string = state });
                 } else {
                     try out.put(alloc, name, .{ .string = "device_not_found" });
@@ -665,4 +764,207 @@ test "registerPower: wires expected routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/machine/device_power/on") != null);
     try testing.expect(reg.lookup(.POST, "/machine/device_power/off") != null);
     try testing.expect(reg.lookup(.POST, "/machine/device_power/device") != null);
+}
+
+// ---- addDeviceFull + new device fields ----
+
+test "addDeviceFull: accepts full Device opts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDeviceFull(.{
+        .name = "printer",
+        .type_str = "gpio",
+        .state = "off",
+        .locked_while_printing = true,
+        .is_shutdown = false,
+        .off_when_shutdown = true,
+        .off_when_shutdown_delay = 1.5,
+        .on_when_queued = true,
+        .klipper_restart = true,
+        .restart_delay = 2.0,
+        .bound_services = "klipper,moonraker",
+        .initial_state = "on",
+        .restrict_actions = true,
+        .timer = 30.0,
+    });
+
+    const dev = ctx.findDevice("printer").?;
+    try testing.expectEqual(true, dev.locked_while_printing);
+    try testing.expectEqual(true, dev.off_when_shutdown);
+    try testing.expectEqual(1.5, dev.off_when_shutdown_delay);
+    try testing.expectEqual(true, dev.on_when_queued);
+    try testing.expectEqual(true, dev.klipper_restart);
+    try testing.expectEqual(2.0, dev.restart_delay);
+    try testing.expectEqualStrings("klipper,moonraker", dev.bound_services.?);
+    try testing.expectEqualStrings("on", dev.initial_state.?);
+    try testing.expectEqual(true, dev.restrict_actions);
+    try testing.expectEqual(30.0, dev.timer);
+}
+
+test "addDeviceFull: optional fields default to null/false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDeviceFull(.{
+        .name = "simple",
+        .type_str = "gpio",
+        .state = "off",
+        .locked_while_printing = false,
+        .is_shutdown = false,
+    });
+
+    const dev = ctx.findDevice("simple").?;
+    try testing.expectEqual(false, dev.off_when_shutdown);
+    try testing.expectEqual(false, dev.on_when_queued);
+    try testing.expectEqual(null, dev.bound_services);
+    try testing.expectEqual(null, dev.initial_state);
+}
+
+// ---- handleKlippyShutdown ----
+
+test "handleKlippyShutdown: powers off devices with off_when_shutdown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDeviceFull(.{ .name = "psu", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .off_when_shutdown = true });
+    try ctx.addDeviceFull(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .off_when_shutdown = false });
+
+    ctx.handleKlippyShutdown(a);
+
+    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
+    try testing.expectEqual(true, ctx.findDevice("psu").?.is_shutdown);
+    try testing.expectEqualStrings("on", ctx.findDevice("fan").?.state);
+}
+
+// ---- handleJobQueued ----
+
+test "handleJobQueued: powers on devices with on_when_queued" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDeviceFull(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .on_when_queued = true });
+    try ctx.addDeviceFull(.{ .name = "fan", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .on_when_queued = false });
+
+    ctx.handleJobQueued(a);
+
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    try testing.expectEqualStrings("off", ctx.findDevice("fan").?.state);
+}
+
+// ---- setDevicePower (remote method) ----
+
+test "setDevicePower: changes state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.setDevicePower("psu", "on", false, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+}
+
+test "setDevicePower: accepts true/false strings" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.setDevicePower("psu", "true", false, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    try ctx.setDevicePower("psu", "false", false, a);
+    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
+}
+
+test "setDevicePower: force bypasses printing lock" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
+    ctx.setPrintingActive(true);
+
+    // Without force — would fail through normal path.
+    try testing.expectError(error.PrinterLocked, ctx.setDevicePower("psu", "on", false, a));
+    // With force — bypasses the lock.
+    try ctx.setDevicePower("psu", "on", true, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+}
+
+test "setDevicePower: unknown device returns NotFound" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try testing.expectError(error.NotFound, ctx.setDevicePower("ghost", "on", false, a));
+}
+
+// ---- fuzz: new features ----
+
+test "fuzz_setDevicePower: never crashes on arbitrary device/state" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+            ctx.addDevice("psu", "gpio", "off", false) catch {};
+
+            const states = [_][]const u8{ "on", "off", "toggle", "true", "false", "status", "" };
+            const state = states[buf[0] % states.len];
+            const force = buf[1] % 2 == 0;
+            _ = ctx.setDevicePower("psu", state, force, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz_handleKlippyShutdown: never crashes" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PowerCtx.init(a, null);
+            defer ctx.deinit();
+
+            const count = buf[0] % 10;
+            for (0..count) |i| {
+                const name = try std.fmt.allocPrint(a, "dev{d}", .{i});
+                ctx.addDeviceFull(.{
+                    .name = name,
+                    .type_str = "gpio",
+                    .state = if (buf[1 + i] % 2 == 0) "on" else "off",
+                    .locked_while_printing = false,
+                    .is_shutdown = false,
+                    .off_when_shutdown = buf[1 + i] % 3 == 0,
+                }) catch continue;
+            }
+            ctx.handleKlippyShutdown(a);
+        }
+    }.run, .{});
 }

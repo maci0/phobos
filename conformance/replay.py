@@ -19,9 +19,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import glob
 import json
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -70,6 +72,37 @@ MANIFEST: List[Dict[str, Any]] = [
     {"method": "server.config", "field": "orig", "rule": "structure_compare"},
     {"method": "server.config", "field": "files", "rule": "files_compare"},
     {"method": "server.config", "field": "filename", "rule": "path_relativize"},
+    # --- server.files.list ---
+    {"method": "server.files.list", "field": "path", "rule": "path_relativize"},
+    {"method": "server.files.list", "field": "", "rule": "sort_array"},
+    # --- server.files.roots ---
+    {"method": "server.files.roots", "field": "path", "rule": "path_relativize"},
+    {"method": "server.files.roots", "field": "", "rule": "sort_array"},
+    # --- server.files.directory ---
+    {"method": "server.files.directory", "field": "files", "rule": "sort_array"},
+    {"method": "server.files.directory", "field": "dirs", "rule": "sort_array"},
+    {"method": "server.files.directory", "field": "files.path", "rule": "path_relativize"},
+    {"method": "server.files.directory", "field": "files.filename", "rule": "path_relativize"},
+    {"method": "server.files.directory", "field": "root_info.path", "rule": "path_relativize"},
+    {"method": "server.files.directory", "field": "dirs.dirname", "rule": "path_relativize"},
+    {"method": "server.files.directory", "field": "dirs.path", "rule": "path_relativize"},
+    {"method": "server.files.directory", "field": "disk_usage", "rule": "structure_compare"},
+    # --- server.database.list ---
+    {"method": "server.database.list", "field": "", "rule": "mask"},
+    # --- access.info ---
+    {"method": "access.info", "field": "trusted", "rule": "mask"},
+    # --- access.user ---
+    {"method": "*", "field": "created_on", "rule": "mask"},
+    # --- machine.proc_stats ---
+    {"method": "machine.proc_stats", "field": "", "rule": "mask"},
+    # --- machine.system_info ---
+    {"method": "machine.system_info", "field": "", "rule": "mask"},
+    # --- machine.peripherals.serial ---
+    {"method": "machine.peripherals.serial", "field": "serial_devices", "rule": "structure_compare"},
+    # --- machine.peripherals.usb ---
+    {"method": "machine.peripherals.usb", "field": "usb_devices", "rule": "structure_compare"},
+    # --- machine.peripherals.video ---
+    {"method": "machine.peripherals.video", "field": "v4l2_devices", "rule": "mask"},
     # --- wildcards ---
     {"method": "*", "field": "*_id", "rule": "mask"},
     {"method": "*", "field": "*_time", "rule": "mask"},
@@ -79,14 +112,29 @@ MANIFEST: List[Dict[str, Any]] = [
 
 
 def _method_matches(pattern: str, method: str) -> bool:
-    return pattern == "*" or pattern == method
+    if pattern == "*":
+        return True
+    if pattern == method:
+        return True
+    # Strip query string from method (e.g. "server.files.directory?path=gcodes")
+    if "?" in method:
+        base = method.split("?", 1)[0]
+        if pattern == base:
+            return True
+    return False
 
 
 def _field_matches(pattern: str, field: str) -> bool:
     if pattern == field:
         return True
-    if pattern.startswith("*") and len(pattern) > 1:
+    if pattern.startswith("*") and len(pattern) > 1 and "*" not in pattern[1:]:
         return field.endswith(pattern[1:])
+    # Support wildcard segments like "result.*.path" matching "result.foo.path"
+    if "*" in pattern:
+        import re
+        regex = re.escape(pattern).replace(r"\*", r"[^.]+")
+        if re.fullmatch(regex, field):
+            return True
     # Match by last component of a dotted path (e.g. "result.klippy_state" matches "klippy_state")
     if "." in field:
         last = field.rsplit(".", 1)[-1]
@@ -147,31 +195,49 @@ def _norm_sort_array(value: Any) -> Any:
 
 
 def _norm_structure_compare(value: Any) -> Any:
-    """For container values: keep count and structure, mask all leaf values."""
+    """For container values: keep count and structure, mask all leaf values.
+
+    Arrays: each element's dict keys are preserved, leaf values → sentinel.
+    Sorted by serialized original before masking for deterministic order.
+    Numbers → 0, strings → "MASKED", bools → false, null → "MASKED".
+    """
     if not isinstance(value, list):
         return value
+    # Sort first for deterministic comparison (device lists, namespace lists).
+    try:
+        items = sorted(value, key=lambda x: json.dumps(x, sort_keys=True))
+    except (TypeError, ValueError):
+        items = value
     result = []
-    for item in value:
+    for item in items:
         if isinstance(item, dict):
             new_item = {}
             for k, v in item.items():
-                if isinstance(v, str):
-                    new_item[k] = "MASKED"
-                elif isinstance(v, (int, float)):
-                    new_item[k] = v
-                elif isinstance(v, bool):
-                    new_item[k] = v
-                elif v is None:
-                    new_item[k] = None
+                if isinstance(v, dict):
+                    new_item[k] = _norm_object_compare(v)
                 elif isinstance(v, list):
                     new_item[k] = _norm_structure_compare(v)
-                elif isinstance(v, dict):
-                    new_item[k] = _norm_structure_compare([v])[0]
+                elif v is None:
+                    new_item[k] = "MASKED"
+                elif isinstance(v, bool):
+                    new_item[k] = False
+                elif isinstance(v, (int, float)):
+                    new_item[k] = 0
+                elif isinstance(v, str):
+                    new_item[k] = "MASKED"
                 else:
                     new_item[k] = "MASKED"
             result.append(new_item)
+        elif item is None:
+            result.append("MASKED")
+        elif isinstance(item, bool):
+            result.append(False)
+        elif isinstance(item, (int, float)):
+            result.append(0)
+        elif isinstance(item, str):
+            result.append("MASKED")
         else:
-            result.append(item)
+            result.append("MASKED")
     return result
 
 
@@ -200,24 +266,27 @@ _STRUCT_MASKED_NUMERIC = {"port", "ssl_port"}
 
 
 def _norm_object_compare(value: Any) -> Any:
-    """For object values: keep structure, mask all leaf values."""
+    """For object values: keep structure (keys + nesting), mask all leaf values.
+
+    Numbers → 0, strings → "MASKED", bools → false, null → "MASKED".  Lists
+    and dicts are recursed into.  The goal is structural identity: same keys at
+    every level, same nesting, but no value-dependent comparison.
+    """
     if isinstance(value, dict):
         result = {}
         for k, v in value.items():
-            if isinstance(v, (str, bool, int, float)):
-                if isinstance(v, str):
-                    result[k] = "MASKED"
-                elif isinstance(v, bool):
-                    result[k] = v
-                else:
-                    # Mask non-deterministic numeric fields (port, etc.).
-                    result[k] = -1.0 if k in _STRUCT_MASKED_NUMERIC else v
-            elif isinstance(v, dict):
+            if isinstance(v, dict):
                 result[k] = _norm_object_compare(v)
             elif isinstance(v, list):
                 result[k] = _norm_structure_compare(v)
             elif v is None:
-                result[k] = None
+                result[k] = "MASKED"
+            elif isinstance(v, bool):
+                result[k] = False
+            elif isinstance(v, (int, float)):
+                result[k] = 0
+            elif isinstance(v, str):
+                result[k] = "MASKED"
             else:
                 result[k] = "MASKED"
         return result
@@ -226,6 +295,11 @@ def _norm_object_compare(value: Any) -> Any:
 
 def normalize(obj: Any, method: str, path: str = "") -> Any:
     """Recursively normalize `obj` according to the manifest for `method`."""
+    # mask on container replaces whole value with sentinel.
+    if isinstance(obj, (dict, list)):
+        if _should_apply(path, method, "mask"):
+            return "MASKED"
+
     if isinstance(obj, dict):
         # Check for structure_compare at this path (for object-level masking).
         if _should_apply(path, method, "structure_compare"):
@@ -330,6 +404,14 @@ class PhobosRunner:
 
     def start(self) -> None:
         """Write config, start phobos, wait for it to accept and stabilize."""
+        # Clean stale data dirs from previous runs (phobos uses /tmp/phobos-data-*).
+        import glob
+        for d in glob.glob("/tmp/phobos-data-*"):
+            try:
+                shutil.rmtree(d)
+            except Exception:
+                pass
+
         cfg_path = self.workdir / "moonraker.conf"
         cfg_path.write_text(
             f"[server]\n"

@@ -32,11 +32,37 @@ pub const Strip = struct {
     name: []const u8,
     status: []const u8, // "on" | "off"
     chain_count: i64,
+    chain_data: []u8,
     preset: i64,
+    initial_preset: i64,
+    initial_colors: ?[]const u8,
     brightness: i64,
     intensity: i64,
     speed: i64,
     error_state: ?[]const u8,
+    send_full_chain_data: bool,
+
+    /// STUB: Turn on the WLED strip with the given preset. In a real
+    /// implementation this would send an HTTP POST to the WLED JSON API
+    /// (preset={p}) or a serial command. phobos only updates in-memory state.
+    pub fn wledOn(self: *Strip, preset: i64) void {
+        self.preset = preset;
+    }
+
+    /// STUB: Turn off the WLED strip. A real implementation would send an
+    /// HTTP POST with {"on": false} or a serial off command.
+    pub fn wledOff(self: *Strip) void {
+        _ = self; // no-op in stub
+    }
+
+    /// STUB: Apply brightness, intensity, and speed control values. A real
+    /// implementation would send these over the serial connection to the WLED
+    /// controller. phobos only caches the values in memory.
+    pub fn wledControl(self: *Strip, brightness: i64, intensity: i64, speed: i64) void {
+        if (brightness >= 0) self.brightness = brightness;
+        if (intensity >= 0) self.intensity = intensity;
+        if (speed >= 0) self.speed = speed;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +86,8 @@ pub const WledCtx = struct {
             self.gpa.free(entry.key_ptr.*);
             self.gpa.free(entry.value_ptr.name);
             self.gpa.free(entry.value_ptr.status);
+            self.gpa.free(entry.value_ptr.chain_data);
+            if (entry.value_ptr.initial_colors) |c| self.gpa.free(c);
             if (entry.value_ptr.error_state) |e| self.gpa.free(e);
         }
         self.strips.deinit();
@@ -74,23 +102,35 @@ pub const WledCtx = struct {
         self: *WledCtx,
         name: []const u8,
         chain_count: i64,
+        chain_data: []const u8,
         preset: i64,
+        initial_preset: i64,
+        initial_colors: ?[]const u8,
+        send_full_chain_data: bool,
     ) !void {
         const k = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(k);
+        const cd = try self.gpa.dupe(u8, chain_data);
+        errdefer self.gpa.free(cd);
         const s: Strip = .{
             .name = try self.gpa.dupe(u8, name),
             .status = try self.gpa.dupe(u8, "off"),
             .chain_count = chain_count,
+            .chain_data = cd,
             .preset = preset,
+            .initial_preset = initial_preset,
+            .initial_colors = if (initial_colors) |c| try self.gpa.dupe(u8, c) else null,
             .brightness = 255,
             .intensity = -1,
             .speed = -1,
             .error_state = null,
+            .send_full_chain_data = send_full_chain_data,
         };
         errdefer {
             self.gpa.free(s.name);
             self.gpa.free(s.status);
+            self.gpa.free(s.chain_data);
+            if (s.initial_colors) |c| self.gpa.free(c);
         }
         try self.strips.put(k, s);
     }
@@ -113,10 +153,10 @@ pub const WledCtx = struct {
         speed: i64,
     ) !void {
         const s = self.strips.getPtr(name) orelse return error.NotFound;
-        if (brightness >= 0) s.brightness = brightness;
+        // STUB: wledControl only caches values in memory. A real
+        // implementation would send them over the serial connection.
+        s.wledControl(brightness, intensity, speed);
         if (preset >= 0) s.preset = preset;
-        if (intensity >= 0) s.intensity = intensity;
-        if (speed >= 0) s.speed = speed;
         self.gpa.free(s.status);
         s.status = try self.gpa.dupe(u8, "on");
     }
@@ -162,12 +202,25 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
 // ---------------------------------------------------------------------------
 
 /// Build the per-strip info object matching Strip.get_strip_info():
-///   { strip, status, chain_count, preset, brightness, intensity, speed, error }
+///   { strip, status, chain_count, chain_data, preset, brightness, intensity, speed, error, send_full_chain_data }
+/// chain_data is encoded as a base-16 hex string ("" when empty or send_full_chain_data is false).
 pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "strip", .{ .string = s.name });
     try obj.put(alloc, "status", .{ .string = s.status });
     try obj.put(alloc, "chain_count", .{ .integer = s.chain_count });
+    // Match Moonraker: only include chain_data in strip info when
+    // send_full_chain_data is true; otherwise emit an empty string.
+    const cd: []const u8 = if (s.send_full_chain_data and s.chain_data.len > 0) blk: {
+        const buf = try alloc.alloc(u8, s.chain_data.len * 2);
+        const hex_chars = "0123456789abcdef";
+        for (s.chain_data, 0..) |byte, i| {
+            buf[i * 2] = hex_chars[byte >> 4];
+            buf[i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
+        break :blk buf;
+    } else "";
+    try obj.put(alloc, "chain_data", .{ .string = cd });
     try obj.put(alloc, "preset", .{ .integer = s.preset });
     try obj.put(alloc, "brightness", .{ .integer = s.brightness });
     try obj.put(alloc, "intensity", .{ .integer = s.intensity });
@@ -201,7 +254,12 @@ fn processRequest(ctx: *WledCtx, strip: *Strip, req: []const u8) ![]const u8 {
     }
     // STUB: a real implementation would call strip.wled_on(preset) or
     // strip.wled_off(), sending an HTTP POST to the WLED JSON API or a serial
-    // command. phobos only updates in-memory state.
+    // command. phobos only updates in-memory state via the stub methods.
+    if (std.mem.eql(u8, action, "on")) {
+        strip.wledOn(strip.preset);
+    } else {
+        strip.wledOff();
+    }
     ctx.setStatus(strip.name, action) catch {};
     return ctx.findStrip(strip.name).?.status;
 }
@@ -364,7 +422,7 @@ test "handleStrips: returns strip info when strip configured" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("printer_leds", 30, -1);
+    try ctx.addStrip("printer_leds", 30, "", -1, -1, null, false);
     const v = try handleStrips(@ptrCast(&ctx), .null, a);
     const strips = v.object.get("strips").?.object;
     try testing.expectEqual(@as(usize, 1), strips.count());
@@ -392,7 +450,7 @@ test "handleSingleStrip: GET returns strip info" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\"}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("leds", s.get("strip").?.string);
@@ -407,7 +465,7 @@ test "handleSingleStrip: POST action=on turns strip on" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
 }
@@ -418,7 +476,7 @@ test "handleSingleStrip: POST action=toggle flips status" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     // off → on
     _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
     try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
@@ -433,7 +491,7 @@ test "handleSingleStrip: POST action=off turns strip off" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     // Turn on first, then off.
     _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"off\"}"), a);
@@ -446,7 +504,7 @@ test "handleSingleStrip: POST invalid action returns InvalidParams" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"dance\"}"), a));
 }
 
@@ -456,7 +514,7 @@ test "handleSingleStrip: POST action=control applies brightness and turns on" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"brightness\":128}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
@@ -473,7 +531,7 @@ test "handleSingleStrip: POST action=control with preset and intensity" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"preset\":3,\"intensity\":200}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
@@ -487,7 +545,7 @@ test "handleSingleStrip: POST action=control with all params" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"brightness\":200,\"preset\":5,\"intensity\":180,\"speed\":50}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
@@ -503,7 +561,7 @@ test "handleSingleStrip: POST action=control with no params still turns on" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\"}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
@@ -520,7 +578,7 @@ test "handleBatchOn: turns on known strip" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     const v = try handleBatchOn(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
     try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
 }
@@ -531,7 +589,7 @@ test "handleBatchOff: turns off known strip" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     try ctx.setStatus("leds", "on");
     const v = try handleBatchOff(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
     try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
@@ -543,7 +601,7 @@ test "handleBatchToggle: toggles strip status" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, -1);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
     _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
     try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
     _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
@@ -567,7 +625,8 @@ test "buildStripInfo: full key set" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const s: Strip = .{ .name = "t", .status = "on", .chain_count = 5, .preset = 2, .brightness = 200, .intensity = 100, .speed = 50, .error_state = null };
+    var chain_data = [_]u8{ 0xff, 0x00, 0xab };
+    const s: Strip = .{ .name = "t", .status = "on", .chain_count = 5, .chain_data = &chain_data, .preset = 2, .initial_preset = 3, .initial_colors = null, .brightness = 200, .intensity = 100, .speed = 50, .error_state = null, .send_full_chain_data = true };
     const v = try buildStripInfo(a, &s);
     const o = v.object;
     try testing.expectEqualStrings("t", o.get("strip").?.string);
@@ -578,9 +637,105 @@ test "buildStripInfo: full key set" {
     try testing.expectEqual(@as(i64, 100), o.get("intensity").?.integer);
     try testing.expectEqual(@as(i64, 50), o.get("speed").?.integer);
     try testing.expect(o.get("error").? == .null);
+    try testing.expectEqualStrings("ff00ab", o.get("chain_data").?.string);
 }
 
-// ---- fuzz ----
+test "buildStripInfo: chain_data empty when send_full_chain_data is false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var chain_data2 = [_]u8{ 0xde, 0xad };
+    const s: Strip = .{ .name = "t", .status = "off", .chain_count = 3, .chain_data = &chain_data2, .preset = 0, .initial_preset = 0, .initial_colors = null, .brightness = 255, .intensity = -1, .speed = -1, .error_state = null, .send_full_chain_data = false };
+    const v = try buildStripInfo(a, &s);
+    try testing.expectEqualStrings("", v.object.get("chain_data").?.string);
+}
+
+// ---- Strip methods ----
+
+test "Strip.wledOn: sets preset" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, "", -1, 5, null, false);
+    var strip = ctx.findStrip("leds").?;
+    strip.wledOn(3);
+    try testing.expectEqual(@as(i64, 3), strip.preset);
+}
+
+test "Strip.wledOff: does not crash (no-op stub)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
+    var strip = ctx.findStrip("leds").?;
+    strip.wledOff();
+}
+
+test "Strip.wledControl: applies brightness, intensity, speed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
+    var strip = ctx.findStrip("leds").?;
+    strip.wledControl(128, 200, 50);
+    try testing.expectEqual(@as(i64, 128), strip.brightness);
+    try testing.expectEqual(@as(i64, 200), strip.intensity);
+    try testing.expectEqual(@as(i64, 50), strip.speed);
+}
+
+test "Strip.wledControl: negative values are not applied (keep current)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
+    var strip = ctx.findStrip("leds").?;
+    strip.brightness = 100;
+    strip.intensity = 150;
+    strip.speed = 75;
+    strip.wledControl(-1, -1, -1);
+    try testing.expectEqual(@as(i64, 100), strip.brightness);
+    try testing.expectEqual(@as(i64, 150), strip.intensity);
+    try testing.expectEqual(@as(i64, 75), strip.speed);
+}
+
+// ---- addStrip: new fields ----
+
+test "addStrip: stores chain_data and initial_preset" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, &.{ 0x01, 0x02, 0x03 }, 0, 7, "red,green", true);
+    const s = ctx.findStrip("leds").?;
+    try testing.expectEqual(@as(i64, 7), s.initial_preset);
+    try testing.expectEqualStrings("red,green", s.initial_colors.?);
+    try testing.expectEqual(true, s.send_full_chain_data);
+    try testing.expectEqual(@as(usize, 3), s.chain_data.len);
+    try testing.expectEqual(@as(u8, 0x01), s.chain_data[0]);
+    try testing.expectEqual(@as(u8, 0x02), s.chain_data[1]);
+    try testing.expectEqual(@as(u8, 0x03), s.chain_data[2]);
+}
+
+test "addStrip: null initial_colors stored as null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false);
+    try testing.expect(ctx.findStrip("leds").?.initial_colors == null);
+}
+
+// ---- fuzz: new fields ----
 
 test "fuzz_single_strip: arbitrary params never crash handleSingleStrip" {
     try std.testing.fuzz({}, struct {
@@ -592,7 +747,7 @@ test "fuzz_single_strip: arbitrary params never crash handleSingleStrip" {
             const a = arena.allocator();
             var ctx = WledCtx.init(a);
             defer ctx.deinit();
-            ctx.addStrip("leds", 10, -1) catch {};
+            ctx.addStrip("leds", 10, "", -1, -1, null, false) catch {};
 
             const names = [_][]const u8{ "leds", "ghost", "" };
             const nm = names[buf[0] % names.len];
@@ -615,7 +770,7 @@ test "fuzz_batch_wled: arbitrary params never crash batch handlers" {
             const a = arena.allocator();
             var ctx = WledCtx.init(a);
             defer ctx.deinit();
-            ctx.addStrip("leds", 10, -1) catch {};
+            ctx.addStrip("leds", 10, "", -1, -1, null, false) catch {};
 
             const names = [_][]const u8{ "leds", "ghost", "another" };
             const nm = names[buf[0] % names.len];

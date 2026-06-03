@@ -755,7 +755,9 @@ pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const filename = try getStr(params, "filename");
+    // Match Moonraker: empty/missing filename → empty list (not an error).
+    const filename = getOptStr(params, "filename") orelse return .{ .array = .init(alloc) };
+    if (filename.len == 0) return .{ .array = .init(alloc) };
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
     if (statKind(io, resolved.abs) != .file) return error.NotFound;
@@ -1315,8 +1317,12 @@ test "handleThumbnails: parses embedded thumbnails from gcode header" {
     try testing.expectEqual(@as(i64, 32), t.get("height").?.integer);
     try testing.expectEqualStrings("iVBORw0KGgoAAAANSUhEUg==", t.get("data").?.string);
 
-    // Missing filename param still errors.
-    try testing.expectError(error.InvalidParams, handleThumbnails(@ptrCast(&c), .null, a));
+    // Missing/empty filename → empty list (matches Moonraker behavior).
+    {
+        const r = try handleThumbnails(@ptrCast(&c), .null, a);
+        try testing.expect(r == .array);
+        try testing.expectEqual(@as(usize, 0), r.array.items.len);
+    }
 }
 
 test "handleThumbnails: non-gcode file returns empty list" {

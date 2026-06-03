@@ -49,13 +49,18 @@ pub const SpoolmanCtx = struct {
     io: ?std.Io,
     /// Allocator for arena-scoped notification payloads.
     gpa: std.mem.Allocator,
+    /// Spoolman server URL (e.g. "http://localhost:7912"). When non-null,
+    /// handleProxy forwards requests to this server; when null, proxy
+    /// returns the "not connected" error shape.
+    server_url: ?[]const u8,
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) SpoolmanCtx {
+    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus, server_url: ?[]const u8) SpoolmanCtx {
         const ctx = SpoolmanCtx{
             .store = store,
             .bus = bus,
             .io = null,
             .gpa = alloc,
+            .server_url = server_url,
         };
         return ctx;
     }
@@ -64,6 +69,12 @@ pub const SpoolmanCtx = struct {
     /// App's event loop is running (e.g. from httpServer setup).
     pub fn setIo(self: *SpoolmanCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Set the spoolman server URL. Called when the config file is parsed
+    /// (setConfig) so that handleProxy can forward requests.
+    pub fn setServerUrl(self: *SpoolmanCtx, url: ?[]const u8) void {
+        self.server_url = url;
     }
 
     fn loadSpoolId(self: *SpoolmanCtx) ?i64 {
@@ -167,8 +178,8 @@ fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
 pub fn handleStatus(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
     var obj: std.json.ObjectMap = .empty;
-    // phobos has no spoolman WS client; always disconnected.
-    try obj.put(alloc, "spoolman_connected", .{ .bool = false });
+    const connected = c.server_url != null;
+    try obj.put(alloc, "spoolman_connected", .{ .bool = connected });
     try obj.put(alloc, "pending_reports", .{ .array = .init(alloc) });
     const spool_id = c.getSpoolId();
     if (spool_id) |id| {
@@ -206,20 +217,31 @@ pub fn handleSpoolId(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     return .{ .object = obj };
 }
 
-/// POST /server/spoolman/proxy → proxy request to Spoolman service
+fn errNotAvailable(alloc: std.mem.Allocator, use_v2: bool) anyerror!std.json.Value {
+    if (use_v2) {
+        var err_obj: std.json.ObjectMap = .empty;
+        try err_obj.put(alloc, "status_code", .{ .integer = 503 });
+        try err_obj.put(alloc, "message", .{ .string = "Spoolman server not available" });
+        var obj: std.json.ObjectMap = .empty;
+        try obj.put(alloc, "response", .null);
+        try obj.put(alloc, "error", .{ .object = err_obj });
+        return .{ .object = obj };
+    }
+    return error.ServiceUnavailable;
+}
+
+/// POST /server/spoolman/proxy → proxy request to Spoolman service.
 ///
-/// phobos has no Spoolman HTTP client. Returns the Moonraker-shaped
-/// "not connected" response. When use_v2_response=true (the newer Fluidd
-/// style), returns v2 error shape; otherwise returns a 503 error.
-///
-/// NOTE: real proxying to an external Spoolman HTTP service is not
-/// implemented — phobos has no HTTP client in this slice.
+/// When server_url is configured, forwards the request to the external
+/// Spoolman HTTP service and returns the response. When server_url is null
+/// (no [spoolman] server in config), returns the Moonraker-shaped
+/// "not connected" error.
 pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = ctx;
+    const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
+
     // Validate required params (mirrors spoolman.py param extraction).
-    const request_method = getStr(params, "request_method") catch return error.InvalidParams;
+    const request_method_str = getStr(params, "request_method") catch return error.InvalidParams;
     const path = getStr(params, "path") catch return error.InvalidParams;
-    _ = request_method;
 
     // Validate path starts with /v1/
     if (path.len < 4 or !std.mem.startsWith(u8, path, "/v1/")) {
@@ -228,20 +250,85 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
 
     const use_v2 = getOptBool(params, "use_v2_response", false);
 
-    if (use_v2) {
-        // v2 response shape: {"response": null, "error": {"status_code": 503, "message": ...}}
-        var err_obj: std.json.ObjectMap = .empty;
-        try err_obj.put(alloc, "status_code", .{ .integer = 503 });
-        try err_obj.put(alloc, "message", .{ .string = "Spoolman server not available" });
+    // No server configured → return "not connected" error.
+    const server_url = c.server_url orelse return errNotAvailable(alloc, use_v2);
 
+    // Need a live io for the HTTP client; absent during tests / dump-api.
+    const io = c.io orelse return errNotAvailable(alloc, use_v2);
+
+    // Parse HTTP method from the request_method string.
+    const method = std.meta.stringToEnum(std.http.Method, request_method_str) orelse return error.InvalidParams;
+
+    // Build the full URL from server_url + path.
+    var url_buf: [2048]u8 = undefined;
+    const full_url = std.fmt.bufPrint(&url_buf, "{s}{s}", .{ server_url, path }) catch return errNotAvailable(alloc, use_v2);
+
+    // Serialize the body parameter to JSON if present.
+    var body_json_buf: [4096]u8 = undefined;
+    var body_slice: ?[]const u8 = null;
+    if (params == .object) {
+        if (params.object.get("body")) |body_val| {
+            if (body_val != .null) {
+                var w: std.Io.Writer = .fixed(&body_json_buf);
+                var jw: std.json.Stringify = .{ .writer = &w };
+                jw.write(body_val) catch return errNotAvailable(alloc, use_v2);
+                body_slice = w.buffered();
+            }
+        }
+    }
+
+    // Use an arena for temporary allocations during the HTTP round-trip.
+    var arena = std.heap.ArenaAllocator.init(c.gpa);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var client: std.http.Client = .{ .allocator = aa, .io = io };
+    defer client.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(aa);
+    defer aw.deinit();
+
+    const result = client.fetch(.{
+        .location = .{ .url = full_url },
+        .method = method,
+        .payload = body_slice,
+        .response_writer = &aw.writer,
+    }) catch return errNotAvailable(alloc, use_v2);
+
+    // Check for non-success HTTP status.
+    if (result.status != .ok and result.status != .created and result.status != .no_content) {
+        if (use_v2) {
+            var err_obj: std.json.ObjectMap = .empty;
+            try err_obj.put(alloc, "status_code", .{ .integer = @intFromEnum(result.status) });
+            try err_obj.put(alloc, "message", .{ .string = "Spoolman request failed" });
+            var obj: std.json.ObjectMap = .empty;
+            try obj.put(alloc, "response", .null);
+            try obj.put(alloc, "error", .{ .object = err_obj });
+            return .{ .object = obj };
+        }
+        return error.ServiceUnavailable;
+    }
+
+    const response_body = aw.toOwnedSlice() catch return errNotAvailable(alloc, use_v2);
+
+    // Parse the response as JSON (spoolman returns JSON).
+    var response_val: std.json.Value = .null;
+    if (response_body.len > 0) {
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, response_body, .{}) catch {
+            // Fallback: return the raw body as a string.
+            return .{ .string = try alloc.dupe(u8, response_body) };
+        };
+        response_val = parsed.value;
+    }
+
+    if (use_v2) {
         var obj: std.json.ObjectMap = .empty;
-        try obj.put(alloc, "response", .null);
-        try obj.put(alloc, "error", .{ .object = err_obj });
+        try obj.put(alloc, "response", response_val);
+        try obj.put(alloc, "error", .null);
         return .{ .object = obj };
     }
 
-    // Non-v2: Moonraker raises a 503 ServerError → phobos returns error.ServiceUnavailable
-    return error.ServiceUnavailable;
+    return response_val;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +451,7 @@ const MemStore = struct {
 };
 
 fn makeCtx(alloc: std.mem.Allocator, mem: *MemStore, nb: *NullBus) SpoolmanCtx {
-    return SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
+    return SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus, null);
 }
 
 test "handleStatus: returns correct shape with no active spool" {
@@ -509,7 +596,7 @@ test "spoolman active-spool persistence round-trip: set then reload" {
     ctx.setSpoolId(77);
 
     // Create a new context from the same datastore (simulates restart)
-    var ctx2 = SpoolmanCtx.init(a, mem.dataStore(), &nb.bus);
+    var ctx2 = SpoolmanCtx.init(a, mem.dataStore(), &nb.bus, null);
     try testing.expectEqual(@as(?i64, 77), ctx2.getSpoolId());
 }
 
@@ -525,7 +612,7 @@ test "registerSpoolman: wires expected routes and JSON-RPC methods" {
     var mem = MemStore.init(alloc);
     defer mem.deinit();
     var nb = NullBus.init(alloc);
-    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
+    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus, null);
 
     try registerSpoolman(&reg, &ctx);
 

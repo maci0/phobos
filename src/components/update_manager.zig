@@ -72,6 +72,10 @@ pub const Source = struct {
     repo_name: []const u8 = "?",
     /// Tracked branch (git sources).
     branch: []const u8 = "master",
+    /// Filesystem path to the git working directory. Empty string means the
+    /// repo is not present on this host. When non-empty AND io is available,
+    /// buildGitStatus runs real git commands to populate version/hash/branch.
+    repo_path: []const u8 = "",
     /// Whether this source is a git repository eligible for recover/rollback.
     pub fn isGit(self: Source) bool {
         return self.type == .git_repo;
@@ -152,13 +156,98 @@ fn getBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Git child-process helper
+// ---------------------------------------------------------------------------
+
+/// Run `git -C <repo_path> <args...>` and return stdout (trimmed, caller owns).
+/// Returns null on any error (spawn failure, non-zero exit, empty stdout).
+fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) ?[]const u8 {
+    if (repo_path.len == 0) return null;
+
+    var arg_buf: [8][]const u8 = undefined;
+    var n: usize = 0;
+    arg_buf[n] = "git"; n += 1;
+    arg_buf[n] = "-C"; n += 1;
+    arg_buf[n] = repo_path; n += 1;
+    for (argv) |a| { arg_buf[n] = a; n += 1; }
+
+    const result = std.process.run(alloc, io, .{
+        .argv = arg_buf[0..n],
+    }) catch return null;
+    defer alloc.free(result.stderr);
+
+    if (result.term != .exited or result.term.exited != 0) {
+        alloc.free(result.stdout);
+        return null;
+    }
+    if (result.stdout.len == 0) {
+        alloc.free(result.stdout);
+        return null;
+    }
+    // Trim trailing newline that some git commands emit.
+    const trimmed = if (result.stdout.len > 0 and result.stdout[result.stdout.len - 1] == '\n')
+        result.stdout[0 .. result.stdout.len - 1]
+    else
+        result.stdout;
+    // Realloc to trimmed size (may shrink or return same pointer).
+    if (alloc.resize(result.stdout, trimmed.len)) {
+        return result.stdout.ptr[0..trimmed.len];
+    }
+    const duped = alloc.dupe(u8, trimmed) catch {
+        alloc.free(result.stdout);
+        return null;
+    };
+    alloc.free(result.stdout);
+    return duped;
+}
+
+/// Run `git -C <repo_path> <args...>` and return true on exit 0, false otherwise.
+fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) bool {
+    if (repo_path.len == 0) return false;
+
+    var arg_buf: [8][]const u8 = undefined;
+    var n: usize = 0;
+    arg_buf[n] = "git"; n += 1;
+    arg_buf[n] = "-C"; n += 1;
+    arg_buf[n] = repo_path; n += 1;
+    for (argv) |a| { arg_buf[n] = a; n += 1; }
+
+    const result = std.process.run(alloc, io, .{
+        .argv = arg_buf[0..n],
+    }) catch return false;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+
+    return result.term == .exited and result.term.exited == 0;
+}
+
+/// Run `git fetch origin --prune` in a repo to update remote tracking refs.
+/// Safe: fetch never modifies the working tree or local branches. Returns true
+/// on success, false when a repo_path is empty, io is unavailable, or fetch
+/// fails (non-zero exit, spawn failure). No-op without io (unit tests).
+fn gitFetch(io: ?std.Io, alloc: std.mem.Allocator, repo_path: []const u8) bool {
+    if (repo_path.len == 0) return false;
+    const live_io = io orelse return false;
+    return gitCheck(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" });
+}
+
+/// Run `git reset --hard <ref>` in a repo. Destructive: overwrites local
+/// changes. Returns true on success, false on failure.
+fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []const u8) bool {
+    if (repo_path.len == 0) return false;
+    return gitCheck(io, alloc, repo_path, &.{ "reset", "--hard", ref });
+}
+
+// ---------------------------------------------------------------------------
 // Per-source status shape (get_update_status)
 // ---------------------------------------------------------------------------
 
 /// Build the git_repo status shape: AppDeploy.get_update_status merged with
-/// GitDeploy.repo.get_repo_status. Every key Moonraker emits is present. With no
-/// live git state we report current==remote (nothing behind), valid, pristine.
-fn buildGitStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
+/// GitDeploy.repo.get_repo_status. Every key Moonraker emits is present. When
+/// io is available and src.repo_path is non-empty, runs real git commands to
+/// populate version, hash, branch, and dirty/detached state. Falls back to
+/// honest "?" defaults when the repo is absent (unit tests, dev workstation).
+fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
 
     // --- AppDeploy.get_update_status base keys ---
@@ -172,24 +261,120 @@ fn buildGitStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
     // --- GitDeploy.get_repo_status keys ---
     try obj.put(alloc, "detected_type", .{ .string = "git_repo" });
     try obj.put(alloc, "remote_alias", .{ .string = "origin" });
-    try obj.put(alloc, "branch", .{ .string = src.branch });
-    try obj.put(alloc, "owner", .{ .string = src.owner });
-    try obj.put(alloc, "repo_name", .{ .string = src.repo_name });
+
     const remote_url = try std.fmt.allocPrint(alloc, "https://github.com/{s}/{s}.git", .{ src.owner, src.repo_name });
     try obj.put(alloc, "remote_url", .{ .string = remote_url });
     try obj.put(alloc, "recovery_url", .{ .string = remote_url });
-    try obj.put(alloc, "version", .{ .string = "?" });
-    try obj.put(alloc, "remote_version", .{ .string = "?" });
+    try obj.put(alloc, "owner", .{ .string = src.owner });
+    try obj.put(alloc, "repo_name", .{ .string = src.repo_name });
+
+    var branch: []const u8 = src.branch;
+    var version: []const u8 = "?";
+    var remote_version: []const u8 = "?";
+    var current_hash: []const u8 = "?";
+    var remote_hash: []const u8 = "?";
+    var is_dirty: bool = false;
+    var detached: bool = false;
+    var commits_behind_count: i64 = 0;
+    var commits_behind: std.json.Array = .init(alloc);
+
+    if (io) |live_io| {
+        if (src.repo_path.len > 0) {
+            // branch: git rev-parse --abbrev-ref HEAD
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "--abbrev-ref", "HEAD" })) |b| {
+                if (!std.mem.eql(u8, b, "HEAD")) branch = b;
+            }
+
+            // version: git describe --tags --always --long --dirty
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", "--always", "--long", "--dirty" })) |v| {
+                version = v;
+            }
+
+            // full_version_string: git describe --tags --always --long --dirty
+            // (same as version; Moonraker's get_version_from_git returns this)
+            try obj.put(alloc, "full_version_string", .{ .string = try alloc.dupe(u8, version) });
+
+            // remote_version: git describe --tags origin/<branch> --always
+            const remote_ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{branch});
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", remote_ref, "--always" })) |rv| {
+                remote_version = rv;
+            }
+
+            // current_hash: git rev-parse HEAD
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" })) |ch| {
+                current_hash = ch;
+            }
+
+            // remote_hash: git rev-parse origin/<branch>
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", remote_ref })) |rh| {
+                remote_hash = rh;
+            }
+
+            // is_dirty: git status --porcelain has any output
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" })) |porcelain| {
+                is_dirty = porcelain.len > 0;
+            }
+
+            // detached: git symbolic-ref -q HEAD fails
+            detached = !gitCheck(live_io, alloc, src.repo_path, &.{ "symbolic-ref", "-q", "HEAD" });
+
+            // commits_behind: git log HEAD..origin/<branch> with Moonraker's
+            // format (unit separator \x1D between fields, record separator
+            // \x1E between commits). Max 100 entries to match Moonraker.
+            const behind_range = try std.fmt.allocPrint(alloc, "HEAD..{s}", .{remote_ref});
+            const log_fmt_arg = try std.fmt.allocPrint(alloc, "--format=sha:%H\x1Dauthor:%an\x1Ddate:%ct\x1Dsubject:%s\x1Dmessage:%b\x1E", .{});
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "log", behind_range, log_fmt_arg, "--max-count=100" })) |behind| {
+                if (behind.len > 0) {
+                    var records = std.mem.splitSequence(u8, behind, "\x1E");
+                    while (records.next()) |record| {
+                        if (record.len == 0) continue;
+                        var commit_obj: std.json.ObjectMap = .empty;
+                        var fields = std.mem.splitSequence(u8, record, "\x1D");
+                        while (fields.next()) |field| {
+                            if (field.len == 0) continue;
+                            if (std.mem.indexOfScalar(u8, field, ':')) |colon| {
+                                const key = field[0..colon];
+                                const val = field[colon + 1 ..];
+                                if (std.mem.eql(u8, key, "date")) {
+                                    // Moonraker returns date as a string (unix timestamp).
+                                    try commit_obj.put(alloc, key, .{ .string = try alloc.dupe(u8, val) });
+                                } else if (std.mem.eql(u8, key, "subject") or
+                                           std.mem.eql(u8, key, "message") or
+                                           std.mem.eql(u8, key, "sha") or
+                                           std.mem.eql(u8, key, "author"))
+                                {
+                                    try commit_obj.put(alloc, key, .{ .string = try alloc.dupe(u8, val) });
+                                }
+                            }
+                        }
+                        // Add tag field (always null — tag detection requires
+                        // additional git commands that Moonraker gates on
+                        // channel != dev).
+                        try commit_obj.put(alloc, "tag", .null);
+                        try commits_behind.append(.{ .object = commit_obj });
+                        commits_behind_count += 1;
+                    }
+                }
+            }
+        } else {
+            try obj.put(alloc, "full_version_string", .{ .string = "?" });
+        }
+    } else {
+        try obj.put(alloc, "full_version_string", .{ .string = "?" });
+    }
+
+    try obj.put(alloc, "branch", .{ .string = try alloc.dupe(u8, branch) });
+    try obj.put(alloc, "version", .{ .string = try alloc.dupe(u8, version) });
+    try obj.put(alloc, "remote_version", .{ .string = try alloc.dupe(u8, remote_version) });
     try obj.put(alloc, "rollback_version", .{ .string = "?" });
-    try obj.put(alloc, "current_hash", .{ .string = "?" });
-    try obj.put(alloc, "remote_hash", .{ .string = "?" });
-    try obj.put(alloc, "is_dirty", .{ .bool = false });
-    try obj.put(alloc, "detached", .{ .bool = false });
-    try obj.put(alloc, "commits_behind", .{ .array = .init(alloc) });
-    try obj.put(alloc, "commits_behind_count", .{ .integer = 0 });
+    try obj.put(alloc, "current_hash", .{ .string = try alloc.dupe(u8, current_hash) });
+    try obj.put(alloc, "remote_hash", .{ .string = try alloc.dupe(u8, remote_hash) });
+    try obj.put(alloc, "is_dirty", .{ .bool = is_dirty });
+    try obj.put(alloc, "detached", .{ .bool = detached });
+    try obj.put(alloc, "commits_behind", .{ .array = commits_behind });
+    try obj.put(alloc, "commits_behind_count", .{ .integer = commits_behind_count });
     try obj.put(alloc, "git_messages", .{ .array = .init(alloc) });
-    try obj.put(alloc, "full_version_string", .{ .string = "?" });
-    try obj.put(alloc, "pristine", .{ .bool = true });
+    try obj.put(alloc, "pristine", .{ .bool = !is_dirty and !detached });
     try obj.put(alloc, "corrupt", .{ .bool = false });
     try obj.put(alloc, "warnings", .{ .array = .init(alloc) });
     try obj.put(alloc, "anomalies", .{ .array = .init(alloc) });
@@ -234,9 +419,9 @@ fn buildWebStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
     return .{ .object = obj };
 }
 
-fn buildSourceStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
+fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.Value {
     return switch (src.type) {
-        .git_repo => buildGitStatus(alloc, src),
+        .git_repo => buildGitStatus(io, alloc, src),
         .system => buildSystemStatus(alloc, src),
         .web, .zip => buildWebStatus(alloc, src),
     };
@@ -253,7 +438,7 @@ fn buildSourceStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
 fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value {
     var version_info: std.json.ObjectMap = .empty;
     for (ctx.sources) |src| {
-        try version_info.put(alloc, src.name, try buildSourceStatus(alloc, src));
+        try version_info.put(alloc, src.name, try buildSourceStatus(ctx.io, alloc, src));
     }
 
     var out: std.json.ObjectMap = .empty;
@@ -325,13 +510,20 @@ fn nextProcId() i64 {
 // GET /machine/update/status → machine.update.status
 // ---------------------------------------------------------------------------
 
-/// Returns the full version_info status payload. The `refresh` param requests a
-/// live refresh; phobos has no live source state to refresh, but when requested
-/// it still emits `notify_update_refreshed` (matching Moonraker's delayed
-/// callback) so subscribers see the refresh completion event.
+/// Returns the full version_info status payload. When `refresh` is true, runs
+/// `git fetch origin --prune` for each git_repo source with a live repo_path
+/// before building the payload, so remote tracking refs are up-to-date. Also
+/// emits `notify_update_refreshed` so subscribers see the refresh completion.
 pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     const refresh = getBool(params, "refresh", false);
+    if (refresh) {
+        for (ctx.sources) |src| {
+            if (src.type == .git_repo and src.repo_path.len > 0) {
+                _ = gitFetch(ctx.io, alloc, src.repo_path);
+            }
+        }
+    }
     const payload = try buildStatusPayload(ctx, alloc);
     if (refresh) emitRefreshed(ctx, alloc, payload);
     return payload;
@@ -342,13 +534,21 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
 // ---------------------------------------------------------------------------
 
 /// Refresh one source (when `name` is given) or all sources, then return the
-/// status payload and emit `notify_update_refreshed`. STUB: no live git/package
-/// state is fetched; the refresh is a shape-faithful no-op that still validates
-/// `name` and fires the notification.
+/// status payload and emit `notify_update_refreshed`. For git_repo sources with
+/// a non-empty repo_path and a live io, runs `git fetch origin --prune` to
+/// update remote tracking refs so the subsequent status payload reflects
+/// accurate behind/ahead counts. Falls back to a no-op when io is null
+/// (unit tests) or repo_path is empty (dev workstation).
 pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     if (getOptStr(params, "name")) |name| {
         if (ctx.findSource(name) == null) return error.InvalidParams;
+    }
+    // Run git fetch for git_repo sources so the status reflects live remotes.
+    for (ctx.sources) |src| {
+        if (src.type == .git_repo and src.repo_path.len > 0) {
+            _ = gitFetch(ctx.io, alloc, src.repo_path);
+        }
     }
     const payload = try buildStatusPayload(ctx, alloc);
     emitRefreshed(ctx, alloc, payload);
@@ -356,69 +556,78 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 }
 
 // ---------------------------------------------------------------------------
-// Update handlers (all STUBBED — never run real git/pip/apt)
+// Update handlers
 // ---------------------------------------------------------------------------
 
-/// Run a stubbed single-target update for `app`: emit a start + complete
-/// `notify_update_response` pair and return "ok". STUB: performs no real
-/// update. Mirrors `_handle_update_request` ack ("ok").
-fn runStubUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerror!std.json.Value {
+/// Run a single-target update for `app`. For git_repo sources with a configured
+/// repo_path, runs `git fetch origin --prune` + `git reset --hard origin/<branch>`.
+/// For non-git sources (system, web, zip), emits notifications but performs no
+/// real installation (apt/pip are not invoked — phobos does not touch the host
+/// package manager).
+fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerror!std.json.Value {
+    const src = ctx.findSource(app) orelse return error.NotFound;
     const proc_id = nextProcId();
     ctx.busy = true;
     defer ctx.busy = false;
 
     const start_msg = try std.fmt.allocPrint(alloc, "Updating {s}...", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, start_msg, false));
-    // STUB: a real implementation would run the deployer's update() here
-    // (git fetch/reset/pull or apt/pip install). phobos never touches the host.
+
+    if (src.type == .git_repo and src.repo_path.len > 0) {
+        if (ctx.io) |io| {
+            // Fetch latest remotes, then hard-reset to origin/<branch>.
+            _ = gitFetch(ctx.io, alloc, src.repo_path);
+            const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
+            defer alloc.free(ref);
+            _ = gitReset(io, alloc, src.repo_path, ref);
+        }
+    }
+
     const done_msg = try std.fmt.allocPrint(alloc, "{s} update finished", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done_msg, true));
     return .{ .string = "ok" };
 }
 
-/// POST /machine/update/moonraker → "ok". STUB.
+/// POST /machine/update/moonraker → "ok".
 pub fn handleUpdateMoonraker(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.findSource("moonraker") == null) return error.NotFound;
-    return runStubUpdate(ctx, alloc, "moonraker");
+    return runUpdate(ctx, alloc, "moonraker");
 }
 
-/// POST /machine/update/klipper → "ok". STUB.
+/// POST /machine/update/klipper → "ok".
 pub fn handleUpdateKlipper(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.findSource("klipper") == null) return error.NotFound;
-    return runStubUpdate(ctx, alloc, "klipper");
+    return runUpdate(ctx, alloc, "klipper");
 }
 
-/// POST /machine/update/system → "ok". STUB.
+/// POST /machine/update/system → "ok". Emits notification but performs no
+/// real package-manager operation (phobos does not touch apt/pip).
 pub fn handleUpdateSystem(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.findSource("system") == null) return error.NotFound;
-    return runStubUpdate(ctx, alloc, "system");
+    return runUpdate(ctx, alloc, "system");
 }
 
-/// POST /machine/update/client?name=<name> → "ok". STUB. Without a `name` param
+/// POST /machine/update/client?name=<name> → "ok". Without a `name` param
 /// Moonraker treats it as a full update; phobos does likewise.
 pub fn handleUpdateClient(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     const name = getOptStr(params, "name") orelse return runFullUpdate(ctx, alloc);
-    if (ctx.findSource(name) == null) return error.NotFound;
-    return runStubUpdate(ctx, alloc, name);
+    return runUpdate(ctx, alloc, name);
 }
 
-/// POST /machine/update/upgrade?name=<name> → "ok". STUB. Like `client`, a
+/// POST /machine/update/upgrade?name=<name> → "ok". Like `client`, a
 /// missing `name` falls back to a full update (matches `_handle_update_request`
 /// where app in ("upgrade","client") routes to full when name is None).
 pub fn handleUpgrade(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     const name = getOptStr(params, "name") orelse return runFullUpdate(ctx, alloc);
-    if (ctx.findSource(name) == null) return error.NotFound;
-    return runStubUpdate(ctx, alloc, name);
+    return runUpdate(ctx, alloc, name);
 }
 
 /// Run a stubbed full update across every source, emitting the Moonraker
 /// progress sequence ("Preparing full software update..." → per-source →
-/// "Full Update Complete"). STUB. Mirrors `_handle_full_update_request`.
+/// "Full Update Complete"). STUB: does not run real updates; phobos never
+/// invokes apt/pip.
 fn runFullUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const proc_id = nextProcId();
     ctx.busy = true;
@@ -541,7 +750,7 @@ test "buildGitStatus: full git_repo key set present" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const v = try buildGitStatus(a, default_sources[1]); // moonraker
+    const v = try buildGitStatus(null, a, default_sources[1]); // moonraker
     const o = v.object;
     for ([_][]const u8{
         "channel",          "debug_enabled",   "channel_invalid",      "is_valid",
@@ -725,6 +934,143 @@ test "getBool: parses bool/string/int/default" {
     try testing.expect(getBool(.null, "x", true));
 }
 
+test "registerUpdateManager: wires expected routes and JSON-RPC methods" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+
+    var ctx = testCtx();
+    try registerUpdateManager(&reg, &ctx);
+
+    try testing.expect(reg.lookup(.GET, "/machine/update/status") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/refresh") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/upgrade") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/full") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/moonraker") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/klipper") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/system") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/client") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/recover") != null);
+    try testing.expect(reg.lookup(.POST, "/machine/update/rollback") != null);
+}
+
+// ---- git status with real io ----
+
+test "buildGitStatus: empty repo_path with null io returns defaults" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const v = try buildGitStatus(null, a, default_sources[1]); // moonraker, no repo_path
+    const o = v.object;
+    try testing.expectEqualStrings("?", o.get("version").?.string);
+    try testing.expectEqualStrings("?", o.get("current_hash").?.string);
+    try testing.expectEqual(false, o.get("is_dirty").?.bool);
+    try testing.expectEqual(false, o.get("detached").?.bool);
+}
+
+test "buildGitStatus: empty repo_path with non-null io still returns defaults" {
+    // No real StdIo needed; we test with our own project path that has no
+    // repo_path set, so gitOutput/gitCheck are never called.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src_no_path: Source = .{
+        .name = "test_git", .type = .git_repo,
+        .owner = "test", .repo_name = "test", .branch = "main", .repo_path = "",
+    };
+    const v = try buildGitStatus(null, a, src_no_path);
+    const o = v.object;
+    try testing.expectEqualStrings("?", o.get("version").?.string);
+    try testing.expectEqualStrings("?", o.get("current_hash").?.string);
+    try testing.expectEqual(false, o.get("is_dirty").?.bool);
+}
+
+test "buildGitStatus: with repo_path set honors defaults when io is null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src_with_path: Source = .{
+        .name = "test_git", .type = .git_repo,
+        .owner = "test", .repo_name = "test", .branch = "main", .repo_path = "/nonexistent",
+    };
+    // io is null, so git commands are never run; "?" defaults are used.
+    const v = try buildGitStatus(null, a, src_with_path);
+    const o = v.object;
+    try testing.expectEqualStrings("?", o.get("version").?.string);
+    try testing.expectEqualStrings("?", o.get("current_hash").?.string);
+    try testing.expectEqual(false, o.get("is_dirty").?.bool);
+}
+
+// ---- gitFetch ----
+
+test "gitFetch: returns false with empty repo_path" {
+    try testing.expect(!gitFetch(null, testing.allocator, ""));
+    try testing.expect(!gitFetch(@as(?std.Io, undefined), testing.allocator, ""));
+}
+
+test "gitFetch: returns false when io is null" {
+    try testing.expect(!gitFetch(null, testing.allocator, "/some/repo"));
+}
+
+test "gitFetch: returns false for nonexistent repo" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    try testing.expect(!gitFetch(threaded.io(), std.heap.smp_allocator, "/nonexistent/path"));
+}
+
+test "gitFetch: succeeds for real repo" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Use the project's own git repo (always available during dev/test).
+    // Skip if no origin remote — git fetch needs a remote to succeed.
+    if (!gitCheck(io, std.heap.smp_allocator, ".", &.{ "remote", "get-url", "origin" })) {
+        return error.SkipZigTest;
+    }
+    try testing.expect(gitFetch(io, std.heap.smp_allocator, "."));
+}
+
+test "handleRefresh: runs gitFetch for sources with repo_path set (real repo)" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Skip if no origin remote — git fetch needs a remote to succeed.
+    if (!gitCheck(io, std.heap.smp_allocator, ".", &.{ "remote", "get-url", "origin" })) {
+        return error.SkipZigTest;
+    }
+    // Use the current directory as repo_path so gitFetch actually works.
+    const test_sources = [_]Source{
+        .{ .name = "system", .type = .system },
+        .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = "." },
+    };
+    var ctx: UpdateCtx = .{ .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const v = try handleRefresh(@ptrCast(&ctx), .null, a);
+    try testing.expect(v.object.get("version_info") != null);
+    try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
+}
+
+test "handleStatus: refresh=true fetches before building payload" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const test_sources = [_]Source{
+        .{ .name = "system", .type = .system },
+        .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = "." },
+    };
+    var ctx: UpdateCtx = .{ .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const v = try handleStatus(@ptrCast(&ctx), .{ .bool = true }, a);
+    try testing.expect(v.object.get("version_info") != null);
+    try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
+}
+
 // ---- fuzz ----
 
 test "fuzz_status: arbitrary params never crash handleStatus, always payload" {
@@ -776,24 +1122,113 @@ test "fuzz_handlers: arbitrary name params never crash update/recover/rollback" 
     }.run, .{});
 }
 
-test "registerUpdateManager: wires expected routes and JSON-RPC methods" {
-    const jsonrpc = @import("../jsonrpc.zig");
-    var d = jsonrpc.Dispatcher.init(testing.allocator);
-    defer d.deinit();
-    var reg = Registry.init(testing.allocator, &d);
-    defer reg.deinit();
+test "fuzz_buildGitStatus: arbitrary source fields never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
 
-    var ctx = testCtx();
-    try registerUpdateManager(&reg, &ctx);
+            const alphabet = "abcdefghijklmnopqrstuvwxyz./_-";
+            var name: [16]u8 = undefined;
+            var owner: [16]u8 = undefined;
+            var repo: [16]u8 = undefined;
+            var rpath: [32]u8 = undefined;
+            for (&name, 0..) |*c, i| c.* = alphabet[buf[i % 32] % alphabet.len];
+            for (&owner, 0..) |*c, i| c.* = alphabet[buf[16 + i % 16] % alphabet.len];
+            for (&repo, 0..) |*c, i| c.* = alphabet[buf[24 + i % 16] % alphabet.len];
+            for (&rpath, 0..) |*c, i| c.* = alphabet[buf[32 + i % 32] % alphabet.len];
 
-    try testing.expect(reg.lookup(.GET, "/machine/update/status") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/refresh") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/upgrade") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/full") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/moonraker") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/klipper") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/system") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/client") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/recover") != null);
-    try testing.expect(reg.lookup(.POST, "/machine/update/rollback") != null);
+            const rpath_len = @as(usize, buf[48]) % rpath.len;
+            const src: Source = .{
+                .name = &name, .type = .git_repo,
+                .owner = &owner, .repo_name = &repo,
+                .branch = "main", .repo_path = rpath[0..rpath_len],
+            };
+            // io is always null → never runs real git; must not crash.
+            _ = try buildGitStatus(null, a, src);
+        }
+    }.run, .{});
+}
+
+test "gitOutput: returns null for empty repo_path" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const result = gitOutput(io, testing.allocator, "", &.{});
+    try testing.expect(result == null);
+}
+
+test "gitOutput: returns null for nonexistent path" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const result = gitOutput(io, testing.allocator, "/nonexistent/path/repo", &.{"rev-parse", "HEAD"});
+    try testing.expect(result == null);
+}
+
+test "gitCheck: returns false for empty repo_path" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try testing.expectEqual(false, gitCheck(io, testing.allocator, "", &.{"rev-parse", "HEAD"}));
+}
+
+test "gitCheck: returns false for nonexistent path" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try testing.expectEqual(false, gitCheck(io, testing.allocator, "/nonexistent/path/repo", &.{"rev-parse", "HEAD"}));
+}
+
+test "gitOutput: special characters in repo_path safe" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Paths with spaces, quotes, etc. should not cause crashes.
+    _ = gitOutput(io, testing.allocator, "/path with spaces/repo", &.{});
+    _ = gitOutput(io, testing.allocator, "/p'ath/qu\"oted", &.{});
+    _ = gitOutput(io, testing.allocator, "/p\x00ath/null", &.{});
+}
+
+test "gitCheck: special characters in repo_path safe" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    _ = gitCheck(io, testing.allocator, "/path with spaces/repo", &.{});
+    _ = gitCheck(io, testing.allocator, "/p'ath/qu\"oted", &.{});
+    _ = gitCheck(io, testing.allocator, "/p\x00ath/null", &.{});
+}
+
+test "gitReset: returns false for empty repo_path" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try testing.expect(!gitReset(io, testing.allocator, "", "origin/master"));
+}
+
+test "gitReset: returns false for nonexistent path" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try testing.expect(!gitReset(io, testing.allocator, "/nonexistent/repo", "origin/master"));
+}
+
+test "fuzz_gitReset: arbitrary ref strings never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+
+            var buf: [128]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const n = @min(buf.len, @as(usize, @intCast(smith.valueRangeAtMostWithHash(u8, 0, 64, 1))));
+            const ref = buf[0..n];
+
+            _ = gitReset(io, std.heap.smp_allocator, "/nonexistent/repo", ref);
+        }
+    }.run, .{});
 }

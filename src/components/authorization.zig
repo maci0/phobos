@@ -1016,7 +1016,6 @@ pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// GET /access/info
 pub fn handleInfo(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
-    _ = params;
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "default_source", .{ .string = try alloc.dupe(u8, c.default_source) });
     var sources: std.json.Array = .init(alloc);
@@ -1024,7 +1023,20 @@ pub fn handleInfo(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     try obj.put(alloc, "available_sources", .{ .array = sources });
     const login_req = c.force_logins and c.users.count() > 1;
     try obj.put(alloc, "login_required", .{ .bool = login_req });
-    try obj.put(alloc, "trusted", .null);
+    // trusted: bool, matching Moonraker's _handle_info_request.
+    //   True if user is TRUSTED_USER sentinel
+    //   bool result of _check_authorized_ip if an IP is present
+    //   false otherwise (no user, no IP)
+    const trusted: bool = blk: {
+        if (currentUser(params)) |user| {
+            if (std.mem.eql(u8, user, trusted_user)) break :blk true;
+        }
+        if (currentIp(params)) |ip| {
+            break :blk c.trusted.isTrusted(ip);
+        }
+        break :blk false;
+    };
+    try obj.put(alloc, "trusted", .{ .bool = trusted });
     return .{ .object = obj };
 }
 
@@ -1039,6 +1051,15 @@ pub fn handleUserGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
             try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, info.username) });
             try obj.put(alloc, "source", .{ .string = try alloc.dupe(u8, info.source) });
             try obj.put(alloc, "created_on", .{ .float = info.created_on });
+            return .{ .object = obj };
+        }
+        // _TRUSTED_USER_ sentinel: not in the users table but authenticated
+        // via trusted IP. Return the sentinel with minimal info matching
+        // Moonraker's behavior for trusted unauthenticated connections.
+        if (std.mem.eql(u8, name, trusted_user)) {
+            try obj.put(alloc, "username", .{ .string = trusted_user });
+            try obj.put(alloc, "source", .{ .string = "moonraker" });
+            try obj.put(alloc, "created_on", .{ .float = nowSeconds() });
             return .{ .object = obj };
         }
     }
@@ -1900,7 +1921,7 @@ test "info: shape matches Moonraker" {
     try testing.expectEqualStrings("moonraker", info.object.get("default_source").?.string);
     try testing.expect(info.object.get("available_sources").? == .array);
     try testing.expect(info.object.get("login_required").? == .bool);
-    try testing.expect(info.object.get("trusted").? == .null);
+    try testing.expect(info.object.get("trusted").? == .bool);
 }
 
 test "user GET: no current user → all null" {

@@ -313,14 +313,15 @@ pub const App = struct {
         // --- Spoolman context (spool_id persistence + proxy stubs) ---
         // io is not stored here; setIo() is called after the event loop starts
         // (see httpServer). Notifications are suppressed until then.
+        // server_url is set later in setConfig when the config file is parsed.
         const spoolman_ctx = try alloc.create(SpoolmanCtx);
         errdefer alloc.destroy(spoolman_ctx);
-        spoolman_ctx.* = SpoolmanCtx.init(alloc, db_ctx.store, bus);
+        spoolman_ctx.* = SpoolmanCtx.init(alloc, db_ctx.store, bus, null);
 
         // --- MQTT context (no broker; faithful endpoint shapes) ---
         const mqtt_ctx = try alloc.create(MqttCtx);
         errdefer alloc.destroy(mqtt_ctx);
-        mqtt_ctx.* = .{};
+        mqtt_ctx.* = MqttCtx.init(alloc);
 
         // --- Extensions context (agent registry) ---
         const extensions_ctx = try alloc.create(ExtensionsCtx);
@@ -400,7 +401,7 @@ pub const App = struct {
         // interaction is STUBBED (see td1.zig).
         const td1_ctx = try alloc.create(Td1Ctx);
         errdefer alloc.destroy(td1_ctx);
-        td1_ctx.* = .{};
+        td1_ctx.* = Td1Ctx.init(alloc);
 
         const button_ctx = try alloc.create(ButtonCtx);
         errdefer alloc.destroy(button_ctx);
@@ -425,7 +426,8 @@ pub const App = struct {
         // --- OctoPrint compatibility context (/api/*) ---
         const octoprint_ctx = try alloc.create(OctoPrintCtx);
         errdefer alloc.destroy(octoprint_ctx);
-        octoprint_ctx.* = .{};
+        octoprint_ctx.* = OctoPrintCtx.init();
+        klippy_ctx.octoprint = octoprint_ctx;
 
         // --- Zeroconf/SSDP context (/server/zeroconf/ssdp) ---
         const zeroconf_ctx = try alloc.create(ZeroconfCtx);
@@ -490,6 +492,11 @@ pub const App = struct {
         self.cfg = cfg;
         self.info.cfg = cfg;
         self.info.config_file_path = config_path;
+
+        // Wire spoolman server URL from [spoolman] server key.
+        if (cfg.get("spoolman", "server")) |url| {
+            self.spoolman_ctx.setServerUrl(url);
+        }
     }
 
     /// Free all owned resources. `io` is required only for the Connections
@@ -519,6 +526,7 @@ pub const App = struct {
         self.alloc.destroy(self.power_ctx);
         self.wled_ctx.deinit();
         self.alloc.destroy(self.wled_ctx);
+        self.td1_ctx.deinit();
         self.alloc.destroy(self.td1_ctx);
         self.button_ctx.deinit();
         self.alloc.destroy(self.button_ctx);
@@ -528,6 +536,7 @@ pub const App = struct {
         self.alloc.destroy(self.octoprint_ctx);
         self.alloc.destroy(self.zeroconf_ctx);
         self.alloc.destroy(self.analysis_ctx);
+        self.mqtt_ctx.deinit();
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
         if (build_options.with_lmdb) {
