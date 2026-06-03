@@ -131,11 +131,15 @@ pub const Dispatcher = struct {
             const code: i64 = switch (err) {
                 error.InvalidParams => -32602,
                 error.KlippyDisconnected => 503,
+                error.MqttNotConfigured => 503,
+                error.ServiceUnavailable => 503,
                 else => -32603,
             };
             const msg: []const u8 = switch (err) {
                 error.InvalidParams => "Invalid params",
                 error.KlippyDisconnected => "Klippy Host not connected",
+                error.MqttNotConfigured => "MQTT not configured",
+                error.ServiceUnavailable => "Service Unavailable",
                 else => "Internal error",
             };
             return jv.errorResponse(alloc, id, code, msg);

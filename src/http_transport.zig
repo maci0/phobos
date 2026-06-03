@@ -367,6 +367,8 @@ pub fn handleParsedAuth(
             error.Forbidden => 403,
             error.NotFound => 404,
             error.KlippyDisconnected => 503,
+            error.MqttNotConfigured => 503,
+            error.ServiceUnavailable => 503,
             else => 500,
         };
         const msg: []const u8 = switch (err) {
@@ -374,6 +376,8 @@ pub fn handleParsedAuth(
             error.Forbidden => "Forbidden",
             error.NotFound => "Not Found",
             error.KlippyDisconnected => @import("components/printer.zig").klippy_disconnected_message,
+            error.MqttNotConfigured => "MQTT not configured",
+            error.ServiceUnavailable => "Service Unavailable",
             else => "Internal Server Error",
         };
         const status: std.http.Status = switch (err) {
@@ -381,6 +385,8 @@ pub fn handleParsedAuth(
             error.Forbidden => .forbidden,
             error.NotFound => .not_found,
             error.KlippyDisconnected => .service_unavailable,
+            error.MqttNotConfigured => .service_unavailable,
+            error.ServiceUnavailable => .service_unavailable,
             else => .internal_server_error,
         };
         const b = try errorBody(alloc, code, msg);

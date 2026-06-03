@@ -38,6 +38,9 @@ pub const MqttConfig = struct {
     port: u16 = 1883,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
+    default_qos: i64 = 0,
+    instance_name: ?[]const u8 = null,
+    client_id: ?[]const u8 = null,
 };
 
 /// Per-topic stored message (last published payload).
@@ -80,6 +83,8 @@ pub const MqttCtx = struct {
             self.gpa.free(cfg.host);
             if (cfg.username) |u| self.gpa.free(u);
             if (cfg.password) |p| self.gpa.free(p);
+            if (cfg.instance_name) |n| self.gpa.free(n);
+            if (cfg.client_id) |c| self.gpa.free(c);
         }
     }
 
@@ -97,6 +102,8 @@ pub const MqttCtx = struct {
             self.gpa.free(old.host);
             if (old.username) |u| self.gpa.free(u);
             if (old.password) |p| self.gpa.free(p);
+            if (old.instance_name) |n| self.gpa.free(n);
+            if (old.client_id) |c| self.gpa.free(c);
         }
         self.config = .{
             .host = host_dup,
@@ -106,6 +113,33 @@ pub const MqttCtx = struct {
         };
     }
 
+    /// Set the optional MQTT instance name (replaces any previous value).
+    pub fn setInstanceName(self: *MqttCtx, name: []const u8) !void {
+        const dup = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(dup);
+        if (self.config) |*cfg| {
+            if (cfg.instance_name) |old| self.gpa.free(old);
+            cfg.instance_name = dup;
+        }
+    }
+
+    /// Set the optional MQTT client ID (replaces any previous value).
+    pub fn setClientId(self: *MqttCtx, id: []const u8) !void {
+        const dup = try self.gpa.dupe(u8, id);
+        errdefer self.gpa.free(dup);
+        if (self.config) |*cfg| {
+            if (cfg.client_id) |old| self.gpa.free(old);
+            cfg.client_id = dup;
+        }
+    }
+
+    /// Set the default QoS for published messages.
+    pub fn setDefaultQos(self: *MqttCtx, qos: i64) void {
+        if (self.config) |*cfg| {
+            cfg.default_qos = qos;
+        }
+    }
+
     /// Returns true if a broker has been configured.
     pub fn isConfigured(self: *const MqttCtx) bool {
         return self.config != null;
@@ -113,7 +147,7 @@ pub const MqttCtx = struct {
 
     /// Store a message for a topic. Called by handlePublish when broker is
     /// configured.
-    fn storeMessage(self: *MqttCtx, topic: []const u8, payload: std.json.Value) !void {
+    pub fn storeMessage(self: *MqttCtx, topic: []const u8, payload: std.json.Value) !void {
         if (self.messages.getPtr(topic)) |existing| {
             existing.payload = payload;
             return;
@@ -124,12 +158,12 @@ pub const MqttCtx = struct {
     }
 
     /// Get the last stored message for a topic (null if none).
-    fn getMessage(self: *const MqttCtx, topic: []const u8) ?std.json.Value {
+    pub fn getMessage(self: *const MqttCtx, topic: []const u8) ?std.json.Value {
         return if (self.messages.get(topic)) |m| m.payload else null;
     }
 
     /// Add an active subscription. No-op if already subscribed.
-    fn addSubscription(self: *MqttCtx, topic: []const u8) !void {
+    pub fn addSubscription(self: *MqttCtx, topic: []const u8) !void {
         if (self.subscriptions.contains(topic)) return;
         const k = try self.gpa.dupe(u8, topic);
         errdefer self.gpa.free(k);
@@ -139,6 +173,30 @@ pub const MqttCtx = struct {
     /// Check whether a topic has an active subscription.
     pub fn hasSubscription(self: *const MqttCtx, topic: []const u8) bool {
         return self.subscriptions.contains(topic);
+    }
+
+    /// Subscribe to a topic (same as addSubscription).
+    pub fn subscribeTopic(self: *MqttCtx, topic: []const u8) !void {
+        try self.addSubscription(topic);
+    }
+
+    /// Remove an active subscription. No-op if not subscribed.
+    pub fn unsubscribe(self: *MqttCtx, topic: []const u8) void {
+        _ = self.subscriptions.remove(topic);
+    }
+
+    /// Publish a message to a topic. Validates QoS, stores the message.
+    /// retain is parsed but unused (no broker connection).
+    pub fn publishTopic(self: *MqttCtx, topic: []const u8, payload: std.json.Value, qos: i64, retain: bool) !void {
+        _ = retain;
+        try validateQos(qos);
+        if (!self.isConfigured()) return error.MqttNotConfigured;
+        try self.storeMessage(topic, payload);
+    }
+
+    /// Close/cleanup (stub — no broker connection to tear down).
+    pub fn close(self: *MqttCtx) void {
+        _ = self;
     }
 };
 
@@ -184,6 +242,33 @@ fn getOptAny(params: std.json.Value, field: []const u8) ?std.json.Value {
     };
 }
 
+fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
+    switch (params) {
+        .object => |obj| {
+            const v = obj.get(field) orelse return default_val;
+            return switch (v) {
+                .bool => |b| b,
+                else => default_val,
+            };
+        },
+        else => return default_val,
+    }
+}
+
+fn getOptFloat(params: std.json.Value, field: []const u8) ?f64 {
+    switch (params) {
+        .object => |obj| {
+            const v = obj.get(field) orelse return null;
+            return switch (v) {
+                .float => |f| f,
+                .integer => |i| @floatFromInt(i),
+                else => null,
+            };
+        },
+        else => return null,
+    }
+}
+
 /// Validate QoS value: must be 0, 1, or 2 (mqtt.py raises ServerError otherwise).
 fn validateQos(qos: i64) error{InvalidParams}!void {
     if (qos < 0 or qos > 2) return error.InvalidParams;
@@ -204,6 +289,8 @@ pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     const topic = try getStr(params, "topic");
     const qos = getOptInt(params, "qos", 0);
     try validateQos(qos);
+    _ = getOptBool(params, "retain", false);
+    _ = getOptFloat(params, "timeout");
 
     if (!ctx.isConfigured()) return error.MqttNotConfigured;
 
@@ -228,6 +315,7 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
     const topic = try getStr(params, "topic");
     const qos = getOptInt(params, "qos", 0);
     try validateQos(qos);
+    _ = getOptFloat(params, "timeout");
 
     if (!ctx.isConfigured()) return error.MqttNotConfigured;
 
@@ -264,6 +352,10 @@ pub fn registerMqtt(reg: *Registry, ctx: *MqttCtx) !void {
         c,
         handleSubscribe,
     );
+
+    // JSON-RPC remote method (no HTTP route).  Moonraker exposes
+    // server.mqtt.publish_mqtt_topic so components can publish via RPC.
+    try reg.dispatcher.register("server.mqtt.publish_mqtt_topic", c, handlePublish);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +485,62 @@ test "MqttCtx: setConfig with credentials" {
     try ctx.setConfig("broker.local", 8883, "user", "pass");
     try testing.expectEqualStrings("user", ctx.config.?.username.?);
     try testing.expectEqualStrings("pass", ctx.config.?.password.?);
+}
+
+test "MqttCtx: setInstanceName / setClientId / setDefaultQos" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("mqtt.local", 1883, null, null);
+    try ctx.setInstanceName("printer1");
+    try ctx.setClientId("client-abc");
+    ctx.setDefaultQos(1);
+
+    try testing.expectEqualStrings("printer1", ctx.config.?.instance_name.?);
+    try testing.expectEqualStrings("client-abc", ctx.config.?.client_id.?);
+    try testing.expectEqual(@as(i64, 1), ctx.config.?.default_qos);
+}
+
+test "MqttCtx: setters replace previous values" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("mqtt.local", 1883, null, null);
+    try ctx.setInstanceName("first");
+    try ctx.setInstanceName("second");
+    try testing.expectEqualStrings("second", ctx.config.?.instance_name.?);
+
+    try ctx.setClientId("c1");
+    try ctx.setClientId("c2");
+    try testing.expectEqualStrings("c2", ctx.config.?.client_id.?);
+
+    ctx.setDefaultQos(2);
+    ctx.setDefaultQos(0);
+    try testing.expectEqual(@as(i64, 0), ctx.config.?.default_qos);
+}
+
+test "MqttCtx: setConfig resets instance_name and client_id" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("mqtt.local", 1883, null, null);
+    try ctx.setInstanceName("printer1");
+    try ctx.setClientId("c1");
+
+    // Re-setting config resets instance_name/client_id/default_qos to defaults.
+    try ctx.setConfig("mqtt2.local", 1884, null, null);
+    try testing.expect(ctx.config.?.instance_name == null);
+    try testing.expect(ctx.config.?.client_id == null);
+    try testing.expectEqual(@as(i64, 0), ctx.config.?.default_qos);
 }
 
 test "MqttCtx: store and retrieve messages" {
@@ -561,6 +709,7 @@ test "registerMqtt: wires routes and JSON-RPC methods" {
 
     try testing.expect(d.methods.get("server.mqtt.publish") != null);
     try testing.expect(d.methods.get("server.mqtt.subscribe") != null);
+    try testing.expect(d.methods.get("server.mqtt.publish_mqtt_topic") != null);
 }
 
 // --- Fuzz tests ---
@@ -862,6 +1011,319 @@ test "fuzz addSubscription/hasSubscription: idempotent, never false-positive" {
 
             // Different topic unaffected
             try testing.expect(!ctx.hasSubscription("other"));
+        }
+    }.run, .{});
+}
+
+// ---- subscribeTopic / unsubscribe ----
+
+test "subscribeTopic: subscribes to topic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.subscribeTopic("my/topic");
+    try testing.expect(ctx.hasSubscription("my/topic"));
+}
+
+test "subscribeTopic: duplicate is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.subscribeTopic("dup/topic");
+    try ctx.subscribeTopic("dup/topic");
+    try testing.expect(ctx.hasSubscription("dup/topic"));
+}
+
+test "unsubscribe: removes subscription" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.subscribeTopic("rm/me");
+    try testing.expect(ctx.hasSubscription("rm/me"));
+    ctx.unsubscribe("rm/me");
+    try testing.expect(!ctx.hasSubscription("rm/me"));
+}
+
+test "unsubscribe: non-existent topic is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    ctx.unsubscribe("never/added");
+    try testing.expect(!ctx.hasSubscription("never/added"));
+}
+
+// ---- publishTopic ----
+
+test "publishTopic: with broker stores message" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.publishTopic("test/foo", .{ .string = "hello" }, 0, false);
+    try testing.expectEqualStrings("hello", ctx.getMessage("test/foo").?.string);
+}
+
+test "publishTopic: no broker returns MqttNotConfigured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try testing.expectError(error.MqttNotConfigured, ctx.publishTopic("t", .null, 0, false));
+}
+
+test "publishTopic: invalid qos returns InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try testing.expectError(error.InvalidParams, ctx.publishTopic("t", .null, 3, false));
+    try testing.expectError(error.InvalidParams, ctx.publishTopic("t", .null, -1, false));
+}
+
+test "publishTopic: retain flag accepted, qos bounds 0/1/2 pass" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    for ([_]i64{ 0, 1, 2 }) |q| {
+        try ctx.publishTopic("t", .{ .integer = q }, q, true);
+        try ctx.publishTopic("t", .{ .integer = q }, q, false);
+    }
+}
+
+test "publishTopic: overwrites previous message" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.publishTopic("t", .{ .integer = 1 }, 0, false);
+    try ctx.publishTopic("t", .{ .integer = 2 }, 0, false);
+    try testing.expectEqual(@as(i64, 2), ctx.getMessage("t").?.integer);
+}
+
+// ---- close ----
+
+test "close: does not crash" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    ctx.close();
+}
+
+test "close: after deinit does not panic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    ctx.deinit();
+    ctx.close();
+}
+
+// ---- publish_mqtt_topic via dispatcher ----
+
+test "publish_mqtt_topic: dispatcher route works" {
+    const alloc = testing.allocator;
+    const jrpc = @import("../jsonrpc.zig");
+
+    var d = jrpc.Dispatcher.init(alloc);
+    defer d.deinit();
+    var reg = Registry.init(alloc, &d);
+    defer reg.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try registerMqtt(&reg, &ctx);
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    const req =
+        \\{"jsonrpc":"2.0","method":"server.mqtt.publish_mqtt_topic",
+        \\"params":{"topic":"foo/bar","payload":"hello"},"id":1}
+    ;
+    const resp = try d.handle(req, alloc);
+    defer alloc.free(resp);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expect(obj.get("result") != null);
+    try testing.expectEqualStrings("foo/bar", obj.get("result").?.object.get("topic").?.string);
+
+    try testing.expectEqualStrings("hello", ctx.getMessage("foo/bar").?.string);
+}
+
+test "publish_mqtt_topic: notification (no id) returns empty" {
+    const alloc = testing.allocator;
+    const jrpc = @import("../jsonrpc.zig");
+
+    var d = jrpc.Dispatcher.init(alloc);
+    defer d.deinit();
+    var reg = Registry.init(alloc, &d);
+    defer reg.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try registerMqtt(&reg, &ctx);
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    // Notification: no "id" field.
+    const req =
+        \\{"jsonrpc":"2.0","method":"server.mqtt.publish_mqtt_topic",
+        \\"params":{"topic":"n/topic"}}
+    ;
+    const resp = try d.handle(req, alloc);
+    defer alloc.free(resp);
+
+    try testing.expectEqual(@as(usize, 0), resp.len);
+    try testing.expect(ctx.getMessage("n/topic").? == .null);
+}
+
+// ---- Fuzz tests for new pub methods ----
+
+test "fuzz publishTopic: never panics on arbitrary inputs" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._/";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const topic = name_buf[0..@min(6, @max(1, buf[0] % 8))];
+
+            ctx.setConfig("localhost", 1883, null, null) catch return;
+
+            const qos: i64 = @as(i64, @intCast(buf[1] % 5)) - 1; // -1..3
+            const retain = buf[2] % 2 == 0;
+            const payloads = [_]std.json.Value{
+                .null,
+                .{ .string = topic },
+                .{ .integer = @as(i64, @intCast(buf[3])) },
+                .{ .bool = buf[4] % 2 == 0 },
+            };
+            const payload = payloads[buf[5] % payloads.len];
+
+            _ = ctx.publishTopic(topic, payload, qos, retain) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz subscribeTopic/unsubscribe: never panics, consistent" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._/+";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const topic = name_buf[0..@min(6, @max(1, buf[0] % 8))];
+
+            try ctx.subscribeTopic(topic);
+            try testing.expect(ctx.hasSubscription(topic));
+            ctx.unsubscribe(topic);
+            try testing.expect(!ctx.hasSubscription(topic));
+
+            // Unsubscribe of already-removed is no-op
+            ctx.unsubscribe(topic);
+            try testing.expect(!ctx.hasSubscription(topic));
+        }
+    }.run, .{});
+}
+
+test "fuzz close: never panics at any lifecycle stage" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+
+            const stage: u8 = buf[0] % 4;
+            switch (stage) {
+                0 => ctx.close(), // just after init
+                1 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                2 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.storeMessage("t", .{ .integer = 1 }) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                3 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.subscribeTopic("s") catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                else => unreachable,
+            }
+            ctx.deinit();
         }
     }.run, .{});
 }

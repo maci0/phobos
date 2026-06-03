@@ -497,6 +497,13 @@ pub const App = struct {
         if (cfg.get("spoolman", "server")) |url| {
             self.spoolman_ctx.setServerUrl(url);
         }
+
+        // Wire job_queue transition gcode/delay from [job_queue] section.
+        if (cfg.hasSection("job_queue")) {
+            const tg = cfg.get("job_queue", "job_transition_gcode");
+            const td: f64 = cfg.getFloat("job_queue", "job_transition_delay") catch 0.0;
+            self.job_queue_ctx.setTransitionConfig(tg, td);
+        }
     }
 
     /// Free all owned resources. `io` is required only for the Connections
@@ -809,6 +816,8 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.job_queue.jump",
         "server.job_queue.post_job",
         "server.job_queue.delete_job",
+        "pause_job_queue",
+        "start_job_queue",
         // Announcements
         "server.announcements.list",
         "server.announcements.dismiss",
@@ -852,6 +861,7 @@ test "App.init: dispatcher has exactly the expected methods" {
         // MQTT
         "server.mqtt.publish",
         "server.mqtt.subscribe",
+        "server.mqtt.publish_mqtt_topic",
         // Extensions
         "server.extensions.list",
         "server.extensions.request",

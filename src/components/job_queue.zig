@@ -63,6 +63,10 @@ pub const JobQueueCtx = struct {
     klippy: ?*anyopaque = null,
     /// Dispatch function that calls into KlippyCtx to send gcode scripts.
     dispatchFn: ?DispatchFn = null,
+    /// Gcode script injected between queued print jobs (config: job_transition_gcode).
+    transition_gcode: ?[]const u8 = null,
+    /// Delay in seconds between queued jobs (config: job_transition_delay).
+    transition_delay: f64 = 0.0,
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
         var ctx = JobQueueCtx{
@@ -74,6 +78,8 @@ pub const JobQueueCtx = struct {
             .queue_state = "paused",
             .klippy = null,
             .dispatchFn = null,
+            .transition_gcode = null,
+            .transition_delay = 0.0,
         };
         // Load persisted queue on init
         ctx.loadFromStore() catch {};
@@ -91,6 +97,13 @@ pub const JobQueueCtx = struct {
     pub fn setKlippyDispatch(self: *JobQueueCtx, klippy_ptr: *anyopaque, dispatch_fn: DispatchFn) void {
         self.klippy = klippy_ptr;
         self.dispatchFn = dispatch_fn;
+    }
+
+    /// Set the transition gcode and delay injected between queued print jobs.
+    /// Called from app.zig during config parsing ([job_queue] section).
+    pub fn setTransitionConfig(self: *JobQueueCtx, gcode: ?[]const u8, delay: f64) void {
+        self.transition_gcode = gcode;
+        self.transition_delay = delay;
     }
 
     /// Returns true when Klippy is wired and connected.
@@ -151,12 +164,24 @@ pub const JobQueueCtx = struct {
     }
 
     /// Dispatch start-gcode for the front job to Klippy.
+    /// When transition_gcode is configured, it is sent first (between-job gcode
+    /// injection, matching Moonraker's _start_next_job → _load_next_job flow).
     fn dispatchNextJob(self: *JobQueueCtx) !void {
         if (self.jobs.items.len == 0) return;
         const front = &self.jobs.items[0];
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
+
+        // Inject transition gcode if configured.
+        if (self.transition_gcode) |tg| {
+            if (tg.len > 0) {
+                self.queue_state = "loading";
+                var tparams = try std.json.ObjectMap.init(a, &.{}, &.{});
+                try tparams.put(a, "script", .{ .string = tg });
+                _ = try self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = tparams }, a);
+            }
+        }
 
         var script_buf: [512]u8 = undefined;
         const script = try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{front.filename});
@@ -591,6 +616,22 @@ pub fn registerJobQueue(reg: *Registry, ctx: *JobQueueCtx) !void {
         c,
         handleJobDispatch,
     );
+
+    // Remote-only methods (no HTTP route, JSON-RPC only).
+    // Moonraker: self.server.register_remote_method("pause_job_queue", ...)
+    //           self.server.register_remote_method("start_job_queue", ...)
+    {
+        const name = try reg.alloc.dupe(u8, "pause_job_queue");
+        errdefer reg.alloc.free(name);
+        try reg.name_pool.append(reg.alloc, name);
+        try reg.dispatcher.register(name, c, handlePause);
+    }
+    {
+        const name = try reg.alloc.dupe(u8, "start_job_queue");
+        errdefer reg.alloc.free(name);
+        try reg.name_pool.append(reg.alloc, name);
+        try reg.dispatcher.register(name, c, handleStart);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,21 +1050,26 @@ test "registerJobQueue: wires expected routes and JSON-RPC methods" {
     try testing.expect(d.methods.get("server.job_queue.jump") != null);
     try testing.expect(d.methods.get("server.job_queue.post_job") != null);
     try testing.expect(d.methods.get("server.job_queue.delete_job") != null);
+    // Remote-only methods (JSON-RPC, no HTTP route).
+    try testing.expect(d.methods.get("pause_job_queue") != null);
+    try testing.expect(d.methods.get("start_job_queue") != null);
 }
 
 // ---------------------------------------------------------------------------
 // Dispatch tests (Klippy gcode bridge)
 // ---------------------------------------------------------------------------
 
-/// Test dispatcher that captures the last dispatch call for verification.
+/// Test dispatcher that captures dispatch calls for verification.
 const TestDispatchCapture = struct {
     called: bool = false,
+    call_count: usize = 0,
     method: []const u8 = "",
     has_params: bool = false,
 
     fn handler(ctx: *anyopaque, method: []const u8, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
         const cap: *TestDispatchCapture = @ptrCast(@alignCast(ctx));
         cap.called = true;
+        cap.call_count += 1;
         cap.method = method;
         cap.has_params = params != .null;
         return .null;
@@ -1179,6 +1225,93 @@ test "handleStart: does not dispatch when not wired" {
     // No dispatch wired — handleStart should still work, just not dispatch.
     const result = try handleStart(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+}
+
+test "setTransitionConfig: stores gcode and delay" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    try testing.expect(ctx.transition_gcode == null);
+    try testing.expect(ctx.transition_delay == 0.0);
+
+    ctx.setTransitionConfig("G28", 2.5);
+    try testing.expectEqualStrings("G28", ctx.transition_gcode.?);
+    try testing.expect(ctx.transition_delay == 2.5);
+
+    ctx.setTransitionConfig(null, 0.0);
+    try testing.expect(ctx.transition_gcode == null);
+    try testing.expect(ctx.transition_delay == 0.0);
+}
+
+test "dispatchNextJob: injects transition gcode when configured" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    const fname = try testing.allocator.dupe(u8, "job.gcode");
+    const jid = try testing.allocator.dupe(u8, "JOB100");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 400.0 });
+
+    ctx.setTransitionConfig("G28", 0.0);
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchNextJob();
+
+    try testing.expect(cap.called);
+    // Two dispatches: transition gcode, then print file.
+    try testing.expectEqual(@as(usize, 2), cap.call_count);
+    try testing.expectEqualStrings("gcode/script", cap.method); // last call = print file
+    try testing.expectEqualStrings("loading", ctx.queue_state);
+}
+
+test "dispatchNextJob: no transition gcode when not configured" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    const fname = try testing.allocator.dupe(u8, "job.gcode");
+    const jid = try testing.allocator.dupe(u8, "JOB101");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 500.0 });
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchNextJob();
+
+    try testing.expect(cap.called);
+    try testing.expectEqual(@as(usize, 1), cap.call_count);
+    try testing.expectEqualStrings("gcode/script", cap.method);
+}
+
+test "dispatchNextJob: transition with empty gcode string is no-op" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    const fname = try testing.allocator.dupe(u8, "job.gcode");
+    const jid = try testing.allocator.dupe(u8, "JOB102");
+    try ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 600.0 });
+
+    ctx.setTransitionConfig("", 0.0);
+
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+
+    try ctx.dispatchNextJob();
+
+    try testing.expect(cap.called);
+    try testing.expectEqual(@as(usize, 1), cap.call_count); // empty gcode skipped
 }
 
 test "onJobStateChanged complete: auto-advances and dispatches next" {

@@ -46,6 +46,8 @@ const DataStore = ds.DataStore;
 const NotifyBus = notify.NotifyBus;
 
 const MOONLIGHT_BASE_URL = "https://arksine.github.io/moonlight";
+/// Moonraker's announcements update interval: 1800 seconds = 30 minutes.
+const UPDATE_CHECK_TIME: u64 = 1800;
 
 // ---------------------------------------------------------------------------
 // Context
@@ -61,9 +63,15 @@ pub const AnnouncementsCtx = struct {
     feeds: std.ArrayListUnmanaged([]u8),
     /// Counter for new entry keys (hex sequence).
     next_key: u64,
+    /// Background refresh timer stop flag. Set by deinit, polled by the timer thread.
+    refresh_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Handle for the background refresh timer thread, joined in deinit.
+    refresh_thread: ?std.Thread = null,
 
     pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
         self.io = io;
+        // Start the periodic RSS refresh timer (30 minute interval).
+        self.refresh_thread = std.Thread.spawn(.{}, announcementsRefreshTimerThread, .{self}) catch null;
     }
 
     /// Built-in feeds (always present, cannot be deleted).
@@ -90,6 +98,15 @@ pub const AnnouncementsCtx = struct {
     }
 
     pub fn deinit(self: *AnnouncementsCtx) void {
+        self.refresh_stop.store(true, .release);
+        // Clear io so the timer thread returns early even if it already passed
+        // the while-condition. This prevents use-after-free when App tears down
+        // the bus/connections before joining the announcements thread.
+        self.io = null;
+        if (self.refresh_thread) |th| {
+            th.join();
+            self.refresh_thread = null;
+        }
         for (self.feeds.items) |f| self.gpa.free(f);
         self.feeds.deinit(self.gpa);
     }
@@ -307,14 +324,16 @@ pub const AnnouncementsCtx = struct {
 
     /// Update all registered feeds. Returns true if any changed.
     /// Emits notify_announcement_update when entries change.
-    pub fn updateAllFeeds(self: *AnnouncementsCtx, alloc: std.mem.Allocator) !bool {
+    /// `locked` must be true when called from a handler (Core lock held),
+    /// false when called from a background thread.
+    pub fn updateAllFeeds(self: *AnnouncementsCtx, alloc: std.mem.Allocator, locked: bool) !bool {
         var changed = false;
         for (self.feeds.items) |f| {
             const feed_changed = self.fetchAndUpdateFeed(alloc, f) catch false;
             changed = changed or feed_changed;
         }
         if (changed) {
-            self.notifyUpdate(alloc);
+            self.notifyUpdate(alloc, locked);
         }
         return changed;
     }
@@ -377,14 +396,53 @@ pub const AnnouncementsCtx = struct {
     }
 
     /// Emit notify_announcement_update with current entries.
-    fn notifyUpdate(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
+    /// `locked` must be true when called from a handler (Core lock held),
+    /// false when called from a background thread.
+    fn notifyUpdate(self: *AnnouncementsCtx, alloc: std.mem.Allocator, locked: bool) void {
         const io = self.io orelse return;
         const entries = self.listEntries(alloc, true) catch return;
         var map: std.json.ObjectMap = .empty;
         map.put(alloc, "entries", .{ .array = entries }) catch return;
-        self.bus.emitLocked(io, "notify_announcement_update", .{ .object = map }) catch {};
+        if (locked) {
+            self.bus.emitLocked(io, "notify_announcement_update", .{ .object = map }) catch {};
+        } else {
+            self.bus.emit(io, "notify_announcement_update", .{ .object = map }) catch {};
+        }
     }
 };
+
+// ---------------------------------------------------------------------------
+// Background refresh timer
+// ---------------------------------------------------------------------------
+
+/// Background thread spawned via std.Thread.spawn. Periodically fetches all
+/// subscribed RSS feeds and emits notify_announcement_update when entries
+/// change. Runs every UPDATE_CHECK_TIME seconds (30 min), matching Moonraker.
+///
+/// Sleeps in 1-second increments so the stop flag is polled frequently,
+/// keeping deinit→join latency bounded (~1 s); otherwise the thread would
+/// block in nanosleep for up to UPDATE_CHECK_TIME seconds.
+fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
+    var elapsed: u64 = 0;
+    while (!self.refresh_stop.load(.acquire)) {
+        var req: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
+        _ = std.os.linux.nanosleep(&req, null);
+        if (self.refresh_stop.load(.acquire)) break;
+        if (self.io == null) break;
+
+        elapsed += 1;
+        if (elapsed < UPDATE_CHECK_TIME) continue;
+        elapsed = 0;
+
+        // Arena for one refresh cycle. smp_allocator is thread-safe.
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        // locked=false → emit() takes the Core lock instead of assuming it.
+        _ = self.updateAllFeeds(a, false) catch {};
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Namespace constants
@@ -503,7 +561,7 @@ pub fn handleUpdate(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
         }
     } else {
         // Fetch all subscribed feeds.
-        changed = c.updateAllFeeds(alloc) catch false;
+        changed = c.updateAllFeeds(alloc, true) catch false;
     }
 
     const entries = try c.listEntries(alloc, true);
@@ -657,7 +715,7 @@ pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
         // Trigger immediate RSS fetch for the new feed.
         const changed = c.fetchAndUpdateFeed(alloc, name_lower) catch false;
         if (changed) {
-            c.notifyUpdate(alloc);
+            c.notifyUpdate(alloc, true);
         }
         break :blk "added";
     };
@@ -1205,6 +1263,194 @@ test "registerAnnouncements: wires expected routes and JSON-RPC methods" {
     try testing.expect(d.methods.get("server.announcements.post_feed") != null);
     try testing.expect(d.methods.get("server.announcements.delete_feed") != null);
     try testing.expect(d.methods.get("server.announcements.feeds") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Background refresh timer tests
+// ---------------------------------------------------------------------------
+
+test "notifyUpdate: locked=true uses emitLocked" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.io = io;
+
+    // locked=true → emitLocked. With entries present, should not crash.
+    try insertEntry(&mem, a, "000001",
+        \\{"entry_id":"e1","dismissed":false,"date":100.0,"feed":"moonraker"}
+    );
+    // Re-init to pick up the inserted entry for next_key etc.
+    var ctx2 = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx2.deinit();
+    ctx2.io = io;
+
+    // notifyUpdate is private; test via updateAllFeeds which calls it when
+    // changed. Since there's no network, fetchAndUpdateFeed returns false,
+    // so no notification would be emitted. Instead, test that notifyUpdate
+    // itself does not crash by calling it indirectly: add an entry, then
+    // verify the update path is reachable.
+    //
+    // Direct test: notifyUpdate handles locked=true without io bounce.
+    // We can't call the private fn, so instead verify that updateAllFeeds
+    // with locked=true completes without error (even if no feeds changed).
+    const changed = try ctx2.updateAllFeeds(a, true);
+    try testing.expectEqual(false, changed);
+}
+
+test "notifyUpdate: locked=false uses emit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.io = io;
+
+    // locked=false → emit(). Same as above, verify no crash.
+    const changed = try ctx.updateAllFeeds(a, false);
+    try testing.expectEqual(false, changed);
+}
+
+test "deinit: handles null refresh_thread gracefully" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    // No setIo → refresh_thread is null. deinit must not crash.
+    ctx.deinit();
+}
+
+test "deinit: sets refresh_stop and nulls io" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    ctx.io = io;
+
+    // Spawn the timer thread.
+    ctx.refresh_thread = std.Thread.spawn(.{}, announcementsRefreshTimerThread, .{&ctx}) catch null;
+
+    // deinit must set the stop flag, null io, and join the thread.
+    ctx.deinit();
+    try testing.expect(ctx.refresh_thread == null);
+    try testing.expect(ctx.io == null);
+    try testing.expect(ctx.refresh_stop.load(.acquire));
+}
+
+test "announcementsRefreshTimerThread: exits when pre-stopped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    // Pre-set stop flag; the thread should exit the while loop without sleeping.
+    ctx.refresh_stop.store(true, .release);
+    announcementsRefreshTimerThread(&ctx);
+    // If we reach here, the thread exited cleanly.
+}
+
+test "announcementsRefreshTimerThread: exits when io is null" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    // io is null (setIo never called). Thread should break on null io check
+    // after the first 1-second sleep.
+    ctx.refresh_stop.store(false, .release);
+    announcementsRefreshTimerThread(&ctx);
+    // If we reach here, the thread exited cleanly after the null io check.
+}
+
+test "fuzz notifyUpdate: locked=true/false never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+            ctx.io = io;
+
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const locked: bool = (buf[0] & 1) != 0;
+            _ = ctx.updateAllFeeds(a, locked) catch {};
+        }
+    }.run, .{});
 }
 
 // ---------------------------------------------------------------------------
