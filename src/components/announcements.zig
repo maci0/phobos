@@ -14,10 +14,10 @@
 //!   namespace "announcements" — key per entry (hex sequence), value = entry object
 //!   namespace "announcement_feeds" — key "feeds", value = JSON array of feed names
 //!
-//! NOTE: Network RSS feed fetching is not implemented in this slice. The
-//! endpoints for feed management and listing operate on stored entries/feeds
-//! only. The response shapes are faithful to Moonraker; a comment marks where
-//! real RSS fetch would be triggered.
+//! NOTE: RSS feed fetching from Moonlight (arksine.github.io/moonlight) is
+//! implemented via `fetchAndUpdateFeed`. ETag-based conditional GET is not yet
+//! supported (Zig 0.16 FetchResult doesn't expose response headers).
+//! Background periodic refresh requires a timer thread (see TODO in app.zig).
 //!
 //! Announcement entry shape (matches announcements.py):
 //!   entry_id, url, title, description, priority, date,
@@ -39,10 +39,13 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
+const rss = @import("rss.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
 const NotifyBus = notify.NotifyBus;
+
+const MOONLIGHT_BASE_URL = "https://arksine.github.io/moonlight";
 
 // ---------------------------------------------------------------------------
 // Context
@@ -204,6 +207,183 @@ pub const AnnouncementsCtx = struct {
         for (self.feeds.items) |f| try arr.append(.{ .string = f });
         return arr;
     }
+
+    /// Fetch RSS feed from Moonlight and store new entries.
+    /// Returns true if any entries were added or removed.
+    /// Skips fetch when io is null (no network, e.g. tests or dump-api).
+    pub fn fetchAndUpdateFeed(self: *AnnouncementsCtx, alloc: std.mem.Allocator, feed_name: []const u8) !bool {
+        const io = self.io orelse return false;
+
+        // Build URL: https://arksine.github.io/moonlight/assets/{feed}.xml
+        var url_buf: [256]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buf, MOONLIGHT_BASE_URL ++ "/assets/{s}.xml", .{feed_name});
+
+        // Arena for HTTP round-trip allocations.
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var client: std.http.Client = .{ .allocator = aa, .io = io };
+        defer client.deinit();
+
+        var aw: std.Io.Writer.Allocating = .init(aa);
+        defer aw.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url },
+            .response_writer = &aw.writer,
+        }) catch return false;
+
+        if (result.status != .ok) return false;
+
+        const body = aw.toOwnedSlice() catch return false;
+
+        // Parse RSS XML.
+        var parser = rss.RssParser.init(alloc);
+        const items = parser.parse(body, feed_name) catch return false;
+        defer {
+            for (items) |it| {
+                alloc.free(it.guid);
+                alloc.free(it.title);
+                alloc.free(it.link);
+                alloc.free(it.description);
+                alloc.free(it.category);
+            }
+            alloc.free(items);
+        }
+
+        // Extract prefix from first item's guid (first two path segments).
+        var prefix: ?[]const u8 = null;
+        if (items.len > 0) {
+            const g = items[0].guid;
+            if (std.mem.indexOfScalar(u8, g, '/')) |first| {
+                if (std.mem.indexOfScalar(u8, g[first + 1 ..], '/')) |second| {
+                    prefix = g[0 .. first + 1 + second + 1];
+                }
+            }
+        }
+
+        var changed = false;
+
+        // Collect valid entry ids for pruning.
+        var valid_ids: std.ArrayList([]const u8) = .empty;
+        defer valid_ids.deinit(alloc);
+
+        for (items) |item| {
+            try valid_ids.append(alloc, item.guid);
+
+            // Check if entry already exists by guid.
+            if (self.hasEntry(alloc, item.guid)) continue;
+
+            // Build entry JSON.
+            var entry_obj: std.json.ObjectMap = .empty;
+            try entry_obj.put(alloc, "entry_id", .{ .string = item.guid });
+            try entry_obj.put(alloc, "url", if (item.link.len > 0) .{ .string = item.link } else .null);
+            try entry_obj.put(alloc, "title", if (item.title.len > 0) .{ .string = item.title } else .null);
+            try entry_obj.put(alloc, "description", if (item.description.len > 0) .{ .string = item.description } else .null);
+            try entry_obj.put(alloc, "priority", if (item.category.len > 0) .{ .string = item.category } else .null);
+            try entry_obj.put(alloc, "date", .{ .float = item.date });
+            try entry_obj.put(alloc, "dismissed", .{ .bool = false });
+            try entry_obj.put(alloc, "date_dismissed", .null);
+            try entry_obj.put(alloc, "dismiss_wake", .null);
+            try entry_obj.put(alloc, "source", .{ .string = "moonlight" });
+            try entry_obj.put(alloc, "feed", .{ .string = feed_name });
+
+            var key_buf: [7]u8 = undefined;
+            const key = try self.nextKeyStr(&key_buf);
+            _ = self.store.insertItem(alloc, ns_entries, key, .{ .object = entry_obj }) catch continue;
+            changed = true;
+        }
+
+        // Prune entries whose prefix matches but are no longer in the feed.
+        if (prefix) |p| {
+            if (self.pruneByPrefix(alloc, p, valid_ids.items)) {
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    /// Update all registered feeds. Returns true if any changed.
+    /// Emits notify_announcement_update when entries change.
+    pub fn updateAllFeeds(self: *AnnouncementsCtx, alloc: std.mem.Allocator) !bool {
+        var changed = false;
+        for (self.feeds.items) |f| {
+            const feed_changed = self.fetchAndUpdateFeed(alloc, f) catch false;
+            changed = changed or feed_changed;
+        }
+        if (changed) {
+            self.notifyUpdate(alloc);
+        }
+        return changed;
+    }
+
+    /// Check if an entry with the given guid exists in the store.
+    fn hasEntry(self: *AnnouncementsCtx, alloc: std.mem.Allocator, entry_id: []const u8) bool {
+        const ns_obj = self.store.getNamespace(alloc, ns_entries) catch return false;
+        switch (ns_obj) {
+            .object => |obj| {
+                for (obj.values()) |*entry| {
+                    const eid = switch (entry.*) {
+                        .object => |o| switch (o.get("entry_id") orelse .null) {
+                            .string => |s| s,
+                            else => continue,
+                        },
+                        else => continue,
+                    };
+                    if (std.mem.eql(u8, eid, entry_id)) return true;
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    /// Prune entries whose entry_id starts with `prefix` but are not in `valid_ids`.
+    fn pruneByPrefix(self: *AnnouncementsCtx, alloc: std.mem.Allocator, prefix: []const u8, valid_ids: []const []const u8) bool {
+        var changed = false;
+        const ns_obj = self.store.getNamespace(alloc, ns_entries) catch return false;
+        switch (ns_obj) {
+            .object => |obj| {
+                var it = obj.iterator();
+                while (it.next()) |kv| {
+                    const entry = kv.value_ptr.*;
+                    const eid = switch (entry) {
+                        .object => |o| switch (o.get("entry_id") orelse .null) {
+                            .string => |s| s,
+                            else => continue,
+                        },
+                        else => continue,
+                    };
+                    if (!std.mem.startsWith(u8, eid, prefix)) continue;
+
+                    var still_valid = false;
+                    for (valid_ids) |vid| {
+                        if (std.mem.eql(u8, vid, eid)) {
+                            still_valid = true;
+                            break;
+                        }
+                    }
+                    if (!still_valid) {
+                        _ = self.store.deleteItem(alloc, ns_entries, kv.key_ptr.*) catch {};
+                        changed = true;
+                    }
+                }
+            },
+            else => {},
+        }
+        return changed;
+    }
+
+    /// Emit notify_announcement_update with current entries.
+    fn notifyUpdate(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
+        const io = self.io orelse return;
+        const entries = self.listEntries(alloc, true) catch return;
+        var map: std.json.ObjectMap = .empty;
+        map.put(alloc, "entries", .{ .array = entries }) catch return;
+        self.bus.emitLocked(io, "notify_announcement_update", .{ .object = map }) catch {};
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -296,9 +476,8 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
 }
 
 /// POST /server/announcements/update
-/// NOTE: Real RSS fetch is not implemented. Returns current stored entries.
-/// A production implementation would fetch each feed's XML from the network
-/// (see RssFeed._fetch_moonlight in announcements.py) and parse it.
+/// Fetches RSS feeds for the requested subscriptions (or all if none specified).
+/// Returns current entries and whether any were added/modified.
 pub fn handleUpdate(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
     const subs_raw = getStrList(params, "subscriptions");
@@ -314,14 +493,24 @@ pub fn handleUpdate(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
         }
     }
 
-    // NOTE: No real RSS fetch in this slice.
-    // In a full implementation: for each subscription, fetch the feed XML from
-    // MOONLIGHT_URL/assets/{name}.xml, parse entries, store new ones.
+    var changed = false;
+    if (subs_raw.len > 0) {
+        // Fetch only the requested feeds.
+        for (subs_raw) |sv| {
+            const name = sv.string;
+            const feed_changed = c.fetchAndUpdateFeed(alloc, name) catch false;
+            changed = changed or feed_changed;
+        }
+    } else {
+        // Fetch all subscribed feeds.
+        changed = c.updateAllFeeds(alloc) catch false;
+    }
+
     const entries = try c.listEntries(alloc, true);
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "entries", .{ .array = entries });
-    try obj.put(alloc, "modified", .{ .bool = false });
+    try obj.put(alloc, "modified", .{ .bool = changed });
     return .{ .object = obj };
 }
 
@@ -464,9 +653,12 @@ pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
         errdefer c.gpa.free(owned);
         try c.feeds.append(c.gpa, owned);
         c.saveFeeds(alloc);
-        // NOTE: In a full implementation, an RSS fetch for the new feed would
-        // be triggered here (see RssFeed.update_entries in announcements.py).
-        // notify_announcement_update would also be emitted if entries changed.
+
+        // Trigger immediate RSS fetch for the new feed.
+        const changed = c.fetchAndUpdateFeed(alloc, name_lower) catch false;
+        if (changed) {
+            c.notifyUpdate(alloc);
+        }
         break :blk "added";
     };
 
@@ -597,28 +789,21 @@ pub fn registerAnnouncements(reg: *Registry, ctx: *AnnouncementsCtx) !void {
 }
 
 /// Multi-verb dispatch for /server/announcements/feed.
-/// Used for both JSON-RPC post_feed/delete_feed (same handler, method name selects)
-/// and for HTTP POST/DELETE routes.
+/// Both HTTP and JSON-RPC transports inject `_method` into params
+/// (HTTP: line 338 of http_transport.zig; JSON-RPC: line 120 of jsonrpc.zig)
+/// so we can branch on the verb, matching Moonraker's `_handle_feed_request`
+/// which checks `web_request.get_request_type()`.
 fn handleFeedDispatchMulti(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    // Heuristic for HTTP dispatch: if called from HTTP POST route, delegate
-    // to post_feed; HTTP DELETE route delegates to delete_feed.
-    // For JSON-RPC: post_feed and delete_feed method names both point here.
-    // Since we can't distinguish in this sync handler, use: if the handler
-    // is called with params that have "action" context we could distinguish,
-    // but we don't have that. Instead, we try post first (add), and if the
-    // feed already exists or we need delete semantics, we rely on the caller
-    // using the right JSON-RPC method.
-    //
-    // In practice: HTTP routes are wired per-verb so:
-    //   POST  /server/announcements/feed → calls this → tries add
-    //   DELETE /server/announcements/feed → calls this → tries remove
-    //
-    // Since both go through the same handler and we can't tell verb,
-    // we check for "action" hint. No such hint → default to post_feed.
-    //
-    // For a cleaner solution the registry would need verb-aware dispatch.
-    // This matches the Moonraker behavior where the same _handle_feed_request
-    // branches on req_type.
+    const verb: []const u8 = switch (params) {
+        .object => |o| if (o.get("_method")) |v| switch (v) {
+            .string => |s| s,
+            else => "POST",
+        } else "POST",
+        else => "POST",
+    };
+    if (std.mem.eql(u8, verb, "DELETE")) {
+        return handleDeleteFeed(ctx, params, alloc);
+    }
     return handlePostFeed(ctx, params, alloc);
 }
 
@@ -1217,6 +1402,88 @@ test "fuzz handleUpdate: never panics" {
             _ = handleUpdate(@ptrCast(&ctx), p.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "handleFeedDispatchMulti: POST dispatches to post_feed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    const params = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"name":"newfeed","_method":"POST"}
+    , .{});
+    const result = try handleFeedDispatchMulti(@ptrCast(&ctx), params.value, a);
+    try testing.expectEqualStrings("newfeed", result.object.get("feed").?.string);
+    try testing.expectEqualStrings("added", result.object.get("action").?.string);
+}
+
+test "handleFeedDispatchMulti: DELETE dispatches to delete_feed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    // First add a feed via POST
+    const p1 = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"name":"to_delete","_method":"POST"}
+    , .{});
+    _ = try handleFeedDispatchMulti(@ptrCast(&ctx), p1.value, a);
+
+    // Then delete it via DELETE
+    const p2 = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"name":"to_delete","_method":"DELETE"}
+    , .{});
+    const result = try handleFeedDispatchMulti(@ptrCast(&ctx), p2.value, a);
+    try testing.expectEqualStrings("to_delete", result.object.get("feed").?.string);
+    try testing.expectEqualStrings("removed", result.object.get("action").?.string);
+}
+
+test "handleFeedDispatchMulti: missing _method defaults to POST" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    const params = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"name":"defaulttest"}
+    , .{});
+    const result = try handleFeedDispatchMulti(@ptrCast(&ctx), params.value, a);
+    try testing.expectEqualStrings("defaulttest", result.object.get("feed").?.string);
+    try testing.expectEqualStrings("added", result.object.get("action").?.string);
 }
 
 test "fuzz handleFeedDispatchMulti: never panics" {

@@ -69,12 +69,27 @@ pub const SpoolmanCtx = struct {
     /// App's event loop is running (e.g. from httpServer setup).
     pub fn setIo(self: *SpoolmanCtx, io: std.Io) void {
         self.io = io;
+        // Emit current connection state now that the event loop is live.
+        self.emitSpoolmanStatusChanged();
     }
 
     /// Set the spoolman server URL. Called when the config file is parsed
     /// (setConfig) so that handleProxy can forward requests.
+    /// Emits notify_spoolman_status_changed when io is live.
     pub fn setServerUrl(self: *SpoolmanCtx, url: ?[]const u8) void {
         self.server_url = url;
+        self.emitSpoolmanStatusChanged();
+    }
+
+    /// Emit notify_spoolman_status_changed with the current connected state.
+    fn emitSpoolmanStatusChanged(self: *SpoolmanCtx) void {
+        const io = self.io orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var payload: std.json.ObjectMap = .empty;
+        payload.put(a, "spoolman_connected", .{ .bool = self.server_url != null }) catch return;
+        self.bus.emitLocked(io, notify.names.spoolman_status_changed, .{ .object = payload }) catch {};
     }
 
     fn loadSpoolId(self: *SpoolmanCtx) ?i64 {
@@ -236,6 +251,13 @@ fn errNotAvailable(alloc: std.mem.Allocator, use_v2: bool) anyerror!std.json.Val
 /// Spoolman HTTP service and returns the response. When server_url is null
 /// (no [spoolman] server in config), returns the Moonraker-shaped
 /// "not connected" error.
+///
+/// Supported params (mirrors spoolman.py):
+///   request_method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" (required)
+///   path: "/v1/..." (required, must start with /v1/)
+///   query: "key=val&..." (optional, appended as ?query to the URL)
+///   body: JSON object (optional, becomes the JSON request body)
+///   use_v2_response: bool (optional, wraps in {response, error, response_headers})
 pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
 
@@ -253,15 +275,30 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
     // No server configured → return "not connected" error.
     const server_url = c.server_url orelse return errNotAvailable(alloc, use_v2);
 
-    // Need a live io for the HTTP client; absent during tests / dump-api.
-    const io = c.io orelse return errNotAvailable(alloc, use_v2);
-
     // Parse HTTP method from the request_method string.
     const method = std.meta.stringToEnum(std.http.Method, request_method_str) orelse return error.InvalidParams;
 
-    // Build the full URL from server_url + path.
+    // Reject GET requests with body before io check (parameter validation).
+    if (method == .GET) {
+        if (params == .object) {
+            if (params.object.get("body")) |body_val| {
+                if (body_val != .null) return error.InvalidParams;
+            }
+        }
+    }
+
+    // Need a live io for the HTTP client; absent during tests / dump-api.
+    const io = c.io orelse return errNotAvailable(alloc, use_v2);
+
+    // Extract optional query string (mirrors spoolman.py).
+    const query = getOptStr(params, "query");
+
+    // Build the full URL from server_url + path [+ ?query].
     var url_buf: [2048]u8 = undefined;
-    const full_url = std.fmt.bufPrint(&url_buf, "{s}{s}", .{ server_url, path }) catch return errNotAvailable(alloc, use_v2);
+    const full_url = if (query) |q|
+        std.fmt.bufPrint(&url_buf, "{s}{s}?{s}", .{ server_url, path, q }) catch return errNotAvailable(alloc, use_v2)
+    else
+        std.fmt.bufPrint(&url_buf, "{s}{s}", .{ server_url, path }) catch return errNotAvailable(alloc, use_v2);
 
     // Serialize the body parameter to JSON if present.
     var body_json_buf: [4096]u8 = undefined;
@@ -325,6 +362,10 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
         var obj: std.json.ObjectMap = .empty;
         try obj.put(alloc, "response", response_val);
         try obj.put(alloc, "error", .null);
+        // response_headers: use empty map (fetch API doesn't expose headers).
+        // The Python reference includes dict(resp.headers.items()); a future
+        // switch to client.request() would enable full header capture.
+        try obj.put(alloc, "response_headers", .{ .object = .empty });
         return .{ .object = obj };
     }
 
@@ -630,6 +671,110 @@ test "registerSpoolman: wires expected routes and JSON-RPC methods" {
 }
 
 // --- Fuzz tests ---
+
+test "handleProxy: query parameter is accepted (not-connected path)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"query\": \"key=value\"}");
+    // No server_url → returns ServiceUnavailable, but query param is valid.
+    try testing.expectError(error.ServiceUnavailable, handleProxy(@ptrCast(&ctx), params, a));
+}
+
+test "handleProxy: GET with body returns InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    // Set server_url so we get past the "not connected" check and hit the GET+body check.
+    ctx.setServerUrl("http://localhost:7912");
+
+    const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"body\": {\"key\": 1}}");
+    try testing.expectError(error.InvalidParams, handleProxy(@ptrCast(&ctx), params, a));
+}
+
+test "handleProxy: v2 error shape includes response and error keys" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"use_v2_response\": true}");
+    const result = try handleProxy(@ptrCast(&ctx), params, a);
+    // v2 error shape: {"response": null, "error": {"status_code": 503, ...}}
+    try testing.expect(result.object.get("response") != null);
+    try testing.expectEqual(.null, result.object.get("response").?);
+    try testing.expect(result.object.get("error") != null);
+    try testing.expect(result.object.get("error").? == .object);
+}
+
+test "handleProxy: query with special characters is accepted" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"query\": \"a=1&b=2\"}");
+    try testing.expectError(error.ServiceUnavailable, handleProxy(@ptrCast(&ctx), params, a));
+}
+
+test "setServerUrl: updates status and does not crash without io" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    // Verify state tracks server_url.
+    try testing.expect(ctx.server_url == null);
+    ctx.setServerUrl("http://localhost:7912");
+    try testing.expectEqualStrings("http://localhost:7912", ctx.server_url.?);
+    try testing.expect(ctx.server_url != null);
+
+    // Status handler reflects the change.
+    const status = try handleStatus(@ptrCast(&ctx), .null, a);
+    try testing.expectEqual(true, status.object.get("spoolman_connected").?.bool);
+}
+
+test "setServerUrl: clearing url marks disconnected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    ctx.setServerUrl("http://localhost:7912");
+    ctx.setServerUrl(null);
+    try testing.expect(ctx.server_url == null);
+
+    const status = try handleStatus(@ptrCast(&ctx), .null, a);
+    try testing.expectEqual(false, status.object.get("spoolman_connected").?.bool);
+}
 
 test "fuzz handleSpoolId: never panics on arbitrary params" {
     try testing.fuzz({}, struct {
