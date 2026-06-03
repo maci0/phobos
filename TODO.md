@@ -13,7 +13,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~82%** (est., weighted by API item count per component).
+- **Overall implementation progress: ~83%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
   (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
   notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
@@ -27,16 +27,20 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   v4l2 devices: key ordering, field shape, version field, mask rule all fixed for
   conformance parity.
   MqttCtx refactored: init/deinit pattern, getOptAny return-switch fix, port overflow fix.
-  spoolman notify deadlock fixed (emit→emitLocked).
+  spoolman: notify deadlock fixed (emit→emitLocked), notify_spoolman_status_changed
+  emission on setIo/setServerUrl, query param support in handleProxy, GET+body rejection.
+  announcements: real RSS fetch from Moonlight via fetchAndUpdateFeed + rss.zig parser,
+  pruneByPrefix removes stale entries, handleFeedDispatchMulti branches on _method param,
+  handlePostFeed triggers immediate fetch on new feed, notify_announcement_update emission.
   job_queue notify_job_queue_changed emission wired.
   printer.* proxied methods with full gcode/script param building.
   device_power, wled, td1 API components registered with in-memory state tracking.
   Golden cases pruned: removed server.mqtt.status/server.analysis.stats (not in Moonraker API).
   **Fuzz test gap closed:** every public JSON-RPC handler now has both a unit test
-  AND a fuzz test. Added 17 fuzz tests across machine (reboot/shutdown/services/sudo/
+  AND a fuzz test. Added 19 fuzz tests across machine (reboot/shutdown/services/sudo/
   peripherals), update_manager (update_moonraker/klipper/system/full), wled (strips),
   webcam (delete/test/validate), announcements (list_feeds/delete_feed/update/
-  feed_dispatch_multi), power (devices).
+  feed_dispatch_multi), power (devices), rss (parser).
 - **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - **Conformance oracle: 54/54 events pass normalized equality** (conformance/replay.py
@@ -44,8 +48,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **~932 pass / 2 skip / 0 fail** (~155 fuzz) with `-Dwith_lmdb=true`;
-  **~917 pass / 5 skip / 0 fail** (~153 fuzz) with `-Dwith_lmdb=false`.
+- Tests: **~972 pass / 2 skip / 0 fail** (~167 fuzz) with `-Dwith_lmdb=true`;
+  **~957 pass / 5 skip / 0 fail** (~165 fuzz) with `-Dwith_lmdb=false`.
   The 2 skips (lmdb) are update_manager git tests (need a real repo).
   The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
   Note: `zig build test` uses `--listen=-` protocol which may hang on this
@@ -163,10 +167,12 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   structure_compare, files_compare), v4l2_devices mask rule, normalizeWarnings fix.
 - API drift scanner + coverage gate (tools/api_scanner/, 67 pytest tests).
 - Notification emission verified for: power, file_manager, update_manager, spoolman
-  (P0 deadlock fixed: emit→emitLocked), job_queue (notify_job_queue_changed),
+  (P0 deadlock fixed: emit→emitLocked; notify_spoolman_status_changed on setIo/setServerUrl),
+  job_queue (notify_job_queue_changed),
   **history** (notify_history_changed on delete_job),
-  **announcements** (notify_announcement_dismissed on dismiss; update+wake helpers
-  ready), **webcam** (notify_webcams_changed on POST/DELETE; helpers + setIo plumbed).
+  **announcements** (notify_announcement_dismissed on dismiss;
+  notify_announcement_update on RSS fetch; notify_announcement_wake helper ready),
+  **webcam** (notify_webcams_changed on POST/DELETE; helpers + setIo plumbed).
 - **OctoPrint compat** — live printer_state() tracks Klippy readiness + print_stats
   state; handleServer reports dynamic safemode; handleJob/handlePrinter report live
   OctoPrint states (Offline/Operational/Printing/Paused/Error) with correct state
@@ -241,7 +247,14 @@ _norm_structure_compare array item masking (Python).
 - **power/wled/td1** — state tracked, real GPIO/network/WLED control stubbed.
 - **mqtt** — endpoints return "not configured"; no MQTT client (in-memory
   message store + subscription tracking for future client integration).
-- **spoolman/announcements** — operate on stored data; no real spoolman HTTP / RSS fetch.
+- **spoolman/announcements** — announcements: real RSS fetch from Moonlight
+  (arksine.github.io/moonlight) via fetchAndUpdateFeed using rss.zig parser,
+  pruneByPrefix removes stale entries, notify_announcement_update on changes,
+  handleFeedDispatchMulti branches on _method param for proper verb dispatch;
+  spoolman: real HTTP proxy with query param support, GET+body rejection,
+  notify_spoolman_status_changed on setIo/setServerUrl via emitLocked.
+  ETag not yet supported (Zig 0.16 FetchResult no response headers).
+  Background periodic refresh timers not yet wired (see TODO in app.zig).
 - **file_manager metadata** — record shape correct; deep gcode parsing (slicer/layers/
   thumbnails) now implements findObjectHeight (6 slicer patterns + G1 Z fallback),
   filament_weight_total (7 patterns), nozzle_diameter (3 patterns), thumbnail
@@ -274,9 +287,10 @@ _norm_structure_compare array item masking (Python).
   return "not configured" with in-memory message store + subscription tracking.
 - **power/wled/td1** — real GPIO sysfs/wiringPi, network WLED control, TD1 UART.
   Current: in-memory state tracking with notification emission, stubbed I/O.
-- **spoolman/announcements** — real HTTP proxy to spoolman, RSS feed fetching with
-  ETag/If-Modified-Since, background refresh timers.
-  Current: CRUD on stored data, notification emission on mutations.
+- **spoolman/announcements** — ETag/If-Modified-Since conditional GET for RSS,
+  background periodic refresh timer for Moonlight feeds.
+  Current: real RSS fetch works (no ETag), notify_announcement_update +
+  notify_spoolman_status_changed emissions wire
 - **Klippy integration test** — full Unix-socket round-trip with a real Klippy (or
   Klippy simulator) to validate the bridge end-to-end. The bridge skeleton
   (connect/identify/subscribe/reconnect/proxy) is complete but untested against
