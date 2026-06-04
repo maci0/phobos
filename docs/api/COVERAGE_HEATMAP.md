@@ -10,9 +10,9 @@
 | 🟠 update_manager | 10/10 | 10/10 | 2/2 | 100% | 35% | 35% |
 | 🟠 wled | 6/6 | 7/7 | 0/0 | 100% | 35% | 35% |
 | 🟢 button | 0/0 | 0/0 | 1/1 | 100% | 80% | 80% |
-| 🟠 machine | 12/12 | 12/12 | 2/2 | 100% | 40% | 40% |
+| 🟠 machine | 12/12 | 12/12 | 2/2 | 100% | 45% | 45% |
 | 🟡 klippy_apis | 6/6 | 6/6 | 0/0 | 100% | 75% | 75% |
-| 🟡 job_queue | 5/5 | 8/8 | 1/1 | 100% | 80% | 80% |
+| 🟢 job_queue | 5/5 | 8/8 | 1/1 | 100% | 90% | 90% |
 | 🟢 announcements | 5/5 | 6/6 | 3/3 | 100% | 90% | 90% |
 | 🟡 webcam | 3/3 | 3/3 | 1/1 | 100% | 80% | 80% |
 | 🟢 file_manager | 10/10 | 10/10 | 1/1 | 100% | 90% | 90% |
@@ -31,7 +31,7 @@
 | 🟢 websockets | 2/2 | 2/2 | 0/0 | 100% | 95% | 95% |
 | 🟢 zeroconf | 1/1 | 0/0 | 0/0 | 100% | 95% | 95% |
 
-> **Overall weighted progress: 82%**
+> **Overall weighted progress: 86%**
 >
 > - **Surface**: API endpoint/method/notification shape coverage
 > - **Depth**: how much of the internal implementation is real (not stubbed)

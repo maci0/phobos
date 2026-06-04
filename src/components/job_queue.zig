@@ -67,6 +67,11 @@ pub const JobQueueCtx = struct {
     transition_gcode: ?[]const u8 = null,
     /// Delay in seconds between queued jobs (config: job_transition_delay).
     transition_delay: f64 = 0.0,
+    /// Background thread for transition_delay timer (nil when delay is zero or
+    /// no timer is active). Pattern follows proc_stat in machine.zig.
+    delay_thread: ?std.Thread = null,
+    /// Atomic flag that cancels any running transition_delay timer.
+    delay_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
         var ctx = JobQueueCtx{
@@ -80,6 +85,8 @@ pub const JobQueueCtx = struct {
             .dispatchFn = null,
             .transition_gcode = null,
             .transition_delay = 0.0,
+            .delay_thread = null,
+            .delay_cancel = std.atomic.Value(bool).init(false),
         };
         // Load persisted queue on init
         ctx.loadFromStore() catch {};
@@ -112,8 +119,29 @@ pub const JobQueueCtx = struct {
     }
 
     pub fn deinit(self: *JobQueueCtx) void {
+        // Cancel any running delay timer and join before freeing memory.
+        // Null out io / klippy state first so the timer thread can observe
+        // the early-exit guard even if it already read the cancel flag.
+        self.delay_cancel.store(true, .release);
+        self.klippy = null;
+        self.dispatchFn = null;
+        self.io = null;
+        if (self.delay_thread) |th| {
+            th.join();
+            self.delay_thread = null;
+        }
         for (self.jobs.items) |*j| j.deinit(self.gpa);
         self.jobs.deinit(self.gpa);
+        self.jobs = .empty;
+    }
+
+    /// Cancel a running transition_delay timer (no-op when no timer is active).
+    fn cancelDelayTimer(self: *JobQueueCtx) void {
+        self.delay_cancel.store(true, .release);
+        if (self.delay_thread) |th| {
+            th.join();
+            self.delay_thread = null;
+        }
     }
 
     /// Called by JobStateCtx when a job state transition is detected.
@@ -129,9 +157,10 @@ pub const JobQueueCtx = struct {
                 }
                 if (self.jobs.items.len > 0) {
                     self.queue_state = "ready";
-                    // Auto-advance: dispatch next job to Klippy.
+                    // Auto-advance: dispatch next job to Klippy after
+                    // transition_delay (if configured) or immediately.
                     if (self.canDispatch()) {
-                        self.dispatchNextJob() catch {};
+                        self.scheduleNextJobDispatch() catch {};
                     }
                 } else {
                     self.queue_state = "paused";
@@ -144,6 +173,7 @@ pub const JobQueueCtx = struct {
             .@"error" => {
                 if (self.jobs.items.len > 0) {
                     self.queue_state = "paused";
+                    self.cancelDelayTimer();
                     var arena = std.heap.ArenaAllocator.init(self.gpa);
                     defer arena.deinit();
                     self.saveToStore(arena.allocator());
@@ -153,6 +183,7 @@ pub const JobQueueCtx = struct {
             .cancelled => {
                 if (self.jobs.items.len > 0) {
                     self.queue_state = "paused";
+                    self.cancelDelayTimer();
                     var arena = std.heap.ArenaAllocator.init(self.gpa);
                     defer arena.deinit();
                     self.saveToStore(arena.allocator());
@@ -160,6 +191,27 @@ pub const JobQueueCtx = struct {
                 }
             },
             else => {},
+        }
+    }
+
+    /// Schedule the next job dispatch after transition_delay (or immediately
+    /// when delay is zero).  When delay > 0 a background timer thread is
+    /// spawned that sleeps for delay seconds, then calls dispatchNextJob and
+    /// emits a queue_changed notification once the dispatch is complete.
+    /// The timer is cancelled by cancelDelayTimer (called on pause/abort/error).
+    fn scheduleNextJobDispatch(self: *JobQueueCtx) !void {
+        if (self.transition_delay > 0) {
+            // Cancel any previously running timer.
+            self.cancelDelayTimer();
+            self.delay_cancel.store(false, .release);
+            self.queue_state = "loading";
+            self.delay_thread = std.Thread.spawn(.{}, transitionDelayCallback, .{self}) catch |e| {
+                self.delay_thread = null;
+                return e;
+            };
+        } else {
+            // No delay — dispatch inline.
+            try self.dispatchNextJob();
         }
     }
 
@@ -271,6 +323,45 @@ pub const JobQueueCtx = struct {
         }
     }
 };
+
+/// Background thread callback for transition_delay timer.  Sleeps in
+/// 1-second intervals (or the remaining delay, whichever is shorter),
+/// checking the cancel flag between each.  This ensures cancelDelayTimer
+/// / deinit can join promptly (matching the proc_stat timer pattern).
+/// Exits early when the cancel flag is set (pause/abort/deinit).
+fn transitionDelayCallback(self: *JobQueueCtx) void {
+    if (self.transition_delay <= 0) {
+        self.delay_thread = null;
+        return;
+    }
+
+    var remaining: f64 = self.transition_delay;
+    while (remaining > 0) : (remaining -= 1.0) {
+        const chunk_ns: i64 = if (remaining >= 1.0)
+            @as(i64, 1_000_000_000)
+        else
+            @intFromFloat(remaining * 1_000_000_000.0);
+        var req: std.os.linux.timespec = .{
+            .sec = @divTrunc(chunk_ns, 1_000_000_000),
+            .nsec = @rem(chunk_ns, 1_000_000_000),
+        };
+        _ = std.os.linux.nanosleep(&req, null);
+
+        if (self.delay_cancel.load(.acquire)) {
+            self.delay_thread = null;
+            return;
+        }
+    }
+
+    // Guard: if deinit nulled these fields, bail out.
+    if (self.io == null or self.dispatchFn == null) {
+        self.delay_thread = null;
+        return;
+    }
+
+    _ = self.dispatchNextJob() catch {};
+    self.delay_thread = null;
+}
 
 // ---------------------------------------------------------------------------
 // Namespace constants
@@ -524,6 +615,7 @@ pub fn handleJobDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
 pub fn handlePause(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
     c.queue_state = "paused";
+    c.cancelDelayTimer();
     // Dispatch pause gcode to Klippy when connected.
     if (c.canDispatch()) {
         c.dispatchPause() catch {};
@@ -538,9 +630,10 @@ pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
     if (c.jobs.items.len > 0) {
         c.queue_state = "ready";
-        // Dispatch start gcode for the front job to Klippy when connected.
+        // Dispatch start gcode for the front job to Klippy (respects
+        // transition_delay when configured).
         if (c.canDispatch()) {
-            c.dispatchNextJob() catch {};
+            c.scheduleNextJobDispatch() catch {};
         }
     } else {
         c.queue_state = "paused";
@@ -1053,6 +1146,239 @@ test "registerJobQueue: wires expected routes and JSON-RPC methods" {
     // Remote-only methods (JSON-RPC, no HTTP route).
     try testing.expect(d.methods.get("pause_job_queue") != null);
     try testing.expect(d.methods.get("start_job_queue") != null);
+}
+
+// ---------------------------------------------------------------------------
+// Transition delay timer tests
+// ---------------------------------------------------------------------------
+
+test "setTransitionConfig: stores delay and gcode" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    ctx.setTransitionConfig(null, 2.5);
+    try testing.expectEqual(2.5, ctx.transition_delay);
+    try testing.expectEqual(null, ctx.transition_gcode);
+
+    ctx.setTransitionConfig("G28", 0.1);
+    try testing.expectEqual(0.1, ctx.transition_delay);
+    try testing.expectEqualStrings("G28", ctx.transition_gcode.?);
+}
+
+test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var cap = TestDispatchCapture{};
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    ctx.setTransitionConfig(null, 0.0);
+
+    _ = ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 100.0,
+    }) catch unreachable;
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    try ctx.scheduleNextJobDispatch();
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("gcode/script", cap.method);
+}
+
+test "cancelDelayTimer: safe no-op when no timer active" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    // Safe to call when no timer was ever started.
+    ctx.cancelDelayTimer();
+    try testing.expectEqual(null, ctx.delay_thread);
+
+    // Safe to call multiple times.
+    ctx.cancelDelayTimer();
+    try testing.expectEqual(null, ctx.delay_thread);
+}
+
+test "transition_delay: handleStart respects delay config" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var cap = TestDispatchCapture{};
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    // delay=0 → immediate dispatch
+    ctx.setTransitionConfig(null, 0.0);
+
+    _ = ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 100.0,
+    }) catch unreachable;
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    const result = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    // Immediate dispatch since delay == 0
+    try testing.expect(cap.called);
+}
+
+test "transition_delay: handlePause cancels running delay timer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var cap = TestDispatchCapture{};
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    // Small delay so we can cancel mid-flight.
+    ctx.setTransitionConfig(null, 0.05);
+
+    _ = ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 100.0,
+    }) catch unreachable;
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    // Start with delay → spawns timer thread.
+    _ = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("loading", ctx.queue_state);
+
+    // Pause immediately — cancel the timer.
+    const result = try handlePause(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
+}
+
+test "transition_delay: timer completes and dispatches" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var cap = TestDispatchCapture{};
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    ctx.setTransitionConfig(null, 0.01);
+
+    _ = ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 100.0,
+    }) catch unreachable;
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    // Spawn the delay timer thread.
+    try ctx.scheduleNextJobDispatch();
+
+    // Wait for the timer thread to complete.
+    if (ctx.delay_thread) |th| {
+        th.join();
+        ctx.delay_thread = null;
+    }
+
+    // The dispatch should have fired after the timer expired.
+    try testing.expect(cap.called);
+    try testing.expectEqualStrings("gcode/script", cap.method);
+}
+
+test "deinit: cancels delay timer gracefully" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var cap = TestDispatchCapture{};
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    ctx.setTransitionConfig(null, 0.2);
+
+    _ = ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 100.0,
+    }) catch unreachable;
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    // Start timer then immediately deinit — must not hang or crash.
+    ctx.scheduleNextJobDispatch() catch {};
+    ctx.deinit();
 }
 
 // ---------------------------------------------------------------------------

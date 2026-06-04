@@ -18,6 +18,19 @@ const http_transport = @import("../http_transport.zig");
 const methods = @import("../core/methods.zig");
 const notify = @import("../server/notify.zig");
 const connections_mod = @import("../server/connections.zig");
+const MachineCtx = @import("../components/machine.zig").MachineCtx;
+
+/// Mock command runner for integration tests: returns fake service state for
+/// "systemctl show" calls and no-op for everything else, so tests never
+/// accidentally run real systemctl/reboot/shutdown on the host.
+fn mockRunCmd(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+    _ = ctx;
+    if (argv.len >= 3 and std.mem.eql(u8, argv[1], "show")) {
+        const out = try gpa.dupe(u8, "active\nrunning\n");
+        return .{ .stdout = out, .stderr = &.{} };
+    }
+    return .{ .stdout = &.{}, .stderr = &.{} };
+}
 
 pub const TestServer = struct {
     threaded: *std.Io.Threaded,
@@ -52,6 +65,9 @@ pub const TestServer = struct {
         self.app = try alloc.create(app_mod.App);
         errdefer alloc.destroy(self.app);
         self.app.* = try app_mod.App.init(alloc);
+
+        // Prevent tests from accidentally running real systemctl/reboot/shutdown.
+        self.app.setMachineRunCmdFn(mockRunCmd, @ptrCast(self));
 
         self.srv = try alloc.create(http_transport.Server);
         errdefer alloc.destroy(self.srv);

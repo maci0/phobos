@@ -552,3 +552,31 @@ test "fuzz handleSendEvent: never panics on arbitrary params" {
         }
     }.run, .{});
 }
+
+test "fuzz handleRegisterRemoteMethod: never panics on arbitrary params" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = ExtensionsCtx.init(a);
+            defer ctx.deinit();
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "null",
+                "{}",
+                "{\"method_name\": \"test.method\"}",
+                "{\"method_name\": \"\"}",
+                "{\"method_name\": 42}",
+            };
+            const p = std.json.parseFromSlice(
+                std.json.Value,
+                a,
+                strs[buf[0] % strs.len],
+                .{},
+            ) catch return;
+            _ = handleRegisterRemoteMethod(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}

@@ -124,7 +124,15 @@ const known_sub_states = [_][]const u8{ "running", "dead", "exited", "plugged", 
 /// machine.sudo.password) and the live io used for reading /proc & /sys. io is
 /// wired after the event loop starts (setIo); handlers fall back to empty
 /// shapes when io is absent (pure unit tests).
+///
+/// run_cmd_fn, when non-null, replaces std.process.run calls in handlers
+/// (services.*, reboot, shutdown) so integration tests can intercept systemctl
+/// invocations without touching the host.
+
 pub const MachineCtx = struct {
+    pub const RunCmdResult = struct { stdout: []u8, stderr: []u8 };
+    pub const RunCmdFn = *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!RunCmdResult;
+
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
     bus: ?*NotifyBus = null,
@@ -142,6 +150,11 @@ pub const MachineCtx = struct {
     /// Populated on first access; tracks starts/stops/restarts requested via
     /// the service action handlers.
     services: std.StringHashMap(ServiceEntry) = std.StringHashMap(ServiceEntry).init(std.heap.smp_allocator),
+    /// Mockable command-runner. When non-null, service / reboot / shutdown
+    /// handlers call this instead of std.process.run. Opaque pointer is
+    /// typically the test harness. Caller owns returned stdout and stderr.
+    run_cmd_fn: ?RunCmdFn = null,
+    run_cmd_ctx: ?*anyopaque = null,
 
     pub const ServiceEntry = struct {
         active_state: []const u8,
@@ -179,6 +192,26 @@ pub const MachineCtx = struct {
         if (self.bus != null) {
             self.proc_stat_thread = std.Thread.spawn(.{}, procStatTimerThread, .{self}) catch null;
         }
+    }
+
+    /// Set a mock command-runner for integration tests. When non-null,
+    /// handler functions call fn(ctx, alloc, argv) instead of std.process.run.
+    pub fn setRunCmdFn(self: *MachineCtx, run_cmd_fn: RunCmdFn, ctx: *anyopaque) void {
+        self.run_cmd_fn = run_cmd_fn;
+        self.run_cmd_ctx = ctx;
+    }
+
+    /// Run a command via the mock (when set) or std.process.run.
+    fn runCmd(self: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8) !RunCmdResult {
+        if (self.run_cmd_fn) |f| {
+            return f(self.run_cmd_ctx.?, alloc, argv);
+        }
+        if (self.io) |io| {
+            // Build a temporary []const []const u8 for std.process.run.
+            const result = try std.process.run(alloc, io, .{ .argv = argv });
+            return .{ .stdout = result.stdout, .stderr = result.stderr };
+        }
+        return .{ .stdout = &.{}, .stderr = &.{} };
     }
 
     pub fn deinit(self: *MachineCtx) void {
@@ -1082,8 +1115,8 @@ fn uptimeSeconds() f64 {
 /// io is null (unit-test path).
 pub fn handleReboot(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.io) |io| {
-        _ = runSudoCmd(io, ctx.sudo_password, "systemctl reboot");
+    if (ctx.io != null and ctx.run_cmd_fn == null) {
+        _ = runSudoCmd(ctx.io.?, ctx.sudo_password, "systemctl reboot");
     }
     return .{ .string = "ok" };
 }
@@ -1093,8 +1126,8 @@ pub fn handleReboot(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator
 /// io is null (unit-test path).
 pub fn handleShutdown(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.io) |io| {
-        _ = runSudoCmd(io, ctx.sudo_password, "systemctl poweroff");
+    if (ctx.io != null and ctx.run_cmd_fn == null) {
+        _ = runSudoCmd(ctx.io.?, ctx.sudo_password, "systemctl poweroff");
     }
     return .{ .string = "ok" };
 }
@@ -1138,15 +1171,15 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
     const name = try getStr(params, "service");
     if (!isServiceAllowed(name)) return error.Forbidden;
 
-    if (ctx.io) |io| {
+    if (ctx.io != null or ctx.run_cmd_fn != null) {
         // Run systemctl <start|stop|restart> --no-block <service>.
         const action_str = @tagName(action);
         var argv: [4][]const u8 = .{ "systemctl", action_str, "--no-block", name };
-        _ = std.process.run(alloc, io, .{ .argv = &argv }) catch {};
+        _ = ctx.runCmd(alloc, &argv) catch {};
 
         // Read the actual service state from systemd.
         var show_argv: [6][]const u8 = .{ "systemctl", "show", "-p", "ActiveState,SubState", "--value", name };
-        const show_result = std.process.run(alloc, io, .{ .argv = &show_argv }) catch {
+        const show_result = ctx.runCmd(alloc, &show_argv) catch {
             return .{ .string = "ok" };
         };
         defer alloc.free(show_result.stdout);
@@ -1172,7 +1205,7 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
             svc_obj.put(alloc, "sub_state", .{ .string = new_sub }) catch {};
             var outer: std.json.ObjectMap = .empty;
             outer.put(alloc, name, .{ .object = svc_obj }) catch {};
-            _ = bus.emitLocked(io, notify.names.service_state_changed, .{ .object = outer }) catch {};
+            _ = bus.emitLocked(ctx.io.?, notify.names.service_state_changed, .{ .object = outer }) catch {};
         }
 
         return .{ .string = "ok" };
@@ -1882,6 +1915,73 @@ test "service handlers: start/stop/restart update state; disallowed Forbidden" {
     const mqtt_ok = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"mqtt\"}"), a);
     try testing.expectEqualStrings("ok", mqtt_ok.string);
     try testing.expect(c.services.get("mqtt") != null);
+}
+
+test "runCmd: delegates to mock when set, returns empty when no io" {
+    const MockCtx = struct {
+        captured_argv: ?[]const []const u8 = null,
+        fn runCmd(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.captured_argv = argv;
+            const out = try gpa.dupe(u8, "mock_stdout");
+            return .{ .stdout = out, .stderr = &.{} };
+        }
+    };
+    var mock = MockCtx{};
+    var c = MachineCtx.init(testing.allocator, null, null);
+    defer c.deinit();
+
+    // Without mock and without io → returns empty.
+    {
+        const r = try c.runCmd(testing.allocator, &.{ "echo", "hello" });
+        defer testing.allocator.free(r.stdout);
+        defer testing.allocator.free(r.stderr);
+        try testing.expectEqualStrings("", r.stdout);
+        try testing.expectEqualStrings("", r.stderr);
+    }
+
+    // With mock → delegates.
+    c.setRunCmdFn(MockCtx.runCmd, @ptrCast(&mock));
+    {
+        const r = try c.runCmd(testing.allocator, &.{ "systemctl", "show", "-p", "ActiveState", "--value", "klipper" });
+        defer testing.allocator.free(r.stdout);
+        defer testing.allocator.free(r.stderr);
+        try testing.expectEqualStrings("mock_stdout", r.stdout);
+        try testing.expectEqualStrings("", r.stderr);
+        try testing.expect(mock.captured_argv != null);
+        try testing.expectEqual(@as(usize, 6), mock.captured_argv.?.len);
+        try testing.expectEqualStrings("systemctl", mock.captured_argv.?[0]);
+    }
+}
+
+test "service handler with runCmd mock: uses mock output for state" {
+    const MockCtx = struct {
+        call_count: usize = 0,
+        fn runCmd(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.call_count += 1;
+            if (argv.len >= 2 and std.mem.eql(u8, argv[1], "show")) {
+                const out = try gpa.dupe(u8, "inactive\ndead\n");
+                return .{ .stdout = out, .stderr = &.{} };
+            }
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    var mock = MockCtx{};
+    var c = MachineCtx.init(testing.allocator, null, null);
+    defer c.deinit();
+    c.setRunCmdFn(MockCtx.runCmd, @ptrCast(&mock));
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const ok = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+    try testing.expectEqualStrings("ok", ok.string);
+    try testing.expectEqual(@as(usize, 2), mock.call_count);
+    try testing.expect(c.services.get("klipper") != null);
+    try testing.expectEqualStrings("inactive", c.services.get("klipper").?.active_state);
+    try testing.expectEqualStrings("dead", c.services.get("klipper").?.sub_state);
 }
 
 test "buildServiceState: reflects tracked service states" {

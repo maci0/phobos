@@ -13,7 +13,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~84%** (est., weighted by API item count per component).
+- **Overall implementation progress: ~86%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
   (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
   notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
@@ -34,8 +34,9 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   handlePostFeed triggers immediate fetch on new feed, notify_announcement_update emission,
   background periodic refresh timer (30 min, atomically stoppable, 1 s join latency).
   job_queue notify_job_queue_changed emission wired.
-  job_queue depth up from 70%→80%: transition_gcode injection, transition_delay
-  storage, loading queue state, pause_job_queue/start_job_queue remote methods registered.
+  job_queue depth up from 70%→90%: transition_gcode injection, transition_delay
+  storage, loading queue state, pause_job_queue/start_job_queue remote methods registered,
+  transition_delay timer thread with atomic cancel flag and thread join.
   mqtt depth: pub API (publishTopic/subscribeTopic/unsubscribe/close), setters
   (setInstanceName/setClientId/setDefaultQos), instance_name/client_id/default_qos
   config, retain/timeout parsed, server.mqtt.publish_mqtt_topic remote method,
@@ -55,8 +56,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1002 pass / 2 skip / 0 fail** (171 fuzz) with `-Dwith_lmdb=true`;
-  **987 pass / 5 skip / 0 fail** (169 fuzz) with `-Dwith_lmdb=false`.
+- Tests: **1012 pass / 2 skip / 0 fail** (174 fuzz) with `-Dwith_lmdb=true`;
+  **997 pass / 5 skip / 0 fail** (172 fuzz) with `-Dwith_lmdb=false`.
   The 2 skips (lmdb) are update_manager git tests (need a real repo).
   The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
   Note: `zig build test` uses `--listen=-` protocol which may hang on this
@@ -244,7 +245,9 @@ _norm_structure_compare array item masking (Python).
   allow-list validation works, real `systemctl start/stop/restart --no-block`
   calls wired, in-memory state tracking. Sudo: password stored and validated via
   real `sudo -S -l` child process; sudo_info reports real `sudo_access` when
-  `check_access=true`.
+  `check_access=true`. `RunCmdFn` mock injection pattern (`setRunCmdFn`/`runCmd`)
+  for testability without host systemctl; TestServer wires mock returning fake
+  service state (2 dedicated unit tests).
 - **update_manager** — git status (version, hash, branch, dirty, detached,
   commits_behind) live via real `git` child process; `handleRefresh` runs live
   `git fetch origin --prune` for git_repo sources; `handleUpdate*` runs live
@@ -282,8 +285,8 @@ _norm_structure_compare array item masking (Python).
 - **job_queue** — ~~transition_gcode/delay, remote methods~~ DONE: transition_gcode
   injection via dispatchNextJob, transition_delay storage, "loading" queue state,
   pause_job_queue/start_job_queue JSON-RPC remote methods registered, [job_queue]
-  config parsing wired in app.zig. Remaining: event-loop delay timer for
-  transition_delay (P3, requires timer callback infrastructure).
+  config parsing wired in app.zig, transition_delay timer thread with atomic
+  cancel flag and thread join (1-second polling, 32 unit + 8 fuzz tests).
 
 ### P2 — misc
 - ~~Read host/port from config in `main()`.~~ Done: `-c`/`--config`, `extractBindAddr`, 5 tests.
@@ -293,8 +296,8 @@ _norm_structure_compare array item masking (Python).
   Done: phobos daemon RSS = 5.4 MB (VmSize 7992 kB, 1 thread) vs stock Moonraker
   ~80-150 MB (Python asyncio, multiple threads).
 - ~~**Fuzz test gap:** every public JSON-RPC handler now has a unit test AND a fuzz test.~~
-  Done: 17 fuzz tests added across machine (11), update_manager (4), wled (1), webcam (3),
-  announcements (4), power (1). Total: ~932 tests (~155 fuzz).
+  Done: 18 fuzz tests added across machine (11), update_manager (4), wled (1), webcam (3),
+  announcements (4), power (1), extensions (1). Total: ~1012 tests (~174 fuzz).
 
 ### P3 — remaining depth gaps (non-blocking, requires hardware/external services)
 - **mqtt** — real MQTT client connection, TLS, keepalive, reconnect. Current: endpoints
@@ -305,6 +308,7 @@ _norm_structure_compare array item masking (Python).
   `server.mqtt.publish_mqtt_topic` registered. 47 tests (9 fuzz).
 - **power/wled/td1** — real GPIO sysfs/wiringPi, network WLED control, TD1 UART.
   Current: in-memory state tracking with notification emission, stubbed I/O.
+  (machine.zig `RunCmdFn` mock pattern reusable here for GPIO/network test doubles.)
 - **spoolman/announcements** — ETag/If-Modified-Since conditional GET for RSS.
   Current: real RSS fetch works (no ETag) with background periodic refresh timer
   (30 min, atomically stoppable); notify_announcement_update +

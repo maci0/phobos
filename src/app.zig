@@ -506,6 +506,12 @@ pub const App = struct {
         }
     }
 
+    /// Set a mock command-runner on the machine component so tests don't
+    /// exec real systemctl/reboot/shutdown commands on the host.
+    pub fn setMachineRunCmdFn(self: *App, run_cmd_fn: MachineCtx.RunCmdFn, ctx: *anyopaque) void {
+        self.machine_ctx.setRunCmdFn(run_cmd_fn, ctx);
+    }
+
     /// Free all owned resources. `io` is required only for the Connections
     /// registry teardown which needs an Io-aware mutex; pass a threaded io or
     /// use `deinitNoIo` in pure unit tests where no event loop is running.
