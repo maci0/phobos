@@ -329,6 +329,9 @@ pub const KlippyCtx = struct {
     /// updates and Klippy state changes for /api/ state reporting.
     octoprint: ?*@import("octoprint_compat.zig").OctoPrintCtx = null,
 
+    /// Set by stop() to signal the background klippyTask to exit.
+    stopping: bool = false,
+
     pub fn init(
         gpa: std.mem.Allocator,
         bus: *notify.NotifyBus,
@@ -349,6 +352,11 @@ pub const KlippyCtx = struct {
         self.read_buf.deinit(self.gpa);
         self.state = .disconnected;
         self.klippy_info = null;
+        // Null out cross-component pointers so any late emitDisconnected
+        // calls from a still-running task become no-ops.
+        self.octoprint = null;
+        self.job_state = null;
+        self.history = null;
     }
 
     /// True when Klippy is connected and ready for requests.
@@ -397,40 +405,59 @@ pub const KlippyCtx = struct {
         _ = io.async(klippyTask, .{self});
     }
 
+    /// Signal the background klippyTask to exit and close any active stream.
+    /// Safe to call multiple times. After this returns, the background task
+    /// will exit its loop at the next sleep/error boundary; call
+    /// `threaded.deinit()` to join it.
+    pub fn stop(self: *KlippyCtx, io: std.Io) void {
+        self.stopping = true;
+        // Shutdown the read side to interrupt any blocking readv before
+        // taking stream_mutex (the background task holds stream_mutex
+        // while blocked in readv).  Only do this from stop(), never from
+        // the reconnect error path inside klippyTask itself.
+        if (self.stream) |*s| {
+            s.shutdown(io, .recv) catch {};
+        }
+        self.closeStream(io);
+    }
+
     // -----------------------------------------------------------------------
     // Background task: connect → handshake → read loop → reconnect
     // -----------------------------------------------------------------------
 
     fn klippyTask(self: *KlippyCtx) void {
         const io = self.io.?;
-        while (true) {
+        while (!self.stopping) {
             _ = self.setState(.connecting);
             self.connectAndHandshake() catch {
                 _ = self.setState(.disconnected);
                 self.emitDisconnected(io);
                 self.closeStream(io);
-                // Sleep ~1s between reconnect attempts using a simple delay.
+                // Check stopping before reconnect sleep.
+                if (self.stopping) break;
+                // Sleep ~1s between reconnect attempts.
                 const delay: std.Io.Duration = .{ .nanoseconds = 1_000_000_000 };
                 std.Io.sleep(self.io.?, delay, .real) catch {};
+                if (self.stopping) break;
                 continue;
             };
-            // Handshake succeeded — enter read loop.
-            self.readLoop() catch {
-                _ = self.setState(.disconnected);
-                self.emitDisconnected(io);
-                self.closeStream(io);
-                self.klippy_identified = false;
-                self.klippy_started = false;
-                continue;
-            };
+            // Handshake succeeded — the connection is ready for request().
+            // We deliberately do NOT run a persistent readLoop here: holding
+            // stream_mutex across a blocking readFrame would deadlock with
+            // request(), which also needs stream_mutex to send requests and
+            // read responses. Spontaneous Klippy notifications (status
+            // updates, gcode responses) are drained inline by request().
+            return;
         }
     }
 
     fn closeStream(self: *KlippyCtx, io: std.Io) void {
         if (self.stream) |*s| {
             s.close(io);
-            self.stream = null;
         }
+        self.stream_mutex.lock(io) catch {};
+        defer self.stream_mutex.unlock(io);
+        self.stream = null;
     }
 
     // -----------------------------------------------------------------------
@@ -453,7 +480,7 @@ pub const KlippyCtx = struct {
 
         // Read the identify_response.
         const identify_payload = try self.readFrame(io);
-        _ = identify_payload;
+        defer self.gpa.free(identify_payload);
         self.klippy_identified = true;
 
         // Phase 2: poll server.info until state != startup.
@@ -464,11 +491,14 @@ pub const KlippyCtx = struct {
         var rid_buf: [32]u8 = undefined;
         const sub_id = self.nextReqId(&rid_buf);
         const sub_frame = try buildSubscribeRequest(
-            \\{"toolhead","extruder","heater_bed","print_stats"}
+            \\["toolhead","extruder","heater_bed","print_stats"]
         , sub_id, &sub_buf);
         try self.writeFrame(io, sub_frame);
         // Ignore the subscribe response — it's an ack.
-        _ = try self.readFrame(io);
+        {
+            const sub_resp = try self.readFrame(io);
+            defer self.gpa.free(sub_resp);
+        }
 
         // Phase 4: register remote methods so Klippy pushes
         // process_status_update and process_gcode_response back to us.
@@ -476,14 +506,19 @@ pub const KlippyCtx = struct {
             const rm_id = self.nextReqId(&rid_buf);
             const rm_frame = try buildRegisterMethodRequest("process_status_update", rm_id, &sub_buf);
             try self.writeFrame(io, rm_frame);
-            _ = try self.readFrame(io);
+            const rm_resp = try self.readFrame(io);
+            defer self.gpa.free(rm_resp);
         }
         {
             const rm_id = self.nextReqId(&rid_buf);
             const rm_frame = try buildRegisterMethodRequest("process_gcode_response", rm_id, &sub_buf);
             try self.writeFrame(io, rm_frame);
-            _ = try self.readFrame(io);
+            const rm_resp = try self.readFrame(io);
+            defer self.gpa.free(rm_resp);
         }
+
+        // Handshake fully complete — mark ready so isConnected() gates open.
+        _ = self.setState(.ready);
     }
 
     /// Poll server.info every 250ms up to 100 times until Klippy exits startup.
@@ -497,14 +532,15 @@ pub const KlippyCtx = struct {
             try self.writeFrame(io, info_frame);
 
             const info_payload = try self.readFrame(io);
+            defer self.gpa.free(info_payload);
             const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, info_payload, .{});
             defer parsed.deinit();
 
-            if (parseKlippyInfoResponse(parsed.value)) |info| {
+            const result = parsed.value.object.get("result") orelse return error.IdentifyFailed;
+            if (parseKlippyInfoResponse(result)) |info| {
                 self.klippy_info = info;
                 switch (info.state) {
                     .ready => {
-                        _ = self.setState(.ready);
                         self.klippy_started = true;
                         return;
                     },
@@ -536,12 +572,15 @@ pub const KlippyCtx = struct {
     /// dispatching to avoid deadlock with the Core lock.
     fn readLoop(self: *KlippyCtx) !void {
         const io = self.io.?;
-        while (true) {
+        while (!self.stopping) {
             const payload = blk: {
                 try self.stream_mutex.lock(io);
-                defer self.stream_mutex.unlock(io);
+                defer {
+                    self.stream_mutex.unlock(io);
+                }
                 break :blk try self.readFrame(io);
             };
+            defer self.gpa.free(payload);
             // Dispatch outside stream_mutex so notification emission can
             // acquire the Core lock without risk of deadlock.
             try self.dispatchFrame(io, payload);
@@ -584,13 +623,12 @@ pub const KlippyCtx = struct {
     }
 
     /// Send an empty acknowledgment response for a remote-method call.
+    /// Caller MUST hold stream_mutex.
     fn sendAck(self: *KlippyCtx, io: std.Io, id: std.json.Value) !void {
         var ack_buf: [128]u8 = undefined;
         const id_str = if (id == .string) id.string else "0";
         const ack = try std.fmt.bufPrint(&ack_buf,
             "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}", .{id_str});
-        try self.stream_mutex.lock(io);
-        defer self.stream_mutex.unlock(io);
         try self.writeFrame(io, ack);
     }
 
@@ -733,9 +771,24 @@ pub const KlippyCtx = struct {
 
     /// Write a framed message to the Klippy socket.
     fn writeFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
-        var framed: [frame_max + 1]u8 = undefined;
-        if (payload.len + 1 > framed.len) return error.FrameTooLarge;
-        const frame = frameEncode(payload, &framed);
+        // Use a small stack buffer for the common case; fall back to the
+        // heap for oversized payloads. The 20 MiB frame_max is the read
+        // buffer limit, not a typical write size.
+        var frame_buf: [4096]u8 = undefined;
+        const frame: []const u8 = if (payload.len + 1 <= frame_buf.len) blk: {
+            @memcpy(frame_buf[0..payload.len], payload);
+            frame_buf[payload.len] = FrameEnd;
+            break :blk frame_buf[0 .. payload.len + 1];
+        } else blk: {
+            if (payload.len + 1 > frame_max) return error.FrameTooLarge;
+            const f = try self.gpa.alloc(u8, payload.len + 1);
+            errdefer self.gpa.free(f);
+            @memcpy(f[0..payload.len], payload);
+            f[payload.len] = FrameEnd;
+            break :blk f;
+        };
+        defer if (frame.ptr != &frame_buf) self.gpa.free(frame);
+
         var wbuf: [4096]u8 = undefined;
         var w = self.stream.?.writer(io, &wbuf);
         try w.interface.writeAll(frame);
@@ -764,9 +817,11 @@ pub const KlippyCtx = struct {
                 },
                 else => |e| return e,
             };
+            // Copy payload before consume() shifts the underlying buffer.
+            const owned = try self.gpa.dupe(u8, payload);
             r.interface.tossBuffered();
             self.read_buf.consume(payload.len + 1);
-            return payload;
+            return owned;
         }
     }
 
@@ -812,7 +867,10 @@ pub const KlippyCtx = struct {
         // Read frames until the matching response arrives.
         while (true) {
             const payload = try self.readFrame(io);
-            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
+            defer self.gpa.free(payload);
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch |e| {
+                return e;
+            };
 
             // Check whether this is our response (matching id).
             if (parsed.value.object.get("id")) |id_val| {
@@ -840,12 +898,13 @@ pub const KlippyCtx = struct {
 
             // Not our response — dispatch inline (caller holds Core lock).
             if (parsed.value.object.get("method")) |method_val| {
-                const has_id = if (parsed.value.object.get("id")) |id_val| id_val != .null else false;
-                if (has_id) {
-                    try self.dispatchRemoteMethod(io, method_val.string, parsed.value);
-                    try self.sendAck(io, parsed.value.object.get("id").?);
-                } else {
-                    try self.dispatchNotification(io, method_val.string, parsed.value);
+                try self.dispatchInlineLocked(io, method_val.string, parsed.value);
+                // If the frame has an id it is a Klippy-initiated remote method
+                // call (not a notification); ack it so Klippy does not retransmit.
+                if (parsed.value.object.get("id")) |id_val| {
+                    if (id_val != .null) {
+                        try self.sendAck(io, id_val);
+                    }
                 }
             }
 
@@ -873,6 +932,7 @@ pub const KlippyCtx = struct {
         if (self.server_info) |info| {
             info.klippy_connected = self.isConnected();
             info.klippy_state = @tagName(self.state);
+            info.klippy_path = self.uds_path;
         }
         return true;
     }

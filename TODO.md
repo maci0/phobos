@@ -13,8 +13,13 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~86%** (est., weighted by API item count per component).
+- **Overall implementation progress: ~87%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
+  **KlippySim fixes:** emergency_stop handling added to readLoop; gcode/script
+  RESTART/FIRMWARE_RESTART now triggers simulator disconnect (matching real Klippy
+  restart behavior). Unskipped the restart/firmware_restart integration test;
+  added emergency_stop end-to-end test. handlePublishPrefixed handler added to mqtt
+  with full test suite (prefix/prefixed param, 10 tests + fuzz).
   (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
   notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
   full ButtonCtx with addButton/sendEvent/emitButtonEvent/notification_sent guard.
@@ -56,8 +61,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1012 pass / 2 skip / 0 fail** (174 fuzz) with `-Dwith_lmdb=true`;
-  **997 pass / 5 skip / 0 fail** (172 fuzz) with `-Dwith_lmdb=false`.
+- Tests: **1062 pass / 2 skip / 0 fail** (175 fuzz) with `-Dwith_lmdb=true`;
+  **~1009 pass / 5 skip / 0 fail** (~173 fuzz) with `-Dwith_lmdb=false`.
   The 2 skips (lmdb) are update_manager git tests (need a real repo).
   The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
   Note: `zig build test` uses `--listen=-` protocol which may hang on this
@@ -210,9 +215,12 @@ Klippy protocol exchange.
 - `websocket_connections` live count from Connections registry.
 
 **Still needed:**
-- Real Klippy integration test (Unix socket round-trip with a real Klippy or Klippy
-  simulator).
-- ~~Deep `print_stats` status parsing~~ — DONE: print_duration/filament_used are
+- Real Klippy integration test (Unix socket round-trip with a real Klippy).
+  KlippySim (`src/testutil/klippy_sim.zig`) covers the protocol: handshake,
+  gcode/script, pause_resume/*, emergency_stop, RESTART/FIRMWARE_RESTART
+  disconnect, status updates, gcode responses, and shutdown. End-to-end
+  integration tests (server.zig) validate printer.* + emergency_stop.
+  ~~Deep `print_stats` status parsing~~ — DONE: print_duration/filament_used are
   already consumed by history.zig's finishJob() via the prev_ps/new_ps pass-through
   (matching Python architecture), and job_state.zig handles all state transitions.
 

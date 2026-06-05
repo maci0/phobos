@@ -24,6 +24,7 @@ pub const database_component = @import("components/database.zig");
 pub const klippy_connection = @import("components/klippy_connection.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
+pub const testutil_klippy_sim = @import("testutil/klippy_sim.zig");
 pub const app = @import("app.zig");
 pub const oracle_normalize = @import("oracle/normalize.zig");
 pub const oracle_replay = @import("oracle/replay.zig");

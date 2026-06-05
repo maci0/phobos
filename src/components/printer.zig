@@ -7,6 +7,7 @@
 //!   POST /printer/print/cancel      → printer.print.cancel
 //!   POST /printer/restart           → printer.restart
 //!   POST /printer/firmware_restart  → printer.firmware_restart
+//!   POST /printer/emergency_stop   → printer.emergency_stop
 //!
 //! In real Moonraker these endpoints are registered by `klippy_apis.py`
 //! (see components/klippy_apis.py:56-71) and ultimately funnel a gcode/restart
@@ -66,19 +67,35 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
 
-    // Extract filename from params; build the gcode command.
-    const filename: []const u8 = if (params == .object)
+    // Extract and sanitize filename (Moonraker: strip leading /, escape ").
+    var filename: []const u8 = if (params == .object)
         if (params.object.get("filename")) |v|
             if (v == .string) v.string else ""
         else
             ""
     else
         "";
+    if (filename.len == 0) return error.InvalidParams;
+    if (filename[0] == '/') filename = filename[1..];
+    // Escape embedded double-quotes: " → \"
+    const escaped = if (std.mem.indexOfScalar(u8, filename, '"') != null) blk: {
+        var buf = try alloc.alloc(u8, filename.len + 16);
+        var i: usize = 0;
+        for (filename) |c| {
+            if (c == '"') {
+                if (i + 2 > buf.len) buf = try alloc.realloc(buf, buf.len * 2);
+                buf[i] = '\\';
+                i += 1;
+            }
+            if (i >= buf.len) buf = try alloc.realloc(buf, buf.len * 2);
+            buf[i] = c;
+            i += 1;
+        }
+        break :blk buf[0..i];
+    } else filename;
+
     var script_buf: [512]u8 = undefined;
-    const script = if (filename.len > 0)
-        try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{filename})
-    else
-        return error.InvalidParams;
+    const script = try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped});
 
     // Build params: {"script": "<script>"}
     var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
@@ -135,6 +152,15 @@ pub fn handleFirmwareRestart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.
     return k.request("gcode/script", .{ .object = params_obj }, alloc);
 }
 
+/// POST /printer/emergency_stop → printer.emergency_stop
+/// Moonraker: klippy_apis.emergency_stop() → Klippy emergency_stop RPC.
+pub fn handleEmergencyStop(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
+    const k = self.klippy orelse return error.KlippyDisconnected;
+    if (!k.isConnected()) return error.KlippyDisconnected;
+    return k.request("emergency_stop", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+}
+
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
@@ -172,6 +198,11 @@ pub fn registerPrinter(reg: *Registry, ctx: *PrinterCtx) !void {
         c,
         handleFirmwareRestart,
     );
+    try reg.registerEndpoint(
+        .{ .path = "/printer/emergency_stop", .methods = &.{.POST} },
+        c,
+        handleEmergencyStop,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +218,7 @@ const all_handlers = [_]registry.HandlerFn{
     handlePrintCancel,
     handleRestart,
     handleFirmwareRestart,
+    handleEmergencyStop,
 };
 
 test "every printer handler returns KlippyDisconnected" {
@@ -208,7 +240,7 @@ test "printer handlers ignore params and still error" {
     try testing.expectError(error.KlippyDisconnected, handlePrintStart(@ptrCast(&ctx), p.value, a));
 }
 
-test "registerPrinter wires all six routes and JSON-RPC methods" {
+test "registerPrinter wires all seven routes and JSON-RPC methods" {
     const alloc = testing.allocator;
     const jsonrpc = @import("../jsonrpc.zig");
 
@@ -227,6 +259,7 @@ test "registerPrinter wires all six routes and JSON-RPC methods" {
         "/printer/print/cancel",
         "/printer/restart",
         "/printer/firmware_restart",
+        "/printer/emergency_stop",
     };
     for (paths) |p| {
         try testing.expect(reg.lookup(.POST, p) != null);
@@ -239,10 +272,30 @@ test "registerPrinter wires all six routes and JSON-RPC methods" {
         "printer.print.cancel",
         "printer.restart",
         "printer.firmware_restart",
+        "printer.emergency_stop",
     };
     for (rpc_methods) |m| {
         try testing.expect(d.methods.get(m) != null);
     }
+}
+
+test "handlePrintStart: filename sanitization strips leading slash and escapes quotes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = PrinterCtx{};
+
+    // Leading-slash stripping: "/foo.gcode" → "foo.gcode"
+    // Quote escaping: "test\"file.gcode" → "test\\\"file.gcode"
+    const p = try std.json.parseFromSlice(std.json.Value, a, "{\"filename\":\"/test\\\"file.gcode\"}", .{});
+    try testing.expectError(error.KlippyDisconnected, handlePrintStart(@ptrCast(&ctx), p.value, a));
+}
+
+test "handleEmergencyStop: returns KlippyDisconnected without klippy" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = PrinterCtx{};
+    try testing.expectError(error.KlippyDisconnected, handleEmergencyStop(@ptrCast(&ctx), .null, arena.allocator()));
 }
 
 // --- Fuzz tests ---

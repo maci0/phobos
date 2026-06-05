@@ -19,6 +19,7 @@ const methods = @import("../core/methods.zig");
 const notify = @import("../server/notify.zig");
 const connections_mod = @import("../server/connections.zig");
 const MachineCtx = @import("../components/machine.zig").MachineCtx;
+const klippy_sim_mod = @import("klippy_sim.zig");
 
 /// Mock command runner for integration tests: returns fake service state for
 /// "systemctl show" calls and no-op for everything else, so tests never
@@ -44,6 +45,9 @@ pub const TestServer = struct {
     /// ws_client tests that inspect connection state directly.
     conns: *connections_mod.Connections,
 
+    /// Optional Klippy simulator for end-to-end bridge testing.
+    klippy_sim: ?*klippy_sim_mod.KlippySim = null,
+
     serve_fut: Io.Future(void),
 
     alloc: std.mem.Allocator,
@@ -57,6 +61,7 @@ pub const TestServer = struct {
         const self = try alloc.create(TestServer);
         errdefer alloc.destroy(self);
 
+        self.klippy_sim = null;
         self.alloc = alloc;
         self.threaded = try alloc.create(std.Io.Threaded);
         self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{});
@@ -101,10 +106,45 @@ pub const TestServer = struct {
         return self.app.bus.emit(self.io, method, params);
     }
 
+    /// Start a Klippy simulator on a background thread and wire the App's
+    /// Klippy bridge to connect to it. Must be called after `init()` and
+    /// before any printer.* requests. The socket path must be unique per test
+    /// to avoid collisions (e.g. `/tmp/phobos_test_klippy_<test_name>`).
+    pub fn startKlippyBridge(self: *TestServer, socket_path: []const u8) !void {
+        const sim = try klippy_sim_mod.KlippySim.init(self.alloc, socket_path);
+        errdefer sim.deinit();
+
+        // Point the Klippy connection context at the simulator's socket.
+        self.app.klippy_ctx.uds_path = sim.socket_path;
+
+        try sim.start();
+        errdefer sim.stop();
+
+        // Ensure the sim thread is in accept() before the bridge connects.
+        std.Io.sleep(self.io, .{ .nanoseconds = 50_000_000 }, .real) catch {};
+
+        // Start the background Klippy bridge task so it connects to the
+        // simulator and runs the handshake.
+        self.app.klippy_ctx.start();
+
+        // Wait for the simulator handshake to complete.
+        sim.waitReady();
+
+        self.klippy_sim = sim;
+    }
+
     /// Stop the accept loop and free everything.
     pub fn stop(self: *TestServer) void {
         self.serve_fut.cancel(self.io);
         self.listener.deinit(self.io);
+        // Signal the Klippy bridge background task to exit before tearing
+        // down the simulator and app components it references.
+        self.app.klippy_ctx.stop(self.io);
+        if (self.klippy_sim) |sim| {
+            sim.deinit();
+            // deinit calls stop() which closes the socket; the bridge task
+            // will see the disconnect and exit its read loop.
+        }
         self.app.deinit(self.io);
         self.threaded.deinit();
 
@@ -1555,6 +1595,137 @@ test "printer: JSON-RPC printer.print.start returns code 503 with exact message"
     try std.testing.expectEqual(@as(i64, 503), err.get("code").?.integer);
     try std.testing.expectEqualStrings("Klippy Host not connected", err.get("message").?.string);
     try std.testing.expectEqual(@as(i64, 9), p.value.object.get("id").?.integer);
+}
+
+// ---------------------------------------------------------------------------
+// Printer (printer.*) tests with Klippy simulator connected.
+// ---------------------------------------------------------------------------
+
+/// Poll until the Klippy bridge reports connected, giving the background
+/// task time to complete the handshake. Returns true if connected within
+/// ~2 seconds, false on timeout.
+fn waitKlippyConnected(ts: *TestServer) bool {
+    var attempts: u16 = 0;
+    while (attempts < 200) : (attempts += 1) {
+        if (ts.app.klippy_ctx.isConnected()) return true;
+        std.Io.sleep(ts.io, .{ .nanoseconds = 10_000_000 }, .real) catch {};
+    }
+    return false;
+}
+
+test "printer: with Klippy sim, server.info reports klippy_connected" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    try ts.startKlippyBridge("/tmp/phobos_test_e2e_klippy_connected");
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const body = try ts.get(alloc, "/server/info");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    const result = p.value.object.get("result").?.object;
+
+    // Klippy state should be reflected as connected/ready.
+    try std.testing.expectEqualStrings("ready", result.get("klippy_state").?.string);
+    try std.testing.expect(result.get("klippy_connected").?.bool == true);
+    try std.testing.expect(result.get("klippy_path").?.string.len > 0);
+}
+
+test "printer: with Klippy sim, print.start returns success" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    try ts.startKlippyBridge("/tmp/phobos_test_e2e_print_start");
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const body = try ts.postJson(alloc, "/printer/print/start",
+        \\{"filename":"test.gcode"}
+    );
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    // No error — the request was forwarded to Klippy successfully.
+    try std.testing.expect(p.value.object.get("error") == null);
+    try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+}
+
+test "printer: with Klippy sim, JSON-RPC printer.print.start succeeds" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    try ts.startKlippyBridge("/tmp/phobos_test_e2e_jsonrpc_start");
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const body = try ts.postJson(alloc, "/server/jsonrpc",
+        \\{"jsonrpc":"2.0","method":"printer.print.start","params":{"filename":"b.gcode"},"id":1}
+    );
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("error") == null);
+    try std.testing.expectEqual(@as(i64, 1), p.value.object.get("id").?.integer);
+}
+
+test "printer: with Klippy sim, pause/resume/cancel all succeed" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    try ts.startKlippyBridge("/tmp/phobos_test_e2e_pause_resume");
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const paths = [_][]const u8{
+        "/printer/print/pause",
+        "/printer/print/resume",
+        "/printer/print/cancel",
+    };
+    for (paths) |path| {
+        const body = try ts.postJson(alloc, path, "{}");
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("error") == null);
+        try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+    }
+}
+
+test "printer: with Klippy sim, restart and firmware_restart succeed" {
+    const alloc = std.testing.allocator;
+    // Use separate server instances: restart causes KlippySim disconnect.
+    inline for ([_][]const u8{ "/printer/restart", "/printer/firmware_restart" }) |path| {
+        const ts = try TestServer.init(alloc);
+        defer ts.stop();
+
+        try ts.startKlippyBridge("/tmp/phobos_test_e2e_restart");
+        try std.testing.expect(waitKlippyConnected(ts));
+
+        const body = try ts.postJson(alloc, path, "{}");
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("error") == null);
+        try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+    }
+}
+
+test "printer: with Klippy sim, emergency_stop succeeds" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    try ts.startKlippyBridge("/tmp/phobos_test_e2e_emergency");
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const body = try ts.postJson(alloc, "/printer/emergency_stop", "{}");
+    defer alloc.free(body);
+    const p = try resultOf(alloc, body);
+    defer p.deinit();
+    try std.testing.expect(p.value.object.get("error") == null);
+    try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
 }
 
 // ---------------------------------------------------------------------------

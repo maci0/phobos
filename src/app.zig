@@ -420,6 +420,11 @@ pub const App = struct {
         klippy_ctx.job_state = job_state_ctx;
         klippy_ctx.history = history_ctx;
 
+        // Wire the Klippy connection into the printer context so handlers
+        // (print.start, pause, resume, cancel, restart, firmware_restart)
+        // can proxy requests through the Unix-domain socket bridge.
+        printer_ctx.klippy = klippy_ctx;
+
         // Wire Klippy dispatch into the job queue so it can start/pause prints.
         job_queue_ctx.setKlippyDispatch(@ptrCast(klippy_ctx), &jobQueueKlippyDispatch);
 
@@ -504,6 +509,111 @@ pub const App = struct {
             const td: f64 = cfg.getFloat("job_queue", "job_transition_delay") catch 0.0;
             self.job_queue_ctx.setTransitionConfig(tg, td);
         }
+
+        // Wire MQTT broker config from [mqtt] section.
+        if (cfg.hasSection("mqtt")) {
+            const host = cfg.get("mqtt", "host") orelse "localhost";
+            const port: u16 = @intCast(cfg.getInt("mqtt", "port") catch @as(i64, 1883));
+            const username = cfg.get("mqtt", "username");
+            const password = cfg.get("mqtt", "password");
+            self.mqtt_ctx.setConfig(host, port, username, password) catch {};
+            if (cfg.get("mqtt", "instance_name")) |iname| {
+                self.mqtt_ctx.setInstanceName(iname) catch {};
+            }
+            if (cfg.get("mqtt", "client_id")) |cid| {
+                self.mqtt_ctx.setClientId(cid) catch {};
+            }
+            if (cfg.get("mqtt", "default_qos")) |qos_str| {
+                const qos: u8 = @intCast(std.fmt.parseInt(i64, qos_str, 10) catch @as(i64, 0));
+                self.mqtt_ctx.setDefaultQos(qos);
+            }
+            if (cfg.getBoolean("mqtt", "enable_moonraker_api")) |ena| {
+                self.mqtt_ctx.setApiEnabled(ena);
+            } else |_| {}
+            if (cfg.get("mqtt", "api_qos")) |aqos_str| {
+                const aqos: i64 = std.fmt.parseInt(i64, aqos_str, 10) catch @as(i64, 0);
+                self.mqtt_ctx.setApiQos(aqos);
+            }
+        }
+
+        // Wire power devices from [power <name>] sections.
+        var power_sects: std.ArrayList([]const u8) = .empty;
+        defer power_sects.deinit(self.alloc);
+        if (cfg.sectionNames(self.alloc)) |names| {
+            defer self.alloc.free(names);
+            for (names) |sect| {
+                if (!std.mem.startsWith(u8, sect, "power ")) continue;
+                const dev_name = sect["power ".len..];
+                if (dev_name.len == 0) continue;
+                power_sects.append(self.alloc, dev_name) catch continue;
+            }
+        } else |_| {}
+        for (power_sects.items) |dev_name| {
+            const sect = std.fmt.allocPrint(self.alloc, "power {s}", .{dev_name}) catch continue;
+            defer self.alloc.free(sect);
+            const dev_type = cfg.get(sect, "type") orelse "gpio";
+            const initial_state: ?[]const u8 = if (cfg.get(sect, "initial_state")) |s|
+                self.alloc.dupe(u8, s) catch null
+            else
+                null;
+            const bound_services: ?[]const u8 = if (cfg.get(sect, "bound_services")) |s|
+                self.alloc.dupe(u8, s) catch null
+            else
+                null;
+            const name_dup = self.alloc.dupe(u8, dev_name) catch continue;
+            const type_dup = self.alloc.dupe(u8, dev_type) catch continue;
+            const state_dup = self.alloc.dupe(u8, "off") catch continue;
+            const dev = power_component.Device{
+                .name = name_dup,
+                .type_str = type_dup,
+                .state = state_dup,
+                .locked_while_printing = cfg.getBoolean(sect, "locked_while_printing") catch false,
+                .off_when_shutdown = cfg.getBoolean(sect, "off_when_shutdown") catch false,
+                .off_when_shutdown_delay = cfg.getFloat(sect, "off_when_shutdown_delay") catch 0.0,
+                .on_when_queued = cfg.getBoolean(sect, "on_when_job_queued") catch cfg.getBoolean(sect, "on_when_queued") catch false,
+                .klipper_restart = cfg.getBoolean(sect, "klipper_restart") catch false,
+                .restart_delay = cfg.getFloat(sect, "restart_delay") catch 0.0,
+                .bound_services = bound_services,
+                .initial_state = initial_state,
+                .restrict_actions = cfg.getBoolean(sect, "restrict_action_processing") catch true,
+                .timer = cfg.getFloat(sect, "timer") catch 0.0,
+                .is_shutdown = false,
+            };
+            self.power_ctx.addDeviceFull(dev) catch |err| {
+                std.debug.print("phobos: warning: failed to add power device '{s}': {}\n", .{ dev_name, err });
+                self.alloc.free(dev.name);
+                self.alloc.free(dev.type_str);
+                self.alloc.free(dev.state);
+                if (dev.bound_services) |bs| self.alloc.free(bs);
+                if (dev.initial_state) |is| self.alloc.free(is);
+            };
+        }
+
+        // Wire WLED strips from [wled <name>] sections.
+        if (cfg.sectionNames(self.alloc)) |names| {
+            defer self.alloc.free(names);
+            for (names) |sect| {
+                if (!std.mem.startsWith(u8, sect, "wled ")) continue;
+                const strip_name = sect["wled ".len..];
+                if (strip_name.len == 0) continue;
+                const chain_count: i64 = cfg.getInt(sect, "chain_count") catch @as(i64, 1);
+                const initial_preset: i64 = cfg.getInt(sect, "initial_preset") catch @as(i64, -1);
+                const initial_red: f64 = cfg.getFloat(sect, "initial_red") catch 0.5;
+                const initial_green: f64 = cfg.getFloat(sect, "initial_green") catch 0.5;
+                const initial_blue: f64 = cfg.getFloat(sect, "initial_blue") catch 0.5;
+                const initial_white: f64 = cfg.getFloat(sect, "initial_white") catch 0.5;
+                // Build initial_colors as JSON array [R,G,B,W].
+                const initial_colors = std.fmt.allocPrint(self.alloc, "[{d},{d},{d},{d}]", .{ initial_red, initial_green, initial_blue, initial_white }) catch continue;
+                // Build chain_data with color_size=4 per node.
+                const color_size: usize = 4;
+                const chain_data_len = @as(usize, @intCast(chain_count)) * color_size;
+                const chain_data = self.alloc.alloc(u8, chain_data_len) catch continue;
+                @memset(chain_data, 0);
+                self.wled_ctx.addStrip(strip_name, chain_count, chain_data, initial_preset, initial_preset, initial_colors, false) catch |err| {
+                    std.debug.print("phobos: warning: failed to add wled strip '{s}': {}\n", .{ strip_name, err });
+                };
+            }
+        } else |_| {}
     }
 
     /// Set a mock command-runner on the machine component so tests don't
@@ -939,6 +1049,7 @@ test "App.init: dispatcher has exactly the expected methods" {
         "printer.print.cancel",
         "printer.restart",
         "printer.firmware_restart",
+        "printer.emergency_stop",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",

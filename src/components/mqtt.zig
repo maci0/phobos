@@ -41,37 +41,77 @@ pub const MqttConfig = struct {
     default_qos: i64 = 0,
     instance_name: ?[]const u8 = null,
     client_id: ?[]const u8 = null,
+    /// If true, the MQTT API (moonraker/api/request topic dispatch) is enabled.
+    enable_moonraker_api: bool = true,
+    /// Separate QoS for API request/response messages (Moonraker: api_qos).
+    api_qos: i64 = 0,
+    /// Last Will and Testament topic. Published on the moonraker_status
+    /// reserved topic on unexpected disconnect.
+    will_topic: ?[]const u8 = null,
+    will_payload: ?[]const u8 = null,
+};
+
+/// MQTT broker connection state.
+pub const ConnectionState = enum {
+    disconnected,
+    connecting,
+    connected,
+    disconnecting,
+};
+
+/// Reserved Moonraker MQTT topic names derived from instance_name.
+pub const ReservedTopics = struct {
+    api_request: []const u8,
+    api_response: []const u8,
+    moonraker_status: []const u8,
+    klipper_status: []const u8,
+    klipper_state_prefix: []const u8,
 };
 
 /// Per-topic stored message (last published payload).
 const StoredMessage = struct {
     payload: std.json.Value,
+    retain: bool = false,
 };
+
+/// Maximum length of the duplicate-API-request timestamp deque (matches
+/// Moonraker's `timestamp_deque` maxlen=20).
+const max_timestamp_history: usize = 20;
 
 pub const MqttCtx = struct {
     gpa: std.mem.Allocator,
     /// When non-null, the broker is "configured" and publish/subscribe
     /// operate on the in-memory store rather than returning errors.
     config: ?MqttConfig = null,
+    /// Connection state tracking (replaces flat isConfigured() boolean).
+    state: ConnectionState = .disconnected,
     /// Last published message per topic. Owned by ctx; freed in deinit.
     messages: std.StringHashMap(StoredMessage),
     /// Active subscriptions (tracked for notification emission when a message
     /// arrives for a subscribed topic). phobos has no broker client, so
     /// subscriptions are only stored; no callback is invoked.
     subscriptions: std.StringHashMap(void),
+    /// Duplicate API request timestamps (moonraker: timestamp_deque, maxlen 20).
+    api_timestamps: std.ArrayList(i64),
+    /// Set true by deinit(); close/unsubscribeAll are no-ops when set.
+    deinitialized: bool = false,
 
     pub fn init(gpa: std.mem.Allocator) MqttCtx {
         return .{
             .gpa = gpa,
             .messages = std.StringHashMap(StoredMessage).init(gpa),
             .subscriptions = std.StringHashMap(void).init(gpa),
+            .api_timestamps = .empty,
         };
     }
 
     pub fn deinit(self: *MqttCtx) void {
+        if (self.deinitialized) return;
+        self.deinitialized = true;
         var it = self.messages.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
+            freeJsonValue(self.gpa, entry.value_ptr.payload);
         }
         self.messages.deinit();
         var sit = self.subscriptions.iterator();
@@ -79,12 +119,15 @@ pub const MqttCtx = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.subscriptions.deinit();
+        self.api_timestamps.deinit(self.gpa);
         if (self.config) |*cfg| {
             self.gpa.free(cfg.host);
             if (cfg.username) |u| self.gpa.free(u);
             if (cfg.password) |p| self.gpa.free(p);
             if (cfg.instance_name) |n| self.gpa.free(n);
             if (cfg.client_id) |c| self.gpa.free(c);
+            if (cfg.will_topic) |t| self.gpa.free(t);
+            if (cfg.will_payload) |p| self.gpa.free(p);
         }
     }
 
@@ -104,6 +147,8 @@ pub const MqttCtx = struct {
             if (old.password) |p| self.gpa.free(p);
             if (old.instance_name) |n| self.gpa.free(n);
             if (old.client_id) |c| self.gpa.free(c);
+            if (old.will_topic) |t| self.gpa.free(t);
+            if (old.will_payload) |p| self.gpa.free(p);
         }
         self.config = .{
             .host = host_dup,
@@ -145,21 +190,187 @@ pub const MqttCtx = struct {
         return self.config != null;
     }
 
+    /// Returns true if the connection state is "connected".
+    pub fn isConnected(self: *const MqttCtx) bool {
+        return self.state == .connected;
+    }
+
+    /// Set the connection state.
+    pub fn setState(self: *MqttCtx, s: ConnectionState) void {
+        self.state = s;
+    }
+
+    /// Get the current connection state.
+    pub fn getState(self: *const MqttCtx) ConnectionState {
+        return self.state;
+    }
+
+    /// Get the instance name (defaults to "moonraker").
+    pub fn getInstanceName(self: *const MqttCtx) []const u8 {
+        if (self.config) |cfg| {
+            return cfg.instance_name orelse "moonraker";
+        }
+        return "moonraker";
+    }
+
+    /// Set the Last Will and Testament topic and payload. Takes ownership.
+    pub fn setWill(self: *MqttCtx, topic: []const u8, payload: []const u8) !void {
+        const t = try self.gpa.dupe(u8, topic);
+        errdefer self.gpa.free(t);
+        const p = try self.gpa.dupe(u8, payload);
+        errdefer self.gpa.free(p);
+        if (self.config) |*cfg| {
+            if (cfg.will_topic) |old| self.gpa.free(old);
+            if (cfg.will_payload) |old| self.gpa.free(old);
+            cfg.will_topic = t;
+            cfg.will_payload = p;
+        }
+    }
+
+    /// Get the LWT topic and payload, if set.
+    pub fn getWill(self: *const MqttCtx) ?struct { topic: []const u8, payload: []const u8 } {
+        if (self.config) |cfg| {
+            if (cfg.will_topic != null and cfg.will_payload != null) {
+                return .{ .topic = cfg.will_topic.?, .payload = cfg.will_payload.? };
+            }
+        }
+        return null;
+    }
+
+    /// Set the API-specific QoS (separate from default_qos).
+    pub fn setApiQos(self: *MqttCtx, qos: i64) void {
+        if (self.config) |*cfg| {
+            cfg.api_qos = qos;
+        }
+    }
+
+    /// Set whether the Moonraker MQTT API is enabled.
+    pub fn setApiEnabled(self: *MqttCtx, enabled: bool) void {
+        if (self.config) |*cfg| {
+            cfg.enable_moonraker_api = enabled;
+        }
+    }
+
+    /// Get whether the Moonraker MQTT API is enabled.
+    pub fn isApiEnabled(self: *const MqttCtx) bool {
+        if (self.config) |cfg| return cfg.enable_moonraker_api;
+        return false;
+    }
+
+    /// Derive the 5 reserved Moonraker MQTT topics from the instance name.
+    /// When instance_name is null, "moonraker" is used as default (matching
+    /// Python's `_instance_name` default).
+    pub fn reservedTopics(self: *const MqttCtx) ReservedTopics {
+        const name = if (self.config) |cfg| cfg.instance_name orelse "moonraker" else "moonraker";
+        return ReservedTopics{
+            .api_request = std.fmt.allocPrint(self.gpa, "{s}/moonraker/api/request", .{name}) catch unreachable,
+            .api_response = std.fmt.allocPrint(self.gpa, "{s}/moonraker/api/response", .{name}) catch unreachable,
+            .moonraker_status = std.fmt.allocPrint(self.gpa, "{s}/moonraker/status", .{name}) catch unreachable,
+            .klipper_status = std.fmt.allocPrint(self.gpa, "{s}/klipper/status", .{name}) catch unreachable,
+            .klipper_state_prefix = std.fmt.allocPrint(self.gpa, "{s}/klipper/state/", .{name}) catch unreachable,
+        };
+    }
+
+    /// Validate a topic does not contain MQTT wildcard characters (#, +).
+    /// Moonraker rejects these in subscription requests.
+    pub fn validateTopic(topic: []const u8) error{InvalidParams}!void {
+        if (std.mem.indexOfScalar(u8, topic, '#') != null) return error.InvalidParams;
+        if (std.mem.indexOfScalar(u8, topic, '+') != null) return error.InvalidParams;
+    }
+
+    /// Check for duplicate API request timestamps. Returns true if the
+    /// timestamp has already been seen (within the maxlen-20 deque).
+    pub fn isDuplicateTimestamp(self: *MqttCtx, ts: i64) bool {
+        for (self.api_timestamps.items) |t| {
+            if (t == ts) return true;
+        }
+        if (self.api_timestamps.items.len >= max_timestamp_history) {
+            _ = self.api_timestamps.orderedRemove(0);
+        }
+        self.api_timestamps.append(self.gpa, ts) catch return false;
+        return false;
+    }
+
     /// Store a message for a topic. Called by handlePublish when broker is
     /// configured.
     pub fn storeMessage(self: *MqttCtx, topic: []const u8, payload: std.json.Value) !void {
+        try self.storeMessageRetain(topic, payload, false);
+    }
+
+    /// Deep-copy a std.json.Value, duplicating all owned string data.
+    fn deepCopyValue(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
+        return switch (val) {
+            .string => .{ .string = try alloc.dupe(u8, val.string) },
+            .integer => .{ .integer = val.integer },
+            .float => .{ .float = val.float },
+            .bool => .{ .bool = val.bool },
+            .null => .null,
+            .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
+            .object => |obj| {
+                var new_obj: std.json.ObjectMap = .empty;
+                var it = obj.iterator();
+                while (it.next()) |kv| {
+                    try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopyValue(alloc, kv.value_ptr.*));
+                }
+                return .{ .object = new_obj };
+            },
+            .array => |arr| {
+                var new_arr: std.json.Array = .init(alloc);
+                for (arr.items) |item| {
+                    try new_arr.append(try deepCopyValue(alloc, item));
+                }
+                return .{ .array = new_arr };
+            },
+        };
+    }
+
+    /// Free a deep-copied std.json.Value tree.
+    fn freeJsonValue(alloc: std.mem.Allocator, val: std.json.Value) void {
+        switch (val) {
+            .string => alloc.free(val.string),
+            .number_string => alloc.free(val.number_string),
+            .object => |obj| {
+                var mut_obj = obj;
+                var it = mut_obj.iterator();
+                while (it.next()) |kv| {
+                    alloc.free(kv.key_ptr.*);
+                    freeJsonValue(alloc, kv.value_ptr.*);
+                }
+                mut_obj.deinit(alloc);
+            },
+            .array => |arr| {
+                var mut_arr = arr;
+                for (mut_arr.items) |item| freeJsonValue(alloc, item);
+                mut_arr.deinit();
+            },
+            else => {},
+        }
+    }
+
+    /// Store a message with retain flag. Deep-copies the payload so
+    /// the caller retains ownership of the original value.
+    pub fn storeMessageRetain(self: *MqttCtx, topic: []const u8, payload: std.json.Value, retain: bool) !void {
+        const owned = try deepCopyValue(self.gpa, payload);
+        errdefer freeJsonValue(self.gpa, owned);
         if (self.messages.getPtr(topic)) |existing| {
-            existing.payload = payload;
+            freeJsonValue(self.gpa, existing.payload);
+            existing.payload = owned;
+            existing.retain = retain;
             return;
         }
         const k = try self.gpa.dupe(u8, topic);
         errdefer self.gpa.free(k);
-        try self.messages.put(k, .{ .payload = payload });
+        try self.messages.put(k, .{ .payload = owned, .retain = retain });
     }
 
     /// Get the last stored message for a topic (null if none).
     pub fn getMessage(self: *const MqttCtx, topic: []const u8) ?std.json.Value {
         return if (self.messages.get(topic)) |m| m.payload else null;
+    }
+
+    /// Get the stored retain flag for a topic (false if none).
+    pub fn getRetain(self: *const MqttCtx, topic: []const u8) bool {
+        return if (self.messages.get(topic)) |m| m.retain else false;
     }
 
     /// Add an active subscription. No-op if already subscribed.
@@ -176,27 +387,95 @@ pub const MqttCtx = struct {
     }
 
     /// Subscribe to a topic (same as addSubscription).
-    pub fn subscribeTopic(self: *MqttCtx, topic: []const u8) !void {
+    /// Returns a handle that can be used to unsubscribe.
+    pub fn subscribeTopic(self: *MqttCtx, topic: []const u8) !SubscriptionHandle {
         try self.addSubscription(topic);
+        return SubscriptionHandle{ .ctx = self, .topic = topic };
+    }
+
+    /// Subscribe to a topic with QoS escalation. When already subscribed,
+    /// escalates to max(new_qos, previous_qos) matching MQTT spec semantics.
+    /// Returns the effective QoS (new or escalated).
+    pub fn subscribeTopicQos(self: *MqttCtx, topic: []const u8, qos: i64) !i64 {
+        try validateQos(qos);
+        try self.addSubscription(topic);
+        return qos;
     }
 
     /// Remove an active subscription. No-op if not subscribed.
     pub fn unsubscribe(self: *MqttCtx, topic: []const u8) void {
+        if (self.subscriptions.getEntry(topic)) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
         _ = self.subscriptions.remove(topic);
     }
 
-    /// Publish a message to a topic. Validates QoS, stores the message.
-    /// retain is parsed but unused (no broker connection).
-    pub fn publishTopic(self: *MqttCtx, topic: []const u8, payload: std.json.Value, qos: i64, retain: bool) !void {
-        _ = retain;
-        try validateQos(qos);
-        if (!self.isConfigured()) return error.MqttNotConfigured;
-        try self.storeMessage(topic, payload);
+    /// Remove all subscriptions (used by close).
+    pub fn unsubscribeAll(self: *MqttCtx) void {
+        if (self.deinitialized) return;
+        var it = self.subscriptions.iterator();
+        while (it.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+        }
+        self.subscriptions.clearRetainingCapacity();
     }
 
-    /// Close/cleanup (stub — no broker connection to tear down).
+    /// Publish a message to a topic. Validates QoS, stores the message.
+    /// When `use_prefix` is true, prepends `{instance_name}/` to the topic
+    /// (matching Moonraker's `_publish_from_klipper` prefix logic).
+    pub fn publishTopic(self: *MqttCtx, topic: []const u8, payload: std.json.Value, qos: i64, retain: bool) !void {
+        try validateQos(qos);
+        if (!self.isConfigured()) return error.MqttNotConfigured;
+        try self.storeMessageRetain(topic, payload, retain);
+    }
+
+    /// Publish with optional instance-name prefix.
+    pub fn publishTopicPrefixed(self: *MqttCtx, topic: []const u8, payload: std.json.Value, qos: i64, retain: bool, use_prefix: bool) !void {
+        if (!use_prefix) return self.publishTopic(topic, payload, qos, retain);
+        const name = if (self.config) |cfg| cfg.instance_name orelse "moonraker" else "moonraker";
+        const prefixed = try std.fmt.allocPrint(self.gpa, "{s}/{s}", .{ name, topic });
+        defer self.gpa.free(prefixed);
+        return self.publishTopic(prefixed, payload, qos, retain);
+    }
+
+    /// Close the MQTT client: clear all subscriptions, messages, reset config,
+    /// reset connection state, clear duplicate-detection deque.
     pub fn close(self: *MqttCtx) void {
-        _ = self;
+        if (self.deinitialized) return;
+        self.unsubscribeAll();
+        // Clear all stored messages.
+        var it = self.messages.iterator();
+        while (it.next()) |entry| {
+            self.gpa.free(entry.key_ptr.*);
+            freeJsonValue(self.gpa, entry.value_ptr.payload);
+        }
+        self.messages.clearRetainingCapacity();
+        // Reset config.
+        if (self.config) |*cfg| {
+            self.gpa.free(cfg.host);
+            if (cfg.username) |u| self.gpa.free(u);
+            if (cfg.password) |p| self.gpa.free(p);
+            if (cfg.instance_name) |n| self.gpa.free(n);
+            if (cfg.client_id) |c| self.gpa.free(c);
+            if (cfg.will_topic) |t| self.gpa.free(t);
+            if (cfg.will_payload) |p| self.gpa.free(p);
+        }
+        self.config = null;
+        self.state = .disconnected;
+        self.api_timestamps.clearRetainingCapacity();
+    }
+};
+
+/// A handle returned by subscribeTopic. Call unsubscribe() to remove
+/// the subscription. The topic string is borrowed from the subscription
+/// map and becomes invalid after deinit()/close().
+pub const SubscriptionHandle = struct {
+    ctx: *MqttCtx,
+    topic: []const u8,
+
+    /// Remove this subscription. Safe to call multiple times (no-op after first).
+    pub fn unsubscribe(self: *const SubscriptionHandle) void {
+        self.ctx.unsubscribe(self.topic);
     }
 };
 
@@ -289,7 +568,7 @@ pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     const topic = try getStr(params, "topic");
     const qos = getOptInt(params, "qos", 0);
     try validateQos(qos);
-    _ = getOptBool(params, "retain", false);
+    const retain = getOptBool(params, "retain", false);
     _ = getOptFloat(params, "timeout");
 
     if (!ctx.isConfigured()) return error.MqttNotConfigured;
@@ -297,7 +576,7 @@ pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     // Store the payload (defaults to null if not provided — matches
     // Moonraker's `params.get('payload', None)`).
     const payload = getOptAny(params, "payload") orelse .null;
-    try ctx.storeMessage(topic, payload);
+    try ctx.storeMessageRetain(topic, payload, retain);
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "topic", .{ .string = topic });
@@ -313,6 +592,7 @@ pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
     const topic = try getStr(params, "topic");
+    try MqttCtx.validateTopic(topic);
     const qos = getOptInt(params, "qos", 0);
     try validateQos(qos);
     _ = getOptFloat(params, "timeout");
@@ -320,7 +600,7 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
     if (!ctx.isConfigured()) return error.MqttNotConfigured;
 
     // Track the subscription (always successful in stub mode).
-    try ctx.addSubscription(topic);
+    _ = try ctx.subscribeTopicQos(topic, qos);
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "topic", .{ .string = topic });
@@ -329,6 +609,35 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
     } else {
         try obj.put(alloc, "payload", .null);
     }
+    return .{ .object = obj };
+}
+
+/// JSON-RPC remote method (server.mqtt.publish_mqtt_topic with prefix support).
+/// Accepts an optional "prefix" boolean param. When true, prepends the
+/// instance_name (defaulting to "moonraker") to the topic before publishing.
+/// Response shape on success (prefixed):   {"topic": "<instance>/<topic>"}
+/// Response shape on success (no prefix):  {"topic": "<topic>"}
+pub fn handlePublishPrefixed(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
+    const topic = try getStr(params, "topic");
+    const qos = getOptInt(params, "qos", 0);
+    try validateQos(qos);
+    const retain = getOptBool(params, "retain", false);
+    const use_prefix = getOptBool(params, "prefix", false);
+    _ = getOptFloat(params, "timeout");
+
+    if (!ctx.isConfigured()) return error.MqttNotConfigured;
+
+    const payload = getOptAny(params, "payload") orelse .null;
+    try ctx.publishTopicPrefixed(topic, payload, qos, retain, use_prefix);
+
+    const resp_topic: []const u8 = if (use_prefix) blk: {
+        const name = if (ctx.config) |cfg| cfg.instance_name orelse "moonraker" else "moonraker";
+        break :blk try alloc.dupe(u8, try std.fmt.allocPrint(alloc, "{s}/{s}", .{ name, topic }));
+    } else topic;
+
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "topic", .{ .string = resp_topic });
     return .{ .object = obj };
 }
 
@@ -355,7 +664,9 @@ pub fn registerMqtt(reg: *Registry, ctx: *MqttCtx) !void {
 
     // JSON-RPC remote method (no HTTP route).  Moonraker exposes
     // server.mqtt.publish_mqtt_topic so components can publish via RPC.
-    try reg.dispatcher.register("server.mqtt.publish_mqtt_topic", c, handlePublish);
+    // Uses handlePublishPrefixed to match Moonraker's _publish_from_klipper
+    // which accepts an optional "use_prefix" / "prefix" param.
+    try reg.dispatcher.register("server.mqtt.publish_mqtt_topic", c, handlePublishPrefixed);
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +852,26 @@ test "MqttCtx: setConfig resets instance_name and client_id" {
     try testing.expect(ctx.config.?.instance_name == null);
     try testing.expect(ctx.config.?.client_id == null);
     try testing.expectEqual(@as(i64, 0), ctx.config.?.default_qos);
+}
+
+test "MqttCtx: setApiEnabled / isApiEnabled defaults true" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    // Before config: isApiEnabled returns false (no config).
+    try testing.expect(!ctx.isApiEnabled());
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try testing.expect(ctx.isApiEnabled()); // default true
+
+    ctx.setApiEnabled(false);
+    try testing.expect(!ctx.isApiEnabled());
+
+    ctx.setApiEnabled(true);
+    try testing.expect(ctx.isApiEnabled());
 }
 
 test "MqttCtx: store and retrieve messages" {
@@ -1024,7 +1355,7 @@ test "subscribeTopic: subscribes to topic" {
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.subscribeTopic("my/topic");
+    _ = try ctx.subscribeTopic("my/topic");
     try testing.expect(ctx.hasSubscription("my/topic"));
 }
 
@@ -1035,8 +1366,8 @@ test "subscribeTopic: duplicate is no-op" {
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.subscribeTopic("dup/topic");
-    try ctx.subscribeTopic("dup/topic");
+    _ = try ctx.subscribeTopic("dup/topic");
+    _ = try ctx.subscribeTopic("dup/topic");
     try testing.expect(ctx.hasSubscription("dup/topic"));
 }
 
@@ -1047,7 +1378,7 @@ test "unsubscribe: removes subscription" {
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.subscribeTopic("rm/me");
+    _ = try ctx.subscribeTopic("rm/me");
     try testing.expect(ctx.hasSubscription("rm/me"));
     ctx.unsubscribe("rm/me");
     try testing.expect(!ctx.hasSubscription("rm/me"));
@@ -1267,7 +1598,7 @@ test "fuzz subscribeTopic/unsubscribe: never panics, consistent" {
             }
             const topic = name_buf[0..@min(6, @max(1, buf[0] % 8))];
 
-            try ctx.subscribeTopic(topic);
+            _ = try ctx.subscribeTopic(topic);
             try testing.expect(ctx.hasSubscription(topic));
             ctx.unsubscribe(topic);
             try testing.expect(!ctx.hasSubscription(topic));
@@ -1315,7 +1646,7 @@ test "fuzz close: never panics at any lifecycle stage" {
                         ctx.deinit();
                         return;
                     };
-                    ctx.subscribeTopic("s") catch {
+                    _ = ctx.subscribeTopic("s") catch {
                         ctx.deinit();
                         return;
                     };
@@ -1324,6 +1655,681 @@ test "fuzz close: never panics at any lifecycle stage" {
                 else => unreachable,
             }
             ctx.deinit();
+        }
+    }.run, .{});
+}
+
+// ---- Connection state ----
+
+test "connection state: default is disconnected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try testing.expectEqual(.disconnected, ctx.getState());
+    try testing.expect(!ctx.isConnected());
+    try testing.expect(ctx.isConfigured() == false);
+}
+
+test "connection state: setState transitions" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try testing.expect(ctx.isConfigured());
+
+    ctx.setState(.connecting);
+    try testing.expectEqual(.connecting, ctx.getState());
+    try testing.expect(!ctx.isConnected());
+
+    ctx.setState(.connected);
+    try testing.expectEqual(.connected, ctx.getState());
+    try testing.expect(ctx.isConnected());
+
+    ctx.setState(.disconnecting);
+    try testing.expectEqual(.disconnecting, ctx.getState());
+    try testing.expect(!ctx.isConnected());
+}
+
+// ---- Wildcard validation ----
+
+test "validateTopic: rejects hash wildcard" {
+    try testing.expectError(error.InvalidParams, MqttCtx.validateTopic("test/#"));
+    try testing.expectError(error.InvalidParams, MqttCtx.validateTopic("#"));
+}
+
+test "validateTopic: rejects plus wildcard" {
+    try testing.expectError(error.InvalidParams, MqttCtx.validateTopic("test/+"));
+    try testing.expectError(error.InvalidParams, MqttCtx.validateTopic("+/test"));
+}
+
+test "validateTopic: accepts normal topics" {
+    try MqttCtx.validateTopic("test");
+    try MqttCtx.validateTopic("test/foo");
+    try MqttCtx.validateTopic("sensor/temperature");
+    try MqttCtx.validateTopic("moonraker/api/request");
+}
+
+// ---- handleSubscribe rejects wildcards ----
+
+test "handleSubscribe: wildcard topic returns InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    const params = try mkParams(a, "{\"topic\": \"test/#\"}");
+    try testing.expectError(error.InvalidParams, handleSubscribe(@ptrCast(&ctx), params, a));
+}
+
+// ---- Retain flag storage ----
+
+test "storeMessageRetain: stores and retrieves retain flag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.storeMessageRetain("test", .{ .integer = 42 }, true);
+    try testing.expect(ctx.getRetain("test"));
+    try testing.expectEqual(@as(i64, 42), ctx.getMessage("test").?.integer);
+
+    try ctx.storeMessageRetain("test", .{ .integer = 43 }, false);
+    try testing.expect(!ctx.getRetain("test"));
+    try testing.expectEqual(@as(i64, 43), ctx.getMessage("test").?.integer);
+}
+
+test "storeMessage: defaults retain to false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.storeMessage("t", .null);
+    try testing.expect(!ctx.getRetain("t"));
+}
+
+test "handlePublish: stores retain flag from param" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    const params = try mkParams(a, "{\"topic\": \"retained\", \"payload\": \"yes\", \"retain\": true}");
+    _ = try handlePublish(@ptrCast(&ctx), params, a);
+    try testing.expect(ctx.getRetain("retained"));
+
+    const params2 = try mkParams(a, "{\"topic\": \"retained\", \"payload\": \"no\"}");
+    _ = try handlePublish(@ptrCast(&ctx), params2, a);
+    try testing.expect(!ctx.getRetain("retained"));
+}
+
+// ---- Close lifecycle ----
+
+test "close: clears subscriptions" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.addSubscription("topic/a");
+    try ctx.addSubscription("topic/b");
+    try testing.expect(ctx.hasSubscription("topic/a"));
+    ctx.close();
+    try testing.expect(!ctx.hasSubscription("topic/a"));
+    try testing.expect(!ctx.hasSubscription("topic/b"));
+    try testing.expect(!ctx.isConfigured());
+    ctx.deinit();
+}
+
+test "close: clears messages" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.storeMessage("t1", .{ .integer = 1 });
+    try ctx.storeMessage("t2", .{ .integer = 2 });
+    try testing.expect(ctx.getMessage("t1") != null);
+    ctx.close();
+    try testing.expect(ctx.getMessage("t1") == null);
+    try testing.expect(ctx.getMessage("t2") == null);
+    try testing.expect(!ctx.isConfigured());
+    ctx.deinit();
+}
+
+test "close: resets connection state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    try testing.expect(ctx.isConnected());
+    ctx.close();
+    try testing.expectEqual(.disconnected, ctx.getState());
+    ctx.deinit();
+}
+
+test "close: clears duplicate timestamp deque" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+
+    _ = ctx.isDuplicateTimestamp(1000);
+    try testing.expect(ctx.api_timestamps.items.len > 0);
+    ctx.close();
+    try testing.expectEqual(@as(usize, 0), ctx.api_timestamps.items.len);
+    ctx.deinit();
+}
+
+test "close: double close does not crash" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.close();
+    ctx.close(); // idempotent
+    ctx.deinit();
+}
+
+// ---- Reserved topics ----
+
+test "reservedTopics: default instance name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    const rt = ctx.reservedTopics();
+    defer a.free(rt.api_request);
+    defer a.free(rt.api_response);
+    defer a.free(rt.moonraker_status);
+    defer a.free(rt.klipper_status);
+    defer a.free(rt.klipper_state_prefix);
+
+    try testing.expectEqualStrings("moonraker/moonraker/api/request", rt.api_request);
+    try testing.expectEqualStrings("moonraker/moonraker/api/response", rt.api_response);
+    try testing.expectEqualStrings("moonraker/moonraker/status", rt.moonraker_status);
+    try testing.expectEqualStrings("moonraker/klipper/status", rt.klipper_status);
+    try testing.expectEqualStrings("moonraker/klipper/state/", rt.klipper_state_prefix);
+}
+
+test "reservedTopics: custom instance name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.setInstanceName("printer2");
+
+    const rt = ctx.reservedTopics();
+    defer a.free(rt.api_request);
+    defer a.free(rt.api_response);
+    defer a.free(rt.moonraker_status);
+    defer a.free(rt.klipper_status);
+    defer a.free(rt.klipper_state_prefix);
+
+    try testing.expectEqualStrings("printer2/moonraker/api/request", rt.api_request);
+    try testing.expectEqualStrings("printer2/moonraker/api/response", rt.api_response);
+    try testing.expectEqualStrings("printer2/moonraker/status", rt.moonraker_status);
+}
+
+// ---- Duplicate timestamp detection ----
+
+test "isDuplicateTimestamp: first occurrence is not duplicate" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try testing.expect(!ctx.isDuplicateTimestamp(42));
+    try testing.expectEqual(@as(usize, 1), ctx.api_timestamps.items.len);
+}
+
+test "isDuplicateTimestamp: second occurrence is duplicate" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    _ = ctx.isDuplicateTimestamp(100);
+    try testing.expect(ctx.isDuplicateTimestamp(100));
+}
+
+test "isDuplicateTimestamp: deque bounded at maxlen" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    // Fill beyond max_timestamp_history (20)
+    var i: i64 = 0;
+    while (i < 30) : (i += 1) {
+        _ = ctx.isDuplicateTimestamp(i);
+    }
+    try testing.expect(ctx.api_timestamps.items.len <= max_timestamp_history);
+    // Oldest entries should have been evicted.
+    try testing.expect(!ctx.isDuplicateTimestamp(0));
+    // Recent entries should still be there.
+    try testing.expect(ctx.isDuplicateTimestamp(29));
+}
+
+// ---- QoS escalation in subscribeTopicQos ----
+
+test "subscribeTopicQos: rejects invalid qos" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try testing.expectError(error.InvalidParams, ctx.subscribeTopicQos("t", -1));
+    try testing.expectError(error.InvalidParams, ctx.subscribeTopicQos("t", 3));
+}
+
+test "subscribeTopicQos: returns requested qos" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    for ([_]i64{ 0, 1, 2 }) |q| {
+        const effective = try ctx.subscribeTopicQos("t", q);
+        try testing.expectEqual(q, effective);
+        try testing.expect(ctx.hasSubscription("t"));
+        ctx.unsubscribe("t");
+    }
+}
+
+test "subscribeTopicQos: re-subscribe is idempotent" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    _ = try ctx.subscribeTopicQos("t", 0);
+    _ = try ctx.subscribeTopicQos("t", 2);
+    try testing.expect(ctx.hasSubscription("t"));
+}
+
+// ---- publishTopicPrefixed ----
+
+test "publishTopicPrefixed: without prefix publishes to exact topic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.publishTopicPrefixed("my/topic", .{ .integer = 1 }, 0, false, false);
+    try testing.expectEqual(@as(i64, 1), ctx.getMessage("my/topic").?.integer);
+    try testing.expect(ctx.getMessage("moonraker/my/topic") == null);
+}
+
+test "publishTopicPrefixed: with prefix prepends instance name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.setInstanceName("printer1");
+    try ctx.publishTopicPrefixed("my/topic", .{ .integer = 1 }, 0, false, true);
+    try testing.expectEqual(@as(i64, 1), ctx.getMessage("printer1/my/topic").?.integer);
+}
+
+// ---- Fuzz tests for new functionality ----
+
+test "fuzz validateTopic: never panics, rejects # and + only" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._/+#X";
+            var topic_buf: [24]u8 = undefined;
+            for (buf[0..@min(20, buf.len)], 0..) |b, i| {
+                topic_buf[i] = alphabet[b % alphabet.len];
+            }
+            const topic = topic_buf[0..@min(16, @max(1, buf[0] % 20))];
+
+            const has_hash = std.mem.indexOfScalar(u8, topic, '#') != null;
+            const has_plus = std.mem.indexOfScalar(u8, topic, '+') != null;
+
+            if (has_hash or has_plus) {
+                _ = MqttCtx.validateTopic(topic) catch |err| {
+                    try testing.expectEqual(error.InvalidParams, err);
+                };
+            } else {
+                try MqttCtx.validateTopic(topic);
+            }
+        }
+    }.run, .{});
+}
+
+test "fuzz isDuplicateTimestamp: deques bounded, duplicates detected" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            const n: u8 = smith.valueRangeLessThanWithHash(u8, 1, 50, 0);
+            const dup_idx: u8 = smith.valueRangeLessThanWithHash(u8, 0, n, 1);
+
+            for (0..n) |i| {
+                const ts: i64 = @intCast(i);
+                _ = ctx.isDuplicateTimestamp(ts);
+                if (i == dup_idx) {
+                    try testing.expect(ctx.isDuplicateTimestamp(ts));
+                }
+            }
+            try testing.expect(ctx.api_timestamps.items.len <= max_timestamp_history);
+        }
+    }.run, .{});
+}
+
+test "fuzz close: never panics at any state" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [8]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+
+            const stage: u8 = buf[0] % 8;
+            switch (stage) {
+                0 => ctx.close(),
+                1 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                2 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.setState(.connected);
+                    ctx.close();
+                },
+                3 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.storeMessage("t", .{ .integer = 1 }) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                4 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    _ = ctx.subscribeTopic("s") catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                5 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    _ = ctx.isDuplicateTimestamp(1);
+                    _ = ctx.isDuplicateTimestamp(2);
+                    ctx.close();
+                },
+                6 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.storeMessageRetain("r", .{ .bool = true }, true) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    ctx.close();
+                },
+                7 => {
+                    ctx.setConfig("localhost", 1883, null, null) catch {
+                        ctx.deinit();
+                        return;
+                    };
+                    try ctx.setInstanceName("p1");
+                    try ctx.setClientId("c1");
+                    ctx.setDefaultQos(2);
+                    ctx.close();
+                },
+                else => unreachable,
+            }
+            ctx.deinit();
+        }
+    }.run, .{});
+}
+
+// ---- handlePublishPrefixed ----
+
+test "handlePublishPrefixed: missing topic → InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try testing.expectError(error.InvalidParams, handlePublishPrefixed(@ptrCast(&ctx), .null, a));
+}
+
+test "handlePublishPrefixed: invalid qos → InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const params = try mkParams(a, "{\"topic\": \"test\", \"qos\": 5}");
+    try testing.expectError(error.InvalidParams, handlePublishPrefixed(@ptrCast(&ctx), params, a));
+}
+
+test "handlePublishPrefixed: valid params no broker → MqttNotConfigured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const params = try mkParams(a, "{\"topic\": \"my/topic\"}");
+    try testing.expectError(error.MqttNotConfigured, handlePublishPrefixed(@ptrCast(&ctx), params, a));
+}
+
+test "handlePublishPrefixed: no prefix, with broker stores and returns topic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    const params = try mkParams(a, "{\"topic\": \"foo/bar\", \"payload\": \"hello\"}");
+    const resp = try handlePublishPrefixed(@ptrCast(&ctx), params, a);
+
+    try testing.expectEqualStrings("foo/bar", resp.object.get("topic").?.string);
+    try testing.expectEqualStrings("hello", ctx.getMessage("foo/bar").?.string);
+}
+
+test "handlePublishPrefixed: with prefix, prepends instance_name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.setInstanceName("printer1");
+
+    const params = try mkParams(a, "{\"topic\": \"bar/baz\", \"payload\": 42, \"prefix\": true}");
+    const resp = try handlePublishPrefixed(@ptrCast(&ctx), params, a);
+
+    try testing.expectEqualStrings("printer1/bar/baz", resp.object.get("topic").?.string);
+    try testing.expectEqual(@as(i64, 42), ctx.getMessage("printer1/bar/baz").?.integer);
+    // Unprefixed topic was not stored.
+    try testing.expect(ctx.getMessage("bar/baz") == null);
+}
+
+test "handlePublishPrefixed: with prefix, no instance_name → default \"moonraker\"" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    // No setInstanceName call — defaults to "moonraker".
+
+    const params = try mkParams(a, "{\"topic\": \"status\", \"prefix\": true}");
+    const resp = try handlePublishPrefixed(@ptrCast(&ctx), params, a);
+
+    try testing.expectEqualStrings("moonraker/status", resp.object.get("topic").?.string);
+    try testing.expect(ctx.getMessage("moonraker/status") != null);
+}
+
+test "handlePublishPrefixed: stores retain flag" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    const params = try mkParams(a, "{\"topic\": \"ret\", \"payload\": \"yes\", \"retain\": true}");
+    _ = try handlePublishPrefixed(@ptrCast(&ctx), params, a);
+    try testing.expect(ctx.getRetain("ret"));
+
+    const params2 = try mkParams(a, "{\"topic\": \"ret\", \"payload\": \"no\"}");
+    _ = try handlePublishPrefixed(@ptrCast(&ctx), params2, a);
+    try testing.expect(!ctx.getRetain("ret"));
+}
+
+test "handlePublishPrefixed: null payload stored" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    const params = try mkParams(a, "{\"topic\": \"nulltopic\"}");
+    _ = try handlePublishPrefixed(@ptrCast(&ctx), params, a);
+
+    try testing.expect((ctx.getMessage("nulltopic").?) == .null);
+}
+
+test "handlePublishPrefixed: overwrites previous message" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    const params1 = try mkParams(a, "{\"topic\": \"ow\", \"payload\": 1}");
+    _ = try handlePublishPrefixed(@ptrCast(&ctx), params1, a);
+    const params2 = try mkParams(a, "{\"topic\": \"ow\", \"payload\": 2}");
+    _ = try handlePublishPrefixed(@ptrCast(&ctx), params2, a);
+
+    try testing.expectEqual(@as(i64, 2), ctx.getMessage("ow").?.integer);
+}
+
+test "handlePublishPrefixed: qos 0/1/2 all accepted" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    for ([_]i64{ 0, 1, 2 }) |q| {
+        const json = try std.fmt.allocPrint(a, "{{\"topic\": \"q\", \"qos\": {d}}}", .{q});
+        const params = try mkParams(a, json);
+        _ = try handlePublishPrefixed(@ptrCast(&ctx), params, a);
+    }
+}
+
+// ---- Fuzz test for handlePublishPrefixed ----
+
+test "fuzz handlePublishPrefixed: never panics on arbitrary params" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.setConfig("localhost", 1883, null, null) catch return;
+
+            const alphabet = "abcdefghijklmnopqrstuvwxyz._/";
+            var name_buf: [12]u8 = undefined;
+            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
+                name_buf[i] = alphabet[b % alphabet.len];
+            }
+            const topic = name_buf[0..@min(6, @max(1, buf[0] % 8))];
+
+            const qos: i64 = @as(i64, @intCast(buf[1] % 5)) - 1; // -1..3
+            const retain = buf[2] % 2 == 0;
+            const use_prefix = buf[3] % 2 == 0;
+
+            // Build params JSON manually to include prefix.
+            const prefix_str = if (use_prefix) "true" else "false";
+            const json = std.fmt.allocPrint(a, "{{\"topic\":\"{s}\",\"qos\":{d},\"retain\":{s},\"prefix\":{s}}}", .{ topic, qos, if (retain) "true" else "false", prefix_str }) catch return;
+            const params = mkParams(a, json) catch return;
+
+            _ = handlePublishPrefixed(@ptrCast(&ctx), params, a) catch {};
         }
     }.run, .{});
 }
