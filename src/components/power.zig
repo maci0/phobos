@@ -10,10 +10,11 @@
 //!   GET  /machine/device_power/device  → machine.device_power.get_device (single)
 //!   POST /machine/device_power/device  → machine.device_power.post_device (single)
 //!
-//! REAL GPIO/NETWORK CONTROL IS STUBBED. State is tracked in memory (within
-//! PowerCtx.devices). No GPIO pins are written, no network plugs are reached, no
-//! MQTT topics are published. Each stub is noted at the relevant handler. The
-//! in-memory state persists across requests within a single process lifetime.
+//! HTTP power devices (type "http" or any type with on_url/off_url configured)
+//! store HTTP URLs in the Device struct. Real HTTP GET requests via `std.http.Client`
+//! are not yet wired; the URL fields are parsed from config and stored for future
+//! integration. GPIO and other non-HTTP device types track state in memory only
+//! (stubbed) unless a future platform-specific GPIO driver is integrated.
 //!
 //! DEVICES FROM CONFIG. Without `[power <name>]` config sections (the spine
 //! carries none), the devices map is empty and the list endpoint returns [].
@@ -79,6 +80,12 @@ pub const Device = struct {
     restrict_actions: bool = false,
     /// Auto-off timer: seconds before automatic power-off (0 = disabled).
     timer: f64 = 0.0,
+    /// HTTP device URLs. When non-null and io is wired, real HTTP GET
+    /// requests are sent. on_url / off_url are used for power state changes;
+    /// status_url is used for status-refresh queries.
+    on_url: ?[]const u8 = null,
+    off_url: ?[]const u8 = null,
+    status_url: ?[]const u8 = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,6 +124,9 @@ pub const PowerCtx = struct {
             self.gpa.free(dev.state);
             if (dev.bound_services) |bs| self.gpa.free(bs);
             if (dev.initial_state) |is| self.gpa.free(is);
+            if (dev.on_url) |u| self.gpa.free(u);
+            if (dev.off_url) |u| self.gpa.free(u);
+            if (dev.status_url) |u| self.gpa.free(u);
         }
         self.devices.deinit();
     }
@@ -186,6 +196,9 @@ pub const PowerCtx = struct {
             .initial_state = if (opts.initial_state) |is| try self.gpa.dupe(u8, is) else null,
             .restrict_actions = opts.restrict_actions,
             .timer = opts.timer,
+            .on_url = if (opts.on_url) |u| try self.gpa.dupe(u8, u) else null,
+            .off_url = if (opts.off_url) |u| try self.gpa.dupe(u8, u) else null,
+            .status_url = if (opts.status_url) |u| try self.gpa.dupe(u8, u) else null,
         };
         errdefer {
             self.gpa.free(dev.name);
@@ -193,6 +206,9 @@ pub const PowerCtx = struct {
             self.gpa.free(dev.state);
             if (dev.bound_services) |bs| self.gpa.free(bs);
             if (dev.initial_state) |is| self.gpa.free(is);
+            if (dev.on_url) |u| self.gpa.free(u);
+            if (dev.off_url) |u| self.gpa.free(u);
+            if (dev.status_url) |u| self.gpa.free(u);
         }
         try self.devices.put(k, dev);
     }
@@ -842,6 +858,34 @@ test "addDeviceFull: optional fields default to null/false" {
     try testing.expectEqual(false, dev.on_when_queued);
     try testing.expectEqual(null, dev.bound_services);
     try testing.expectEqual(null, dev.initial_state);
+    try testing.expectEqual(null, dev.on_url);
+    try testing.expectEqual(null, dev.off_url);
+    try testing.expectEqual(null, dev.status_url);
+}
+
+test "addDeviceFull: http device with URLs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDeviceFull(.{
+        .name = "wled",
+        .type_str = "http",
+        .state = "off",
+        .locked_while_printing = false,
+        .is_shutdown = false,
+        .on_url = "http://10.0.0.1/on",
+        .off_url = "http://10.0.0.1/off",
+        .status_url = "http://10.0.0.1/status",
+    });
+
+    const dev = ctx.findDevice("wled").?;
+    try testing.expectEqualStrings("http", dev.type_str);
+    try testing.expectEqualStrings("http://10.0.0.1/on", dev.on_url.?);
+    try testing.expectEqualStrings("http://10.0.0.1/off", dev.off_url.?);
+    try testing.expectEqualStrings("http://10.0.0.1/status", dev.status_url.?);
 }
 
 // ---- handleKlippyShutdown ----

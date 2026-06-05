@@ -73,6 +73,9 @@ pub const TestServer = struct {
 
         // Prevent tests from accidentally running real systemctl/reboot/shutdown.
         self.app.setMachineRunCmdFn(mockRunCmd, @ptrCast(self));
+        // Disable the proc_stat timer to avoid background-thread + thread-pool
+        // interactions that deadlock the test harness.
+        self.app.machine_ctx.no_proc_stat_timer = true;
 
         self.srv = try alloc.create(http_transport.Server);
         errdefer alloc.destroy(self.srv);
@@ -1466,7 +1469,7 @@ test "wled: on/off/toggle batch and single strip endpoints work correctly" {
     defer ts.stop();
 
     // Add a strip via the wled_ctx.
-    ts.app.wled_ctx.addStrip("test_strip", 30, "", -1, -1, null, false) catch unreachable;
+    ts.app.wled_ctx.addStrip("test_strip", 30, "", -1, -1, null, false, null, 80, null) catch unreachable;
 
     // GET strip → initial state "off".
     const get_body = try ts.get(alloc, "/machine/wled/strip?strip=test_strip");

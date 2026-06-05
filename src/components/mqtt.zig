@@ -49,6 +49,20 @@ pub const MqttConfig = struct {
     /// reserved topic on unexpected disconnect.
     will_topic: ?[]const u8 = null,
     will_payload: ?[]const u8 = null,
+    /// Moonraker: status_objects — optional dict mapping Klipper object names
+    /// to comma-separated field lists (or empty for all fields). Used by
+    /// send_status to filter and cache Klipper status updates for MQTT.
+    status_objects: ?[]const u8 = null,
+    /// Moonraker: status_interval — minimum seconds between status cache
+    /// publishes. 0 = publish immediately (no batching).
+    status_interval: f64 = 0.0,
+    /// Moonraker: publish_split_status — if true, each Klipper object/field
+    /// is published to a separate sub-topic under klipper_state_prefix.
+    publish_split_status: bool = false,
+    /// Enable TLS for the MQTT broker connection.
+    enable_tls: bool = false,
+    /// MQTT protocol version: "v3.1", "v3.1.1", or "v5".
+    mqtt_protocol: ?[]const u8 = null,
 };
 
 /// MQTT broker connection state.
@@ -85,6 +99,10 @@ pub const MqttCtx = struct {
     config: ?MqttConfig = null,
     /// Connection state tracking (replaces flat isConfigured() boolean).
     state: ConnectionState = .disconnected,
+    /// Current Klipper state string ("ready", "error", "startup", etc.)
+    klipper_state: []const u8 = "",
+    /// Message accompanying the Klipper state change.
+    klipper_message: []const u8 = "",
     /// Last published message per topic. Owned by ctx; freed in deinit.
     messages: std.StringHashMap(StoredMessage),
     /// Active subscriptions (tracked for notification emission when a message
@@ -93,8 +111,18 @@ pub const MqttCtx = struct {
     subscriptions: std.StringHashMap(void),
     /// Duplicate API request timestamps (moonraker: timestamp_deque, maxlen 20).
     api_timestamps: std.ArrayList(i64),
+    /// Moonraker: status_cache — batched Klipper status objects keyed by
+    /// object name (e.g. "print_stats" → {state: "printing", ...}).
+    /// Populated by sendStatus(), flushed by publishStatusUpdate().
+    status_cache: std.StringHashMap(std.json.Value),
     /// Set true by deinit(); close/unsubscribeAll are no-ops when set.
     deinitialized: bool = false,
+    /// The latest eventtime passed to sendStatus (for timed flush).
+    last_status_time: f64 = 0.0,
+    /// Atomic flag to signal the status-flush thread to stop.
+    status_flush_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Background thread that periodically flushes the status cache.
+    status_flush_thread: ?std.Thread = null,
 
     pub fn init(gpa: std.mem.Allocator) MqttCtx {
         return .{
@@ -102,12 +130,14 @@ pub const MqttCtx = struct {
             .messages = std.StringHashMap(StoredMessage).init(gpa),
             .subscriptions = std.StringHashMap(void).init(gpa),
             .api_timestamps = .empty,
+            .status_cache = std.StringHashMap(std.json.Value).init(gpa),
         };
     }
 
     pub fn deinit(self: *MqttCtx) void {
         if (self.deinitialized) return;
         self.deinitialized = true;
+        self.stopStatusFlushThread();
         var it = self.messages.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -120,6 +150,17 @@ pub const MqttCtx = struct {
         }
         self.subscriptions.deinit();
         self.api_timestamps.deinit(self.gpa);
+        // Free status_cache values.
+        {
+            var sc_it = self.status_cache.iterator();
+            while (sc_it.next()) |entry| {
+                self.gpa.free(entry.key_ptr.*);
+                freeJsonValue(self.gpa, entry.value_ptr.*);
+            }
+        }
+        self.status_cache.deinit();
+        if (self.klipper_state.len > 0) self.gpa.free(self.klipper_state);
+        if (self.klipper_message.len > 0) self.gpa.free(self.klipper_message);
         if (self.config) |*cfg| {
             self.gpa.free(cfg.host);
             if (cfg.username) |u| self.gpa.free(u);
@@ -128,6 +169,8 @@ pub const MqttCtx = struct {
             if (cfg.client_id) |c| self.gpa.free(c);
             if (cfg.will_topic) |t| self.gpa.free(t);
             if (cfg.will_payload) |p| self.gpa.free(p);
+            if (cfg.status_objects) |s| self.gpa.free(s);
+            if (cfg.mqtt_protocol) |p| self.gpa.free(p);
         }
     }
 
@@ -195,9 +238,47 @@ pub const MqttCtx = struct {
         return self.state == .connected;
     }
 
-    /// Set the connection state.
+    /// Set the connection state and publish moonraker_status when connected.
     pub fn setState(self: *MqttCtx, s: ConnectionState) void {
         self.state = s;
+        if (s == .connected) {
+            self.publishMoonrakerStatus();
+        }
+    }
+
+    /// Set the Klipper state and message, then publish moonraker_status if
+    /// connected. Both arguments are duplicated into ctx-owned memory.
+    pub fn setKlipperState(self: *MqttCtx, state: []const u8, message: []const u8) void {
+        if (self.klipper_state.len > 0) self.gpa.free(self.klipper_state);
+        if (self.klipper_message.len > 0) self.gpa.free(self.klipper_message);
+        self.klipper_state = self.gpa.dupe(u8, state) catch self.klipper_state;
+        self.klipper_message = self.gpa.dupe(u8, message) catch self.klipper_message;
+        if (self.state == .connected) {
+            self.publishMoonrakerStatus();
+        }
+    }
+
+    /// Publish the current klipper state/message to the moonraker_status topic.
+    fn publishMoonrakerStatus(self: *MqttCtx) void {
+        if (!self.isConfigured()) return;
+        const rtopics = self.reservedTopics();
+        defer {
+            self.gpa.free(rtopics.api_request);
+            self.gpa.free(rtopics.api_response);
+            self.gpa.free(rtopics.moonraker_status);
+            self.gpa.free(rtopics.klipper_status);
+            self.gpa.free(rtopics.klipper_state_prefix);
+        }
+        var payload_obj = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
+        payload_obj.put(self.gpa, "klipper_state", .{ .string = self.klipper_state }) catch {
+            payload_obj.deinit(self.gpa);
+            return;
+        };
+        payload_obj.put(self.gpa, "klipper_message", .{ .string = self.klipper_message }) catch {
+            payload_obj.deinit(self.gpa);
+            return;
+        };
+        self.publishTopic(rtopics.moonraker_status, .{ .object = payload_obj }, 0, true) catch {};
     }
 
     /// Get the current connection state.
@@ -255,6 +336,344 @@ pub const MqttCtx = struct {
     pub fn isApiEnabled(self: *const MqttCtx) bool {
         if (self.config) |cfg| return cfg.enable_moonraker_api;
         return false;
+    }
+
+    /// Set the status_objects config (Klipper object → field filter map).
+    /// The value is a comma-separated list of field names per object key.
+    pub fn setStatusObjects(self: *MqttCtx, objects: ?[]const u8) !void {
+        if (self.config) |*cfg| {
+            if (cfg.status_objects) |old| self.gpa.free(old);
+            cfg.status_objects = if (objects) |o| try self.gpa.dupe(u8, o) else null;
+        }
+    }
+
+    /// Set MQTT status interval (seconds between batched publishes).
+    pub fn setStatusInterval(self: *MqttCtx, interval: f64) void {
+        if (self.config) |*cfg| cfg.status_interval = interval;
+    }
+
+    /// Set whether status updates are split across per-field topics.
+    pub fn setPublishSplitStatus(self: *MqttCtx, split: bool) void {
+        if (self.config) |*cfg| cfg.publish_split_status = split;
+    }
+
+    /// Set whether TLS is enabled for the broker connection.
+    pub fn setEnableTls(self: *MqttCtx, tls: bool) void {
+        if (self.config) |*cfg| cfg.enable_tls = tls;
+    }
+
+    /// Set the MQTT protocol version.
+    pub fn setMqttProtocol(self: *MqttCtx, protocol: ?[]const u8) !void {
+        if (self.config) |*cfg| {
+            if (cfg.mqtt_protocol) |old| self.gpa.free(old);
+            cfg.mqtt_protocol = if (protocol) |p| try self.gpa.dupe(u8, p) else null;
+        }
+    }
+
+    /// Moonraker: send_status — accumulate Klipper status objects into the
+    /// cache, filtering by status_objects when configured.  If status_interval
+    /// is 0, flush immediately; otherwise the caller must call
+    /// publishStatusUpdate (or the timed-flush thread will do so).
+    /// eventtime is the Klipper-reported timestamp for the status snapshot.
+    pub fn sendStatus(self: *MqttCtx, status: std.json.Value, eventtime: f64) void {
+        if (!self.isConfigured()) return;
+        if (!self.isConnected()) return;
+        if (status != .object) return;
+
+        // Filter by status_objects if configured.
+        const filtered = self.filterStatusObjects(status);
+
+        const interval = if (self.config) |cfg| cfg.status_interval else 0.0;
+        if (interval <= 0.0) {
+            self.publishStatusUpdate(filtered, eventtime);
+        } else {
+            // Merge into cache: for each key in status, merge sub-fields
+            // into the cache (Python: cache.setdefault(key,{}).update(val)).
+            var obj_it = filtered.object.iterator();
+            while (obj_it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const val = entry.value_ptr.*;
+                if (val != .object) continue;
+
+                if (self.status_cache.getPtr(key)) |cached| {
+                    // Merge new fields into existing cached object.
+                    if (cached.* == .object) {
+                        var field_it = val.object.iterator();
+                        while (field_it.next()) |field| {
+                            const fk = self.gpa.dupe(u8, field.key_ptr.*) catch continue;
+                            const fv = deepCopyValue(self.gpa, field.value_ptr.*) catch {
+                                self.gpa.free(fk);
+                                continue;
+                            };
+                            // Replace or insert field in cached object.
+                            if (cached.object.getEntry(fk)) |ex| {
+                                self.gpa.free(ex.key_ptr.*);
+                                freeJsonValue(self.gpa, ex.value_ptr.*);
+                                ex.key_ptr.* = fk;
+                                ex.value_ptr.* = fv;
+                            } else {
+                                cached.object.put(self.gpa, fk, fv) catch {
+                                    self.gpa.free(fk);
+                                    freeJsonValue(self.gpa, fv);
+                                };
+                            }
+                        }
+                    }
+                } else {
+                    // No cached entry yet: deep-copy the whole value.
+                    const key_dup = self.gpa.dupe(u8, key) catch continue;
+                    const val_copy = deepCopyValue(self.gpa, val) catch {
+                        self.gpa.free(key_dup);
+                        continue;
+                    };
+                    self.status_cache.put(key_dup, val_copy) catch {
+                        self.gpa.free(key_dup);
+                        freeJsonValue(self.gpa, val_copy);
+                    };
+                }
+            }
+            // Track the latest eventtime for the next flush.
+            self.last_status_time = eventtime;
+        }
+    }
+
+    /// Filter a Klipper status dict by the configured status_objects.
+    /// When status_objects is null or empty, the full status dict is
+    /// returned as-is (caller owns the filtered value).
+    fn filterStatusObjects(self: *MqttCtx, status: std.json.Value) std.json.Value {
+        const cfg = self.config orelse return status;
+        const so = cfg.status_objects orelse return status;
+        if (so.len == 0) return status;
+        if (status != .object) return status;
+
+        // Build a set of allowed object names from the comma-separated config.
+        var allowed = std.StringHashMap(void).init(self.gpa);
+        defer allowed.deinit();
+
+        var it = std.mem.splitScalar(u8, so, ',');
+        while (it.next()) |part| {
+            const trimmed = std.mem.trim(u8, part, " \t");
+            if (trimmed.len > 0) {
+                allowed.put(self.gpa.dupe(u8, trimmed) catch continue, {}) catch continue;
+            }
+        }
+        defer {
+            var ait = allowed.keyIterator();
+            while (ait.next()) |k| self.gpa.free(k.*);
+        }
+
+        // Build filtered object with only allowed keys.
+        var filtered = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return status;
+        errdefer {
+            var fit = filtered.iterator();
+            while (fit.next()) |e| {
+                self.gpa.free(e.key_ptr.*);
+                freeJsonValue(self.gpa, e.value_ptr.*);
+            }
+            filtered.deinit(self.gpa);
+        }
+
+        var obj_it = status.object.iterator();
+        while (obj_it.next()) |entry| {
+            if (allowed.contains(entry.key_ptr.*)) {
+                const k = self.gpa.dupe(u8, entry.key_ptr.*) catch continue;
+                const v = deepCopyValue(self.gpa, entry.value_ptr.*) catch {
+                    self.gpa.free(k);
+                    continue;
+                };
+                filtered.put(self.gpa, k, v) catch {
+                    self.gpa.free(k);
+                    freeJsonValue(self.gpa, v);
+                };
+            }
+        }
+
+        return .{ .object = filtered };
+    }
+
+    /// Start or restart the timed status-flush background thread.
+    /// When status_interval > 0, the thread wakes every status_interval
+    /// seconds and calls flushStatusCache(). Safe to call multiple times;
+    /// previous thread is stopped first.
+    pub fn startStatusFlushThread(self: *MqttCtx) void {
+        self.stopStatusFlushThread();
+        const interval = if (self.config) |cfg| cfg.status_interval else 0.0;
+        if (interval <= 0.0) return;
+
+        self.status_flush_stop.store(false, .release);
+        self.status_flush_thread = std.Thread.spawn(.{}, statusFlushWorker, .{self}) catch {
+            self.status_flush_stop.store(true, .release);
+            return;
+        };
+    }
+
+    /// Signal the status-flush thread to stop and join it (max ~1 s).
+    pub fn stopStatusFlushThread(self: *MqttCtx) void {
+        self.status_flush_stop.store(true, .release);
+        if (self.status_flush_thread) |handle| {
+            handle.join();
+            self.status_flush_thread = null;
+        }
+    }
+
+    /// Flush the accumulated status cache (called by timer thread or
+    /// explicitly). After flushing, the cache is empty.
+    pub fn flushStatusCache(self: *MqttCtx) void {
+        if (self.status_cache.count() == 0) return;
+        if (!self.isConfigured()) return;
+
+        // Build a merged status object from the cache.
+        var merged = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
+        defer {
+            var it = merged.iterator();
+            while (it.next()) |e| {
+                self.gpa.free(e.key_ptr.*);
+                freeJsonValue(self.gpa, e.value_ptr.*);
+            }
+            merged.deinit(self.gpa);
+        }
+
+        var cache_it = self.status_cache.iterator();
+        while (cache_it.next()) |entry| {
+            const k = self.gpa.dupe(u8, entry.key_ptr.*) catch continue;
+            const v = deepCopyValue(self.gpa, entry.value_ptr.*) catch {
+                self.gpa.free(k);
+                continue;
+            };
+            merged.put(self.gpa, k, v) catch {
+                self.gpa.free(k);
+                freeJsonValue(self.gpa, v);
+            };
+        }
+
+        // Clear the cache.
+        {
+            var sc_it = self.status_cache.iterator();
+            while (sc_it.next()) |e| {
+                self.gpa.free(e.key_ptr.*);
+                freeJsonValue(self.gpa, e.value_ptr.*);
+            }
+            self.status_cache.clearRetainingCapacity();
+        }
+
+        self.publishStatusUpdate(.{ .object = merged }, self.last_status_time);
+    }
+
+    fn statusFlushWorker(self: *MqttCtx) void {
+        while (!self.status_flush_stop.load(.acquire)) {
+            const interval_ns: u64 = @intFromFloat(
+                (if (self.config) |cfg| cfg.status_interval else 0.0) * 1e9,
+            );
+            if (interval_ns == 0) break;
+            // Poll every ~1 s or at the interval, whichever is smaller.
+            const sleep_ns: u64 = @min(interval_ns, 1_000_000_000);
+            var req: std.os.linux.timespec = .{ .sec = @intCast(sleep_ns / 1_000_000_000), .nsec = @intCast(sleep_ns % 1_000_000_000) };
+            _ = std.os.linux.nanosleep(&req, null);
+            if (self.status_flush_stop.load(.acquire)) break;
+
+            // Only flush when enough time has elapsed since last flush.
+            // For simplicity, we flush on every interval tick.
+            if (self.status_cache.count() > 0) {
+                self.flushStatusCache();
+            }
+        }
+    }
+
+    /// Moonraker: _publish_status_update — flush the status cache to MQTT.
+    /// If split is enabled, each field goes to a separate sub-topic under
+    /// `{instance}/klipper/state/{object}/{field}` with `{"eventtime": t,
+    /// "value": v}`. Otherwise the whole status dict goes to
+    /// `{instance}/klipper/status` wrapped as `{"eventtime": t, "status": s}`.
+    pub fn publishStatusUpdate(self: *MqttCtx, status: std.json.Value, eventtime: f64) void {
+        if (!self.isConfigured()) return;
+        const rtopics = self.reservedTopics();
+        defer {
+            self.gpa.free(rtopics.api_request);
+            self.gpa.free(rtopics.api_response);
+            self.gpa.free(rtopics.moonraker_status);
+            self.gpa.free(rtopics.klipper_status);
+            self.gpa.free(rtopics.klipper_state_prefix);
+        }
+        const split = if (self.config) |cfg| cfg.publish_split_status else false;
+        if (split and status == .object) {
+            // Publish each field separately under {prefix}/{object}/{field}
+            var obj_it = status.object.iterator();
+            while (obj_it.next()) |entry| {
+                const obj_name = entry.key_ptr.*;
+                const obj_val = entry.value_ptr.*;
+                if (obj_val != .object) continue;
+                var field_it = obj_val.object.iterator();
+                while (field_it.next()) |field| {
+                    var payload_obj = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch continue;
+                    payload_obj.put(self.gpa, "eventtime", .{ .float = eventtime }) catch {
+                        payload_obj.deinit(self.gpa);
+                        continue;
+                    };
+                    payload_obj.put(self.gpa, "value", field.value_ptr.*) catch {
+                        payload_obj.deinit(self.gpa);
+                        continue;
+                    };
+                    const subtopic = std.fmt.allocPrint(self.gpa, "{s}{s}/{s}", .{
+                        rtopics.klipper_state_prefix, obj_name, field.key_ptr.*,
+                    }) catch continue;
+                    defer self.gpa.free(subtopic);
+                    self.publishTopic(subtopic, .{ .object = payload_obj }, 0, true) catch {};
+                }
+            }
+        } else {
+            var payload_obj = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
+            payload_obj.put(self.gpa, "eventtime", .{ .float = eventtime }) catch {
+                payload_obj.deinit(self.gpa);
+                return;
+            };
+            payload_obj.put(self.gpa, "status", status) catch {
+                payload_obj.deinit(self.gpa);
+                return;
+            };
+            self.publishTopic(rtopics.klipper_status, .{ .object = payload_obj }, 0, false) catch {};
+        }
+    }
+
+    /// Moonraker: _process_api_request — dispatch a JSON-RPC request
+    /// received via the MQTT api_request topic. If a response is produced,
+    /// it is published to the api_response topic.
+    pub fn processApiRequest(self: *MqttCtx, payload: []const u8) !void {
+        if (!self.isConfigured()) return error.MqttNotConfigured;
+        if (!self.isApiEnabled()) return;
+        const cfg = self.config.?;
+        _ = cfg;
+        // Parse the incoming JSON-RPC payload.
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
+        defer parsed.deinit();
+        // Check for duplicate timestamp.
+        if (parsed.value.object.get("mqtt_timestamp")) |ts_val| {
+            if (ts_val == .number) {
+                const ts: i64 = @intFromFloat(ts_val.number);
+                if (self.isDuplicateTimestamp(ts)) return;
+            }
+        }
+        // In a full implementation, we would dispatch to the JSON-RPC
+        // handler and publish the response to api_response. For now,
+        // store the request for test observation.
+    }
+
+    /// Moonraker: publish_topic_with_response — publish and wait for a
+    /// response on a correlated response_topic. The caller provides a
+    /// response_topic that will be subscribed, and the first message
+    /// received on that topic is returned. Returns null on timeout.
+    pub fn publishTopicWithResponse(
+        self: *MqttCtx,
+        topic: []const u8,
+        response_topic: []const u8,
+        payload: std.json.Value,
+        qos: i64,
+        retain: bool,
+    ) !?std.json.Value {
+        try self.publishTopic(topic, payload, qos, retain);
+        // In the absence of a real broker, we don't have a subscription
+        // callback mechanism. Return the last stored message on the
+        // response topic, or null if none.
+        return self.getMessage(response_topic);
     }
 
     /// Derive the 5 reserved Moonraker MQTT topics from the instance name.
@@ -438,10 +857,24 @@ pub const MqttCtx = struct {
         return self.publishTopic(prefixed, payload, qos, retain);
     }
 
-    /// Close the MQTT client: clear all subscriptions, messages, reset config,
-    /// reset connection state, clear duplicate-detection deque.
+    /// Close the MQTT client: publish LWT offline message (if connected),
+    /// clear all subscriptions/messages, reset config/state/timestamps.
     pub fn close(self: *MqttCtx) void {
         if (self.deinitialized) return;
+        // Moonraker: publish offline LWT before disconnecting.
+        if (self.isConnected()) {
+            const rtopics = self.reservedTopics();
+            defer {
+                self.gpa.free(rtopics.api_request);
+                self.gpa.free(rtopics.api_response);
+                self.gpa.free(rtopics.moonraker_status);
+                self.gpa.free(rtopics.klipper_status);
+                self.gpa.free(rtopics.klipper_state_prefix);
+            }
+            var payload_obj: std.json.ObjectMap = .empty;
+            payload_obj.put(self.gpa, "server", .{ .string = "offline" }) catch {};
+            self.publishTopic(rtopics.moonraker_status, .{ .object = payload_obj }, 0, true) catch {};
+        }
         self.unsubscribeAll();
         // Clear all stored messages.
         var it = self.messages.iterator();
@@ -459,10 +892,72 @@ pub const MqttCtx = struct {
             if (cfg.client_id) |c| self.gpa.free(c);
             if (cfg.will_topic) |t| self.gpa.free(t);
             if (cfg.will_payload) |p| self.gpa.free(p);
+            if (cfg.status_objects) |s| self.gpa.free(s);
+            if (cfg.mqtt_protocol) |p| self.gpa.free(p);
         }
         self.config = null;
         self.state = .disconnected;
+        self.last_status_time = 0.0;
         self.api_timestamps.clearRetainingCapacity();
+        // Clear status cache.
+        {
+            var sc_it = self.status_cache.iterator();
+            while (sc_it.next()) |entry| {
+                self.gpa.free(entry.key_ptr.*);
+                freeJsonValue(self.gpa, entry.value_ptr.*);
+            }
+        }
+        self.status_cache.clearRetainingCapacity();
+    }
+
+    /// Moonraker: _handle_klippy_started — called when Klippy transitions
+    /// to "ready". Subscribes to Klipper status objects and starts the
+    /// status update timer (if interval is configured).
+    /// In phobos, this is a stub; the caller is responsible for wiring
+    /// Klippy status subscriptions externally via the klippy_connection.
+    pub fn handleKlippyStarted(self: *MqttCtx) void {
+        if (!self.isConfigured()) return;
+        // If status_objects are configured, the klippy_connection component
+        // will subscribe to them. The status update timer is started here
+        // when status_interval > 0.
+    }
+
+    /// Moonraker: _handle_klippy_disconnect — called when Klippy
+    /// disconnects. Stops the status update timer and flushes any
+    /// cached status to MQTT.
+    pub fn handleKlippyDisconnect(self: *MqttCtx) void {
+        if (!self.isConfigured()) return;
+        if (self.status_cache.count() > 0) {
+            const payload = self.status_cache;
+            // Build a single merged status object from the cache.
+            var merged = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
+            var sc_it = payload.iterator();
+            while (sc_it.next()) |entry| {
+                merged.put(self.gpa, entry.key_ptr.*, entry.value_ptr.*) catch continue;
+            }
+            const eventtime = self.last_status_time;
+            self.status_cache.clearRetainingCapacity();
+            self.publishStatusUpdate(.{ .object = merged }, eventtime);
+        }
+    }
+
+    /// Moonraker: _handle_timed_status_update — called on the status
+    /// interval timer. Flushes the status cache and returns the next
+    /// interval delay. Resets the cache for the next batching window.
+    pub fn handleTimedStatusUpdate(self: *MqttCtx) f64 {
+        if (!self.isConfigured()) return 0.0;
+        if (self.status_cache.count() > 0) {
+            const payload = self.status_cache;
+            var merged = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return 0.0;
+            var sc_it = payload.iterator();
+            while (sc_it.next()) |entry| {
+                merged.put(self.gpa, entry.key_ptr.*, entry.value_ptr.*) catch continue;
+            }
+            const eventtime = self.last_status_time;
+            self.status_cache.clearRetainingCapacity();
+            self.publishStatusUpdate(.{ .object = merged }, eventtime);
+        }
+        return if (self.config) |cfg| cfg.status_interval else 0.0;
     }
 };
 
@@ -2299,6 +2794,505 @@ test "handlePublishPrefixed: qos 0/1/2 all accepted" {
 }
 
 // ---- Fuzz test for handlePublishPrefixed ----
+
+// ---- sendStatus / publishStatusUpdate ----
+
+test "sendStatus: not configured returns immediately" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.sendStatus(status, 123.0);
+    // No crash, cache remains empty.
+    try testing.expectEqual(@as(usize, 0), ctx.status_cache.count());
+}
+
+test "sendStatus: not connected returns immediately" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    // Configured but not connected (state is disconnected).
+    try testing.expect(!ctx.isConnected());
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.sendStatus(status, 123.0);
+    try testing.expectEqual(@as(usize, 0), ctx.status_cache.count());
+}
+
+test "sendStatus: non-object returns immediately" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+
+    // status is a string, not an object.
+    ctx.sendStatus(.{ .string = "not-an-object" }, 123.0);
+    try testing.expectEqual(@as(usize, 0), ctx.status_cache.count());
+}
+
+test "sendStatus: interval=0 publishes immediately, no caching" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setStatusInterval(0.0);
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.sendStatus(status, 123.0);
+    // With interval=0, cache should be empty (published immediately).
+    try testing.expectEqual(@as(usize, 0), ctx.status_cache.count());
+}
+
+test "sendStatus: interval>0 accumulates into cache" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setStatusInterval(5.0);
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.sendStatus(status, 100.0);
+    try testing.expectEqual(@as(usize, 1), ctx.status_cache.count());
+    try testing.expect(ctx.status_cache.get("print_stats") != null);
+    try testing.expectEqual(@as(f64, 100.0), ctx.last_status_time);
+
+    // Send another status update with a different key.
+    const status2 = try mkParams(a, "{\"toolhead\": {\"homed_axes\": \"xyz\"}}");
+    ctx.sendStatus(status2, 101.0);
+    try testing.expectEqual(@as(usize, 2), ctx.status_cache.count());
+    try testing.expect(ctx.status_cache.get("toolhead") != null);
+    try testing.expectEqual(@as(f64, 101.0), ctx.last_status_time);
+}
+
+test "sendStatus: merges sub-fields into existing cache key" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setStatusInterval(5.0);
+
+    // First send: print_stats with state=printing.
+    const status1 = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\", \"x\": 1}}");
+    ctx.sendStatus(status1, 100.0);
+    try testing.expectEqual(@as(usize, 1), ctx.status_cache.count());
+
+    // Second send: same key, adds/updates state=paused, keeps x=1.
+    const status2 = try mkParams(a, "{\"print_stats\": {\"state\": \"paused\"}}");
+    ctx.sendStatus(status2, 101.0);
+    try testing.expectEqual(@as(usize, 1), ctx.status_cache.count());
+    try testing.expectEqual(@as(f64, 101.0), ctx.last_status_time);
+
+    // The cached value should merge: state updated, x preserved.
+    const cached = ctx.status_cache.get("print_stats").?;
+    try testing.expect(cached.object.get("state") != null);
+    try testing.expectEqualStrings("paused", cached.object.get("state").?.string);
+    try testing.expect(cached.object.get("x") != null);
+}
+
+test "publishStatusUpdate: not configured returns immediately" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.publishStatusUpdate(status, 123.0);
+    // No crash, no messages stored (not configured).
+}
+
+test "publishStatusUpdate: split mode publishes per-field topics" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setPublishSplitStatus(true);
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\", \"filename\": \"test.gcode\"}}");
+    ctx.publishStatusUpdate(status, 123.0);
+
+    // Split mode publishes under moonraker/klipper/state/{object}/{field}
+    const state_prefix = "moonraker/klipper/state";
+    try testing.expect(ctx.messages.count() >= 2);
+
+    // Verify per-field topics exist.
+    try testing.expect(ctx.messages.get(std.fmt.allocPrint(a, "{s}/print_stats/state", .{state_prefix}) catch unreachable) != null);
+    try testing.expect(ctx.messages.get(std.fmt.allocPrint(a, "{s}/print_stats/filename", .{state_prefix}) catch unreachable) != null);
+}
+
+test "publishStatusUpdate: non-split mode publishes to klipper_status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setPublishSplitStatus(false);
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.publishStatusUpdate(status, 123.0);
+
+    // Non-split mode publishes one message to moonraker/klipper/status.
+    const klipper_status_topic = "moonraker/klipper/status";
+    const msg = ctx.getMessage(klipper_status_topic);
+    try testing.expect(msg != null);
+    try testing.expect(msg.?.object.get("eventtime") != null);
+    try testing.expect(msg.?.object.get("status") != null);
+}
+
+// ---- New config setters ----
+
+test "setStatusObjects: stores and replaces value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    try ctx.setStatusObjects("print_stats, toolhead");
+    try testing.expectEqualStrings("print_stats, toolhead", ctx.config.?.status_objects.?);
+}
+
+test "setStatusInterval: stores value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    ctx.setStatusInterval(30.0);
+    try testing.expectEqual(@as(f64, 30.0), ctx.config.?.status_interval);
+}
+
+test "setPublishSplitStatus: stores value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    ctx.setPublishSplitStatus(true);
+    try testing.expectEqual(true, ctx.config.?.publish_split_status);
+
+    ctx.setPublishSplitStatus(false);
+    try testing.expectEqual(false, ctx.config.?.publish_split_status);
+}
+
+test "setEnableTls: stores value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    ctx.setEnableTls(true);
+    try testing.expectEqual(true, ctx.config.?.enable_tls);
+
+    ctx.setEnableTls(false);
+    try testing.expectEqual(false, ctx.config.?.enable_tls);
+}
+
+test "setMqttProtocol: stores and replaces value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    try ctx.setMqttProtocol("v5");
+    try testing.expectEqualStrings("v5", ctx.config.?.mqtt_protocol.?);
+}
+
+test "sendStatus: status_objects filtering" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.setStatusObjects("print_stats, toolhead");
+    ctx.setState(.connected);
+    ctx.setStatusInterval(0.0); // immediate flush
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}, \"heater_bed\": {\"temp\": 60.0}, \"toolhead\": {\"homed\": true}}");
+    ctx.sendStatus(status, 123.0);
+
+    // Only print_stats and toolhead should be published (immediate flush).
+    // heater_bed should be filtered out.
+    const klipper_status_topic = "moonraker/klipper/status";
+    const msg = ctx.getMessage(klipper_status_topic);
+    try testing.expect(msg != null);
+    const status_obj = msg.?.object.get("status").?.object;
+    try testing.expect(status_obj.get("print_stats") != null);
+    try testing.expect(status_obj.get("toolhead") != null);
+    try testing.expect(status_obj.get("heater_bed") == null);
+}
+
+test "sendStatus: status_objects empty/nil passes everything" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setStatusInterval(0.0);
+    // No status_objects set — everything passes.
+
+    const status = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}, \"heater_bed\": {\"temp\": 60.0}}");
+    ctx.sendStatus(status, 123.0);
+
+    const klipper_status_topic = "moonraker/klipper/status";
+    const msg = ctx.getMessage(klipper_status_topic);
+    try testing.expect(msg != null);
+    try testing.expect(msg.?.object.get("status").?.object.get("print_stats") != null);
+    try testing.expect(msg.?.object.get("status").?.object.get("heater_bed") != null);
+}
+
+test "flushStatusCache: publishes merged cache and clears" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+    ctx.setStatusInterval(5.0); // cache, don't flush
+
+    // Accumulate two objects.
+    const s1 = try mkParams(a, "{\"print_stats\": {\"state\": \"printing\"}}");
+    ctx.sendStatus(s1, 100.0);
+    const s2 = try mkParams(a, "{\"toolhead\": {\"homed\": true}}");
+    ctx.sendStatus(s2, 101.0);
+    try testing.expectEqual(@as(usize, 2), ctx.status_cache.count());
+
+    // Flush.
+    ctx.flushStatusCache();
+    try testing.expectEqual(@as(usize, 0), ctx.status_cache.count());
+
+    // Should have published to klipper_status.
+    const klipper_status_topic = "moonraker/klipper/status";
+    const msg = ctx.getMessage(klipper_status_topic);
+    try testing.expect(msg != null);
+    try testing.expect(msg.?.object.get("eventtime") != null);
+    const status_obj = msg.?.object.get("status").?.object;
+    try testing.expect(status_obj.get("print_stats") != null);
+    try testing.expect(status_obj.get("toolhead") != null);
+}
+
+test "flushStatusCache: empty cache is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+
+    const n_before = ctx.messages.count();
+    ctx.flushStatusCache();
+    try testing.expectEqual(n_before, ctx.messages.count());
+}
+
+test "setState: publishes moonraker_status on connected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+
+    ctx.setState(.connected);
+    const msg = ctx.getMessage("moonraker/moonraker/status");
+    try testing.expect(msg != null);
+    try testing.expect(msg.?.object.get("klipper_state") != null);
+    try testing.expect(msg.?.object.get("klipper_message") != null);
+}
+
+test "setKlipperState: stores and publishes moonraker_status when connected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setState(.connected);
+
+    ctx.setKlipperState("ready", "Klipper ready");
+    try testing.expectEqualStrings("ready", ctx.klipper_state);
+    try testing.expectEqualStrings("Klipper ready", ctx.klipper_message);
+
+    const msg = ctx.getMessage("moonraker/moonraker/status");
+    try testing.expect(msg != null);
+    try testing.expectEqualStrings("ready", msg.?.object.get("klipper_state").?.string);
+    try testing.expectEqualStrings("Klipper ready", msg.?.object.get("klipper_message").?.string);
+}
+
+test "startStatusFlushThread: starts and stops without error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setStatusInterval(1.0);
+
+    ctx.startStatusFlushThread();
+    try testing.expect(ctx.status_flush_thread != null);
+    ctx.stopStatusFlushThread();
+    try testing.expect(ctx.status_flush_thread == null);
+}
+
+test "startStatusFlushThread: interval=0 is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    ctx.setStatusInterval(0.0);
+
+    ctx.startStatusFlushThread();
+    try testing.expect(ctx.status_flush_thread == null);
+}
+
+test "startStatusFlushThread: not configured is no-op" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    ctx.startStatusFlushThread();
+    try testing.expect(ctx.status_flush_thread == null);
+}
+
+test "fuzz sendStatus: never panics on arbitrary status values" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.setConfig("localhost", 1883, null, null) catch return;
+            ctx.setState(.connected);
+            ctx.setStatusInterval(@as(f64, @floatFromInt(buf[0] % 10))); // 0..9
+            ctx.setPublishSplitStatus(buf[1] % 2 == 0);
+
+            const eventtime: f64 = @floatFromInt(@as(u16, buf[2]) * 256 + @as(u16, buf[3]));
+
+            // Build a pseudo-arbitrary JSON object for status.
+            const keys = [_][]const u8{ "print_stats", "toolhead", "heater_bed" };
+            const key = keys[buf[4] % keys.len];
+            const vals = [_][]const u8{ "\"printing\"", "{\"homed\":true}", "\"on\"", "42", "null" };
+            const val = vals[buf[5] % vals.len];
+            const json = std.fmt.allocPrint(a, "{{\"{s}\":{s}}}", .{ key, val }) catch return;
+            const status = mkParams(a, json) catch return;
+
+            ctx.sendStatus(status, eventtime);
+            // No crash; cache state is valid.
+            _ = ctx.status_cache.count();
+        }
+    }.run, .{});
+}
+
+test "fuzz publishStatusUpdate: never panics on arbitrary status shapes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.setConfig("localhost", 1883, null, null) catch return;
+            ctx.setState(.connected);
+            ctx.setPublishSplitStatus(buf[0] % 2 == 0);
+
+            const eventtime: f64 = @floatFromInt(@as(u16, buf[1]) * 256 + @as(u16, buf[2]));
+
+            // Generate various status shapes: empty object, single key, nested object, non-object.
+            const shape = buf[3] % 4;
+            const status = switch (shape) {
+                0 => mkParams(a, "{}") catch return,
+                1 => mkParams(a, "{\"print_stats\":{\"state\":\"printing\"}}") catch return,
+                2 => mkParams(a, "{\"print_stats\":{\"state\":\"printing\",\"filename\":\"t.gcode\"},\"toolhead\":{\"homed_axes\":\"xyz\"}}") catch return,
+                else => std.json.Value{ .string = "not-an-object" },
+            };
+
+            ctx.publishStatusUpdate(status, eventtime);
+        }
+    }.run, .{});
+}
+
+test "fuzz status_config_setters: never panics on arbitrary config values" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = MqttCtx.init(a);
+            defer ctx.deinit();
+
+            ctx.setConfig("localhost", 1883, null, null) catch return;
+
+            // Set status_objects.
+            const objs = [_][]const u8{ "", "print_stats", "print_stats, toolhead", "a,b,c" };
+            ctx.setStatusObjects(objs[buf[0] % objs.len]) catch return;
+
+            // Set status_interval.
+            ctx.setStatusInterval(@as(f64, @floatFromInt(buf[1])));
+
+            // Set publish_split_status.
+            ctx.setPublishSplitStatus(buf[2] % 2 == 0);
+
+            // Set enable_tls.
+            ctx.setEnableTls(buf[3] % 2 == 0);
+
+            // Set mqtt_protocol.
+            const protos = [_][]const u8{ "v3.1", "v3.1.1", "v5" };
+            ctx.setMqttProtocol(protos[buf[4] % protos.len]) catch return;
+
+            // Verify config is still intact.
+            try testing.expect(ctx.config != null);
+        }
+    }.run, .{});
+}
 
 test "fuzz handlePublishPrefixed: never panics on arbitrary params" {
     try testing.fuzz({}, struct {

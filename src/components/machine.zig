@@ -146,10 +146,19 @@ pub const MachineCtx = struct {
     proc_stat_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Handle for the proc_stat timer thread, joined in deinit.
     proc_stat_thread: ?std.Thread = null,
+    /// Rolling 30-sample buffer for moonraker_stats (Moonraker keeps 30 samples).
+    moonraker_stats: [30]MoonrakerSample = [_]MoonrakerSample{.{}} ** 30,
+    moonraker_stats_head: usize = 0,
+    moonraker_stats_count: usize = 0,
+    moonraker_stats_mutex: std.Io.Mutex = .init,
     /// In-memory service state: allowed_service → { active_state, sub_state }.
     /// Populated on first access; tracks starts/stops/restarts requested via
     /// the service action handlers.
     services: std.StringHashMap(ServiceEntry) = std.StringHashMap(ServiceEntry).init(std.heap.smp_allocator),
+    /// When true, setIo will NOT spawn a proc_stat timer thread. Set by test
+    /// harnesses before calling httpServer to avoid background-thread + thread-
+    /// pool interactions that can deadlock tests.
+    no_proc_stat_timer: bool = false,
     /// Mockable command-runner. When non-null, service / reboot / shutdown
     /// handlers call this instead of std.process.run. Opaque pointer is
     /// typically the test harness. Caller owns returned stdout and stderr.
@@ -163,6 +172,13 @@ pub const MachineCtx = struct {
         fn active(active_state: []const u8, sub_state: []const u8) ServiceEntry {
             return .{ .active_state = active_state, .sub_state = sub_state };
         }
+    };
+
+    pub const MoonrakerSample = struct {
+        time: f64 = 0,
+        cpu_usage: f64 = 0,
+        memory: i64 = 0,
+        mem_units: []const u8 = "kB",
     };
 
     /// Map a systemctl state string to an interned (static) slice. Returns
@@ -189,7 +205,7 @@ pub const MachineCtx = struct {
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
         // Start the periodic proc_stat emission if a bus is wired.
-        if (self.bus != null) {
+        if (self.bus != null and !self.no_proc_stat_timer) {
             self.proc_stat_thread = std.Thread.spawn(.{}, procStatTimerThread, .{self}) catch null;
         }
     }
@@ -299,19 +315,15 @@ fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
     // Process CPU usage since last tick (thread-local tracking).
     const cpu_usage = procCpuUsage();
 
-    // Build moonraker_stats: a single-sample array of {time, cpu_usage, memory, mem_units}.
-    var sample: std.json.ObjectMap = .empty;
-    try sample.put(alloc, "time", .{ .float = nowSeconds() });
-    try sample.put(alloc, "cpu_usage", .{ .float = cpu_usage });
-    try sample.put(alloc, "memory", .{ .integer = mem });
-    try sample.put(alloc, "mem_units", .{ .string = "kB" });
+    // Push the new sample into the ring buffer.
+    pushMoonrakerSample(self, io, .{ .time = nowSeconds(), .cpu_usage = cpu_usage, .memory = mem });
 
-    var samples: std.json.Array = .init(alloc);
-    try samples.append(.{ .object = sample });
+    // Build the samples array from the ring buffer.
+    const samples = buildMoonrakerStats(self, alloc, io);
 
     // Event payload: mirrors Moonraker's proc_stats:proc_stat_update shape.
     var event_data: std.json.ObjectMap = .empty;
-    try event_data.put(alloc, "moonraker_stats", .{ .array = samples });
+    try event_data.put(alloc, "moonraker_stats", samples);
     try event_data.put(alloc, "cpu_temp", cpu_temp);
     try event_data.put(alloc, "network", network);
     try event_data.put(alloc, "system_cpu_usage", sys_cpu);
@@ -360,6 +372,59 @@ fn procCpuUsage() f64 {
     S.last_wall = wall_now;
     S.last_proc = proc_now;
     return usage;
+}
+
+/// Push a sample into the rolling moonraker_stats ring buffer. Thread-safe.
+fn pushMoonrakerSample(self: *MachineCtx, io: std.Io, sample: MachineCtx.MoonrakerSample) void {
+    self.moonraker_stats_mutex.lockUncancelable(io);
+    defer self.moonraker_stats_mutex.unlock(io);
+
+    self.moonraker_stats[self.moonraker_stats_head] = sample;
+    self.moonraker_stats_head = (self.moonraker_stats_head + 1) % 30;
+    if (self.moonraker_stats_count < 30) {
+        self.moonraker_stats_count += 1;
+    }
+}
+
+/// Read the current ring buffer as a JSON array of {time, cpu_usage, memory,
+/// mem_units} objects in chronological order (oldest first). Locks the mutex
+/// when io is available.
+fn buildMoonrakerStats(self: *MachineCtx, alloc: std.mem.Allocator, io: ?std.Io) std.json.Value {
+    if (io) |i| {
+        self.moonraker_stats_mutex.lockUncancelable(i);
+        defer self.moonraker_stats_mutex.unlock(i);
+    }
+
+    var arr = std.json.Array.init(alloc);
+
+    const count = self.moonraker_stats_count;
+    if (count == 0) {
+        // Return a single zeroed sample so the array shape is present.
+        var sample: std.json.ObjectMap = .empty;
+        sample.put(alloc, "time", .{ .float = 0 }) catch return .{ .array = arr };
+        sample.put(alloc, "cpu_usage", .{ .float = 0 }) catch return .{ .array = arr };
+        sample.put(alloc, "memory", .{ .integer = 0 }) catch return .{ .array = arr };
+        sample.put(alloc, "mem_units", .{ .string = "kB" }) catch return .{ .array = arr };
+        arr.append(.{ .object = sample }) catch return .{ .array = arr };
+        return .{ .array = arr };
+    }
+
+    // Start from the oldest entry. When the buffer hasn't wrapped, start at 0.
+    // When it has wrapped, start at head (the oldest element is right after the
+    // newest, which is head-1).
+    const start: usize = if (count < 30) @as(usize, 0) else self.moonraker_stats_head;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const idx = (start + i) % 30;
+        const s = self.moonraker_stats[idx];
+        var sample: std.json.ObjectMap = .empty;
+        sample.put(alloc, "time", .{ .float = s.time }) catch continue;
+        sample.put(alloc, "cpu_usage", .{ .float = s.cpu_usage }) catch continue;
+        sample.put(alloc, "memory", .{ .integer = s.memory }) catch continue;
+        sample.put(alloc, "mem_units", .{ .string = s.mem_units }) catch continue;
+        arr.append(.{ .object = sample }) catch continue;
+    }
+    return .{ .array = arr };
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,10 +1109,9 @@ pub fn parseCpuTemp(text: []const u8) ?f64 {
 ///     system_cpu_usage, system_uptime, system_memory,
 ///     websocket_connections }
 ///
-/// moonraker_stats is the rolling sample queue (Moonraker keeps the last 30
-/// samples). Without a long-lived sampling timer phobos returns a single fresh
-/// sample so the array shape is present and non-empty. throttled_state requires
-/// a Raspberry Pi mailbox → null (matching upstream on non-Pi hosts).
+/// moonraker_stats is read from the rolling 30-sample ring buffer populated by
+/// the proc_stat timer thread. Without a timer running (io == null), returns
+/// a single zeroed sample so the array shape is present and non-empty.
 pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
 
@@ -1071,17 +1135,12 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
         }
     }
 
-    // moonraker_stats: a single sample { time, cpu_usage, memory, mem_units }.
-    var samples: std.json.Array = .init(alloc);
-    var sample: std.json.ObjectMap = .empty;
-    try sample.put(alloc, "time", .{ .float = nowSeconds() });
-    try sample.put(alloc, "cpu_usage", .{ .float = 0.0 });
-    try sample.put(alloc, "memory", .{ .integer = 0 });
-    try sample.put(alloc, "mem_units", .{ .string = "kB" });
-    try samples.append(.{ .object = sample });
+    // Read from the rolling ring buffer (populated by the timer thread).
+    // Falls back to a single zeroed sample when no timer has run yet.
+    const samples = buildMoonrakerStats(ctx, alloc, ctx.io);
 
     var out: std.json.ObjectMap = .empty;
-    try out.put(alloc, "moonraker_stats", .{ .array = samples });
+    try out.put(alloc, "moonraker_stats", samples);
     try out.put(alloc, "throttled_state", .null);
     try out.put(alloc, "cpu_temp", cpu_temp);
     try out.put(alloc, "network", network);

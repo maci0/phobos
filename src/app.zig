@@ -602,6 +602,9 @@ pub const App = struct {
                 const initial_green: f64 = cfg.getFloat(sect, "initial_green") catch 0.5;
                 const initial_blue: f64 = cfg.getFloat(sect, "initial_blue") catch 0.5;
                 const initial_white: f64 = cfg.getFloat(sect, "initial_white") catch 0.5;
+                const address: ?[]const u8 = cfg.get(sect, "address");
+                const port: u16 = @intCast(cfg.getInt(sect, "port") catch @as(i64, 80));
+                const protocol: ?[]const u8 = cfg.get(sect, "protocol");
                 // Build initial_colors as JSON array [R,G,B,W].
                 const initial_colors = std.fmt.allocPrint(self.alloc, "[{d},{d},{d},{d}]", .{ initial_red, initial_green, initial_blue, initial_white }) catch continue;
                 // Build chain_data with color_size=4 per node.
@@ -609,7 +612,7 @@ pub const App = struct {
                 const chain_data_len = @as(usize, @intCast(chain_count)) * color_size;
                 const chain_data = self.alloc.alloc(u8, chain_data_len) catch continue;
                 @memset(chain_data, 0);
-                self.wled_ctx.addStrip(strip_name, chain_count, chain_data, initial_preset, initial_preset, initial_colors, false) catch |err| {
+                self.wled_ctx.addStrip(strip_name, chain_count, chain_data, initial_preset, initial_preset, initial_colors, false, address, port, protocol) catch |err| {
                     std.debug.print("phobos: warning: failed to add wled strip '{s}': {}\n", .{ strip_name, err });
                 };
             }
@@ -1053,6 +1056,8 @@ test "App.init: dispatcher has exactly the expected methods" {
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",
+        "set_wled_state",
+        "set_wled",
     };
     try std.testing.expectEqual(@as(usize, expected.len), app.dispatcher.methods.count());
     for (expected) |m| {

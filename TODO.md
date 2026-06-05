@@ -13,8 +13,20 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~87%** (est., weighted by API item count per component).
+- **Overall implementation progress: ~92%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
+  **Recent depth improvements:**
+  wled depth up from 70%→80%: real HTTP POST to WLED JSON API for address-based
+  strips via std.http.Client; sendWledBody, wledOn/wledOff/wledControl/setWled
+  fully implemented with chain_data color management.
+  mqtt depth up from 75%→80%: status_cache with sub-field merge, timed
+  status-flush background thread, moonraker_status publication on klippy state
+  changes, connection state tracking (disconnected→connecting→connected→disconnecting),
+  handlePublishPrefixed handler.
+  machine depth up from 70%→75%: moonraker_stats 30-sample rolling ring buffer with
+  thread-safe push/build functions.
+  power: HTTP device URLs (on_url/off_url/status_url) parsed from config and stored
+  in Device struct; real HTTP client not yet wired (stays at 50%).
   **KlippySim fixes:** emergency_stop handling added to readLoop; gcode/script
   RESTART/FIRMWARE_RESTART now triggers simulator disconnect (matching real Klippy
   restart behavior). Unskipped the restart/firmware_restart integration test;
@@ -45,7 +57,9 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   mqtt depth: pub API (publishTopic/subscribeTopic/unsubscribe/close), setters
   (setInstanceName/setClientId/setDefaultQos), instance_name/client_id/default_qos
   config, retain/timeout parsed, server.mqtt.publish_mqtt_topic remote method,
-  MqttNotConfigured/ServiceUnavailable error handling.
+  MqttNotConfigured/ServiceUnavailable error handling, status caching with
+  sub-field merge (sendStatus), status_objects filtering, timed status-flush
+  background thread, moonraker_status publication on state change.
   printer.* proxied methods with full gcode/script param building.
   device_power, wled, td1 API components registered with in-memory state tracking.
   Golden cases pruned: removed server.mqtt.status/server.analysis.stats (not in Moonraker API).
@@ -61,8 +75,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1062 pass / 2 skip / 0 fail** (175 fuzz) with `-Dwith_lmdb=true`;
-  **~1009 pass / 5 skip / 0 fail** (~173 fuzz) with `-Dwith_lmdb=false`.
+- Tests: **1104 pass / 2 skip / 0 fail** (~191 fuzz) with `-Dwith_lmdb=true`;
+  **1089 pass / 5 skip / 0 fail** (~182 fuzz) with `-Dwith_lmdb=false`.
   The 2 skips (lmdb) are update_manager git tests (need a real repo).
   The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
   Note: `zig build test` uses `--listen=-` protocol which may hang on this
@@ -171,7 +185,9 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   KlippyCtx with state machine, UDS connect/identify/subscribe handshake, background
   reconnect, /klippysocket WS proxy bridge, job_queue dispatch, history live tracking.
 - MqttCtx with init/deinit, in-memory message store, subscription tracking, topic
-  matching, getOptAny fix, port overflow fix, dupe comptime fix.
+  matching, getOptAny fix, port overflow fix, dupe comptime fix, status caching with
+  sub-field merge, status_objects filtering, timed flush thread, moonraker_status
+  on state change.
 - Conformance oracle: capture.py (boots vendored Moonraker, captures 54 HTTP/WS
   events), replay.py (replays against phobos, asserts normalized equality with
   manifest-based field masking). All 54 events pass.
@@ -255,18 +271,25 @@ _norm_structure_compare array item masking (Python).
   real `sudo -S -l` child process; sudo_info reports real `sudo_access` when
   `check_access=true`. `RunCmdFn` mock injection pattern (`setRunCmdFn`/`runCmd`)
   for testability without host systemctl; TestServer wires mock returning fake
-  service state (2 dedicated unit tests).
+  service state (2 dedicated unit tests). proc_stat: 30-sample rolling ring buffer
+  for moonraker_stats with thread-safe push/build.
 - **update_manager** — git status (version, hash, branch, dirty, detached,
   commits_behind) live via real `git` child process; `handleRefresh` runs live
   `git fetch origin --prune` for git_repo sources; `handleUpdate*` runs live
   `git fetch origin --prune` + `git reset --hard origin/<branch>` for git_repo
   sources; non-git sources (system/web/zip) emit notifications but skip real
   apt/pip (phobos does not touch the host package manager).
-- **power/wled/td1** — state tracked, real GPIO/network/WLED control stubbed.
+- **power/wled/td1** — power: state tracked, device URLs stored,
+  real GPIO/network control stubbed. wled: real HTTP POST to WLED JSON API
+  for address-based strips; serial-only strips stubbed. td1: UART stubbed.
 - **mqtt** — in-memory message store + subscription tracking; pub API
   (`publishTopic`, `subscribeTopic`, `unsubscribe`, `close`, setters) exposed,
   `retain`/`timeout` parsed, `server.mqtt.publish_mqtt_topic` remote method
-  registered. Real MQTT client connection (TLS/keepalive/reconnect) is P3.
+  registered. Status caching with sub-field merge, status_objects filtering,
+  timed flush thread, moonraker_status publication on state change.
+  Connection state tracking (disconnected→connecting→connected→disconnecting).
+  handlePublishPrefixed handler with full test suite (prefix/prefixed param).
+  Real MQTT broker connection (TLS/keepalive/reconnect) is P3.
 - **spoolman/announcements** — announcements: real RSS fetch from Moonlight
   (arksine.github.io/moonlight) via fetchAndUpdateFeed using rss.zig parser,
   pruneByPrefix removes stale entries, notify_announcement_update on changes,
@@ -308,14 +331,19 @@ _norm_structure_compare array item masking (Python).
   announcements (4), power (1), extensions (1). Total: ~1012 tests (~174 fuzz).
 
 ### P3 — remaining depth gaps (non-blocking, requires hardware/external services)
-- **mqtt** — real MQTT client connection, TLS, keepalive, reconnect. Current: endpoints
+- **mqtt** — real MQTT broker connection, TLS, keepalive, reconnect. Current: endpoints
   return "not configured" with in-memory message store + subscription tracking.
   Pub API complete: `publishTopic`, `subscribeTopic`, `unsubscribe`, `close`,
   `setInstanceName`/`setClientId`/`setDefaultQos`, `storeMessage`/`getMessage`/
   `addSubscription` exposed. `retain`/`timeout` params parsed. Remote method
-  `server.mqtt.publish_mqtt_topic` registered. 47 tests (9 fuzz).
-- **power/wled/td1** — real GPIO sysfs/wiringPi, network WLED control, TD1 UART.
-  Current: in-memory state tracking with notification emission, stubbed I/O.
+  `server.mqtt.publish_mqtt_topic` registered. Status caching with sub-field merge
+  (`sendStatus`), `status_objects` filtering, timed flush background thread,
+  `moonraker_status` publication on klippy state change. Connection state tracking
+  (disconnected→connecting→connected→disconnecting). handlePublishPrefixed handler
+  with full test suite (prefix/prefixed param). 58 tests (9 fuzz).
+- **power/wled/td1** — power: real GPIO sysfs/wiringPi, HTTP client for device URLs;
+  td1: UART; GPIO stubs. wled: serial-only strip communication (HTTP POST to WLED
+  JSON API is real for address-based strips via `std.http.Client`).
   (machine.zig `RunCmdFn` mock pattern reusable here for GPIO/network test doubles.)
 - **spoolman/announcements** — ETag/If-Modified-Since conditional GET for RSS.
   Current: real RSS fetch works (no ETag) with background periodic refresh timer

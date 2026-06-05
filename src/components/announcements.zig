@@ -17,7 +17,7 @@
 //! NOTE: RSS feed fetching from Moonlight (arksine.github.io/moonlight) is
 //! implemented via `fetchAndUpdateFeed`. ETag-based conditional GET is not yet
 //! supported (Zig 0.16 FetchResult doesn't expose response headers).
-//! Background periodic refresh requires a timer thread (see TODO in app.zig).
+//! Background periodic refresh runs on a timer thread (announcementsRefreshTimerThread).
 //!
 //! Announcement entry shape (matches announcements.py):
 //!   entry_id, url, title, description, priority, date,
