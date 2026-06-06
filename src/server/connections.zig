@@ -128,6 +128,27 @@ pub const Connections = struct {
         };
     }
 
+    /// Write `frame` to every connection (optionally filtered by `topic`
+    /// subscription), holding the registry mutex for the WHOLE fan-out so a
+    /// concurrent `remove` cannot free a connection between selection and write.
+    ///
+    /// Safe lock order: this holds the registry mutex while `writeFrame` takes
+    /// only the per-connection `write_mutex` — no path takes `write_mutex` then
+    /// the registry mutex, so there is no inversion. `conn.subs` is read under
+    /// the same registry mutex that guards its mutation (see `isSubscribed`).
+    pub fn broadcast(self: *Connections, io: Io, frame: []const u8, topic: ?[]const u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.list.items) |conn| {
+            if (topic) |t| {
+                if (!conn.subs.contains(t)) continue;
+            }
+            // A failed write flags the connection dead; swallow so one dead
+            // client never stalls the broadcast to the rest.
+            self.writeFrame(io, conn, frame) catch {};
+        }
+    }
+
     /// True if the connection has been flagged dead by a failed write.
     pub fn isDead(self: *Connections, io: Io, conn: *Connection) bool {
         _ = self;

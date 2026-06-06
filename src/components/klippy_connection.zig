@@ -339,6 +339,10 @@ pub const KlippyCtx = struct {
     /// Registered /klippysocket bridge WebSocket connections. Every frame
     /// received from Klippy is forwarded to every registered bridge writer.
     bridges: std.ArrayListUnmanaged(Bridge) = .empty,
+    /// Guards `bridges` — mutated from /klippysocket WS threads (add/remove) and
+    /// read from the frame-forwarding path. Locked via `self.io` (no-op when io
+    /// is unset, i.e. single-threaded unit tests).
+    bridges_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
     /// Job state component (set by App after init). Called on status updates
     /// to detect print state transitions.
@@ -390,11 +394,15 @@ pub const KlippyCtx = struct {
     /// Register a bridge client that will receive every frame from Klippy.
     /// The caller owns `ctx` and must ensure it outlives the registration.
     pub fn addBridge(self: *KlippyCtx, bridge: Bridge) !void {
+        if (self.io) |io| self.bridges_mutex.lockUncancelable(io);
+        defer if (self.io) |io| self.bridges_mutex.unlock(io);
         try self.bridges.append(self.gpa, bridge);
     }
 
     /// Remove a previously registered bridge client.
     pub fn removeBridge(self: *KlippyCtx, bridge: Bridge) void {
+        if (self.io) |io| self.bridges_mutex.lockUncancelable(io);
+        defer if (self.io) |io| self.bridges_mutex.unlock(io);
         for (self.bridges.items, 0..) |b, i| {
             if (b.ctx == bridge.ctx and b.write_fn == bridge.write_fn) {
                 _ = self.bridges.swapRemove(i);
@@ -405,6 +413,8 @@ pub const KlippyCtx = struct {
 
     /// Forward a raw frame (without the \\x03 delimiter) to every registered bridge.
     fn forwardToBridges(self: *KlippyCtx, raw_payload: []const u8) void {
+        if (self.io) |io| self.bridges_mutex.lockUncancelable(io);
+        defer if (self.io) |io| self.bridges_mutex.unlock(io);
         for (self.bridges.items) |b| {
             b.write_fn(b.ctx, raw_payload) catch {};
         }
@@ -475,12 +485,20 @@ pub const KlippyCtx = struct {
     }
 
     fn closeStream(self: *KlippyCtx, io: std.Io) void {
-        if (self.stream) |*s| {
-            s.close(io);
-        }
+        // Take the stream under the mutex, null it, release, THEN close — so we
+        // never close the fd out from under an in-flight `request()` that holds
+        // `stream_mutex` (use-after-close), and two concurrent closeStream calls
+        // (stop() + the reconnect error path) can't double-close (only the one
+        // that observes non-null closes). stop() issues shutdown(.recv) first to
+        // unblock a request blocked in readFrame so it releases the mutex.
         self.stream_mutex.lock(io) catch {};
-        defer self.stream_mutex.unlock(io);
+        const s = self.stream;
         self.stream = null;
+        self.stream_mutex.unlock(io);
+        if (s) |sock| {
+            var local = sock;
+            local.close(io);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -750,6 +768,12 @@ pub const KlippyCtx = struct {
             } else {
                 _ = self.bus.emitStatus(io, notify.names.status_update, params_array, obj_name) catch {};
             }
+            // emit serializes params into its own frame buffer (read-only), so
+            // the per-object scaffolding can be freed now. Without this every
+            // status update leaked the map + array backing stores (smp_allocator)
+            // — an unbounded leak during a live print.
+            params_arr.deinit();
+            per_obj_map.deinit(std.heap.smp_allocator);
         }
 
         // Feed print_stats into the job state machine (job_state component).

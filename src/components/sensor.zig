@@ -153,8 +153,19 @@ pub const Sensor = struct {
     pub fn setMeasurement(self: *Sensor, alloc: std.mem.Allocator, param: []const u8, value: f64) !void {
         const gop = try self.history.getOrPut(param);
         if (!gop.found_existing) {
-            gop.key_ptr.* = try alloc.dupe(u8, param);
-            gop.value_ptr.* = try MeasurementRing.init(alloc, self.store_size);
+            // Build the ring + key first; if either fails, remove the
+            // half-initialized entry so deinit never frees an uninitialized ring.
+            const ring = MeasurementRing.init(alloc, self.store_size) catch |e| {
+                _ = self.history.remove(param);
+                return e;
+            };
+            gop.key_ptr.* = alloc.dupe(u8, param) catch |e| {
+                var r = ring;
+                r.deinit(alloc);
+                _ = self.history.remove(param);
+                return e;
+            };
+            gop.value_ptr.* = ring;
         }
         gop.value_ptr.push(value);
 

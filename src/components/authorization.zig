@@ -758,24 +758,22 @@ pub const AuthCtx = struct {
 
     /// Consume a oneshot token (single-use), returning the bound username if the
     /// token exists, is unexpired, and the IP matches.
-    pub fn consumeOneshot(self: *AuthCtx, token: []const u8, ip: IpAddress, now: i64) ?[]const u8 {
+    /// Consume a oneshot token. On success returns the username duped into
+    /// `alloc` (the caller's per-request arena) so it shares the request
+    /// lifetime — duping into `self.gpa` previously leaked, since the resulting
+    /// `AuthOutcome.user` is treated as a borrow and never freed.
+    pub fn consumeOneshot(self: *AuthCtx, alloc: std.mem.Allocator, token: []const u8, ip: IpAddress, now: i64) ?[]const u8 {
         self.pruneOneshot(now);
         var i: usize = 0;
         while (i < self.oneshot.items.len) : (i += 1) {
             const t = &self.oneshot.items[i];
             if (std.mem.eql(u8, &t.token, token)) {
                 const matches = addrEql(t.ip, ip);
-                const uname = t.username;
+                const uname = t.username; // gpa-owned by the oneshot entry
                 _ = self.oneshot.swapRemove(i);
-                if (!matches) {
-                    self.gpa.free(uname);
-                    return null;
-                }
-                // Caller copies before next mutation; we leak-free via arena in
-                // the auth path. Return the (now removed) username slice; it
-                // remains valid until freed here, so dupe into a stable place.
                 defer self.gpa.free(uname);
-                return self.gpa.dupe(u8, uname) catch null;
+                if (!matches) return null;
+                return alloc.dupe(u8, uname) catch null;
             }
         }
         return null;
@@ -1281,7 +1279,7 @@ pub fn authenticateRequest(
     if (creds.oneshot) |tok| {
         if (creds.remote_ip) |ip_s| {
             if (parseIp(ip_s)) |ip| {
-                if (c.consumeOneshot(tok, ip, now)) |uname| {
+                if (c.consumeOneshot(alloc, tok, ip, now)) |uname| {
                     return .{ .user = uname };
                 }
             } else |_| {}
@@ -1818,19 +1816,19 @@ test "oneshot token: single-use, IP-bound" {
 
     // Wrong IP → null.
     const wrong_ip = try parseIp("10.0.0.6");
-    try testing.expect(ctx.consumeOneshot(tok, wrong_ip, 1001) == null);
+    try testing.expect(ctx.consumeOneshot(a, tok, wrong_ip, 1001) == null);
 
     // Re-mint (the wrong-IP attempt consumed the token in Moonraker semantics).
     const tok2 = try ctx.createOneshot(ip, "_API_KEY_USER_", 1000);
     defer a.free(tok2);
-    const u = ctx.consumeOneshot(tok2, ip, 1001);
+    const u = ctx.consumeOneshot(a, tok2, ip, 1001);
     try testing.expect(u != null);
     if (u) |un| {
         defer a.free(un);
         try testing.expectEqualStrings("_API_KEY_USER_", un);
     }
     // Second use → null (single-use).
-    try testing.expect(ctx.consumeOneshot(tok2, ip, 1001) == null);
+    try testing.expect(ctx.consumeOneshot(a, tok2, ip, 1001) == null);
 }
 
 test "oneshot token: expires after TTL" {
@@ -1845,7 +1843,7 @@ test "oneshot token: expires after TTL" {
     const tok = try ctx.createOneshot(ip, api_user, 1000);
     defer a.free(tok);
     // now = 1000 + 6 > 1000 + ONESHOT_TIMEOUT(5) → expired.
-    try testing.expect(ctx.consumeOneshot(tok, ip, 1006) == null);
+    try testing.expect(ctx.consumeOneshot(a, tok, ip, 1006) == null);
 }
 
 test "trusted client: exact IP and CIDR match" {

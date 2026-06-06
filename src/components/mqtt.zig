@@ -1280,7 +1280,7 @@ pub fn handlePublishPrefixed(ctx_ptr: *anyopaque, params: std.json.Value, alloc:
 
     const resp_topic: []const u8 = if (use_prefix) blk: {
         const name = if (ctx.config) |cfg| cfg.instance_name orelse "moonraker" else "moonraker";
-        break :blk try alloc.dupe(u8, try std.fmt.allocPrint(alloc, "{s}/{s}", .{ name, topic }));
+        break :blk try std.fmt.allocPrint(alloc, "{s}/{s}", .{ name, topic });
     } else topic;
 
     var obj: std.json.ObjectMap = .empty;

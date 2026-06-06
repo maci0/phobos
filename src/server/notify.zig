@@ -228,15 +228,11 @@ pub const NotifyBus = struct {
         const a = arena.allocator();
 
         const frame = try buildFrame(a, method, params);
-        const snap = try self.conns.snapshot(io, a);
-        for (snap) |conn| {
-            if (topic) |t| {
-                if (!self.conns.isSubscribed(io, conn, t)) continue;
-            }
-            // A failed write flags the connection dead; we swallow the error so
-            // one dead client never stalls the broadcast to the rest.
-            self.conns.writeFrame(io, conn, frame) catch {};
-        }
+        // Fan out under the registry mutex (held for the whole loop) so a
+        // concurrent WS teardown (`Connections.remove`) cannot free a connection
+        // mid-write — previously snapshot()+writeFrame() dropped the lock between
+        // selecting and writing, a use-after-free against background-thread emits.
+        self.conns.broadcast(io, frame, topic);
     }
 };
 

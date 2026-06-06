@@ -195,13 +195,18 @@ pub fn handleReboot(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
     const serial = try getStr(params, "serial");
 
     var out: std.json.ObjectMap = .empty;
-    if (ctx.conns.get(serial)) |conn| {
-        // Free the entry's allocated memory.
+    if (ctx.conns.getEntry(serial)) |entry| {
+        // Free the entry's value fields AND the map key (a separate allocation
+        // from serial_number — see addConnection). remove() only unlinks; the
+        // key would otherwise leak on every reboot of a known device.
+        const key = entry.key_ptr.*;
+        const conn = entry.value_ptr.*;
         ctx.gpa.free(conn.serial_number);
         ctx.gpa.free(conn.scan_time);
         if (conn.color) |c| ctx.gpa.free(c);
         if (conn.error_msg) |e| ctx.gpa.free(e);
         _ = ctx.conns.remove(serial);
+        ctx.gpa.free(key);
         try out.put(alloc, "status", .{ .string = "ok" });
     } else {
         try out.put(alloc, "status", .{ .string = "serial_error" });
@@ -544,4 +549,20 @@ test "pollSerialOnce: reads a line from the device and updates the connection" {
     try std.testing.expect(conn.done_initializing);
     try std.testing.expectEqual(@as(f64, 1.72), conn.td.?);
     try std.testing.expectEqualStrings("Green", conn.color.?);
+}
+
+test "handleReboot: removing a known device frees the map key (no leak)" {
+    // Runs under testing.allocator: a leaked key/value would fail the test.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = Td1Ctx.init(std.testing.allocator);
+    defer ctx.deinit();
+    try ctx.addConnection(.{ .serial_number = "TD1X", .scan_time = "t", .color = "Red", .done_initializing = true });
+
+    const params = try std.json.parseFromSlice(std.json.Value, a, "{\"serial\":\"TD1X\"}", .{});
+    const r = try handleReboot(@ptrCast(&ctx), params.value, a);
+    try std.testing.expectEqualStrings("ok", r.object.get("status").?.string);
+    try std.testing.expect(ctx.conns.count() == 0);
 }

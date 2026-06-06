@@ -17,6 +17,10 @@ const Io = std.Io;
 /// they must outlive it.
 pub const PublishHandler = *const fn (ctx: *anyopaque, topic: []const u8, payload: []const u8) void;
 
+/// Upper bound on an inbound MQTT packet body (8 MiB). Larger frames are
+/// rejected to cap attacker-controlled allocation.
+pub const max_packet_len: u32 = 8 * 1024 * 1024;
+
 pub const MqttClient = struct {
     gpa: std.mem.Allocator,
     io: Io,
@@ -186,6 +190,10 @@ pub const MqttClient = struct {
             mult *= 128;
             if (count >= 4) return error.MalformedVarInt;
         }
+        // Bound the allocation: a malformed/hostile broker frame can encode up to
+        // ~256 MB in the remaining-length field. Reject oversized packets rather
+        // than allocate attacker-controlled memory.
+        if (rl > max_packet_len) return error.PacketTooLarge;
         const body = try self.gpa.alloc(u8, rl);
         errdefer self.gpa.free(body);
         if (rl > 0) try r.readSliceAll(body);
