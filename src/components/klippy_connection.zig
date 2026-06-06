@@ -93,31 +93,52 @@ pub fn buildJsonRpcRequest(
     );
 }
 
-/// Build a `server.connection.identify` request (first handshake step).
-pub fn buildIdentifyRequest(
-    client_name: []const u8,
+/// Build the Klippy `info` request — the real handshake/identify step.
+///
+/// Klippy has no `server.connection.identify`; the Moonraker host identifies
+/// itself by sending the `info` endpoint with a `client_info` object (see
+/// klippy_apis.get_klippy_info, send_id=True). `id` is the request id; pass
+/// `send_id=true` for the first (identifying) call and `false` for subsequent
+/// state polls (which omit `client_info`).
+pub fn buildInfoRequest(
+    program: []const u8,
     version: []const u8,
-    client_url: []const u8,
+    id: []const u8,
+    send_id: bool,
     buf: []u8,
 ) ![]const u8 {
+    if (send_id) {
+        return std.fmt.bufPrint(buf,
+            \\{{"jsonrpc":"2.0","method":"info","id":"{s}","params":{{"client_info":{{"program":"{s}","version":"{s}"}}}}}}
+        ,
+            .{ id, program, version },
+        );
+    }
     return std.fmt.bufPrint(buf,
-        \\{{"jsonrpc":"2.0","method":"server.connection.identify","id":"identify","params":{{"client_name":"{s}","version":"{s}","type":"moonraker","url":"{s}"}}}}
+        \\{{"jsonrpc":"2.0","method":"info","id":"{s}","params":{{}}}}
     ,
-        .{ client_name, version, client_url },
+        .{id},
     );
 }
 
-/// Build an `objects/subscribe` request.
+/// Build an `objects/subscribe` request. Includes the `response_template`
+/// naming the remote method (`process_status_update`) Klippy invokes on each
+/// status update for this connection — without it Klippy returns the initial
+/// status only and pushes no further updates (klippy_connection.py:644).
 pub fn buildSubscribeRequest(objects: []const u8, id: []const u8, buf: []u8) ![]const u8 {
     return std.fmt.bufPrint(buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"{s}\",\"params\":{{\"objects\":{s}}}}}",
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"{s}\",\"params\":{{\"objects\":{s},\"response_template\":{{\"method\":\"process_status_update\"}}}}}}",
         .{ id, objects },
     );
 }
 
-/// Build a `gcode/subscribe_output` request.
+/// Build a `gcode/subscribe_output` request. Carries the `response_template`
+/// naming `process_gcode_response` (klippy_apis.subscribe_gcode_output).
 pub fn buildSubscribeGcodeRequest(id: []const u8, buf: []u8) ![]const u8 {
-    return buildJsonRpcRequest("gcode/subscribe_output", id, null, buf);
+    return std.fmt.bufPrint(buf,
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"gcode/subscribe_output\",\"id\":\"{s}\",\"params\":{{\"response_template\":{{\"method\":\"process_gcode_response\"}}}}}}",
+        .{id},
+    );
 }
 
 /// Build a `register_remote_method` request.
@@ -145,7 +166,9 @@ pub fn parseKlippyInfoResponse(result: std.json.Value) ?KlippyInfo {
                 .string => |str| str,
                 else => "",
             } else "";
-            const version = if (obj.get("version")) |s| switch (s) {
+            // Real Klippy reports `software_version`; the sim historically used
+            // `version`. Accept either.
+            const version = if (obj.get("software_version") orelse obj.get("version")) |s| switch (s) {
                 .string => |str| str,
                 else => "",
             } else "";
@@ -464,71 +487,63 @@ pub const KlippyCtx = struct {
     // Connect + handshake
     // -----------------------------------------------------------------------
 
-    /// Open the Unix socket, send identify, poll server.info until ready,
-    /// then subscribe to status updates.
+    /// Open the Unix socket and perform the real Klippy handshake:
+    ///   1. `info` (with client_info) to identify, then poll `info` until
+    ///      Klippy leaves the `startup` state (mirrors Moonraker's _check_ready).
+    ///   2. `objects/subscribe` (with response_template) for status updates.
+    ///   3. `gcode/subscribe_output` (with response_template) for gcode output.
+    /// Klippy has NO `server.connection.identify` — the `info` request is the
+    /// identify step. Status/gcode pushes arrive as `process_status_update` /
+    /// `process_gcode_response` remote-method calls named in the templates.
     fn connectAndHandshake(self: *KlippyCtx) !void {
         const io = self.io.?;
         const addr = try net.UnixAddress.init(self.uds_path);
         const s = try addr.connect(io);
         self.stream = s;
 
-        // Phase 1: send identify request
+        // Phase 1: identify + poll `info` until Klippy is out of startup.
         _ = self.setState(.connecting);
-        var id_buf: [512]u8 = undefined;
-        const identify_frame = try buildIdentifyRequest("phobos", "1.0.0", "http://localhost:7125", &id_buf);
-        try self.writeFrame(io, identify_frame);
-
-        // Read the identify_response.
-        const identify_payload = try self.readFrame(io);
-        defer self.gpa.free(identify_payload);
+        try self.pollServerInfo(io);
         self.klippy_identified = true;
 
-        // Phase 2: poll server.info until state != startup.
-        try self.pollServerInfo(io);
-
-        // Phase 3: subscribe to printer objects for status updates.
+        // Phase 2: subscribe to printer objects for status updates. Tolerate a
+        // subscribe error (Moonraker logs and continues) so a missing object on
+        // a bare config never aborts the handshake.
         var sub_buf: [512]u8 = undefined;
         var rid_buf: [32]u8 = undefined;
-        const sub_id = self.nextReqId(&rid_buf);
-        const sub_frame = try buildSubscribeRequest(
-            \\["toolhead","extruder","heater_bed","print_stats"]
-        , sub_id, &sub_buf);
-        try self.writeFrame(io, sub_frame);
-        // Ignore the subscribe response — it's an ack.
         {
+            const sub_id = self.nextReqId(&rid_buf);
+            const sub_frame = try buildSubscribeRequest(
+                \\{"webhooks":null,"toolhead":null,"print_stats":null}
+            , sub_id, &sub_buf);
+            try self.writeFrame(io, sub_frame);
             const sub_resp = try self.readFrame(io);
-            defer self.gpa.free(sub_resp);
+            self.gpa.free(sub_resp);
         }
 
-        // Phase 4: register remote methods so Klippy pushes
-        // process_status_update and process_gcode_response back to us.
+        // Phase 3: subscribe to gcode output.
         {
-            const rm_id = self.nextReqId(&rid_buf);
-            const rm_frame = try buildRegisterMethodRequest("process_status_update", rm_id, &sub_buf);
-            try self.writeFrame(io, rm_frame);
-            const rm_resp = try self.readFrame(io);
-            defer self.gpa.free(rm_resp);
-        }
-        {
-            const rm_id = self.nextReqId(&rid_buf);
-            const rm_frame = try buildRegisterMethodRequest("process_gcode_response", rm_id, &sub_buf);
-            try self.writeFrame(io, rm_frame);
-            const rm_resp = try self.readFrame(io);
-            defer self.gpa.free(rm_resp);
+            const gc_id = self.nextReqId(&rid_buf);
+            const gc_frame = try buildSubscribeGcodeRequest(gc_id, &sub_buf);
+            try self.writeFrame(io, gc_frame);
+            const gc_resp = try self.readFrame(io);
+            self.gpa.free(gc_resp);
         }
 
         // Handshake fully complete — mark ready so isConnected() gates open.
         _ = self.setState(.ready);
     }
 
-    /// Poll server.info every 250ms up to 100 times until Klippy exits startup.
+    /// Poll the Klippy `info` endpoint every 250ms up to 100 times until Klippy
+    /// exits the startup state. The first request carries `client_info`
+    /// (identify); subsequent polls omit it.
     fn pollServerInfo(self: *KlippyCtx, io: std.Io) !void {
         var poll_count: u8 = 0;
         while (poll_count < 100) : (poll_count += 1) {
             var info_buf: [256]u8 = undefined;
             var rid: [32]u8 = undefined;
             const info_id = self.nextReqId(&rid);
-            const info_frame = try buildJsonRpcRequest("server.info", info_id, null, &info_buf);
+            const info_frame = try buildInfoRequest("phobos", "1.0.0", info_id, poll_count == 0, &info_buf);
             try self.writeFrame(io, info_frame);
 
             const info_payload = try self.readFrame(io);
@@ -843,25 +858,28 @@ pub const KlippyCtx = struct {
         defer self.stream_mutex.unlock(io);
 
         // Build and send the request frame.
-        var req_buf: [512]u8 = undefined;
         var rid_buf: [32]u8 = undefined;
         const rid = self.nextReqId(&rid_buf);
 
-        // Serialize params to JSON for embedding in the request.
+        // Serialize params to JSON for embedding in the request. Built on the
+        // caller's arena so arbitrarily large params (e.g. an objects/query
+        // listing every printer object) are never truncated.
         var params_json: []const u8 = "";
-        var params_buf: [256]u8 = undefined;
+        var params_owned: ?[]u8 = null;
+        defer if (params_owned) |p| alloc.free(p);
         if (params != .null) {
             var aw: std.Io.Writer.Allocating = .init(alloc);
             defer aw.deinit();
             var jw: std.json.Stringify = .{ .writer = &aw.writer };
             try jw.write(params);
-            const tmp = try aw.toOwnedSlice();
-            defer alloc.free(tmp);
-            @memcpy(params_buf[0..@min(tmp.len, params_buf.len)], tmp);
-            params_json = params_buf[0..@min(tmp.len, params_buf.len)];
+            params_owned = try aw.toOwnedSlice();
+            params_json = params_owned.?;
         }
 
-        const req_frame = try buildJsonRpcRequest(method, rid, params_json, &req_buf);
+        // Frame buffer sized to fit method + id + params with envelope overhead.
+        const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
+        defer alloc.free(req_buf);
+        const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
         try self.writeFrame(io, req_frame);
 
         // Read frames until the matching response arrives.
@@ -1121,23 +1139,30 @@ test "buildJsonRpcRequest: empty params omitted" {
     );
 }
 
-test "buildIdentifyRequest: produces valid JSON with quoted strings" {
+test "buildInfoRequest: identify form carries client_info" {
     var buf: [512]u8 = undefined;
-    const got = try buildIdentifyRequest("phobos", "1.0.0", "http://localhost:7125", &buf);
-    // Must contain the method, id, and all params.
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"method\":\"server.connection.identify\"") != null);
+    const got = try buildInfoRequest("phobos", "1.0.0", "identify", true, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"method\":\"info\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, got, "\"id\":\"identify\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"client_name\":\"phobos\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"version\":\"1.0.0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"type\":\"moonraker\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"url\":\"http://localhost:7125\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"client_info\":{\"program\":\"phobos\",\"version\":\"1.0.0\"}") != null);
+    // No legacy moonraker identify shape.
+    try std.testing.expect(std.mem.indexOf(u8, got, "server.connection.identify") == null);
 }
 
-test "buildSubscribeRequest: includes objects array" {
+test "buildInfoRequest: poll form omits client_info" {
     var buf: [256]u8 = undefined;
-    const got = try buildSubscribeRequest("{\"gcode_move\",\"toolhead\"}", "2", &buf);
+    const got = try buildInfoRequest("phobos", "1.0.0", "7", false, &buf);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"2\",\"params\":{\"objects\":{\"gcode_move\",\"toolhead\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"info\",\"id\":\"7\",\"params\":{}}",
+        got,
+    );
+}
+
+test "buildSubscribeRequest: includes objects and response_template" {
+    var buf: [256]u8 = undefined;
+    const got = try buildSubscribeRequest("{\"toolhead\":null}", "2", &buf);
+    try std.testing.expectEqualStrings(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"2\",\"params\":{\"objects\":{\"toolhead\":null},\"response_template\":{\"method\":\"process_status_update\"}}}",
         got,
     );
 }
@@ -1155,7 +1180,7 @@ test "buildSubscribeGcodeRequest" {
     var buf: [256]u8 = undefined;
     const got = try buildSubscribeGcodeRequest("4", &buf);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"gcode/subscribe_output\",\"id\":\"4\"}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"gcode/subscribe_output\",\"id\":\"4\",\"params\":{\"response_template\":{\"method\":\"process_gcode_response\"}}}",
         got,
     );
 }

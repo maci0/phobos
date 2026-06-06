@@ -11,10 +11,9 @@
 //!   POST /machine/device_power/device  → machine.device_power.post_device (single)
 //!
 //! HTTP power devices (type "http" or any type with on_url/off_url configured)
-//! store HTTP URLs in the Device struct. Real HTTP GET requests via `std.http.Client`
-//! are not yet wired; the URL fields are parsed from config and stored for future
-//! integration. GPIO and other non-HTTP device types track state in memory only
-//! (stubbed) unless a future platform-specific GPIO driver is integrated.
+//! send real HTTP GET requests to the configured URLs via `std.http.Client`.
+//! GPIO and other non-HTTP device types track state in memory only (stubbed)
+//! unless a future platform-specific GPIO driver is integrated.
 //!
 //! DEVICES FROM CONFIG. Without `[power <name>]` config sections (the spine
 //! carries none), the devices map is empty and the list endpoint returns [].
@@ -133,6 +132,55 @@ pub const PowerCtx = struct {
 
     pub fn setIo(self: *PowerCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Issue an HTTP GET to a device URL. Silently returns on any error
+    /// (DNS, connect, timeout, non-200) — the in-memory state update is
+    /// already committed, and we treat the HTTP part as best-effort.
+    fn sendDeviceHttpGet(self: *PowerCtx, url: []const u8) void {
+        const io = self.io orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var client: std.http.Client = .{ .allocator = aa, .io = io };
+        defer client.deinit();
+
+        var aw: std.Io.Writer.Allocating = .init(aa);
+        defer aw.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url },
+            .method = .GET,
+            .response_writer = &aw.writer,
+        }) catch return;
+        _ = result;
+    }
+
+    /// Try to read live device status via HTTP GET to the device's
+    /// `status_url`. Returns the response body as a dupe'd string on
+    /// success, null on failure or if status_url is not configured.
+    fn fetchDeviceStatus(self: *PowerCtx, url: []const u8) ?[]const u8 {
+        const io = self.io orelse return null;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var client: std.http.Client = .{ .allocator = aa, .io = io };
+        defer client.deinit();
+
+        var aw: std.Io.Writer.Allocating = .init(aa);
+        defer aw.deinit();
+
+        const result = client.fetch(.{
+            .location = .{ .url = url },
+            .method = .GET,
+            .response_writer = &aw.writer,
+        }) catch return null;
+
+        if (result.status != .ok) return null;
+        const body = aw.written();
+        return if (body.len > 0) self.gpa.dupe(u8, body) catch null else null;
     }
 
     /// Get a device by name (borrowed pointer into the map).
@@ -328,15 +376,39 @@ fn emitPowerChanged(ctx: *PowerCtx, alloc: std.mem.Allocator, dev: *const Device
 // ---------------------------------------------------------------------------
 
 /// Apply a power request ("on" | "off" | "toggle" | "status") to a device.
-/// STUB: no real GPIO/network control is performed. State is updated in memory.
+/// For HTTP-type devices with URLs configured, real HTTP GET requests are sent
+/// via std.http.Client. GPIO/non-HTTP types update in-memory state only.
 /// Returns the resulting state string (points into ctx-owned memory or a
 /// literal — caller must not free).
 fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {
     const cur = dev.state;
     if (std.mem.eql(u8, req, "status")) {
-        // STUB: in Moonraker this calls refresh_status() on the device to read
-        // live state from the hardware. phobos returns the cached in-memory
-        // state without touching any hardware.
+        // If a status_url is configured, try to read live state from the
+        // hardware via HTTP GET. On failure, fall back to cached state.
+        if (dev.status_url) |url| {
+            if (ctx.fetchDeviceStatus(url)) |body| {
+                defer ctx.gpa.free(body);
+                // Moonraker's power types return various response formats;
+                // we do a best-effort parse: if the body contains "on"
+                // but not "off", treat as on; "off" but not "on", treat
+                // as off. Otherwise keep the cached state.
+                const has_on = std.mem.indexOf(u8, body, "\"on\"") != null or
+                    std.mem.indexOf(u8, body, "ON") != null or
+                    std.mem.indexOf(u8, body, "\"POWER\":\"ON\"") != null;
+                const has_off = std.mem.indexOf(u8, body, "\"off\"") != null or
+                    std.mem.indexOf(u8, body, "OFF") != null or
+                    std.mem.indexOf(u8, body, "\"POWER\":\"OFF\"") != null;
+                if (has_on and !has_off) {
+                    ctx.setState(dev.name, "on") catch {};
+                    const updated = ctx.findDevice(dev.name) orelse return "on";
+                    return updated.state;
+                } else if (has_off and !has_on) {
+                    ctx.setState(dev.name, "off") catch {};
+                    const updated = ctx.findDevice(dev.name) orelse return "off";
+                    return updated.state;
+                }
+            }
+        }
         return cur;
     }
     // Enforce the printing lock on mutating actions. Status queries (above)
@@ -352,9 +424,12 @@ fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.
     if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
         return error.InvalidParams;
     }
-    // STUB: a real implementation would call device.set_power(action) which
-    // writes a GPIO pin, sends an HTTP request, publishes an MQTT topic, etc.
-    // phobos only updates the in-memory state and emits the notification.
+    // Send real HTTP GET to the device URL if configured.
+    if (std.mem.eql(u8, action, "on")) {
+        if (dev.on_url) |url| ctx.sendDeviceHttpGet(url);
+    } else {
+        if (dev.off_url) |url| ctx.sendDeviceHttpGet(url);
+    }
     ctx.setState(dev.name, action) catch {};
     // Refresh pointer after setState (dupe may have reallocated).
     const updated = ctx.findDevice(dev.name) orelse return action;

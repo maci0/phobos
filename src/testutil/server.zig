@@ -136,6 +136,16 @@ pub const TestServer = struct {
         self.klippy_sim = sim;
     }
 
+    /// Point the Klippy bridge at an ALREADY-RUNNING Klippy API socket (a real
+    /// Klippy, not the simulator) and start the background bridge. Used by the
+    /// gated real-Klippy integration test. `socket_path` must outlive the bridge
+    /// (pass a string literal). No simulator is created, so `stop()` tears down
+    /// only the bridge task.
+    pub fn connectRealKlippy(self: *TestServer, socket_path: []const u8) void {
+        self.app.klippy_ctx.uds_path = socket_path;
+        self.app.klippy_ctx.start();
+    }
+
     /// Stop the accept loop and free everything.
     pub fn stop(self: *TestServer) void {
         self.serve_fut.cancel(self.io);
@@ -1729,6 +1739,81 @@ test "printer: with Klippy sim, emergency_stop succeeds" {
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") == null);
     try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
+}
+
+// ---------------------------------------------------------------------------
+// Real Klippy integration test (gated). Runs only when a real Klippy API
+// socket is present at /tmp/klippy_uds. Boot one with:
+//   .testenv/run-klippy.sh   (native linux host MCU + klippy via uv)
+// Skipped automatically in CI / normal `zig build test` when absent.
+// ---------------------------------------------------------------------------
+
+test "printer: real Klippy proxies info/objects.list/objects.query" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // Gate: only run when a real Klippy API socket is present.
+    std.Io.Dir.cwd().access(ts.io, "/tmp/klippy_uds", .{}) catch return error.SkipZigTest;
+
+    ts.connectRealKlippy("/tmp/klippy_uds");
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    // server.info reflects the real Klippy "ready" state.
+    {
+        const body = try ts.get(alloc, "/server/info");
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        const result = p.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("ready", result.get("klippy_state").?.string);
+        try std.testing.expect(result.get("klippy_connected").?.bool == true);
+    }
+
+    // printer.info proxies to Klippy and returns its real state.
+    {
+        const body = try ts.postJson(alloc, "/server/jsonrpc",
+            \\{"jsonrpc":"2.0","method":"printer.info","id":1}
+        );
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("error") == null);
+        const result = p.value.object.get("result").?.object;
+        try std.testing.expectEqualStrings("ready", result.get("state").?.string);
+    }
+
+    // printer.objects.list returns Klippy's live object list (must include
+    // "toolhead", always present once Klippy is ready).
+    {
+        const body = try ts.postJson(alloc, "/server/jsonrpc",
+            \\{"jsonrpc":"2.0","method":"printer.objects.list","id":2}
+        );
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("error") == null);
+        const objects = p.value.object.get("result").?.object.get("objects").?.array;
+        var found_toolhead = false;
+        for (objects.items) |o| {
+            if (o == .string and std.mem.eql(u8, o.string, "toolhead")) found_toolhead = true;
+        }
+        try std.testing.expect(found_toolhead);
+    }
+
+    // printer.objects.query with a non-trivial params payload (exercises the
+    // dynamic request-frame path that previously truncated at 256 bytes).
+    {
+        const body = try ts.postJson(alloc, "/server/jsonrpc",
+            \\{"jsonrpc":"2.0","method":"printer.objects.query","params":{"objects":{"webhooks":null,"toolhead":null,"gcode_move":null}},"id":3}
+        );
+        defer alloc.free(body);
+        const p = try resultOf(alloc, body);
+        defer p.deinit();
+        try std.testing.expect(p.value.object.get("error") == null);
+        const status = p.value.object.get("result").?.object.get("status").?.object;
+        try std.testing.expectEqualStrings("ready", status.get("webhooks").?.object.get("state").?.string);
+    }
 }
 
 // ---------------------------------------------------------------------------

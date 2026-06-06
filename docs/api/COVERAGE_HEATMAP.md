@@ -14,13 +14,13 @@
 | 🟢 gcode_metadata | 0/0 | 0/0 | 0/0 | 100% | 90% | 90% |
 | 🟢 history | 4/4 | 5/5 | 1/1 | 100% | 85% | 85% |
 | 🟢 job_queue | 5/5 | 8/8 | 1/1 | 100% | 90% | 90% |
-| 🟡 klippy_apis | 6/6 | 6/6 | 0/0 | 100% | 75% | 75% |
+| 🟢 klippy_apis | 13/13 | 13/13 | 0/0 | 100% | 90% | 90% |
 | 🟢 loghelper | 1/1 | 1/1 | 0/0 | 100% | 95% | 95% |
 | 🟢 machine | 12/12 | 12/12 | 2/2 | 100% | 75% | 75% |
 | 🟡 mqtt | 2/2 | 3/3 | 0/0 | 100% | 80% | 80% |
 | 🟢 notifier | 2/2 | 2/2 | 0/0 | 100% | 95% | 95% |
 | 🟢 octoprint_compat | 10/10 | 0/0 | 0/0 | 100% | 95% | 95% |
-| 🟡 power | 5/5 | 6/6 | 1/1 | 100% | 50% | 50% |
+| 🟡 power | 5/5 | 6/6 | 1/1 | 100% | 70% | 70% |
 | 🟢 proc_stats | 1/1 | 1/1 | 2/2 | 100% | 95% | 95% |
 | 🟡 sensor | 3/3 | 3/3 | 1/1 | 100% | 65% | 65% |
 | 🟢 server | 3/3 | 3/3 | 4/4 | 100% | 95% | 95% |
@@ -55,10 +55,13 @@
 > - **50%** — In-memory state tracking with notification emission, all hardware I/O stubbed
 >
 > P3 blockers (require hardware/external services):
-> - power: GPIO/network device control (HTTP URLs parsed/stored, `std.http.Client` not yet wired)
+> - power: GPIO device control (HTTP URLs send real GET requests via `std.http.Client`; GPIO still stubbed pending platform driver)
 > - td1: UART communication
 > - spoolman: ETag conditional GET (Zig 0.16 FetchResult header limitation)
 > - sensor: MQTT/Klippy sensor integration
 > - mqtt: real MQTT broker connection (TLS/keepalive/reconnect); status_cache, flush thread, moonraker_status publication done
-> - klippy_apis: real Klippy integration test
+> - klippy_apis: DONE — real Klippy handshake (info/poll/subscribe with
+>   response_template), is_remote proxied endpoints (printer.info, objects.*,
+>   gcode.script/help, query_endstops.status), validated end-to-end against a
+>   live Klippy (native linux host MCU) via the gated integration test
 > - wled: serial-only strip communication (HTTP POST to WLED JSON API is real for address-based strips)

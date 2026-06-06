@@ -225,7 +225,9 @@ pub const KlippySim = struct {
 
     fn doHandshake(self: *Self, io: Io, stream: net.Stream) bool {
         var poll_count: u32 = 0;
-        var remote_count: u32 = 0;
+        var ready_sent: bool = false;
+        var sub_done: bool = false;
+        var gcode_done: bool = false;
 
         while (!self.stop_flag.load(.acquire)) {
             const payload = self.readFrame(io, stream) catch {
@@ -242,41 +244,46 @@ pub const KlippySim = struct {
             const method = if (frame.object.get("method")) |m| m.string else "";
             const id = if (frame.object.get("id")) |id_val| id_val else null;
 
-            if (std.mem.eql(u8, method, "server.connection.identify")) {
-                const resp = "{\"jsonrpc\":\"2.0\",\"id\":\"identify\",\"result\":{\"connection_id\":0}}";
-                self.writeFrame(io, stream, resp) catch return false;
-            } else if (std.mem.eql(u8, method, "server.info")) {
-                const state_str: []const u8 = if (poll_count < self.startup_polls) "startup" else "ready";
+            // Real Klippy handshake: `info` (identify + state polls), then
+            // `objects/subscribe` and `gcode/subscribe_output` (each with a
+            // response_template). No `server.connection.identify` exists.
+            if (std.mem.eql(u8, method, "info")) {
+                const is_ready = poll_count >= self.startup_polls;
+                const state_str: []const u8 = if (is_ready) "ready" else "startup";
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [512]u8 = undefined;
                 const resp = std.fmt.bufPrint(&buf,
-                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"state\":\"{s}\",\"state_message\":\"sim\",\"version\":\"v0.12.0-sim\",\"hostname\":\"sim\"}}}}",
+                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"state\":\"{s}\",\"state_message\":\"Printer is ready\",\"software_version\":\"v0.12.0-sim\",\"hostname\":\"sim\"}}}}",
                     .{ id_str, state_str },
                 ) catch return false;
                 self.writeFrame(io, stream, resp) catch return false;
                 poll_count += 1;
+                if (is_ready) ready_sent = true;
             } else if (std.mem.eql(u8, method, "objects/subscribe")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [128]u8 = undefined;
                 const resp = std.fmt.bufPrint(&buf,
-                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}",
+                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"eventtime\":0.0,\"status\":{{}}}}}}",
                     .{id_str},
                 ) catch return false;
                 self.writeFrame(io, stream, resp) catch return false;
-            } else if (std.mem.eql(u8, method, "register_remote_method")) {
+                sub_done = true;
+            } else if (std.mem.eql(u8, method, "gcode/subscribe_output")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [128]u8 = undefined;
                 const resp = std.fmt.bufPrint(&buf,
-                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}",
+                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{}}}}",
                     .{id_str},
                 ) catch return false;
                 self.writeFrame(io, stream, resp) catch return false;
-                remote_count += 1;
-                // Two remote methods: process_gcode_response + process_status_update.
-                if (poll_count >= self.startup_polls and remote_count >= 2) return true;
+                gcode_done = true;
             } else {
                 return false;
             }
+
+            // Handshake complete once Klippy is ready and both subscriptions
+            // have been acknowledged.
+            if (ready_sent and sub_done and gcode_done) return true;
         }
         return false;
     }

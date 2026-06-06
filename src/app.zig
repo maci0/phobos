@@ -1053,6 +1053,14 @@ test "App.init: dispatcher has exactly the expected methods" {
         "printer.restart",
         "printer.firmware_restart",
         "printer.emergency_stop",
+        // Klipper-proxied (is_remote): single dotted method, GET|POST route.
+        "printer.info",
+        "printer.objects.list",
+        "printer.objects.query",
+        "printer.objects.subscribe",
+        "printer.query_endstops.status",
+        "printer.gcode.script",
+        "printer.gcode.help",
         // WS-only stubs
         "server.connection.identify",
         "server.websocket.id",

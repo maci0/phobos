@@ -64,6 +64,10 @@ pub const ApiDef = struct {
     /// `{"result": <r>}`; when false the raw handler result is the body.
     wrap_result: bool = true,
     auth_required: bool = true,
+    /// Klipper-proxied endpoint (Moonraker `is_remote=True`). Such endpoints
+    /// accept GET|POST on the HTTP route but map to a SINGLE dotted JSON-RPC
+    /// method with no `get_`/`post_` verb prefix (common.py APIDefinition.create).
+    is_remote: bool = false,
 };
 
 /// A registered HTTP route: matched by (path, method).
@@ -187,13 +191,23 @@ pub const Registry = struct {
         // JSON-RPC methods: derived only when a non-HTTP transport exists, to
         // mirror Moonraker (`transports != TransportType.HTTP`).
         if (hasNonHttpTransport(def.transports)) {
-            for (def.methods) |verb| {
+            if (def.is_remote) {
+                // Klipper-proxied: one plain dotted method regardless of verbs.
                 var buf: [max_method_name]u8 = undefined;
-                const derived = try deriveMethodName(&buf, def.path, verb, multi);
+                const derived = try deriveMethodName(&buf, def.path, def.methods[0], false);
                 const owned = try self.alloc.dupe(u8, derived);
                 errdefer self.alloc.free(owned);
                 try self.name_pool.append(self.alloc, owned);
                 try self.dispatcher.register(owned, ctx, handler);
+            } else {
+                for (def.methods) |verb| {
+                    var buf: [max_method_name]u8 = undefined;
+                    const derived = try deriveMethodName(&buf, def.path, verb, multi);
+                    const owned = try self.alloc.dupe(u8, derived);
+                    errdefer self.alloc.free(owned);
+                    try self.name_pool.append(self.alloc, owned);
+                    try self.dispatcher.register(owned, ctx, handler);
+                }
             }
         }
     }

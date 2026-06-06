@@ -39,6 +39,8 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 
 const Registry = registry.Registry;
+const RequestType = registry.RequestType;
+const KlippyCtx = @import("klippy_connection.zig").KlippyCtx;
 
 /// The exact message Moonraker raises when a printer.* request is made while
 /// Klippy is not connected. Surfaced verbatim by both transports.
@@ -49,7 +51,61 @@ pub const klippy_disconnected_message = "Klippy Host not connected";
 pub const PrinterCtx = struct {
     /// Optional pointer to the Klippy connection; set by App after init.
     /// When non-null and Klippy is connected, handlers proxy to Klippy.
-    klippy: ?*@import("klippy_connection.zig").KlippyCtx = null,
+    klippy: ?*KlippyCtx = null,
+    /// Stable storage for the standard Klipper-proxied endpoint descriptors.
+    /// Populated by `registerPrinter`; the registry holds pointers into this
+    /// array, so it must live as long as the PrinterCtx (App owns both).
+    proxies: [proxy_specs.len]ProxyEndpoint = undefined,
+};
+
+/// One Klipper-proxied endpoint (Moonraker `is_remote=True`). `endpoint` is the
+/// Klippy-side path with slashes (e.g. "objects/query"); `parent` supplies the
+/// live Klippy handle at call time.
+pub const ProxyEndpoint = struct {
+    parent: *PrinterCtx = undefined,
+    endpoint: []const u8 = "",
+
+    /// Generic proxy handler: forward the request verbatim to Klippy and return
+    /// its result. Returns the disconnected error when Klippy is absent, exactly
+    /// like the dedicated handlers above.
+    pub fn handle(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        const self: *ProxyEndpoint = @ptrCast(@alignCast(ctx));
+        const k = self.parent.klippy orelse return error.KlippyDisconnected;
+        if (!k.isConnected()) return error.KlippyDisconnected;
+
+        // Forward params as-is. Strip the transport-injected `_method` marker so
+        // it never reaches Klippy. Non-object params become an empty object
+        // (Klippy endpoints expect a params object).
+        if (params == .object) {
+            if (params.object.get("_method") != null) {
+                var clone = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+                var it = params.object.iterator();
+                while (it.next()) |e| {
+                    if (std.mem.eql(u8, e.key_ptr.*, "_method")) continue;
+                    try clone.put(alloc, e.key_ptr.*, e.value_ptr.*);
+                }
+                return k.request(self.endpoint, .{ .object = clone }, alloc);
+            }
+            return k.request(self.endpoint, params, alloc);
+        }
+        return k.request(self.endpoint, .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+    }
+};
+
+/// The standard set of Klipper-proxied endpoints Moonraker registers from
+/// Klippy's `list_endpoints` (minus RESERVED_ENDPOINTS). These match the
+/// documented `docs/external_api/printer.md` surface and the set a real Klippy
+/// reports. Each is registered with `is_remote=true`: GET|POST HTTP route, one
+/// plain dotted JSON-RPC method (`printer.<dotted endpoint>`).
+const ProxySpec = struct { path: []const u8, methods: []const RequestType, endpoint: []const u8 };
+const proxy_specs = [_]ProxySpec{
+    .{ .path = "/printer/info", .methods = &.{ .GET, .POST }, .endpoint = "info" },
+    .{ .path = "/printer/objects/list", .methods = &.{ .GET, .POST }, .endpoint = "objects/list" },
+    .{ .path = "/printer/objects/query", .methods = &.{ .GET, .POST }, .endpoint = "objects/query" },
+    .{ .path = "/printer/objects/subscribe", .methods = &.{ .GET, .POST }, .endpoint = "objects/subscribe" },
+    .{ .path = "/printer/query_endstops/status", .methods = &.{ .GET, .POST }, .endpoint = "query_endstops/status" },
+    .{ .path = "/printer/gcode/script", .methods = &.{ .GET, .POST }, .endpoint = "gcode/script" },
+    .{ .path = "/printer/gcode/help", .methods = &.{ .GET, .POST }, .endpoint = "gcode/help" },
 };
 
 // ---------------------------------------------------------------------------
@@ -203,6 +259,18 @@ pub fn registerPrinter(reg: *Registry, ctx: *PrinterCtx) !void {
         c,
         handleEmergencyStop,
     );
+
+    // Standard Klipper-proxied endpoints (is_remote). info / objects.* /
+    // gcode.* / query_endstops.status. Each forwards to Klippy verbatim and
+    // returns the 503 disconnected shape when Klippy is absent.
+    for (proxy_specs, 0..) |spec, i| {
+        ctx.proxies[i] = .{ .parent = ctx, .endpoint = spec.endpoint };
+        try reg.registerEndpoint(
+            .{ .path = spec.path, .methods = spec.methods, .is_remote = true },
+            @ptrCast(&ctx.proxies[i]),
+            ProxyEndpoint.handle,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +345,26 @@ test "registerPrinter wires all seven routes and JSON-RPC methods" {
     for (rpc_methods) |m| {
         try testing.expect(d.methods.get(m) != null);
     }
+
+    // Klipper-proxied (is_remote): single dotted method, GET+POST HTTP routes.
+    const proxied = [_][]const u8{
+        "printer.info",
+        "printer.objects.list",
+        "printer.objects.query",
+        "printer.objects.subscribe",
+        "printer.query_endstops.status",
+        "printer.gcode.script",
+        "printer.gcode.help",
+    };
+    for (proxied) |m| {
+        try testing.expect(d.methods.get(m) != null);
+    }
+    // is_remote endpoints answer both GET and POST on the same path.
+    try testing.expect(reg.lookup(.GET, "/printer/objects/query") != null);
+    try testing.expect(reg.lookup(.POST, "/printer/objects/query") != null);
+    // ...but must NOT produce verb-prefixed method names.
+    try testing.expect(d.methods.get("printer.objects.get_query") == null);
+    try testing.expect(d.methods.get("printer.objects.post_query") == null);
 }
 
 test "handlePrintStart: filename sanitization strips leading slash and escapes quotes" {
@@ -296,6 +384,40 @@ test "handleEmergencyStop: returns KlippyDisconnected without klippy" {
     defer arena.deinit();
     var ctx = PrinterCtx{};
     try testing.expectError(error.KlippyDisconnected, handleEmergencyStop(@ptrCast(&ctx), .null, arena.allocator()));
+}
+
+test "ProxyEndpoint.handle: returns KlippyDisconnected without klippy" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = PrinterCtx{};
+    var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/query" };
+    // Non-object params.
+    try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), .null, a));
+    // Object params with an injected _method marker.
+    const p = try std.json.parseFromSlice(std.json.Value, a, "{\"_method\":\"GET\",\"objects\":{}}", .{});
+    try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), p.value, a));
+}
+
+test "fuzz ProxyEndpoint.handle: arbitrary params never crash, always KlippyDisconnected" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = PrinterCtx{};
+            var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/query" };
+
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const strs = [_][]const u8{
+                "null", "{}", "{\"_method\":\"POST\"}", "{\"objects\":{\"toolhead\":null}}",
+                "[1,2,3]", "\"raw\"", "42", "{\"_method\":\"GET\",\"a\":1}",
+            };
+            const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
+            try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), p.value, a));
+        }
+    }.run, .{});
 }
 
 // --- Fuzz tests ---

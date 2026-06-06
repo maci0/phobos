@@ -18,11 +18,12 @@
 //!   GET  /machine/peripherals/video  → machine.peripherals.video
 //!   GET  /machine/peripherals/canbus → machine.peripherals.canbus
 //!
-//! Reboot/shutdown run real `sudo systemctl` commands when io is wired and a
-//! sudo password has been stored; they return "ok" without touching the host
-//! when io is null (unit-test path). Service actions (start/stop/restart) run
-//! real `systemctl` commands when io is wired; they fall back to optimistic
-//! in-memory state in unit tests (io == null).
+//! Reboot/shutdown are DELIBERATE NO-OPs: they return Moonraker's "ok" shape
+//! but never touch the host. Firing `systemctl reboot` rebooted the dev host,
+//! and target printer boards lack systemd anyway, so real host power control is
+//! left to an opt-in platform driver (see handleReboot/handleShutdown).
+//! Service actions (start/stop/restart) run real `systemctl` commands when io is
+//! wired; they fall back to optimistic in-memory state in unit tests (io == null).
 //!
 //! REAL DATA WHERE READABLE. system_info and proc_stats read the live Linux
 //! /proc and /sys trees (cpuinfo, meminfo, os-release, /proc/stat,
@@ -1169,25 +1170,31 @@ fn uptimeSeconds() f64 {
 // reboot / shutdown
 // ===========================================================================
 
-/// POST /machine/reboot → "ok". Runs `sudo systemctl reboot` when io and
-/// sudo_password are both set; returns "ok" without touching the host when
-/// io is null (unit-test path).
+/// POST /machine/reboot → "ok".
+///
+/// NOTE: deliberately a NO-OP. Real host control is intentionally disabled.
+/// Reasons:
+///   1. Firing `sudo systemctl reboot` here rebooted the developer host during
+///      testing. A stray API call (or a UI probe) must never take the box down.
+///   2. The target appliances (printer mainboards) generally have no systemd /
+///      `systemctl`, so the systemctl path is wrong for the real deployment too.
+/// We return the same "ok" shape Moonraker returns so API/behaviour parity holds
+/// for callers; actual reboot wiring is left to a platform-specific driver that
+/// is opt-in and cannot point at a dev machine. See `runSudoCmd` (kept for
+/// services/sudo paths) — it is intentionally NOT called from here.
 pub fn handleReboot(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.io != null and ctx.run_cmd_fn == null) {
-        _ = runSudoCmd(ctx.io.?, ctx.sudo_password, "systemctl reboot");
-    }
+    _ = ctx_ptr;
     return .{ .string = "ok" };
 }
 
-/// POST /machine/shutdown → "ok". Runs `sudo systemctl poweroff` when io and
-/// sudo_password are both set; returns "ok" without touching the host when
-/// io is null (unit-test path).
+/// POST /machine/shutdown → "ok".
+///
+/// NOTE: deliberately a NO-OP — same rationale as `handleReboot` above
+/// (host-reboot hazard + printers lack systemctl). Returns Moonraker's "ok"
+/// shape without touching the host. Real power-off is left to an opt-in
+/// platform driver.
 pub fn handleShutdown(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.io != null and ctx.run_cmd_fn == null) {
-        _ = runSudoCmd(ctx.io.?, ctx.sudo_password, "systemctl poweroff");
-    }
+    _ = ctx_ptr;
     return .{ .string = "ok" };
 }
 

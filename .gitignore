@@ -7,3 +7,4 @@ zig-out/
 /conformance/golden/*.raw
 # Python bytecode
 __pycache__/
+.testenv/
