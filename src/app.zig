@@ -846,7 +846,10 @@ pub const App = struct {
         self.mqtt_ctx.on_connected = SensorMqttBridge.onConnected;
         self.mqtt_ctx.on_connected_ctx = &self.sensor_mqtt_bridge;
         if (self.mqtt_ctx.isConfigured()) {
-            _ = io.async(MqttCtx.connectBrokerBg, .{self.mqtt_ctx});
+            // Tracked std.Thread (not a discarded io.async future) so
+            // disconnectBroker can join it before teardown — closes the
+            // deinit-vs-in-flight-connect UAF window.
+            self.mqtt_ctx.connect_thread = std.Thread.spawn(.{}, MqttCtx.connectBrokerBg, .{self.mqtt_ctx}) catch null;
         }
         // Wire connections and io into ServerInfo so server.info reports live
         // websocket_count.

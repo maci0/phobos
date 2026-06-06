@@ -444,10 +444,13 @@ pub const KlippyCtx = struct {
     /// `threaded.deinit()` to join it.
     pub fn stop(self: *KlippyCtx, io: std.Io) void {
         self.stopping = true;
-        // Shutdown the read side to interrupt any blocking readv before
-        // taking stream_mutex (the background task holds stream_mutex
-        // while blocked in readv).  Only do this from stop(), never from
-        // the reconnect error path inside klippyTask itself.
+        // Read self.stream WITHOUT stream_mutex on purpose: the background task
+        // may hold stream_mutex while blocked in readv, so acquiring it here
+        // first would deadlock. shutdown(.recv) interrupts that blocked read so
+        // it releases the mutex; closeStream then takes the mutex and closes.
+        // Worst case this shutdown hits an already-closed/stale fd → harmless
+        // (caught). Only do this from stop(), never from the klippyTask
+        // reconnect error path.
         if (self.stream) |*s| {
             s.shutdown(io, .recv) catch {};
         }
@@ -491,7 +494,10 @@ pub const KlippyCtx = struct {
         // (stop() + the reconnect error path) can't double-close (only the one
         // that observes non-null closes). stop() issues shutdown(.recv) first to
         // unblock a request blocked in readFrame so it releases the mutex.
-        self.stream_mutex.lock(io) catch {};
+        // lockUncancelable: a teardown path must not skip the lock on
+        // cancellation (which `lock(io) catch {}` would, then mutate + unlock
+        // without holding it).
+        self.stream_mutex.lockUncancelable(io);
         const s = self.stream;
         self.stream = null;
         self.stream_mutex.unlock(io);

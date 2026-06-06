@@ -377,7 +377,11 @@ pub const SensorCtx = struct {
                 svals.put(a, mentry.key_ptr.*, .{ .float = mentry.value_ptr.* }) catch continue;
             }
             payload.put(a, entry.key_ptr.*, .{ .object = svals }) catch continue;
-            s.snapshotValues(a) catch continue;
+            // Snapshot into the STABLE ctx allocator, not `a`: `last_value`
+            // outlives this call (the live MQTT path passes a per-message arena
+            // that is freed on return). Keys must be gpa-owned to match
+            // last_measurements + Sensor.deinit, else UAF / cross-allocator free.
+            s.snapshotValues(self.gpa) catch continue;
             changed = true;
         }
         if (!changed) return;
@@ -868,4 +872,39 @@ test "fuzz ingestMqttMessage: arbitrary payloads never crash" {
             ctx.ingestMqttMessage("t", &buf, arena.allocator());
         }
     }.run, .{});
+}
+
+test "ingestMqttMessage: last_value snapshot is gpa-stable across per-message arenas" {
+    // Regression for the snapshotValues cross-allocator/UAF: each message uses
+    // its own arena that is freed on return; last_value keys must be gpa-owned.
+    // Requires bus+io set (emitSensorUpdate early-returns otherwise, which is
+    // why the single-arena tests missed this). testing.allocator flags a
+    // cross-allocator free if regressed.
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = @import("../server/core.zig").Core{};
+    var conns = @import("../server/connections.zig").Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+
+    var ctx = SensorCtx.init(alloc, &bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    _ = try ctx.addSensor("c", "mqtt");
+    try ctx.setSensorTopic("c", "t");
+
+    {
+        var a1 = std.heap.ArenaAllocator.init(alloc);
+        defer a1.deinit();
+        ctx.ingestMqttMessage("t", "{\"temp\":1.0}", a1.allocator());
+    }
+    {
+        var a2 = std.heap.ArenaAllocator.init(alloc);
+        defer a2.deinit();
+        ctx.ingestMqttMessage("t", "{\"temp\":2.0}", a2.allocator());
+    }
+    try testing.expectEqual(@as(f64, 2.0), ctx.findSensor("c").?.last_measurements.get("temp").?);
 }

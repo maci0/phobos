@@ -134,6 +134,10 @@ pub const MqttCtx = struct {
     client: ?*mqtt_client.MqttClient = null,
     /// Background reader thread draining inbound broker packets.
     reader_thread: ?std.Thread = null,
+    /// Background thread running the (possibly slow) broker connect. Tracked so
+    /// disconnectBroker can join it before teardown — otherwise a deinit racing
+    /// an in-flight connect frees the ctx while connectBroker still uses it.
+    connect_thread: ?std.Thread = null,
     reader_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Inbound-message hook: invoked (on the reader thread) for each application
     /// PUBLISH with (topic, payload). The app routes this to subscribers (e.g.
@@ -297,6 +301,13 @@ pub const MqttCtx = struct {
     /// Disconnect the broker client and stop the reader thread. Safe to call
     /// when not connected.
     pub fn disconnectBroker(self: *MqttCtx) void {
+        // Join the connect task first so client/reader_thread are fully set (or
+        // the connect has finished failing) before we tear anything down — this
+        // closes the deinit-vs-in-flight-connect UAF window.
+        if (self.connect_thread) |t| {
+            t.join();
+            self.connect_thread = null;
+        }
         self.reader_stop.store(true, .release);
         if (self.client) |client| {
             // Interrupt the reader's blocking recv, then join it before any
@@ -748,14 +759,10 @@ pub const MqttCtx = struct {
                 var field_it = obj_val.object.iterator();
                 while (field_it.next()) |field| {
                     var payload_obj = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch continue;
-                    payload_obj.put(self.gpa, "eventtime", .{ .float = eventtime }) catch {
-                        payload_obj.deinit(self.gpa);
-                        continue;
-                    };
-                    payload_obj.put(self.gpa, "value", field.value_ptr.*) catch {
-                        payload_obj.deinit(self.gpa);
-                        continue;
-                    };
+                    // publishTopic deep-copies; free this builder each iteration.
+                    defer payload_obj.deinit(self.gpa);
+                    payload_obj.put(self.gpa, "eventtime", .{ .float = eventtime }) catch continue;
+                    payload_obj.put(self.gpa, "value", field.value_ptr.*) catch continue;
                     const subtopic = std.fmt.allocPrint(self.gpa, "{s}{s}/{s}", .{
                         rtopics.klipper_state_prefix, obj_name, field.key_ptr.*,
                     }) catch continue;
@@ -765,14 +772,10 @@ pub const MqttCtx = struct {
             }
         } else {
             var payload_obj = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
-            payload_obj.put(self.gpa, "eventtime", .{ .float = eventtime }) catch {
-                payload_obj.deinit(self.gpa);
-                return;
-            };
-            payload_obj.put(self.gpa, "status", status) catch {
-                payload_obj.deinit(self.gpa);
-                return;
-            };
+            // publishTopic deep-copies; free this builder on return.
+            defer payload_obj.deinit(self.gpa);
+            payload_obj.put(self.gpa, "eventtime", .{ .float = eventtime }) catch return;
+            payload_obj.put(self.gpa, "status", status) catch return;
             self.publishTopic(rtopics.klipper_status, .{ .object = payload_obj }, 0, false) catch {};
         }
     }
@@ -1078,19 +1081,10 @@ pub const MqttCtx = struct {
     /// disconnects. Stops the status update timer and flushes any
     /// cached status to MQTT.
     pub fn handleKlippyDisconnect(self: *MqttCtx) void {
-        if (!self.isConfigured()) return;
-        if (self.status_cache.count() > 0) {
-            const payload = self.status_cache;
-            // Build a single merged status object from the cache.
-            var merged = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
-            var sc_it = payload.iterator();
-            while (sc_it.next()) |entry| {
-                merged.put(self.gpa, entry.key_ptr.*, entry.value_ptr.*) catch continue;
-            }
-            const eventtime = self.last_status_time;
-            self.status_cache.clearRetainingCapacity();
-            self.publishStatusUpdate(.{ .object = merged }, eventtime);
-        }
+        // flushStatusCache deep-copies the cache, frees the cache entries, and
+        // frees the merged builder — the previous inline version shallow-copied
+        // and clearRetainingCapacity'd, leaking both the entries and the builder.
+        self.flushStatusCache();
     }
 
     /// Moonraker: _handle_timed_status_update — called on the status
@@ -1098,17 +1092,8 @@ pub const MqttCtx = struct {
     /// interval delay. Resets the cache for the next batching window.
     pub fn handleTimedStatusUpdate(self: *MqttCtx) f64 {
         if (!self.isConfigured()) return 0.0;
-        if (self.status_cache.count() > 0) {
-            const payload = self.status_cache;
-            var merged = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return 0.0;
-            var sc_it = payload.iterator();
-            while (sc_it.next()) |entry| {
-                merged.put(self.gpa, entry.key_ptr.*, entry.value_ptr.*) catch continue;
-            }
-            const eventtime = self.last_status_time;
-            self.status_cache.clearRetainingCapacity();
-            self.publishStatusUpdate(.{ .object = merged }, eventtime);
-        }
+        // flushStatusCache deep-copies + frees correctly (see handleKlippyDisconnect).
+        self.flushStatusCache();
         return if (self.config) |cfg| cfg.status_interval else 0.0;
     }
 };
