@@ -15,7 +15,9 @@
 //!   namespace "announcement_feeds" — key "feeds", value = JSON array of feed names
 //!
 //! NOTE: RSS feed fetching from Moonlight (arksine.github.io/moonlight) is
-//! implemented via `fetchAndUpdateFeed`. ETag-based conditional GET is not yet
+//! implemented via `fetchAndUpdateFeed` with ETag-based conditional GET (the
+//! per-feed ETag is stored and replayed as If-None-Match; a 304 skips re-parse).
+//! Historical note (superseded): ETag-based conditional GET is not yet
 //! supported (Zig 0.16 FetchResult doesn't expose response headers).
 //! Background periodic refresh runs on a timer thread (announcementsRefreshTimerThread).
 //!
@@ -40,6 +42,7 @@ const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 const rss = @import("rss.zig");
+const http_get = @import("http_get.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -67,6 +70,9 @@ pub const AnnouncementsCtx = struct {
     refresh_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Handle for the background refresh timer thread, joined in deinit.
     refresh_thread: ?std.Thread = null,
+    /// Per-feed ETag from the last successful fetch, for `If-None-Match`
+    /// conditional GETs (keyed by feed name; both key and value gpa-owned).
+    etags: std.StringHashMap([]u8) = undefined,
 
     pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
         self.io = io;
@@ -85,6 +91,7 @@ pub const AnnouncementsCtx = struct {
             .gpa = alloc,
             .feeds = .empty,
             .next_key = 0,
+            .etags = std.StringHashMap([]u8).init(alloc),
         };
         // Add built-in feeds
         for (builtin_feeds) |f| {
@@ -109,6 +116,12 @@ pub const AnnouncementsCtx = struct {
         }
         for (self.feeds.items) |f| self.gpa.free(f);
         self.feeds.deinit(self.gpa);
+        var eit = self.etags.iterator();
+        while (eit.next()) |e| {
+            self.gpa.free(e.key_ptr.*);
+            self.gpa.free(e.value_ptr.*);
+        }
+        self.etags.deinit();
     }
 
     fn loadFeeds(self: *AnnouncementsCtx) !void {
@@ -225,6 +238,21 @@ pub const AnnouncementsCtx = struct {
         return arr;
     }
 
+    /// Store (replace) the ETag for a feed. Key and value are gpa-owned; the
+    /// previous value is freed.
+    fn storeEtag(self: *AnnouncementsCtx, feed_name: []const u8, etag: []const u8) !void {
+        const new_val = try self.gpa.dupe(u8, etag);
+        errdefer self.gpa.free(new_val);
+        if (self.etags.getEntry(feed_name)) |entry| {
+            self.gpa.free(entry.value_ptr.*);
+            entry.value_ptr.* = new_val;
+            return;
+        }
+        const key = try self.gpa.dupe(u8, feed_name);
+        errdefer self.gpa.free(key);
+        try self.etags.put(key, new_val);
+    }
+
     /// Fetch RSS feed from Moonlight and store new entries.
     /// Returns true if any entries were added or removed.
     /// Skips fetch when io is null (no network, e.g. tests or dump-api).
@@ -235,25 +263,20 @@ pub const AnnouncementsCtx = struct {
         var url_buf: [256]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buf, MOONLIGHT_BASE_URL ++ "/assets/{s}.xml", .{feed_name});
 
-        // Arena for HTTP round-trip allocations.
-        var arena = std.heap.ArenaAllocator.init(alloc);
-        defer arena.deinit();
-        const aa = arena.allocator();
+        // Conditional GET: send the previously-stored ETag as If-None-Match so
+        // the server can answer 304 Not Modified and we skip re-parsing.
+        const prev_etag: ?[]const u8 = if (self.etags.get(feed_name)) |e| e else null;
+        var resp = http_get.getConditional(alloc, io, url, prev_etag) catch return false;
+        defer resp.deinit(alloc);
 
-        var client: std.http.Client = .{ .allocator = aa, .io = io };
-        defer client.deinit();
+        // 304 → nothing changed; keep existing entries and ETag.
+        if (resp.not_modified) return false;
+        if (resp.status != 200) return false;
 
-        var aw: std.Io.Writer.Allocating = .init(aa);
-        defer aw.deinit();
+        // Persist the new validator (if any) for the next conditional fetch.
+        if (resp.etag) |et| self.storeEtag(feed_name, et) catch {};
 
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &aw.writer,
-        }) catch return false;
-
-        if (result.status != .ok) return false;
-
-        const body = aw.toOwnedSlice() catch return false;
+        const body = resp.body;
 
         // Parse RSS XML.
         var parser = rss.RssParser.init(alloc);

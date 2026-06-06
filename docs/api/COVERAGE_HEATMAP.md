@@ -57,7 +57,13 @@
 > P3 blockers (require hardware/external services):
 > - power: GPIO device control (HTTP URLs send real GET requests via `std.http.Client`; GPIO still stubbed pending platform driver)
 > - td1: UART communication
-> - spoolman: ETag conditional GET (Zig 0.16 FetchResult header limitation)
+> - announcements: ETag conditional GET DONE — http_get.zig uses the lower-level
+>   std.http.Client.request API to read the ETag response header and send
+>   If-None-Match, so the 30-min RSS refresh skips unchanged feeds (304). The old
+>   "FetchResult header limitation" no longer blocks this.
+> - spoolman: proxy is a per-request user-driven forwarder (no server-side cache),
+>   so ETag does not apply; the shared http_get helper is available if a cached
+>   path is added later
 > - sensor: MQTT/Klippy sensor integration
 > - mqtt: DONE — real MQTT 3.1.1 TCP client (mqtt_proto codec + mqtt_client),
 >   CONNECT/CONNACK/PUBLISH/SUBSCRIBE/PUBACK/PING, LWT, live publish wired into
