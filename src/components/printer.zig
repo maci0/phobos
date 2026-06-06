@@ -150,12 +150,12 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
         break :blk buf[0..i];
     } else filename;
 
-    var script_buf: [512]u8 = undefined;
-    const script = try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped});
+    // Build on the arena (no fixed cap) — a long filename must not be truncated.
+    const script = try std.fmt.allocPrint(alloc, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped});
 
     // Build params: {"script": "<script>"}
     var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
-    try params_obj.put(alloc, "script", .{ .string = try alloc.dupe(u8, script) });
+    try params_obj.put(alloc, "script", .{ .string = script });
     return k.request("gcode/script", .{ .object = params_obj }, alloc);
 }
 

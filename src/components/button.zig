@@ -124,6 +124,9 @@ pub const ButtonCtx = struct {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
         const now = @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+        // Seconds since the previous event for this button (Moonraker GpioButton
+        // reports elapsed time between presses). 0 on the first event.
+        b.event.elapsed_time = if (b.event.received_time > 0) now - b.event.received_time else 0;
         b.event.received_time = now;
         b.event.render_time = now;
         b.event.pressed = pressed;
@@ -220,6 +223,17 @@ test "sendEvent: NotFound for unknown button" {
     var ctx = testCtx(testing.allocator);
     defer ctx.deinit();
     try testing.expectError(error.NotFound, ctx.sendEvent("ghost", true));
+}
+
+test "sendEvent: elapsed_time is 0 on first event, positive after" {
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try ctx.addButton("btn", "gpio5", 0.0);
+    try ctx.sendEvent("btn", true);
+    try testing.expectEqual(@as(f64, 0), ctx.findButton("btn").?.event.elapsed_time);
+    try ctx.sendEvent("btn", false);
+    // Second event sets elapsed = now - previous received_time (>= 0).
+    try testing.expect(ctx.findButton("btn").?.event.elapsed_time >= 0);
 }
 
 test "emitButtonEvent: no-op without bus" {

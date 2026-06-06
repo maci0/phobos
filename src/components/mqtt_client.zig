@@ -29,7 +29,9 @@ pub const MqttClient = struct {
     /// buffer pointer stays valid for the client's lifetime.
     reader_buf: []u8,
     rdr: net.Stream.Reader,
-    next_id: u16 = 1,
+    /// Packet-id source. Atomic so a foreground publish/subscribe and any future
+    /// concurrent caller never race the increment. Never yields 0 (invalid id).
+    next_id: std.atomic.Value(u16) = std.atomic.Value(u16).init(1),
     connected: bool = false,
     on_publish: ?PublishHandler = null,
     on_publish_ctx: ?*anyopaque = null,
@@ -158,9 +160,11 @@ pub const MqttClient = struct {
     }
 
     fn nextId(self: *MqttClient) u16 {
-        const id = self.next_id;
-        self.next_id = if (self.next_id == std.math.maxInt(u16)) 1 else self.next_id + 1;
-        return id;
+        // fetchAdd wraps 0xFFFF→0; 0 is not a valid MQTT packet id, so skip it.
+        while (true) {
+            const old = self.next_id.fetchAdd(1, .monotonic);
+            if (old != 0) return old;
+        }
     }
 
     const RawPacket = struct {

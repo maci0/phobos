@@ -72,6 +72,9 @@ pub const JobQueueCtx = struct {
     delay_thread: ?std.Thread = null,
     /// Atomic flag that cancels any running transition_delay timer.
     delay_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Monotonic suffix for job ids — guarantees uniqueness even when two jobs
+    /// are enqueued within the same clock nanosecond (a tight `post_job` loop).
+    job_seq: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
         var ctx = JobQueueCtx{
@@ -403,12 +406,13 @@ fn nowSecs() f64 {
 }
 
 /// Generate a unique job_id using monotonic time + address.
-fn genJobId(alloc: std.mem.Allocator) ![]u8 {
+fn genJobId(alloc: std.mem.Allocator, seq: u32) ![]u8 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
     const ns = @as(u64, @intCast(@as(i64, ts.sec))) *% 1_000_000_000 +% @as(u64, @intCast(@as(i64, ts.nsec)));
-    var buf: [16]u8 = undefined;
-    const s = try std.fmt.bufPrint(&buf, "{X:0>16}", .{ns});
+    // 16 hex ns + 4 hex seq → unique even within one nanosecond.
+    var buf: [20]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buf, "{X:0>16}{X:0>4}", .{ ns, seq & 0xFFFF });
     return alloc.dupe(u8, s);
 }
 
@@ -534,7 +538,7 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
             .string => |s| s,
             else => return error.InvalidParams,
         };
-        const job_id = try genJobId(c.gpa);
+        const job_id = try genJobId(c.gpa, c.job_seq.fetchAdd(1, .monotonic));
         errdefer c.gpa.free(job_id);
         const fname_owned = try c.gpa.dupe(u8, filename);
         errdefer c.gpa.free(fname_owned);
@@ -1974,4 +1978,14 @@ test "fuzz handleJobDispatch: never panics" {
             _ = handleJobDispatch(@ptrCast(&ctx), p.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "genJobId: same-nanosecond calls differ by seq suffix" {
+    const a = std.testing.allocator;
+    const id0 = try genJobId(a, 0);
+    defer a.free(id0);
+    const id1 = try genJobId(a, 1);
+    defer a.free(id1);
+    try std.testing.expectEqual(@as(usize, 20), id0.len);
+    try std.testing.expect(!std.mem.eql(u8, id0, id1));
 }

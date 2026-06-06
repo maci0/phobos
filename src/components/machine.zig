@@ -154,7 +154,10 @@ pub const MachineCtx = struct {
     moonraker_stats_mutex: std.Io.Mutex = .init,
     /// In-memory service state: allowed_service → { active_state, sub_state }.
     /// Populated on first access; tracks starts/stops/restarts requested via
-    /// the service action handlers.
+    /// the service action handlers. The smp_allocator default lets a
+    /// struct-literal MachineCtx (tests) compile; init() recreates it with the
+    /// ctx allocator. Keys are always gpa-owned and freed with gpa, so the two
+    /// allocators never cross.
     services: std.StringHashMap(ServiceEntry) = std.StringHashMap(ServiceEntry).init(std.heap.smp_allocator),
     /// When true, setIo will NOT spawn a proc_stat timer thread. Set by test
     /// harnesses before calling httpServer to avoid background-thread + thread-

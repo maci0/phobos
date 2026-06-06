@@ -295,10 +295,10 @@ pub const PowerCtx = struct {
         while (it.next()) |entry| {
             const dev = entry.value_ptr;
             if (dev.off_when_shutdown) {
-                self.setState(dev.name, "off") catch {};
+                // setState already frees the old state and installs a fresh
+                // "off"; do not free/re-dupe it again (redundant + fragile).
+                self.setState(dev.name, "off") catch continue;
                 dev.is_shutdown = true;
-                self.gpa.free(dev.state);
-                dev.state = self.gpa.dupe(u8, "off") catch continue;
                 emitPowerChanged(self, alloc, dev);
             }
         }
@@ -311,9 +311,8 @@ pub const PowerCtx = struct {
         while (it.next()) |entry| {
             const dev = entry.value_ptr;
             if (dev.on_when_queued) {
-                self.setState(dev.name, "on") catch {};
-                self.gpa.free(dev.state);
-                dev.state = self.gpa.dupe(u8, "on") catch continue;
+                // setState already frees+replaces dev.state; no extra free/dupe.
+                self.setState(dev.name, "on") catch continue;
                 emitPowerChanged(self, alloc, dev);
             }
         }

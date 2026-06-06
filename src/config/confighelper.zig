@@ -150,16 +150,28 @@ pub const ConfigParser = struct {
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |raw_line| {
             // Expand tabs (4-space stops — Moonraker uses expandtabs(4)).
-            var tab_buf: [4096]u8 = undefined;
-            const line_exp = expandTabs(raw_line, &tab_buf, 4);
+            // Stack buffer for normal lines; heap for over-long lines so a long
+            // config value is never silently truncated (worst case 4× on tabs).
+            var tab_stack: [4096]u8 = undefined;
+            const tab_heap: ?[]u8 = if (raw_line.len * 4 + 1 > tab_stack.len)
+                (self.alloc.alloc(u8, raw_line.len * 4 + 1) catch null)
+            else
+                null;
+            defer if (tab_heap) |h| self.alloc.free(h);
+            const line_exp = expandTabs(raw_line, tab_heap orelse &tab_stack, 4);
 
             const trimmed = std.mem.trim(u8, line_exp, &std.ascii.whitespace);
             if (trimmed.len == 0) continue;
             if (trimmed[0] == '#' or trimmed[0] == ';') continue;
 
             // Strip inline comments and unescape escaped comment chars.
-            var icom_buf: [4096]u8 = undefined;
-            const processed = stripInlineComment(line_exp, &icom_buf);
+            var icom_stack: [4096]u8 = undefined;
+            const icom_heap: ?[]u8 = if (line_exp.len + 1 > icom_stack.len)
+                (self.alloc.alloc(u8, line_exp.len + 1) catch null)
+            else
+                null;
+            defer if (icom_heap) |h| self.alloc.free(h);
+            const processed = stripInlineComment(line_exp, icom_heap orelse &icom_stack);
 
             const line_indent = countLeadingSpaces(processed);
 
@@ -1021,4 +1033,14 @@ test "fuzz stripInlineComment: no panics" {
             _ = stripInlineComment(&buf_in, &buf_out);
         }
     }.run, .{});
+}
+
+test "parse: value longer than the line stack buffer is not truncated" {
+    var p = ConfigParser.init(std.testing.allocator);
+    defer p.deinit();
+    // 5000-byte value exceeds the 4096 per-line stack buffer → heap fallback.
+    const big = "x" ** 5000;
+    const src = "[s]\nkey: " ++ big ++ "\n";
+    try p.parseString(src, "");
+    try std.testing.expectEqualStrings(big, p.get("s", "key").?);
 }
