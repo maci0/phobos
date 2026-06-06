@@ -263,9 +263,19 @@ pub const MqttCtx = struct {
         // Let the app subscribe sensor (and other) topics now we are connected.
         if (self.on_connected) |cb| cb(self.on_connected_ctx.?);
 
-        // Start the background reader to drain inbound packets.
+        // Start the background reader to drain inbound packets. If the thread
+        // cannot be spawned, tear the connection down rather than leaving a
+        // connected-but-unserviced client (no PINGRESP/keepalive → broker would
+        // silently drop it); the caller can retry.
         self.reader_stop.store(false, .release);
-        self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch null;
+        self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch |e| {
+            client.disconnect();
+            client.deinit();
+            self.gpa.destroy(client);
+            self.client = null;
+            self.state = .disconnected;
+            return e;
+        };
     }
 
     /// Static MqttClient.on_publish trampoline → MqttCtx.on_message.
