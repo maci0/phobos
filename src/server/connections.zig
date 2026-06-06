@@ -58,6 +58,15 @@ pub const Connection = struct {
     /// registry mutex. Status notifications are gated on membership here; all
     /// other notifications broadcast regardless.
     subs: std.StringHashMapUnmanaged(void) = .empty,
+    /// In-flight broadcast references. Guarded by the registry mutex. `broadcast`
+    /// increments this while it writes to the connection with the registry lock
+    /// released; `remove` defers the actual free until it returns to 0. Lets the
+    /// fan-out drop the registry lock during (possibly blocking) socket writes
+    /// without a use-after-free against a concurrent disconnect.
+    refs: u32 = 0,
+    /// Set by `remove` when a connection is unlinked while `refs > 0`; the last
+    /// `broadcast` to release its ref performs the deferred free.
+    pending_free: bool = false,
 };
 
 pub const Connections = struct {
@@ -129,23 +138,46 @@ pub const Connections = struct {
     }
 
     /// Write `frame` to every connection (optionally filtered by `topic`
-    /// subscription), holding the registry mutex for the WHOLE fan-out so a
-    /// concurrent `remove` cannot free a connection between selection and write.
+    /// subscription) WITHOUT holding the registry mutex during the (possibly
+    /// blocking) socket writes — so one slow client cannot stall connection
+    /// add/remove server-wide.
     ///
-    /// Safe lock order: this holds the registry mutex while `writeFrame` takes
-    /// only the per-connection `write_mutex` — no path takes `write_mutex` then
-    /// the registry mutex, so there is no inversion. `conn.subs` is read under
-    /// the same registry mutex that guards its mutation (see `isSubscribed`).
-    pub fn broadcast(self: *Connections, io: Io, frame: []const u8, topic: ?[]const u8) void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        for (self.list.items) |conn| {
-            if (topic) |t| {
-                if (!conn.subs.contains(t)) continue;
+    /// Safety: under the registry mutex we select the target connections, apply
+    /// the subscription filter, and bump each target's `refs` (so a concurrent
+    /// `remove` defers the free). We release the mutex, write to each target,
+    /// then re-take the mutex to drop the refs and perform any deferred free.
+    /// `targets` is built in `alloc` (the caller's per-broadcast arena).
+    pub fn broadcast(self: *Connections, io: Io, alloc: std.mem.Allocator, frame: []const u8, topic: ?[]const u8) void {
+        var targets: std.ArrayList(*Connection) = .empty;
+        defer targets.deinit(alloc);
+
+        // Phase 1: select + pin (refs) under the registry mutex.
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            for (self.list.items) |conn| {
+                if (topic) |t| {
+                    if (!conn.subs.contains(t)) continue;
+                }
+                conn.refs += 1;
+                targets.append(alloc, conn) catch {
+                    conn.refs -= 1; // OOM: drop this target, keep refs balanced.
+                };
             }
-            // A failed write flags the connection dead; swallow so one dead
-            // client never stalls the broadcast to the rest.
-            self.writeFrame(io, conn, frame) catch {};
+        }
+
+        // Phase 2: write outside the lock. A pinned (refs>0) connection cannot be
+        // freed by `remove`, so this is safe even if the client disconnects mid-write.
+        for (targets.items) |conn| self.writeFrame(io, conn, frame) catch {};
+
+        // Phase 3: release refs; perform any free deferred by `remove`.
+        {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            for (targets.items) |conn| {
+                conn.refs -= 1;
+                if (conn.refs == 0 and conn.pending_free) self.freeConn(conn);
+            }
         }
     }
 
@@ -229,7 +261,9 @@ pub const Connections = struct {
         for (self.list.items, 0..) |c, i| {
             if (c == conn) {
                 _ = self.list.swapRemove(i);
-                self.freeConn(c);
+                // If a broadcast currently holds a ref, defer the free to it;
+                // otherwise free now. Either way the connection is unlinked.
+                if (c.refs == 0) self.freeConn(c) else c.pending_free = true;
                 return;
             }
         }
@@ -508,6 +542,42 @@ test "writeFrame flags the connection dead on write failure" {
     try std.testing.expect(conns.isDead(io, c));
     // Once dead, further writes short-circuit with ConnectionDead.
     try std.testing.expectError(error.ConnectionDead, conns.writeFrame(io, c, "y"));
+}
+
+test "broadcast: connection removed during its own write is freed via deferred ref" {
+    // Regression for the refcounted fan-out: broadcast drops the registry lock
+    // during writes; a write callback that disconnects its own connection must
+    // not UAF and must be freed exactly once (testing.allocator enforces both).
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    const Remover = struct {
+        conns: *Connections,
+        conn: *Connection,
+        io: Io,
+        called: bool = false,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            _ = bytes;
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.called = true;
+            self.conns.remove(self.io, self.conn); // disconnect mid-broadcast
+        }
+    };
+    var rem = Remover{ .conns = &conns, .conn = c, .io = io };
+    conns.attachWriter(io, c, &rem, Remover.write);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    conns.broadcast(io, arena.allocator(), "frame", null);
+
+    try std.testing.expect(rem.called);
+    try std.testing.expectEqual(@as(usize, 0), conns.count(io));
 }
 
 test "detachWriter stops further delivery" {

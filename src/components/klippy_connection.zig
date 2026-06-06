@@ -340,8 +340,13 @@ pub const KlippyCtx = struct {
     /// received from Klippy is forwarded to every registered bridge writer.
     bridges: std.ArrayListUnmanaged(Bridge) = .empty,
     /// Guards `bridges` — mutated from /klippysocket WS threads (add/remove) and
-    /// read from the frame-forwarding path. Locked via `self.io` (no-op when io
-    /// is unset, i.e. single-threaded unit tests).
+    /// read from the frame-forwarding path. Locked via `self.io`; the
+    /// `if (self.io)` guard is sound (not a mixed-state hazard) because every
+    /// bridge access happens AFTER `setIo`: `addBridge`/`removeBridge` run only
+    /// for live WS sessions (ws.serveBridge) and `forwardToBridges` runs from the
+    /// request/dispatch paths — all post-setIo. `setIo` is called once at startup
+    /// before any thread starts, so io never transitions while a caller races.
+    /// The null branch is the single-threaded pre-serve / unit-test path.
     bridges_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
     /// Job state component (set by App after init). Called on status updates

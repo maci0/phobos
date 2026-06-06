@@ -228,11 +228,12 @@ pub const NotifyBus = struct {
         const a = arena.allocator();
 
         const frame = try buildFrame(a, method, params);
-        // Fan out under the registry mutex (held for the whole loop) so a
-        // concurrent WS teardown (`Connections.remove`) cannot free a connection
-        // mid-write — previously snapshot()+writeFrame() dropped the lock between
-        // selecting and writing, a use-after-free against background-thread emits.
-        self.conns.broadcast(io, frame, topic);
+        // Refcounted fan-out: broadcast pins target connections under the registry
+        // mutex, releases it during the socket writes (so a slow client cannot
+        // stall connection add/remove), then drops the refs. A concurrent WS
+        // teardown (`Connections.remove`) defers the free while a ref is held, so
+        // there is no use-after-free against background-thread emits.
+        self.conns.broadcast(io, a, frame, topic);
     }
 };
 
