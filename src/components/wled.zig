@@ -12,9 +12,9 @@
 //!   POST /machine/wled/strip   → machine.wled.post_strip (single)
 //!
 //! HTTP WLED strips (with an `address` config) send real HTTP POST requests to
-//! the WLED JSON API (`/json`). Strips without an address (serial or in-memory
-//! only) are handled as stubs — state is tracked in memory but no commands are
-//! transmitted.
+//! the WLED JSON API (`/json`). Serial strips (with a `serial_path`, set via
+//! setStripSerial) write the newline-terminated JSON command to the character
+//! device through `serial.zig`. Strips with neither remain in-memory only.
 //!
 //! STRIPS FROM CONFIG. Without `[wled <name>]` config sections (the spine
 //! carries none), the strips map is empty and the list endpoint returns {}.
@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const serial_mod = @import("serial.zig");
 
 const Registry = registry.Registry;
 
@@ -50,6 +51,11 @@ pub const Strip = struct {
     address: ?[]const u8 = null,
     port: u16 = 80,
     protocol: []const u8 = "http",
+    /// Serial-strip device path (Moonraker `serial:`). When non-null, WLED JSON
+    /// commands are written to this character device instead of HTTP.
+    serial_path: ?[]const u8 = null,
+    /// Serial baud rate (Moonraker default 115200).
+    serial_baud: u32 = 115200,
 
     /// Moonraker: wled_on(preset). Sets send_full_chain_data=true and
     /// resets brightness/intensity/speed to -1 (unknown until read back).
@@ -203,8 +209,19 @@ pub const WledCtx = struct {
             if (entry.value_ptr.error_state) |e| self.gpa.free(e);
             if (entry.value_ptr.address) |a| self.gpa.free(a);
             if (!std.mem.eql(u8, entry.value_ptr.protocol, "http")) self.gpa.free(entry.value_ptr.protocol);
+            if (entry.value_ptr.serial_path) |sp| self.gpa.free(sp);
         }
         self.strips.deinit();
+    }
+
+    /// Configure a strip as a serial device: subsequent commands are written to
+    /// `path` (gpa-owned, replacing any previous value) at `baud`.
+    pub fn setStripSerial(self: *WledCtx, name: []const u8, path: []const u8, baud: u32) !void {
+        const s = self.strips.getPtr(name) orelse return error.NotFound;
+        const dup = try self.gpa.dupe(u8, path);
+        if (s.serial_path) |old| self.gpa.free(old);
+        s.serial_path = dup;
+        s.serial_baud = baud;
     }
 
     /// Set the Io handle for making real HTTP requests to WLED devices.
@@ -215,8 +232,32 @@ pub const WledCtx = struct {
     /// Send a JSON body string to a WLED device via HTTP POST.
     /// Sets strip.error_state on failure.
     pub fn sendWledBody(self: *WledCtx, strip: *Strip, body: []const u8) void {
-        const addr = strip.address orelse return;
         const io = self.io orelse return;
+
+        // Serial strip: write the newline-terminated JSON command to the device.
+        if (strip.serial_path) |path| {
+            var ser = serial_mod.Serial.open(io, path, strip.serial_baud) catch {
+                if (strip.error_state) |e| self.gpa.free(e);
+                strip.error_state = self.gpa.dupe(u8, "WLED: serial open failed") catch null;
+                return;
+            };
+            defer ser.close();
+            // Single newline-terminated write (one serial transaction).
+            const line = std.fmt.allocPrint(self.gpa, "{s}\n", .{body}) catch return;
+            defer self.gpa.free(line);
+            ser.write(line) catch {
+                if (strip.error_state) |e| self.gpa.free(e);
+                strip.error_state = self.gpa.dupe(u8, "WLED: serial write failed") catch null;
+                return;
+            };
+            if (strip.error_state) |e| {
+                self.gpa.free(e);
+                strip.error_state = null;
+            }
+            return;
+        }
+
+        const addr = strip.address orelse return;
 
         // Build URL: {protocol}://{address}:{port}/json
         var url_buf: [256]u8 = undefined;
@@ -1663,4 +1704,35 @@ test "fuzz setStripControl: with address never panics, no real HTTP" {
             if (preset >= 0) try testing.expectEqual(preset, s.preset);
         }
     }.run, .{});
+}
+
+// --- WLED serial output ---
+
+test "sendWledBody: serial strip writes newline-terminated JSON to the device" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Dir = std.Io.Dir;
+
+    const path = "/tmp/phobos_wled_serial.dev";
+    Dir.cwd().deleteFile(io, path) catch {};
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
+    defer Dir.cwd().deleteFile(io, path) catch {};
+
+    var ctx = testCtx(std.testing.allocator);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
+    try ctx.setStripSerial("leds", path, 115200);
+
+    const strip = ctx.findStrip("leds").?;
+    ctx.sendWledBody(strip, "{\"on\":true}");
+    try std.testing.expect(strip.error_state == null);
+
+    const fh = try Dir.cwd().openFile(io, path, .{});
+    defer fh.close(io);
+    var buf: [64]u8 = undefined;
+    var r = fh.reader(io, &buf);
+    const n = try r.interface.readSliceShort(&buf);
+    try std.testing.expectEqualStrings("{\"on\":true}\n", buf[0..n]);
 }

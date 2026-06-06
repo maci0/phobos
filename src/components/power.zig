@@ -12,8 +12,10 @@
 //!
 //! HTTP power devices (type "http" or any type with on_url/off_url configured)
 //! send real HTTP GET requests to the configured URLs via `std.http.Client`.
-//! GPIO and other non-HTTP device types track state in memory only (stubbed)
-//! unless a future platform-specific GPIO driver is integrated.
+//! `type: gpio` devices with a configured `gpio_pin` drive the line via the
+//! sysfs GPIO driver (`gpio_sysfs.zig`) on power on/off, honouring active-low.
+//! Other vendor device types (tplink, tasmota, shelly, …) still track state in
+//! memory only.
 //!
 //! DEVICES FROM CONFIG. Without `[power <name>]` config sections (the spine
 //! carries none), the devices map is empty and the list endpoint returns [].
@@ -27,6 +29,7 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
+const gpio_sysfs = @import("gpio_sysfs.zig");
 
 const Registry = registry.Registry;
 
@@ -85,6 +88,11 @@ pub const Device = struct {
     on_url: ?[]const u8 = null,
     off_url: ?[]const u8 = null,
     status_url: ?[]const u8 = null,
+    /// sysfs GPIO line number for `type: gpio` devices. When set and io is
+    /// wired, on/off drives the line via `gpio_sysfs`.
+    gpio_pin: ?u32 = null,
+    /// Active-low line: "on" drives the physical level low (Moonraker "!pin").
+    gpio_active_low: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +110,8 @@ pub const PowerCtx = struct {
     /// rejected with a "locked_while_printing" error matching Moonraker's
     /// `PrinterPowerLock` in power.py.
     printing_active: bool = false,
+    /// sysfs GPIO controller root. Overridable so tests can target a temp dir.
+    gpio_root: []const u8 = "/sys/class/gpio",
 
     pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) PowerCtx {
         return .{
@@ -132,6 +142,21 @@ pub const PowerCtx = struct {
 
     pub fn setIo(self: *PowerCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Drive a `type: gpio` device's sysfs line on power on/off. No-op for
+    /// non-gpio devices, devices without a configured pin, or when io is not
+    /// wired (unit-test path). Best-effort: hardware errors are swallowed since
+    /// the in-memory state has already been committed.
+    fn driveGpio(self: *PowerCtx, dev: *const Device, on: bool) void {
+        const io = self.io orelse return;
+        const pin = dev.gpio_pin orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const g = gpio_sysfs.SysfsGpio{ .io = io, .root = self.gpio_root };
+        // active_low: "on" places a LOW level on the line.
+        const physical_high = on != dev.gpio_active_low;
+        g.setValue(arena.allocator(), pin, physical_high) catch {};
     }
 
     /// Issue an HTTP GET to a device URL. Silently returns on any error
@@ -247,6 +272,8 @@ pub const PowerCtx = struct {
             .on_url = if (opts.on_url) |u| try self.gpa.dupe(u8, u) else null,
             .off_url = if (opts.off_url) |u| try self.gpa.dupe(u8, u) else null,
             .status_url = if (opts.status_url) |u| try self.gpa.dupe(u8, u) else null,
+            .gpio_pin = opts.gpio_pin,
+            .gpio_active_low = opts.gpio_active_low,
         };
         errdefer {
             self.gpa.free(dev.name);
@@ -424,12 +451,14 @@ fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.
     if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
         return error.InvalidParams;
     }
-    // Send real HTTP GET to the device URL if configured.
-    if (std.mem.eql(u8, action, "on")) {
+    // Drive real hardware: HTTP GET for URL devices, sysfs GPIO for gpio pins.
+    const turning_on = std.mem.eql(u8, action, "on");
+    if (turning_on) {
         if (dev.on_url) |url| ctx.sendDeviceHttpGet(url);
     } else {
         if (dev.off_url) |url| ctx.sendDeviceHttpGet(url);
     }
+    ctx.driveGpio(dev, turning_on);
     ctx.setState(dev.name, action) catch {};
     // Refresh pointer after setState (dupe may have reallocated).
     const updated = ctx.findDevice(dev.name) orelse return action;
@@ -1245,4 +1274,71 @@ test "fuzz setState: never panics, updates correctly" {
             try testing.expectError(error.NotFound, ctx.setState("ghost", "on"));
         }
     }.run, .{});
+}
+
+// --- GPIO hardware wiring ---
+
+test "driveGpio: drives sysfs line on/off, honouring active_low" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Dir = std.Io.Dir;
+
+    const root = "/tmp/phobos_power_gpio_root";
+    const pindir = root ++ "/gpio23";
+    Dir.cwd().deleteTree(io, root) catch {};
+    try Dir.cwd().createDirPath(io, pindir);
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/direction", .data = "in" });
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
+    defer Dir.cwd().deleteTree(io, root) catch {};
+
+    const readVal = struct {
+        fn f(i: std.Io) ![]const u8 {
+            const fh = try Dir.cwd().openFile(i, pindir ++ "/value", .{});
+            defer fh.close(i);
+            var buf: [8]u8 = undefined;
+            var r = fh.reader(i, &buf);
+            const n = try r.interface.readSliceShort(&buf);
+            return std.testing.allocator.dupe(u8, buf[0..n]);
+        }
+    }.f;
+
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.gpio_root = root;
+
+    // Active-high gpio device: on → 1, off → 0.
+    try ctx.addDeviceFull(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .gpio_pin = 23 });
+    const dev = ctx.findDevice("psu").?;
+
+    ctx.driveGpio(dev, true);
+    {
+        const v = try readVal(io);
+        defer testing.allocator.free(v);
+        try testing.expectEqualStrings("1", v);
+    }
+    ctx.driveGpio(dev, false);
+    {
+        const v = try readVal(io);
+        defer testing.allocator.free(v);
+        try testing.expectEqualStrings("0", v);
+    }
+
+    // Active-low: on → physical 0.
+    dev.gpio_active_low = true;
+    ctx.driveGpio(dev, true);
+    {
+        const v = try readVal(io);
+        defer testing.allocator.free(v);
+        try testing.expectEqualStrings("0", v);
+    }
+}
+
+test "driveGpio: no-op without pin or io (no crash)" {
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    // No io, no pin → must not crash.
+    try ctx.addDeviceFull(.{ .name = "d", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false });
+    ctx.driveGpio(ctx.findDevice("d").?, true);
 }

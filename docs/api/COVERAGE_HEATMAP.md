@@ -20,16 +20,16 @@
 | 🟢 mqtt | 2/2 | 3/3 | 0/0 | 100% | 90% | 90% |
 | 🟢 notifier | 2/2 | 2/2 | 0/0 | 100% | 95% | 95% |
 | 🟢 octoprint_compat | 10/10 | 0/0 | 0/0 | 100% | 95% | 95% |
-| 🟡 power | 5/5 | 6/6 | 1/1 | 100% | 70% | 70% |
+| 🟢 power | 5/5 | 6/6 | 1/1 | 100% | 85% | 85% |
 | 🟢 proc_stats | 1/1 | 1/1 | 2/2 | 100% | 95% | 95% |
 | 🟡 sensor | 3/3 | 3/3 | 1/1 | 100% | 65% | 65% |
 | 🟢 server | 3/3 | 3/3 | 4/4 | 100% | 95% | 95% |
 | 🟡 spoolman | 3/3 | 4/4 | 2/2 | 100% | 60% | 60% |
-| 🟡 td1 | 2/2 | 2/2 | 0/0 | 100% | 50% | 50% |
+| 🟢 td1 | 2/2 | 2/2 | 0/0 | 100% | 80% | 80% |
 | 🟢 update_manager | 10/10 | 10/10 | 2/2 | 100% | 65% | 65% |
 | 🟡 webcam | 3/3 | 3/3 | 1/1 | 100% | 80% | 80% |
 | 🟢 websockets | 2/2 | 2/2 | 0/0 | 100% | 95% | 95% |
-| 🟢 wled | 6/6 | 7/7 | 0/0 | 100% | 80% | 80% |
+| 🟢 wled | 6/6 | 7/7 | 0/0 | 100% | 90% | 90% |
 | 🟢 zeroconf | 1/1 | 0/0 | 0/0 | 100% | 95% | 95% |
 
 > **Overall weighted progress: 88% → ~92%**
@@ -55,8 +55,12 @@
 > - **50%** — In-memory state tracking with notification emission, all hardware I/O stubbed
 >
 > P3 blockers (require hardware/external services):
-> - power: GPIO device control (HTTP URLs send real GET requests via `std.http.Client`; GPIO still stubbed pending platform driver)
-> - td1: UART communication
+> - power: DONE — HTTP-URL devices send real GET requests; `type: gpio` devices
+>   drive the line via the sysfs GPIO driver (`gpio_sysfs.zig`, active-low aware),
+>   unit-tested against a temp-dir controller root. Other vendor types remain in-memory.
+> - td1: DONE (serial) — `serial.zig` + `parseTd1Line` (CSV, matches td1.py
+>   `_parse_line`) read TD/color over the UART via `pollSerialOnce`. Parser
+>   unit-tested; on-hardware USB hotplug/timing unverified (no device).
 > - announcements: ETag conditional GET DONE — http_get.zig uses the lower-level
 >   std.http.Client.request API to read the ETag response header and send
 >   If-None-Match, so the 30-min RSS refresh skips unchanged feeds (304). The old
@@ -75,4 +79,6 @@
 >   response_template), is_remote proxied endpoints (printer.info, objects.*,
 >   gcode.script/help, query_endstops.status), validated end-to-end against a
 >   live Klippy (native linux host MCU) via the gated integration test
-> - wled: serial-only strip communication (HTTP POST to WLED JSON API is real for address-based strips)
+> - wled: DONE — address strips use HTTP POST to the WLED JSON API; serial strips
+>   write newline-terminated JSON to the character device via `serial.zig`
+>   (setStripSerial), unit-tested against a temp file.
