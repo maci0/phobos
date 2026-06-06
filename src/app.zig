@@ -157,6 +157,9 @@ pub const App = struct {
     notifier_ctx: *NotifierCtx,
     webcam_ctx: *WebcamCtx,
     sensor_ctx: *SensorCtx,
+    /// Routes inbound MQTT messages to the sensor component under the Core lock.
+    /// Stable storage so MqttCtx can hold a pointer to it.
+    sensor_mqtt_bridge: SensorMqttBridge = undefined,
     auth_ctx: *AuthCtx,
     spoolman_ctx: *SpoolmanCtx,
     mqtt_ctx: *MqttCtx,
@@ -835,6 +838,13 @@ pub const App = struct {
         // Wire io into MQTT and, when a broker is configured, connect to it in
         // the background (a slow/unreachable broker must not stall startup).
         self.mqtt_ctx.setIo(io);
+        // Bridge inbound MQTT messages → sensors (under the Core lock) and
+        // subscribe sensor topics on connect.
+        self.sensor_mqtt_bridge = .{ .app = self };
+        self.mqtt_ctx.on_message = SensorMqttBridge.onMessage;
+        self.mqtt_ctx.on_message_ctx = &self.sensor_mqtt_bridge;
+        self.mqtt_ctx.on_connected = SensorMqttBridge.onConnected;
+        self.mqtt_ctx.on_connected_ctx = &self.sensor_mqtt_bridge;
         if (self.mqtt_ctx.isConfigured()) {
             _ = io.async(MqttCtx.connectBrokerBg, .{self.mqtt_ctx});
         }
@@ -862,6 +872,32 @@ pub const App = struct {
 fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     return error.WsOnlyMethod;
 }
+
+/// Glue between the MQTT client (background reader thread) and the sensor
+/// component. Inbound messages are dispatched into the sensor store under the
+/// Core lock so they serialize with JSON-RPC handlers and notifications.
+pub const SensorMqttBridge = struct {
+    app: *App = undefined,
+
+    /// MQTT inbound-message hook. Runs sensor ingestion under the Core lock.
+    pub fn onMessage(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
+        const self: *SensorMqttBridge = @ptrCast(@alignCast(ctx));
+        const app = self.app;
+        const io = app.mqtt_ctx.io orelse return;
+        var arena = std.heap.ArenaAllocator.init(app.alloc);
+        defer arena.deinit();
+        app.core.run(io, SensorCtx.ingestMqttMessage, .{ app.sensor_ctx, topic, payload, arena.allocator() });
+    }
+
+    /// MQTT post-connect hook: subscribe every MQTT sensor's state topic.
+    pub fn onConnected(ctx: *anyopaque) void {
+        const self: *SensorMqttBridge = @ptrCast(@alignCast(ctx));
+        var it = self.app.sensor_ctx.sensors.valueIterator();
+        while (it.next()) |s| {
+            if (s.state_topic) |topic| self.app.mqtt_ctx.subscribeTopicLive(topic);
+        }
+    }
+};
 
 /// Dispatches a gcode request to Klippy on behalf of the job_queue component.
 /// This is the adapter that bridges job_queue's anyopaque dispatch to

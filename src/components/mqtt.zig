@@ -135,6 +135,15 @@ pub const MqttCtx = struct {
     /// Background reader thread draining inbound broker packets.
     reader_thread: ?std.Thread = null,
     reader_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Inbound-message hook: invoked (on the reader thread) for each application
+    /// PUBLISH with (topic, payload). The app routes this to subscribers (e.g.
+    /// MQTT sensors) under the Core lock.
+    on_message: ?*const fn (ctx: *anyopaque, topic: []const u8, payload: []const u8) void = null,
+    on_message_ctx: ?*anyopaque = null,
+    /// Post-connect hook: invoked once after a successful broker connect (and on
+    /// each reconnect). The app uses it to (re)subscribe sensor topics.
+    on_connected: ?*const fn (ctx: *anyopaque) void = null,
+    on_connected_ctx: ?*anyopaque = null,
 
     pub fn init(gpa: std.mem.Allocator) MqttCtx {
         return .{
@@ -228,6 +237,9 @@ pub const MqttCtx = struct {
             return e;
         };
         client.rebind();
+        // Route inbound PUBLISH frames (from the reader thread) to on_message.
+        client.on_publish = mqttOnPublish;
+        client.on_publish_ctx = self;
         self.client = client;
         // setState(.connected) publishes moonraker_status — now sent live.
         self.setState(.connected);
@@ -244,9 +256,25 @@ pub const MqttCtx = struct {
         const api_qos: u2 = if (self.config) |c| @intCast(@max(0, @min(2, c.api_qos))) else 0;
         client.subscribe(rtopics.api_request, api_qos) catch {};
 
+        // Let the app subscribe sensor (and other) topics now we are connected.
+        if (self.on_connected) |cb| cb(self.on_connected_ctx.?);
+
         // Start the background reader to drain inbound packets.
         self.reader_stop.store(false, .release);
         self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch null;
+    }
+
+    /// Static MqttClient.on_publish trampoline → MqttCtx.on_message.
+    fn mqttOnPublish(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
+        const self: *MqttCtx = @ptrCast(@alignCast(ctx));
+        if (self.on_message) |cb| cb(self.on_message_ctx.?, topic, payload);
+    }
+
+    /// Subscribe to a topic on the live broker connection (qos 0). No-op when no
+    /// broker connection exists.
+    pub fn subscribeTopicLive(self: *MqttCtx, topic: []const u8) void {
+        const client = self.client orelse return;
+        client.subscribe(topic, 0) catch {};
     }
 
     /// Background-task entry point: connect to the broker, ignoring errors (an
@@ -3500,4 +3528,55 @@ test "mqtt: connectBroker without io returns MqttNotConfigured" {
     // No io wired → cannot connect.
     try testing.expectError(error.MqttNotConfigured, ctx.connectBroker());
     try testing.expect(!ctx.hasBrokerConnection());
+}
+
+test "mqtt: inbound broker PUBLISH fires the on_message hook" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try mqtt_client.TestBroker.bind(alloc, io);
+    const p = try broker.port();
+    // 2 frames after handshake: moonraker_status publish + api_request subscribe.
+    var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 2) });
+
+    const Cap = struct {
+        topic: [128]u8 = undefined,
+        topic_len: usize = 0,
+        payload: [128]u8 = undefined,
+        payload_len: usize = 0,
+        fn cb(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            @memcpy(self.topic[0..topic.len], topic);
+            self.topic_len = topic.len;
+            @memcpy(self.payload[0..payload.len], payload);
+            self.payload_len = payload.len;
+        }
+    };
+    var cap: Cap = .{};
+
+    var ctx = MqttCtx.init(alloc);
+    try ctx.setConfig("127.0.0.1", p, null, null);
+    try ctx.setInstanceName("phobos");
+    ctx.setIo(io);
+    ctx.on_message = Cap.cb;
+    ctx.on_message_ctx = &cap;
+
+    try ctx.connectBroker();
+    bf.await(io); // broker processed status publish + subscribe
+
+    try broker.injectPublish("phobos/chamber/state", "{\"temperature\":21.0}");
+
+    // Wait for the background reader to dispatch the inbound publish.
+    var spins: usize = 0;
+    while (cap.payload_len == 0 and spins < 200) : (spins += 1) {
+        std.Io.sleep(io, .{ .nanoseconds = 5_000_000 }, .real) catch {};
+    }
+
+    ctx.deinit();
+    broker.deinit();
+
+    try testing.expectEqualStrings("phobos/chamber/state", cap.topic[0..cap.topic_len]);
+    try testing.expectEqualStrings("{\"temperature\":21.0}", cap.payload[0..cap.payload_len]);
 }

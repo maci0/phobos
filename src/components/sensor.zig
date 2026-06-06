@@ -20,9 +20,12 @@
 //!   measurements (no sensor param) → {}
 //!   measurements (with sensor param) → 404 error
 //!
-//! NOTE: No MQTT or Klippy sensor integration. This component provides the
-//! sensor state machine, measurement history storage, and notification emission.
-//! Hardware integration (MQTT topics, Klippy sensor callbacks) is stubbed.
+//! MQTT source: `ingestMqttMessage(topic, payload)` feeds inbound MQTT messages
+//! (JSON object → numeric measurements) into the matching sensor and emits
+//! `notify_sensor_update`. The live path is MqttClient reader → MqttCtx.on_message
+//! → app bridge → core.run → ingest (under the Core lock); topics are subscribed
+//! on connect. (Moonraker's only built-in sensor type is MQTT; it renders a Jinja
+//! state_response_template — phobos does direct JSON-field mapping instead.)
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
@@ -94,6 +97,9 @@ pub const Sensor = struct {
     param_info: std.ArrayList(ParameterInfo),
     error_state: ?[]const u8,
     store_size: usize,
+    /// MQTT state topic (Moonraker `[sensor] type: mqtt`, `state_topic:`). When
+    /// set, inbound MQTT messages on this topic feed measurements.
+    state_topic: ?[]const u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, sensor_id: []const u8, sensor_type: []const u8) !Sensor {
         return .{
@@ -106,6 +112,7 @@ pub const Sensor = struct {
             .param_info = .empty,
             .error_state = null,
             .store_size = 1200,
+            .state_topic = null,
         };
     }
 
@@ -114,6 +121,7 @@ pub const Sensor = struct {
         alloc.free(self.type_str);
         alloc.free(self.name);
         if (self.error_state) |e| alloc.free(e);
+        if (self.state_topic) |t| alloc.free(t);
         {
             var it = self.last_measurements.iterator();
             while (it.next()) |entry| {
@@ -282,6 +290,63 @@ pub const SensorCtx = struct {
             self.gpa.free(@constCast(pi.units));
         }
         try s.param_info.append(self.gpa, pi);
+    }
+
+    /// Configure a sensor's MQTT state topic (gpa-owned; replaces any previous).
+    pub fn setSensorTopic(self: *SensorCtx, sensor_id: []const u8, topic: []const u8) !void {
+        const s = self.findSensor(sensor_id) orelse return error.NotFound;
+        const dup = try self.gpa.dupe(u8, topic);
+        if (s.state_topic) |old| self.gpa.free(old);
+        s.state_topic = dup;
+    }
+
+    /// Feed an inbound MQTT message to every sensor subscribed to `topic`.
+    ///
+    /// phobos models the payload as a JSON object: each numeric field becomes a
+    /// measurement keyed by the field name. (Moonraker renders a Jinja
+    /// `state_response_template` calling `set_result(name, value)`; phobos does
+    /// not embed a template engine — direct JSON-field mapping covers the
+    /// common case.) Emits `notify_sensor_update` once if any value changed.
+    ///
+    /// MUST be called under the Core lock (it emits notifications); the MQTT
+    /// reader path wraps it via `core.run`.
+    pub fn ingestMqttMessage(self: *SensorCtx, topic: []const u8, payload: []const u8, a: std.mem.Allocator) void {
+        var matched = false;
+        var it = self.sensors.iterator();
+        while (it.next()) |entry| {
+            const s = entry.value_ptr;
+            const st = s.state_topic orelse continue;
+            if (!std.mem.eql(u8, st, topic)) continue;
+            matched = true;
+
+            const parsed = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch {
+                self.setSensorError(s, "sensor: invalid JSON payload");
+                continue;
+            };
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+
+            if (s.error_state) |e| {
+                self.gpa.free(e);
+                s.error_state = null;
+            }
+            var fit = parsed.value.object.iterator();
+            while (fit.next()) |f| {
+                const v: f64 = switch (f.value_ptr.*) {
+                    .float => |x| x,
+                    .integer => |x| @floatFromInt(x),
+                    else => continue,
+                };
+                // key duped into gpa by setMeasurement.
+                s.setMeasurement(self.gpa, f.key_ptr.*, v) catch {};
+            }
+        }
+        if (matched) self.emitSensorUpdate(a);
+    }
+
+    fn setSensorError(self: *SensorCtx, s: *Sensor, msg: []const u8) void {
+        if (s.error_state) |e| self.gpa.free(e);
+        s.error_state = self.gpa.dupe(u8, msg) catch null;
     }
 
     pub fn emitSensorUpdate(self: *SensorCtx, a: std.mem.Allocator) void {
@@ -728,6 +793,68 @@ test "fuzz SensorRing: push and read back" {
             defer a.free(slice);
             const expected_len = @min(n, cap);
             if (slice.len != expected_len) return;
+        }
+    }.run, .{});
+}
+
+// --- MQTT sensor source ---
+
+test "ingestMqttMessage: JSON numeric fields become measurements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(std.testing.allocator);
+    defer ctx.deinit();
+    _ = try ctx.addSensor("chamber", "mqtt");
+    try ctx.setSensorTopic("chamber", "printer/chamber/state");
+
+    ctx.ingestMqttMessage("printer/chamber/state", "{\"temperature\":42.5,\"humidity\":60}", a);
+
+    const s = ctx.findSensor("chamber").?;
+    try std.testing.expectEqual(@as(f64, 42.5), s.last_measurements.get("temperature").?);
+    try std.testing.expectEqual(@as(f64, 60.0), s.last_measurements.get("humidity").?);
+    try std.testing.expect(s.error_state == null);
+    // History ring captured the value too.
+    try std.testing.expectEqual(@as(usize, 1), s.history.get("temperature").?.len);
+}
+
+test "ingestMqttMessage: non-matching topic is ignored" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx = testCtx(std.testing.allocator);
+    defer ctx.deinit();
+    _ = try ctx.addSensor("chamber", "mqtt");
+    try ctx.setSensorTopic("chamber", "printer/chamber/state");
+
+    ctx.ingestMqttMessage("some/other/topic", "{\"temperature\":99}", arena.allocator());
+    try std.testing.expectEqual(@as(usize, 0), ctx.findSensor("chamber").?.last_measurements.count());
+}
+
+test "ingestMqttMessage: invalid JSON sets error_state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx = testCtx(std.testing.allocator);
+    defer ctx.deinit();
+    _ = try ctx.addSensor("c", "mqtt");
+    try ctx.setSensorTopic("c", "t");
+
+    ctx.ingestMqttMessage("t", "not json{", arena.allocator());
+    try std.testing.expect(ctx.findSensor("c").?.error_state != null);
+}
+
+test "fuzz ingestMqttMessage: arbitrary payloads never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var ctx = testCtx(std.testing.allocator);
+            defer ctx.deinit();
+            _ = ctx.addSensor("c", "mqtt") catch return;
+            ctx.setSensorTopic("c", "t") catch return;
+            var buf: [48]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            ctx.ingestMqttMessage("t", &buf, arena.allocator());
         }
     }.run, .{});
 }

@@ -22,7 +22,7 @@
 | 🟢 octoprint_compat | 10/10 | 0/0 | 0/0 | 100% | 95% | 95% |
 | 🟢 power | 5/5 | 6/6 | 1/1 | 100% | 85% | 85% |
 | 🟢 proc_stats | 1/1 | 1/1 | 2/2 | 100% | 95% | 95% |
-| 🟡 sensor | 3/3 | 3/3 | 1/1 | 100% | 65% | 65% |
+| 🟢 sensor | 3/3 | 3/3 | 1/1 | 100% | 85% | 85% |
 | 🟢 server | 3/3 | 3/3 | 4/4 | 100% | 95% | 95% |
 | 🟡 spoolman | 3/3 | 4/4 | 2/2 | 100% | 60% | 60% |
 | 🟢 td1 | 2/2 | 2/2 | 0/0 | 100% | 80% | 80% |
@@ -68,7 +68,12 @@
 > - spoolman: proxy is a per-request user-driven forwarder (no server-side cache),
 >   so ETag does not apply; the shared http_get helper is available if a cached
 >   path is added later
-> - sensor: MQTT/Klippy sensor integration
+> - sensor: DONE — MQTT source. ingestMqttMessage parses a JSON payload into
+>   measurements (Moonraker's only built-in sensor type is MQTT). Live path:
+>   MqttClient reader → MqttCtx.on_message → app bridge → core.run → sensor
+>   ingest (under the Core lock); topics subscribed on connect. Hook firing
+>   validated over a real socket. (Direct JSON-field mapping, not Jinja
+>   state_response_template.)
 > - mqtt: DONE — real MQTT 3.1.1 TCP client (mqtt_proto codec + mqtt_client),
 >   CONNECT/CONNACK/PUBLISH/SUBSCRIBE/PUBACK/PING, LWT, live publish wired into
 >   MqttCtx (connectBroker + background reader), connects at startup when a
