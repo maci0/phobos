@@ -17,7 +17,7 @@
 | 🟢 klippy_apis | 13/13 | 13/13 | 0/0 | 100% | 90% | 90% |
 | 🟢 loghelper | 1/1 | 1/1 | 0/0 | 100% | 95% | 95% |
 | 🟢 machine | 12/12 | 12/12 | 2/2 | 100% | 75% | 75% |
-| 🟡 mqtt | 2/2 | 3/3 | 0/0 | 100% | 80% | 80% |
+| 🟢 mqtt | 2/2 | 3/3 | 0/0 | 100% | 90% | 90% |
 | 🟢 notifier | 2/2 | 2/2 | 0/0 | 100% | 95% | 95% |
 | 🟢 octoprint_compat | 10/10 | 0/0 | 0/0 | 100% | 95% | 95% |
 | 🟡 power | 5/5 | 6/6 | 1/1 | 100% | 70% | 70% |
@@ -59,7 +59,12 @@
 > - td1: UART communication
 > - spoolman: ETag conditional GET (Zig 0.16 FetchResult header limitation)
 > - sensor: MQTT/Klippy sensor integration
-> - mqtt: real MQTT broker connection (TLS/keepalive/reconnect); status_cache, flush thread, moonraker_status publication done
+> - mqtt: DONE — real MQTT 3.1.1 TCP client (mqtt_proto codec + mqtt_client),
+>   CONNECT/CONNACK/PUBLISH/SUBSCRIBE/PUBACK/PING, LWT, live publish wired into
+>   MqttCtx (connectBroker + background reader), connects at startup when a
+>   broker is configured. Validated over a real socket against an in-tree broker
+>   double. Remaining P3: TLS, automatic reconnect/backoff, JSON-RPC-over-MQTT
+>   request dispatch.
 > - klippy_apis: DONE — real Klippy handshake (info/poll/subscribe with
 >   response_template), is_remote proxied endpoints (printer.info, objects.*,
 >   gcode.script/help, query_endstops.status), validated end-to-end against a

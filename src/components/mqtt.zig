@@ -25,8 +25,11 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const mqtt_client = @import("mqtt_client.zig");
+const mqtt_proto = @import("mqtt_proto.zig");
 
 const Registry = registry.Registry;
+const Io = std.Io;
 
 // ---------------------------------------------------------------------------
 // Context
@@ -123,6 +126,15 @@ pub const MqttCtx = struct {
     status_flush_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Background thread that periodically flushes the status cache.
     status_flush_thread: ?std.Thread = null,
+    /// Live Io handle (set once the server is serving). Required for a real
+    /// broker connection; null in unit tests that exercise the in-memory store.
+    io: ?Io = null,
+    /// Real MQTT broker client (heap-owned for a stable reader address). Null
+    /// until `connectBroker` succeeds; back to null after `disconnectBroker`.
+    client: ?*mqtt_client.MqttClient = null,
+    /// Background reader thread draining inbound broker packets.
+    reader_thread: ?std.Thread = null,
+    reader_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(gpa: std.mem.Allocator) MqttCtx {
         return .{
@@ -137,6 +149,7 @@ pub const MqttCtx = struct {
     pub fn deinit(self: *MqttCtx) void {
         if (self.deinitialized) return;
         self.deinitialized = true;
+        self.disconnectBroker();
         self.stopStatusFlushThread();
         var it = self.messages.iterator();
         while (it.next()) |entry| {
@@ -172,6 +185,110 @@ pub const MqttCtx = struct {
             if (cfg.status_objects) |s| self.gpa.free(s);
             if (cfg.mqtt_protocol) |p| self.gpa.free(p);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Real broker connection (mqtt_client over std.Io.net)
+    // -----------------------------------------------------------------------
+
+    /// Wire the live Io handle. Enables `connectBroker`; until set, the
+    /// component operates purely on the in-memory store (unit-test path).
+    pub fn setIo(self: *MqttCtx, io: Io) void {
+        self.io = io;
+    }
+
+    /// Connect to the configured broker, publish online status, subscribe to the
+    /// API request topic, and start the background reader. Idempotent while
+    /// connected. Requires both a config and a wired Io.
+    pub fn connectBroker(self: *MqttCtx) !void {
+        if (self.client != null) return;
+        const cfg = self.config orelse return error.MqttNotConfigured;
+        const io = self.io orelse return error.MqttNotConfigured;
+
+        self.setState(.connecting);
+        const client = try self.gpa.create(mqtt_client.MqttClient);
+        errdefer self.gpa.destroy(client);
+
+        var opts: mqtt_proto.ConnectOptions = .{
+            .client_id = cfg.client_id orelse "phobos",
+            .username = cfg.username,
+            .password = cfg.password,
+            .keepalive_s = 60,
+            .clean_session = true,
+        };
+        if (cfg.will_topic) |wt| {
+            opts.will_topic = wt;
+            opts.will_payload = cfg.will_payload orelse "offline";
+            opts.will_retain = true;
+        }
+
+        client.* = mqtt_client.MqttClient.connect(self.gpa, io, cfg.host, cfg.port, opts) catch |e| {
+            self.gpa.destroy(client);
+            self.state = .disconnected;
+            return e;
+        };
+        client.rebind();
+        self.client = client;
+        // setState(.connected) publishes moonraker_status — now sent live.
+        self.setState(.connected);
+
+        // Subscribe to the API request topic.
+        const rtopics = self.reservedTopics();
+        defer {
+            self.gpa.free(rtopics.api_request);
+            self.gpa.free(rtopics.api_response);
+            self.gpa.free(rtopics.moonraker_status);
+            self.gpa.free(rtopics.klipper_status);
+            self.gpa.free(rtopics.klipper_state_prefix);
+        }
+        const api_qos: u2 = if (self.config) |c| @intCast(@max(0, @min(2, c.api_qos))) else 0;
+        client.subscribe(rtopics.api_request, api_qos) catch {};
+
+        // Start the background reader to drain inbound packets.
+        self.reader_stop.store(false, .release);
+        self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch null;
+    }
+
+    /// Background-task entry point: connect to the broker, ignoring errors (an
+    /// unreachable broker must not crash the server). Spawned via `io.async` from
+    /// app startup so a slow TCP connect never stalls the serve path.
+    pub fn connectBrokerBg(self: *MqttCtx) void {
+        self.connectBroker() catch {};
+    }
+
+    /// Background reader: drain inbound packets until stopped or the socket
+    /// errors (broker disconnect). Keepalive PINGREQ/PINGRESP and inbound
+    /// PUBLISH dispatch are handled inside `client.readOne`.
+    fn runReader(self: *MqttCtx) void {
+        const client = self.client orelse return;
+        while (!self.reader_stop.load(.acquire)) {
+            _ = client.readOne() catch break;
+        }
+    }
+
+    /// Disconnect the broker client and stop the reader thread. Safe to call
+    /// when not connected.
+    pub fn disconnectBroker(self: *MqttCtx) void {
+        self.reader_stop.store(true, .release);
+        if (self.client) |client| {
+            // Interrupt the reader's blocking recv, then join it before any
+            // teardown that frees the buffers the reader is using.
+            client.shutdownRecv();
+            if (self.reader_thread) |t| {
+                t.join();
+                self.reader_thread = null;
+            }
+            client.disconnect();
+            client.deinit();
+            self.gpa.destroy(client);
+            self.client = null;
+        }
+        if (self.state == .connected or self.state == .connecting) self.state = .disconnected;
+    }
+
+    /// True when a live broker connection is established.
+    pub fn hasBrokerConnection(self: *const MqttCtx) bool {
+        return self.client != null;
     }
 
     /// Configure broker connection settings. Takes ownership of slices.
@@ -270,14 +387,12 @@ pub const MqttCtx = struct {
             self.gpa.free(rtopics.klipper_state_prefix);
         }
         var payload_obj = std.json.ObjectMap.init(self.gpa, &.{}, &.{}) catch return;
-        payload_obj.put(self.gpa, "klipper_state", .{ .string = self.klipper_state }) catch {
-            payload_obj.deinit(self.gpa);
-            return;
-        };
-        payload_obj.put(self.gpa, "klipper_message", .{ .string = self.klipper_message }) catch {
-            payload_obj.deinit(self.gpa);
-            return;
-        };
+        // publishTopic deep-copies the value, so we always own and must free the
+        // builder object (entries array). Borrowed string values + literal keys
+        // are not owned by the map, so deinit only releases the backing array.
+        defer payload_obj.deinit(self.gpa);
+        payload_obj.put(self.gpa, "klipper_state", .{ .string = self.klipper_state }) catch return;
+        payload_obj.put(self.gpa, "klipper_message", .{ .string = self.klipper_message }) catch return;
         self.publishTopic(rtopics.moonraker_status, .{ .object = payload_obj }, 0, true) catch {};
     }
 
@@ -846,6 +961,14 @@ pub const MqttCtx = struct {
         try validateQos(qos);
         if (!self.isConfigured()) return error.MqttNotConfigured;
         try self.storeMessageRetain(topic, payload, retain);
+        // When a live broker connection exists, also publish over the wire.
+        if (self.client) |client| {
+            var aw: std.Io.Writer.Allocating = .init(self.gpa);
+            defer aw.deinit();
+            var jw: std.json.Stringify = .{ .writer = &aw.writer };
+            jw.write(payload) catch return;
+            client.publish(topic, aw.written(), @intCast(@max(0, @min(2, qos))), retain) catch {};
+        }
     }
 
     /// Publish with optional instance-name prefix.
@@ -872,6 +995,7 @@ pub const MqttCtx = struct {
                 self.gpa.free(rtopics.klipper_state_prefix);
             }
             var payload_obj: std.json.ObjectMap = .empty;
+            defer payload_obj.deinit(self.gpa); // publishTopic deep-copies; free the builder.
             payload_obj.put(self.gpa, "server", .{ .string = "offline" }) catch {};
             self.publishTopic(rtopics.moonraker_status, .{ .object = payload_obj }, 0, true) catch {};
         }
@@ -3326,4 +3450,54 @@ test "fuzz handlePublishPrefixed: never panics on arbitrary params" {
             _ = handlePublishPrefixed(@ptrCast(&ctx), params, a) catch {};
         }
     }.run, .{});
+}
+
+// ---------------------------------------------------------------------------
+// Real broker integration (mqtt_client.TestBroker over a real TCP socket).
+// ---------------------------------------------------------------------------
+
+test "mqtt: connectBroker connects; publishTopic reaches the broker live" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try mqtt_client.TestBroker.bind(alloc, io);
+    const p = try broker.port();
+
+    // Broker services 3 client frames after the handshake:
+    //   1) PUBLISH moonraker_status (emitted by setState(.connected))
+    //   2) SUBSCRIBE api_request
+    //   3) PUBLISH our live-test message  ← last publish recorded
+    var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 3) });
+
+    var ctx = MqttCtx.init(alloc);
+    try ctx.setConfig("127.0.0.1", p, null, null);
+    try ctx.setInstanceName("phobos");
+    ctx.setIo(io);
+
+    try ctx.connectBroker();
+    try testing.expect(ctx.hasBrokerConnection());
+
+    try ctx.publishTopic("phobos/instance/live-test", .{ .string = "hi-live" }, 0, false);
+
+    bf.await(io);
+
+    // Tear down the client (joins reader thread) before the broker socket.
+    ctx.deinit();
+    broker.deinit();
+
+    try testing.expect(broker.saw_subscribe);
+    try testing.expectEqualStrings("phobos/instance/live-test", broker.got_topic[0..broker.got_topic_len]);
+    try testing.expectEqualStrings("\"hi-live\"", broker.got_payload[0..broker.got_payload_len]);
+}
+
+test "mqtt: connectBroker without io returns MqttNotConfigured" {
+    const alloc = std.testing.allocator;
+    var ctx = MqttCtx.init(alloc);
+    defer ctx.deinit();
+    try ctx.setConfig("127.0.0.1", 1883, null, null);
+    // No io wired → cannot connect.
+    try testing.expectError(error.MqttNotConfigured, ctx.connectBroker());
+    try testing.expect(!ctx.hasBrokerConnection());
 }

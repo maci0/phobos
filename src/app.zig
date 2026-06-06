@@ -832,6 +832,12 @@ pub const App = struct {
         self.webcam_ctx.setIo(io);
         // Wire io into the klippy connection so it can connect and handshake.
         self.klippy_ctx.setIo(io);
+        // Wire io into MQTT and, when a broker is configured, connect to it in
+        // the background (a slow/unreachable broker must not stall startup).
+        self.mqtt_ctx.setIo(io);
+        if (self.mqtt_ctx.isConfigured()) {
+            _ = io.async(MqttCtx.connectBrokerBg, .{self.mqtt_ctx});
+        }
         // Wire connections and io into ServerInfo so server.info reports live
         // websocket_count.
         self.info.conns = self.conns;
