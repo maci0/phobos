@@ -92,7 +92,7 @@ webcam, extensions`.
 | `dbus_manager.py` | 150 | Indirect | (CORE) | — |
 | `analysis.py` | 546 | Untested | — | — |
 | `button.py` | 125 | Untested | — | — |
-| `ldap.py` | 147 | Untested | — | Auth backend. |
+| `ldap.py` | 147 | Untested | — | **NON-GOAL** — LDAP auth source out of scope; not implemented in phobos. |
 | `mqtt.py` | 883 | Untested | — | Entire MQTT transport untested. |
 | `notifier.py` | 217 | Untested | — | — |
 | `octoprint_compat.py` | 413 | Untested | — | OctoPrint API shim. |

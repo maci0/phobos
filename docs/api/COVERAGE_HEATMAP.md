@@ -82,3 +82,13 @@
 > - wled: DONE — address strips use HTTP POST to the WLED JSON API; serial strips
 >   write newline-terminated JSON to the character device via `serial.zig`
 >   (setStripSerial), unit-tested against a temp file.
+>
+> Non-goals (intentionally not implemented — not counted against parity):
+> - **LDAP auth source** (`ldap.py`): out of scope. phobos supports only the
+>   `moonraker` auth source. `source: "ldap"` logins are unsupported; the auth DB
+>   keeps the `source` field for shape parity only.
+> - **machine.reboot / machine.shutdown host action**: deliberate no-ops (return
+>   the "ok" shape without touching the host) — printer boards lack systemd and a
+>   stray call must never power-cycle the box.
+> - **apt/pip system package updates** (update_manager non-git sources): emit
+>   notifications but never invoke the host package manager.

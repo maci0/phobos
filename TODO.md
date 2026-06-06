@@ -306,7 +306,12 @@ _norm_structure_compare array item masking (Python).
 - **octoprint_compat** — live printer_state() with klippy + print_stats tracking;
   dynamic safemode in handleServer; state flags for handlePrinter match Python spec.
   Done: 13 unit tests + fuzz test.
-- **LDAP** auth source omitted (moonraker-source-only scope).
+- **LDAP** auth source — **NON-GOAL** (explicitly out of scope, will not be
+  implemented). phobos supports only the `moonraker` auth source. Rationale:
+  LDAP requires a hand-rolled LDAPv3 BER/ASN.1 client + TLS for a deployment
+  scenario (corporate directory auth on a 3D-printer appliance) that the target
+  does not need. The auth DB still carries the `source` field for shape parity,
+  but `source: "ldap"` logins are unsupported. Do not add it back.
 - **sensor** — ~~`notify_sensor_update` deferred (SensorCtx empty struct; only relevant
   when MQTT/Klippy sensor integration lands).~~ DONE: real SensorCtx with sensors
   StringHashMap, MeasurementRing history, change detection, emitSensorUpdate via

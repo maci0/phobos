@@ -501,6 +501,10 @@ regex domains; wildcards/trailing-slash rejected. Applied in request handlers.
 Users persisted in DB namespace with `UserInfo` (username, password hash, salt, source
 `moonraker`|`ldap`, jwt_secret, jwk_id, groups; default group `admin`).
 
+> **Non-goal:** the `ldap` auth source is intentionally NOT implemented in phobos.
+> Only `source: "moonraker"` is supported; `source: "ldap"` logins are rejected.
+> The `source` field is retained purely for record-shape parity.
+
 ---
 
 ## 6. Transports
