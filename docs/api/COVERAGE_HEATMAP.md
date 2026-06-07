@@ -12,7 +12,7 @@
 | 🟢 extensions | 4/4 | 4/4 | 1/1 | 100% | 95% | 95% |
 | 🟢 file_manager | 10/10 | 10/10 | 1/1 | 100% | 90% | 90% |
 | 🟢 gcode_metadata | 0/0 | 0/0 | 0/0 | 100% | 95% | 95% |
-| 🟢 history | 4/4 | 5/5 | 1/1 | 100% | 85% | 85% |
+| 🟢 history | 4/4 | 5/5 | 1/1 | 100% | 95% | 95% |
 | 🟢 job_queue | 5/5 | 8/8 | 1/1 | 100% | 95% | 95% |
 | 🟢 klippy_apis | 13/13 | 13/13 | 0/0 | 100% | 95% | 95% |
 | 🟢 loghelper | 1/1 | 1/1 | 0/0 | 100% | 95% | 95% |
@@ -32,7 +32,7 @@
 | 🟢 wled | 6/6 | 7/7 | 0/0 | 100% | 90% | 90% |
 | 🟢 zeroconf | 1/1 | 0/0 | 0/0 | 100% | 95% | 95% |
 
-> **Overall weighted progress: ~96%**
+> **Overall weighted progress: ~97%**
 >
 > - **Surface**: API endpoint/method/notification shape coverage
 > - **Depth**: how much of the internal implementation is real (not stubbed)
@@ -45,7 +45,7 @@
 >   roughly 50-90x less. (Measured via /proc/<pid>/status; down from a prior
 >   5.4 MB after removing the eager 20 MiB Klippy ReadBuf, the proc_stat per-tick
 >   leak, the sensor-ring memset, and building ReleaseSmall.)
-> - **Tests**: 1185 pass / 2 skip / 0 fail (~205 fuzz)
+> - **Tests**: 1204 pass / 2 skip / 0 fail (~215 fuzz)
 > - **Fuzz**: every public JSON-RPC handler has both a unit test and a fuzz test
 >
 > Depth key:
