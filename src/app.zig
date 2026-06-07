@@ -642,6 +642,8 @@ pub const App = struct {
     /// use `deinitNoIo` in pure unit tests where no event loop is running.
     pub fn deinit(self: *App, io: std.Io) void {
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
+        // Stop the Spoolman WS supervisor (uses io) before io/conns teardown.
+        self.spoolman_ctx.stopWs();
         // Stop the machine proc_stat timer thread before tearing down
         // connections (the timer thread may access conns within emitProcStatUpdate).
         self.machine_ctx.deinit();
@@ -821,6 +823,10 @@ pub const App = struct {
         // Wire the live io into the spoolman component so it can emit
         // notify_active_spool_set to connected WebSocket clients.
         self.spoolman_ctx.setIo(io);
+        // Spoolman WebSocket: live connection status + spool-deleted push.
+        self.spoolman_ctx.on_spool_deleted = spoolmanSpoolDeleted;
+        self.spoolman_ctx.on_spool_deleted_ctx = self;
+        self.spoolman_ctx.startWs();
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
         // Wire io into the machine component for /proc & /sys reads.
@@ -900,6 +906,14 @@ fn mqttApiDispatch(ctx: *anyopaque, payload: []const u8, alloc: std.mem.Allocato
     const app: *App = @ptrCast(@alignCast(ctx));
     const io = app.mqtt_ctx.io orelse return error.NotReady;
     return app.core.run(io, Dispatcher.handle, .{ app.dispatcher, payload, alloc });
+}
+
+/// Spoolman WS spool-deletion hook: clear the active spool (if it was the
+/// deleted one) under the Core lock. Runs off the WS supervisor thread.
+fn spoolmanSpoolDeleted(ctx: *anyopaque, spool_id: i64) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const io = app.spoolman_ctx.io orelse return;
+    app.core.run(io, SpoolmanCtx.handleSpoolDeletedLocked, .{ app.spoolman_ctx, spool_id });
 }
 
 pub const SensorMqttBridge = struct {

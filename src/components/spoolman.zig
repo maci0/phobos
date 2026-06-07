@@ -16,16 +16,18 @@
 //! requires a live io; call setIo() after the App event loop starts. emitLocked
 //! is used because the POST handler runs under the held Core lock.
 //!
-//! NOTE: phobos has an HTTP proxy client (handleProxy forwards to the configured
-//! Spoolman server_url via std.http), but no persistent websocket — ws_connected
-//! is always false. When no server_url is configured the proxy returns the v2
-//! "not connected" error shape when use_v2_response=true, or a 503 otherwise,
+//! phobos has both an HTTP proxy client (handleProxy → server_url via std.http)
+//! and a persistent WebSocket supervisor (ws_client.zig) to ws://host/api/v1/spool:
+//! ws_connected reflects the real socket state, and spool-deletion pushes clear
+//! the active spool (handleSpoolDeletedLocked). When no server_url is configured
+//! the proxy returns the v2 "not connected" shape (use_v2_response=true) or a 503,
 //! exactly as Moonraker does.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
+const ws_client_mod = @import("ws_client.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -55,6 +57,19 @@ pub const SpoolmanCtx = struct {
     /// handleProxy forwards requests to this server; when null, proxy
     /// returns the "not connected" error shape.
     server_url: ?[]const u8,
+    /// Live WebSocket connection state (Moonraker's real spoolman_connected),
+    /// maintained by the WS supervisor thread.
+    ws_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    ws_thread: ?std.Thread = null,
+    ws_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
+    ws: ?*ws_client_mod.WsClient = null,
+    ws_host: ?[]const u8 = null,
+    ws_port: u16 = 7912,
+    /// Callback invoked off the Core lock on a spool-deletion push; App wires it
+    /// to clear the active spool under the Core lock.
+    on_spool_deleted: ?*const fn (ctx: *anyopaque, spool_id: i64) void = null,
+    on_spool_deleted_ctx: ?*anyopaque = null,
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus, server_url: ?[]const u8) SpoolmanCtx {
         const ctx = SpoolmanCtx{
@@ -83,15 +98,160 @@ pub const SpoolmanCtx = struct {
         self.emitSpoolmanStatusChanged();
     }
 
-    /// Emit notify_spoolman_status_changed with the current connected state.
-    fn emitSpoolmanStatusChanged(self: *SpoolmanCtx) void {
+    /// True if Spoolman is connected: the live WS state when a WS supervisor is
+    /// running, else (HTTP-only) whether a server_url is configured.
+    pub fn connected(self: *const SpoolmanCtx) bool {
+        if (self.ws_thread != null) return self.ws_connected.load(.acquire);
+        return self.server_url != null;
+    }
+
+    /// Emit notify_spoolman_status_changed. `locked` selects emitLocked (caller
+    /// holds the Core lock) vs emit (lock-taking, for the WS supervisor thread).
+    fn emitStatus(self: *SpoolmanCtx, locked: bool) void {
         const io = self.io orelse return;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
         var payload: std.json.ObjectMap = .empty;
-        payload.put(a, "spoolman_connected", .{ .bool = self.server_url != null }) catch return;
-        self.bus.emitLocked(io, notify.names.spoolman_status_changed, .{ .object = payload }) catch {};
+        payload.put(a, "spoolman_connected", .{ .bool = self.connected() }) catch return;
+        if (locked)
+            self.bus.emitLocked(io, notify.names.spoolman_status_changed, .{ .object = payload }) catch {}
+        else
+            self.bus.emit(io, notify.names.spoolman_status_changed, .{ .object = payload }) catch {};
+    }
+
+    fn emitSpoolmanStatusChanged(self: *SpoolmanCtx) void {
+        self.emitStatus(true);
+    }
+
+    fn wsLock(self: *SpoolmanCtx) void {
+        if (self.io) |io| self.ws_mutex.lockUncancelable(io);
+    }
+    fn wsUnlock(self: *SpoolmanCtx) void {
+        if (self.io) |io| self.ws_mutex.unlock(io);
+    }
+
+    /// Parse "http(s)://host[:port]" into host (gpa-owned) + port (default 7912).
+    fn parseWsTarget(self: *SpoolmanCtx, url: []const u8) !void {
+        var rest = url;
+        if (std.mem.indexOf(u8, rest, "://")) |i| rest = rest[i + 3 ..];
+        if (std.mem.indexOfScalar(u8, rest, '/')) |s| rest = rest[0..s];
+        var host = rest;
+        var port: u16 = 7912;
+        if (std.mem.lastIndexOfScalar(u8, rest, ':')) |c| {
+            host = rest[0..c];
+            port = std.fmt.parseInt(u16, rest[c + 1 ..], 10) catch 7912;
+        }
+        if (self.ws_host) |h| self.gpa.free(h);
+        self.ws_host = try self.gpa.dupe(u8, host);
+        self.ws_port = port;
+    }
+
+    /// Start the Spoolman WebSocket supervisor (no-op without server_url/io or if
+    /// already running).
+    pub fn startWs(self: *SpoolmanCtx) void {
+        if (self.ws_thread != null) return;
+        const url = self.server_url orelse return;
+        if (self.io == null) return;
+        self.parseWsTarget(url) catch return;
+        self.ws_stop.store(false, .release);
+        self.ws_thread = std.Thread.spawn(.{}, wsSupervisor, .{self}) catch null;
+    }
+
+    pub fn stopWs(self: *SpoolmanCtx) void {
+        self.ws_stop.store(true, .release);
+        self.wsLock();
+        if (self.ws) |w| w.shutdownRecv();
+        self.wsUnlock();
+        if (self.ws_thread) |t| {
+            t.join();
+            self.ws_thread = null;
+        }
+        if (self.ws_host) |h| {
+            self.gpa.free(h);
+            self.ws_host = null;
+        }
+    }
+
+    fn freeWsLocked(self: *SpoolmanCtx) void {
+        self.wsLock();
+        const w = self.ws;
+        self.ws = null;
+        self.wsUnlock();
+        if (w) |c| c.deinit();
+    }
+
+    /// Reconnect supervisor: connect to ws://host/api/v1/spool, mark connected,
+    /// read push frames (spool deletions), reconnect with backoff on drop.
+    fn wsSupervisor(self: *SpoolmanCtx) void {
+        var backoff_ms: u64 = 500;
+        const max_backoff: u64 = 30_000;
+        const host = self.ws_host orelse return;
+        const io = self.io orelse return;
+        while (!self.ws_stop.load(.acquire)) {
+            const w = ws_client_mod.WsClient.connect(self.gpa, io, host, self.ws_port, "/api/v1/spool") catch {
+                if (self.ws_stop.load(.acquire)) break;
+                sleepMs(backoff_ms);
+                backoff_ms = @min(backoff_ms * 2, max_backoff);
+                continue;
+            };
+            self.wsLock();
+            self.ws = w;
+            self.wsUnlock();
+            if (self.ws_stop.load(.acquire)) w.shutdownRecv();
+            self.ws_connected.store(true, .release);
+            self.emitStatus(false);
+            backoff_ms = 500;
+
+            while (!self.ws_stop.load(.acquire)) {
+                var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+                defer arena.deinit();
+                const msg = w.readMessage(arena.allocator()) catch break;
+                if (msg.opcode == .text) self.handleWsMessage(msg.data);
+            }
+
+            self.ws_connected.store(false, .release);
+            self.emitStatus(false);
+            self.freeWsLocked();
+            if (self.ws_stop.load(.acquire)) break;
+            sleepMs(backoff_ms);
+            backoff_ms = @min(backoff_ms * 2, max_backoff);
+        }
+    }
+
+    /// Parse a Spoolman push frame; on a spool deletion, invoke on_spool_deleted.
+    /// {"resource":"spool","type":"deleted","payload":{"id":N}}.
+    fn handleWsMessage(self: *SpoolmanCtx, data: []const u8) void {
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), data, .{}) catch return;
+        if (parsed.value != .object) return;
+        const o = parsed.value.object;
+        const res = o.get("resource") orelse return;
+        const typ = o.get("type") orelse return;
+        if (res != .string or typ != .string) return;
+        if (!std.mem.eql(u8, res.string, "spool") or !std.mem.eql(u8, typ.string, "deleted")) return;
+        const pl = o.get("payload") orelse return;
+        if (pl != .object) return;
+        const idv = pl.object.get("id") orelse return;
+        const id: i64 = switch (idv) {
+            .integer => |i| i,
+            .float => |f| @intFromFloat(f),
+            else => return,
+        };
+        if (self.on_spool_deleted) |cb| cb(self.on_spool_deleted_ctx.?, id);
+    }
+
+    fn sleepMs(ms: u64) void {
+        var req: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+        _ = std.os.linux.nanosleep(&req, null);
+    }
+
+    /// Clear the active spool if it matches `deleted_id` (Moonraker behaviour).
+    /// Runs under the Core lock (App wires this via core.run).
+    pub fn handleSpoolDeletedLocked(self: *SpoolmanCtx, deleted_id: i64) void {
+        const active = self.getSpoolId() orelse return;
+        if (active == deleted_id) self.setSpoolId(null);
     }
 
     fn loadSpoolId(self: *SpoolmanCtx) ?i64 {
@@ -195,8 +355,7 @@ fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
 pub fn handleStatus(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
     var obj: std.json.ObjectMap = .empty;
-    const connected = c.server_url != null;
-    try obj.put(alloc, "spoolman_connected", .{ .bool = connected });
+    try obj.put(alloc, "spoolman_connected", .{ .bool = c.connected() });
     try obj.put(alloc, "pending_reports", .{ .array = .init(alloc) });
     const spool_id = c.getSpoolId();
     if (spool_id) |id| {
@@ -532,6 +691,140 @@ const MemStore = struct {
 
 fn makeCtx(alloc: std.mem.Allocator, mem: *MemStore, nb: *NullBus) SpoolmanCtx {
     return SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus, null);
+}
+
+var ws_captured_id: i64 = -1;
+fn wsCaptureDeleted(_: *anyopaque, id: i64) void {
+    ws_captured_id = id;
+}
+
+test "spoolman WS: deletion frame invokes on_spool_deleted with the spool id" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+    var dummy: u8 = 0;
+    ctx.on_spool_deleted = wsCaptureDeleted;
+    ctx.on_spool_deleted_ctx = &dummy;
+
+    ws_captured_id = -1;
+    ctx.handleWsMessage("{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{\"id\":42}}");
+    try testing.expectEqual(@as(i64, 42), ws_captured_id);
+
+    ws_captured_id = -1;
+    ctx.handleWsMessage("{\"resource\":\"spool\",\"type\":\"updated\",\"payload\":{\"id\":7}}");
+    ctx.handleWsMessage("{\"resource\":\"filament\",\"type\":\"deleted\",\"payload\":{\"id\":7}}");
+    ctx.handleWsMessage("not json");
+    try testing.expectEqual(@as(i64, -1), ws_captured_id);
+}
+
+test "spoolman WS: deletion clears the active spool only when it matches" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    _ = try handleSpoolId(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 5}"), a);
+    ctx.handleSpoolDeletedLocked(99);
+    try testing.expectEqual(@as(i64, 5), ctx.getSpoolId().?);
+    ctx.handleSpoolDeletedLocked(5);
+    try testing.expect(ctx.getSpoolId() == null);
+}
+
+test "spoolman parseWsTarget: host + port (default 7912)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+    try ctx.parseWsTarget("http://192.168.1.9:7913/api");
+    try testing.expectEqualStrings("192.168.1.9", ctx.ws_host.?);
+    try testing.expectEqual(@as(u16, 7913), ctx.ws_port);
+    try ctx.parseWsTarget("http://localhost");
+    try testing.expectEqualStrings("localhost", ctx.ws_host.?);
+    try testing.expectEqual(@as(u16, 7912), ctx.ws_port);
+}
+
+var ws_sup_deleted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+fn wsSupFlag(_: *anyopaque, _: i64) void {
+    ws_sup_deleted.store(true, .release);
+}
+
+fn spoolmanTestWsServer(server: *std.Io.net.Server, io: std.Io, payload: []const u8) void {
+    const stream = server.accept(io) catch return;
+    defer stream.close(io);
+    var rbuf: [2048]u8 = undefined;
+    var wbuf: [512]u8 = undefined;
+    var r = stream.reader(io, &rbuf);
+    var w = stream.writer(io, &wbuf);
+    while (true) {
+        const line = r.interface.takeDelimiterInclusive('\n') catch return;
+        if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
+    }
+    w.interface.writeAll("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n") catch return;
+    w.interface.writeByte(0x81) catch return;
+    w.interface.writeByte(@intCast(payload.len)) catch return;
+    w.interface.writeAll(payload) catch return;
+    w.interface.flush() catch return;
+    while (true) _ = r.interface.takeByte() catch break;
+}
+
+test "spoolman WS supervisor: connects, receives a deletion push, shuts down cleanly" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ip = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try ip.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const port = blk: {
+        var sa: std.os.linux.sockaddr.in = undefined;
+        var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
+        _ = std.os.linux.getsockname(server.socket.handle, @ptrCast(&sa), &slen);
+        break :blk std.mem.bigToNative(u16, sa.port);
+    };
+    var sf = io.async(spoolmanTestWsServer, .{ &server, io, @as([]const u8, "{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{\"id\":5}}") });
+
+    var mem = MemStore.init(alloc);
+    defer mem.deinit();
+    // Stable inline bus (NullBus.init returns by value with self-pointers that
+    // would dangle once emit() is actually exercised with a live io).
+    var core = Core.init();
+    var conns = connections_mod.Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &bus, null);
+    var url_buf: [64]u8 = undefined;
+    ctx.setServerUrl(try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{port}));
+    ctx.io = io;
+    var dummy: u8 = 0;
+    ctx.on_spool_deleted = wsSupFlag;
+    ctx.on_spool_deleted_ctx = &dummy;
+    ws_sup_deleted.store(false, .release);
+
+    ctx.startWs();
+    var tries: usize = 0;
+    while (!(ctx.connected() and ws_sup_deleted.load(.acquire)) and tries < 400) : (tries += 1) {
+        var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 5_000_000 };
+        _ = std.os.linux.nanosleep(&req, null);
+    }
+    try testing.expect(ctx.connected());
+    try testing.expect(ws_sup_deleted.load(.acquire));
+
+    ctx.stopWs(); // joins supervisor; testing.allocator catches leak/UAF
+    sf.await(io);
+    // After stop the WS is down; connected() falls back to HTTP (server_url set).
+    try testing.expect(!ctx.ws_connected.load(.acquire));
+    try testing.expect(ctx.ws_thread == null);
 }
 
 test "handleStatus: returns correct shape with no active spool" {
