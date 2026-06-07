@@ -339,22 +339,26 @@ pub const App = struct {
         };
 
         // --- Power device context (machine.device_power.*) ---
-        // No [power <name>] sections in the spine configuration → empty device
-        // list. Real GPIO/network control is STUBBED (see power.zig).
+        // Devices come from [power <name>] config sections (none in the bare
+        // spine → empty list). HTTP-URL devices send real GET requests and
+        // `type: gpio` devices drive the sysfs line (see power.zig); other vendor
+        // types remain in-memory.
         const power_ctx = try alloc.create(PowerCtx);
         errdefer alloc.destroy(power_ctx);
         power_ctx.* = PowerCtx.init(alloc, bus);
 
         // --- WLED context (machine.wled.*) ---
-        // No [wled <name>] sections in the spine → empty strip list.
-        // Real WLED HTTP/serial control is STUBBED (see wled.zig).
+        // Strips come from [wled <name>] config (none in the bare spine).
+        // Address strips use the WLED JSON HTTP API; serial strips write JSON to
+        // the character device (see wled.zig).
         const wled_ctx = try alloc.create(WledCtx);
         errdefer alloc.destroy(wled_ctx);
         wled_ctx.* = WledCtx.init(alloc);
 
         // --- TD-1 context (machine.td1.*) ---
-        // No USB TD-1 devices are enumerated in phobos. Serial port
-        // interaction is STUBBED (see td1.zig).
+        // Devices are auto-discovered by USB vid/pid and read over the serial
+        // port (see td1.zig: findTd1Devices + pollSerialOnce, started after io
+        // is wired). None present on a host without a TD-1.
         const td1_ctx = try alloc.create(Td1Ctx);
         errdefer alloc.destroy(td1_ctx);
         td1_ctx.* = Td1Ctx.init(alloc);

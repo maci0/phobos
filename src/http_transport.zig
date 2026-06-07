@@ -37,9 +37,11 @@ pub const jsonrpc_path = "/server/jsonrpc";
 /// for trusted transports (INTERNAL is always allowed).
 pub const AuthHook = *const fn (transport: TransportType, auth_required: bool) bool;
 
-/// Default hook: INTERNAL bypasses; everything else is allowed for now (real
-/// token/trusted-client checks land in a later task). Endpoints with
-/// `auth_required = false` skip the hook entirely (see `authorize`).
+/// Fallback hook used only when no authorization component is wired (e.g. unit
+/// tests that build a bare Server). The real daemon path sets `Server.auth` to
+/// the AuthCtx, and request auth then runs the full JWT → oneshot → API key →
+/// trusted-client chain in `handleParsedAuth` (this hook is not consulted).
+/// INTERNAL always bypasses; `auth_required = false` skips auth (see `authorize`).
 pub fn defaultAuthHook(transport: TransportType, auth_required: bool) bool {
     if (transport == .INTERNAL) return true;
     _ = auth_required;
