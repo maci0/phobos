@@ -5,6 +5,15 @@ zig-out/
 /vendor/
 # Conformance golden captures are large; track selectively later
 /conformance/golden/*.raw
-# Python bytecode
+# Python bytecode + local envs/caches
 __pycache__/
+*.pyc
+.venv/
+.pytest_cache/
 .testenv/
+
+# Editor / OS junk + stray backups
+*.orig
+*.bak
+*.swp
+.DS_Store
