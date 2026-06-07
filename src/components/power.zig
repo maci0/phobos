@@ -408,6 +408,34 @@ fn emitPowerChanged(ctx: *PowerCtx, alloc: std.mem.Allocator, dev: *const Device
 /// types update in-memory state only.
 /// Returns the resulting state string (points into ctx-owned memory or a
 /// literal — caller must not free).
+/// on/off/status URLs for a protocol-specific HTTP power device. Strings are
+/// allocated in `alloc` (caller owns all three).
+pub const ProtoUrls = struct { on: []const u8, off: []const u8, status: []const u8 };
+
+/// Tasmota HTTP command URLs (Moonraker tasmota.py): cmnd=Power<id>%20<ON|OFF|>.
+/// `password` (with user "admin") is appended when set.
+pub fn tasmotaUrls(alloc: std.mem.Allocator, address: []const u8, output_id: i64, password: ?[]const u8) !ProtoUrls {
+    var auth_buf: [128]u8 = undefined;
+    const auth: []const u8 = if (password) |p|
+        try std.fmt.bufPrint(&auth_buf, "&user=admin&password={s}", .{p})
+    else
+        "";
+    return .{
+        .on = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}%20ON{s}", .{ address, output_id, auth }),
+        .off = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}%20OFF{s}", .{ address, output_id, auth }),
+        .status = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}{s}", .{ address, output_id, auth }),
+    };
+}
+
+/// Shelly Gen1 relay URLs (Moonraker shelly.py): /relay/<id>?turn=<on|off>.
+pub fn shellyUrls(alloc: std.mem.Allocator, address: []const u8, output_id: i64) !ProtoUrls {
+    return .{
+        .on = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}?turn=on", .{ address, output_id }),
+        .off = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}?turn=off", .{ address, output_id }),
+        .status = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}", .{ address, output_id }),
+    };
+}
+
 fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {
     const cur = dev.state;
     if (std.mem.eql(u8, req, "status")) {
@@ -589,6 +617,43 @@ pub fn registerPower(reg: *Registry, ctx: *PowerCtx) !void {
 // ===========================================================================
 
 const testing = std.testing;
+
+test "tasmotaUrls: cmnd=Power<id> on/off/status, optional auth" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const u = try tasmotaUrls(a, "1.2.3.4", 1, null);
+    try testing.expectEqualStrings("http://1.2.3.4/cm?cmnd=Power1%20ON", u.on);
+    try testing.expectEqualStrings("http://1.2.3.4/cm?cmnd=Power1%20OFF", u.off);
+    try testing.expectEqualStrings("http://1.2.3.4/cm?cmnd=Power1", u.status);
+    const ua = try tasmotaUrls(a, "host", 2, "secret");
+    try testing.expectEqualStrings("http://host/cm?cmnd=Power2%20ON&user=admin&password=secret", ua.on);
+}
+
+test "shellyUrls: /relay/<id>?turn=on|off + status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const u = try shellyUrls(a, "shelly.local", 0);
+    try testing.expectEqualStrings("http://shelly.local/relay/0?turn=on", u.on);
+    try testing.expectEqualStrings("http://shelly.local/relay/0?turn=off", u.off);
+    try testing.expectEqualStrings("http://shelly.local/relay/0", u.status);
+}
+
+test "fuzz tasmota/shellyUrls: arbitrary address never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var addr: [24]u8 = undefined;
+            smith.bytesWithHash(&addr, 0);
+            const id = smith.valueRangeLessThanWithHash(i64, 0, 16, 1);
+            _ = tasmotaUrls(a, &addr, id, null) catch {};
+            _ = shellyUrls(a, &addr, id) catch {};
+        }
+    }.run, .{});
+}
 
 fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     const p = try std.json.parseFromSlice(std.json.Value, alloc, json_str, .{});

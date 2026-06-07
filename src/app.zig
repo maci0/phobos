@@ -522,6 +522,37 @@ pub const App = struct {
             const name_dup = self.alloc.dupe(u8, dev_name) catch continue;
             const type_dup = self.alloc.dupe(u8, dev_type) catch continue;
             const state_dup = self.alloc.dupe(u8, "off") catch continue;
+
+            // HTTP URLs: explicit on_url/off_url/status_url win; otherwise derive
+            // them for protocol types (tasmota/shelly) from `address`+`output_id`.
+            // addDeviceFull dupes these, so the temporaries here are freed after.
+            var on_url: ?[]const u8 = if (cfg.get(sect, "on_url")) |s| (self.alloc.dupe(u8, s) catch null) else null;
+            var off_url: ?[]const u8 = if (cfg.get(sect, "off_url")) |s| (self.alloc.dupe(u8, s) catch null) else null;
+            var status_url: ?[]const u8 = if (cfg.get(sect, "status_url")) |s| (self.alloc.dupe(u8, s) catch null) else null;
+            if (on_url == null) {
+                if (cfg.get(sect, "address")) |addr| {
+                    const output_id = cfg.getInt(sect, "output_id") catch 1;
+                    const password = cfg.get(sect, "password");
+                    const urls: ?power_component.ProtoUrls =
+                        if (std.mem.eql(u8, dev_type, "tasmota"))
+                            (power_component.tasmotaUrls(self.alloc, addr, output_id, password) catch null)
+                        else if (std.mem.eql(u8, dev_type, "shelly"))
+                            (power_component.shellyUrls(self.alloc, addr, output_id) catch null)
+                        else
+                            null;
+                    if (urls) |u| {
+                        on_url = u.on;
+                        off_url = u.off;
+                        status_url = u.status;
+                    }
+                }
+            }
+            defer {
+                if (on_url) |u| self.alloc.free(u);
+                if (off_url) |u| self.alloc.free(u);
+                if (status_url) |u| self.alloc.free(u);
+            }
+
             const dev = power_component.Device{
                 .name = name_dup,
                 .type_str = type_dup,
@@ -537,6 +568,9 @@ pub const App = struct {
                 .restrict_actions = cfg.getBoolean(sect, "restrict_action_processing") catch true,
                 .timer = cfg.getFloat(sect, "timer") catch 0.0,
                 .is_shutdown = false,
+                .on_url = on_url,
+                .off_url = off_url,
+                .status_url = status_url,
             };
             self.power_ctx.addDeviceFull(dev) catch |err| {
                 std.debug.print("phobos: warning: failed to add power device '{s}': {}\n", .{ dev_name, err });
