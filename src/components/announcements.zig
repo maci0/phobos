@@ -443,6 +443,65 @@ pub const AnnouncementsCtx = struct {
 /// Sleeps in 1-second increments so the stop flag is polled frequently,
 /// keeping deinit→join latency bounded (~1 s); otherwise the thread would
 /// block in nanosleep for up to UPDATE_CHECK_TIME seconds.
+/// True if a stored entry is dismissed with a `dismiss_wake` time at/<= `now`.
+/// Pure; the unit of wake detection.
+fn entryShouldWake(entry: std.json.Value, now: f64) bool {
+    if (entry != .object) return false;
+    const o = entry.object;
+    const dismissed = switch (o.get("dismissed") orelse .null) {
+        .bool => |b| b,
+        else => false,
+    };
+    if (!dismissed) return false;
+    const wake: f64 = switch (o.get("dismiss_wake") orelse .null) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => return false, // no wake time → stays dismissed
+    };
+    return wake <= now;
+}
+
+/// Re-surface dismissed entries whose `dismiss_wake` time has passed, emitting
+/// notify_announcement_wake (Moonraker `_wake_dismissed`). Runs on the refresh
+/// timer thread, so it emits via the lock-taking `bus.emit` (NOT emitLocked).
+fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
+    const io = self.io orelse return;
+    const ns = self.store.getNamespace(alloc, ns_entries) catch return;
+    if (ns != .object) return;
+
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+    const now: f64 = @floatFromInt(ts.sec);
+
+    var it = ns.object.iterator();
+    while (it.next()) |kv| {
+        const entry = kv.value_ptr.*;
+        if (!entryShouldWake(entry, now)) continue;
+        const o = entry.object;
+        const eid = switch (o.get("entry_id") orelse .null) {
+            .string => |s| s,
+            else => continue,
+        };
+
+        // Un-dismiss and persist.
+        var ne: std.json.ObjectMap = .empty;
+        var nit = o.iterator();
+        while (nit.next()) |e| ne.put(alloc, e.key_ptr.*, e.value_ptr.*) catch {};
+        ne.put(alloc, "dismissed", .{ .bool = false }) catch {};
+        ne.put(alloc, "date_dismissed", .null) catch {};
+        ne.put(alloc, "dismiss_wake", .null) catch {};
+        const key_z = alloc.dupeZ(u8, kv.key_ptr.*) catch continue;
+        self.store.insertItem(alloc, ns_entries, key_z, .{ .object = ne }) catch {};
+
+        // Emit notify_announcement_wake (lock-taking variant on the timer thread).
+        var inner: std.json.ObjectMap = .empty;
+        inner.put(alloc, "entry_id", .{ .string = eid }) catch continue;
+        var params: std.json.Array = .init(alloc);
+        params.append(.{ .object = inner }) catch continue;
+        self.bus.emit(io, notify.names.announcement_wake, .{ .array = params }) catch {};
+    }
+}
+
 fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
     var elapsed: u64 = 0;
     while (!self.refresh_stop.load(.acquire)) {
@@ -450,6 +509,13 @@ fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
         _ = std.os.linux.nanosleep(&req, null);
         if (self.refresh_stop.load(.acquire)) break;
         if (self.io == null) break;
+
+        // Each second: re-surface any dismissed entries past their wake time.
+        {
+            var wa = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer wa.deinit();
+            self.checkWakes(wa.allocator());
+        }
 
         elapsed += 1;
         if (elapsed < UPDATE_CHECK_TIME) continue;
@@ -891,6 +957,42 @@ fn handleFeedDispatchMulti(ctx: *anyopaque, params: std.json.Value, alloc: std.m
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+// ---- entryShouldWake ----
+
+test "entryShouldWake: only dismissed entries past their wake time" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { json: []const u8, now: f64, want: bool }{
+        .{ .json = "{\"dismissed\":true,\"dismiss_wake\":100}", .now = 150, .want = true }, // past wake
+        .{ .json = "{\"dismissed\":true,\"dismiss_wake\":100}", .now = 50, .want = false }, // before wake
+        .{ .json = "{\"dismissed\":true,\"dismiss_wake\":100.0}", .now = 100, .want = true }, // exactly at wake
+        .{ .json = "{\"dismissed\":true,\"dismiss_wake\":null}", .now = 1e12, .want = false }, // no wake → never
+        .{ .json = "{\"dismissed\":false,\"dismiss_wake\":1}", .now = 1e12, .want = false }, // not dismissed
+        .{ .json = "{}", .now = 1e12, .want = false },
+    };
+    for (cases) |c| {
+        const v = (try std.json.parseFromSlice(std.json.Value, a, c.json, .{})).value;
+        try testing.expectEqual(c.want, entryShouldWake(v, c.now));
+    }
+    // Non-object value.
+    try testing.expectEqual(false, entryShouldWake(.{ .integer = 5 }, 1e12));
+}
+
+test "fuzz entryShouldWake: arbitrary JSON never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var buf: [48]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const parsed = std.json.parseFromSlice(std.json.Value, a, &buf, .{}) catch return;
+            _ = entryShouldWake(parsed.value, 1234.0);
+        }
+    }.run, .{});
+}
 
 // ---- In-memory store for tests ----
 
