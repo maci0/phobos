@@ -32,7 +32,7 @@
 | 🟢 wled | 6/6 | 7/7 | 0/0 | 100% | 90% | 90% |
 | 🟢 zeroconf | 1/1 | 0/0 | 0/0 | 100% | 95% | 95% |
 
-> **Overall weighted progress: ~97%**
+> **Overall weighted progress: ~97%** (MQTT now auto-reconnects; remaining gaps are Spoolman WS, MQTT TLS, td1 serial protocol — all dedicated efforts)
 >
 > - **Surface**: API endpoint/method/notification shape coverage
 > - **Depth**: how much of the internal implementation is real (not stubbed)
@@ -45,7 +45,7 @@
 >   roughly 50-90x less. (Measured via /proc/<pid>/status; down from a prior
 >   5.4 MB after removing the eager 20 MiB Klippy ReadBuf, the proc_stat per-tick
 >   leak, the sensor-ring memset, and building ReleaseSmall.)
-> - **Tests**: 1204 pass / 2 skip / 0 fail (~215 fuzz)
+> - **Tests**: 1208 pass / 2 skip / 0 fail (~217 fuzz)
 > - **Fuzz**: every public JSON-RPC handler has both a unit test and a fuzz test
 >
 > Depth key:
