@@ -651,6 +651,16 @@ test "WS: job_queue POST job emits notify_job_queue_changed" {
     const env = try c.call(alloc, "server.websocket.id", null);
     alloc.free(env);
 
+    // The job queue now rejects nonexistent files, so create it first. The
+    // upload emits its own notify_filelist_changed; drain that (and any
+    // proc_stat) so the next read sees the job-queue notification cleanly.
+    const up = try ts.uploadFile(alloc, "gcodes", null, "test.gcode", "G28\n");
+    alloc.free(up);
+    setReadTimeout(c, 1);
+    while (nextDataFrameSkipProcStat(c)) |f| {
+        alloc.free(f.data);
+    } else |_| {}
+
     const body = try ts.postJson(alloc, "/server/job_queue/job",
         \\{"filenames":["test.gcode"]}
     );

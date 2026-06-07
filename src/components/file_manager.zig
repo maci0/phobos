@@ -117,6 +117,26 @@ pub const FileCtx = struct {
     fn requireIo(self: *const FileCtx) error{NotReady}!std.Io {
         return self.io orelse error.NotReady;
     }
+
+    /// True if `rel` exists as a regular file under the named root. Used by
+    /// job_queue to reject enqueuing/printing a missing file (Moonraker
+    /// `check_file_exists`). False if io is absent or the path is invalid.
+    pub fn fileExists(self: *const FileCtx, root_name: []const u8, rel: []const u8) bool {
+        const io = self.io orelse return false;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const req = std.fmt.allocPrint(a, "{s}/{s}", .{ root_name, rel }) catch return false;
+        const resolved = resolveRequestPath(self, a, req) catch return false;
+        _ = Dir.cwd().statFile(io, resolved.abs, .{}) catch return false;
+        return true;
+    }
+
+    /// Type-erased adapter: does "gcodes/<filename>" exist as a file?
+    pub fn gcodeExistsErased(ctx: *anyopaque, filename: []const u8) bool {
+        const self: *const FileCtx = @ptrCast(@alignCast(ctx));
+        return self.fileExists("gcodes", filename);
+    }
 };
 
 // ---------------------------------------------------------------------------

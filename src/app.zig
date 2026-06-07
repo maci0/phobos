@@ -381,6 +381,11 @@ pub const App = struct {
 
         // Wire Klippy dispatch into the job queue so it can start/pause prints.
         job_queue_ctx.setKlippyDispatch(@ptrCast(klippy_ctx), &jobQueueKlippyDispatch);
+        // Reject enqueuing a missing gcode file; defer dispatch while printing.
+        job_queue_ctx.file_check = FileCtx.gcodeExistsErased;
+        job_queue_ctx.file_check_ctx = file_ctx;
+        job_queue_ctx.printing_check = JobStateCtx.isActiveErased;
+        job_queue_ctx.printing_ctx = job_state_ctx;
 
         // --- OctoPrint compatibility context (/api/*) ---
         const octoprint_ctx = try alloc.create(OctoPrintCtx);

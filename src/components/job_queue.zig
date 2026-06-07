@@ -75,6 +75,26 @@ pub const JobQueueCtx = struct {
     /// Monotonic suffix for job ids — guarantees uniqueness even when two jobs
     /// are enqueued within the same clock nanosecond (a tight `post_job` loop).
     job_seq: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    /// Optional file-existence check (file_manager.gcodeExistsErased). When wired,
+    /// post_job rejects filenames that don't exist (Moonraker check_file_exists).
+    file_check: ?*const fn (*anyopaque, []const u8) bool = null,
+    file_check_ctx: ?*anyopaque = null,
+    /// Optional printing-state check (job_state.isActiveErased). When a print is
+    /// active the queue won't dispatch the next job (Moonraker _check_can_print).
+    printing_check: ?*const fn (*anyopaque) bool = null,
+    printing_ctx: ?*anyopaque = null,
+
+    fn fileExists(self: *const JobQueueCtx, filename: []const u8) bool {
+        const f = self.file_check orelse return true; // no checker → don't block
+        const c = self.file_check_ctx orelse return true;
+        return f(c, filename);
+    }
+
+    fn isPrinting(self: *const JobQueueCtx) bool {
+        const f = self.printing_check orelse return false;
+        const c = self.printing_ctx orelse return false;
+        return f(c);
+    }
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
         var ctx = JobQueueCtx{
@@ -228,13 +248,20 @@ pub const JobQueueCtx = struct {
         defer arena.deinit();
         const a = arena.allocator();
 
-        // Inject transition gcode if configured.
+        // Inject transition gcode if configured. On failure, pause the queue
+        // rather than proceeding to start the print (Moonraker _pop_job).
         if (self.transition_gcode) |tg| {
             if (tg.len > 0) {
                 self.queue_state = "loading";
                 var tparams = try std.json.ObjectMap.init(a, &.{}, &.{});
                 try tparams.put(a, "script", .{ .string = tg });
-                _ = try self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = tparams }, a);
+                _ = self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = tparams }, a) catch {
+                    self.queue_state = "paused";
+                    return;
+                };
+                // The transition gcode may have paused the queue (e.g. an M-code
+                // that triggered a pause) — don't start the print if so.
+                if (!std.mem.eql(u8, self.queue_state, "loading")) return;
             }
         }
 
@@ -243,7 +270,11 @@ pub const JobQueueCtx = struct {
 
         var params_obj = try std.json.ObjectMap.init(a, &.{}, &.{});
         try params_obj.put(a, "script", .{ .string = script });
-        _ = try self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = params_obj }, a);
+        // On start-gcode failure, pause the queue (don't silently drop the job).
+        _ = self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = params_obj }, a) catch {
+            self.queue_state = "paused";
+            return;
+        };
     }
 
     /// Dispatch pause command to Klippy.
@@ -539,6 +570,9 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
             .string => |s| s,
             else => return error.InvalidParams,
         };
+        // Reject files that don't exist under the gcodes root (Moonraker
+        // queue_job → check_file_exists). No checker wired → accept.
+        if (!c.fileExists(filename)) return error.InvalidParams;
         const job_id = try genJobId(c.gpa, c.job_seq.fetchAdd(1, .monotonic));
         errdefer c.gpa.free(job_id);
         const fname_owned = try c.gpa.dupe(u8, filename);
@@ -636,8 +670,10 @@ pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
     if (c.jobs.items.len > 0) {
         c.queue_state = "ready";
         // Dispatch start gcode for the front job to Klippy (respects
-        // transition_delay when configured).
-        if (c.canDispatch()) {
+        // transition_delay when configured). Skip while a print is active —
+        // Moonraker defers loading until the current job finishes
+        // (_check_can_print); the queue stays "ready" and loads later.
+        if (c.canDispatch() and !c.isPrinting()) {
             c.scheduleNextJobDispatch() catch {};
         }
     } else {
@@ -1205,6 +1241,147 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
     try ctx.scheduleNextJobDispatch();
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);
+}
+
+var jq_file_exists_flag: bool = true;
+fn jqFileCheckStub(_: *anyopaque, _: []const u8) bool {
+    return jq_file_exists_flag;
+}
+var jq_printing_flag: bool = false;
+fn jqPrintingStub(_: *anyopaque) bool {
+    return jq_printing_flag;
+}
+const FailDispatch = struct {
+    fn handler(_: *anyopaque, _: []const u8, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+        return error.KlippyDisconnected;
+    }
+};
+
+test "handlePostJob: rejects nonexistent gcode file (G5)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    var dummy: u8 = 0;
+    ctx.file_check = jqFileCheckStub;
+    ctx.file_check_ctx = &dummy;
+
+    const params = (try std.json.parseFromSlice(std.json.Value, a, "{\"filenames\":[\"missing.gcode\"]}", .{})).value;
+    jq_file_exists_flag = false;
+    try testing.expectError(error.InvalidParams, handlePostJob(@ptrCast(&ctx), params, a));
+    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
+
+    jq_file_exists_flag = true;
+    _ = try handlePostJob(@ptrCast(&ctx), params, a);
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
+}
+
+test "dispatchNextJob: pauses the queue when start-gcode dispatch fails (G6)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    var dummy: u8 = 0;
+    ctx.setKlippyDispatch(&dummy, &FailDispatch.handler);
+
+    _ = try ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 1.0,
+    });
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    try ctx.dispatchNextJob(); // start gcode fails → must pause, not error out
+    try testing.expectEqualStrings("paused", ctx.queue_state);
+}
+
+test "handleStart: does not dispatch while a print is active (G5 can-print)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var cap = TestDispatchCapture{};
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    var dummy: u8 = 0;
+    ctx.printing_check = jqPrintingStub;
+    ctx.printing_ctx = &dummy;
+
+    _ = try ctx.jobs.append(ctx.gpa, .{
+        .filename = try a.dupe(u8, "print.gcode"),
+        .job_id = try a.dupe(u8, "JOB001"),
+        .time_added = 1.0,
+    });
+    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
+
+    jq_printing_flag = true;
+    _ = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expect(!cap.called); // deferred while printing
+    try testing.expectEqualStrings("ready", ctx.queue_state);
+
+    jq_printing_flag = false; // reset for other tests
+}
+
+test "fuzz handlePostJob with file_check: never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var core = NullCore.init();
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const tio = threaded.io();
+            var conns = NullConns.init(a, &core);
+            defer conns.deinit(tio);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            defer ctx.deinit();
+            var dummy: u8 = 0;
+            ctx.file_check = jqFileCheckStub;
+            ctx.file_check_ctx = &dummy;
+            jq_file_exists_flag = smith.valueWithHash(bool, 0);
+            var fn_buf: [16]u8 = undefined;
+            smith.bytesWithHash(&fn_buf, 1);
+            var params_map: std.json.ObjectMap = .empty;
+            var arr: std.json.Array = .init(a);
+            arr.append(.{ .string = &fn_buf }) catch return;
+            params_map.put(a, "filenames", .{ .array = arr }) catch return;
+            _ = handlePostJob(@ptrCast(&ctx), .{ .object = params_map }, a) catch {};
+            jq_file_exists_flag = true;
+        }
+    }.run, .{});
 }
 
 test "cancelDelayTimer: safe no-op when no timer active" {
