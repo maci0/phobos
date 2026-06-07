@@ -202,6 +202,7 @@ pub const App = struct {
             .io = null,
             .current_job_id = null,
             .job_user = "No User",
+            .gpa = alloc,
         };
 
         // --- Job queue context ---
@@ -249,6 +250,7 @@ pub const App = struct {
         const sensor_ctx = try alloc.create(SensorCtx);
         errdefer alloc.destroy(sensor_ctx);
         sensor_ctx.* = SensorCtx.init(alloc, bus);
+        sensor_ctx.history_ctx = history_ctx; // report measurements to history aux fields
 
         // --- Authorization context (access.* + auth hook) ---
         const auth_ctx = try alloc.create(AuthCtx);
@@ -610,6 +612,23 @@ pub const App = struct {
                 };
             }
         } else |_| {}
+
+        // Register history auxiliary fields from [history_field <name>] sections.
+        if (cfg.sectionNames(self.alloc)) |names| {
+            defer self.alloc.free(names);
+            for (names) |sect| {
+                if (!std.mem.startsWith(u8, sect, "history_field ")) continue;
+                const field_name = sect["history_field ".len..];
+                if (field_name.len == 0) continue;
+                const provider = cfg.get(sect, "provider") orelse continue;
+                const parameter = cfg.get(sect, "parameter") orelse continue;
+                const units = cfg.get(sect, "units");
+                const strategy = history_component.AuxStrategy.fromString(cfg.get(sect, "strategy") orelse "basic");
+                self.history_ctx.registerAuxField(provider, field_name, parameter, units, strategy) catch |err| {
+                    std.debug.print("phobos: warning: failed to add history_field '{s}': {}\n", .{ field_name, err });
+                };
+            }
+        } else |_| {}
     }
 
     /// Set a mock command-runner on the machine component so tests don't
@@ -676,6 +695,7 @@ pub const App = struct {
         self.alloc.destroy(self.job_queue_ctx);
         self.job_state_ctx.deinit();
         self.alloc.destroy(self.job_state_ctx);
+        self.history_ctx.deinit();
         self.alloc.destroy(self.history_ctx);
         self.alloc.destroy(self.bus);
         self.alloc.destroy(self.conns);

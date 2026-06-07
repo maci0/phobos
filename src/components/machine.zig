@@ -2103,7 +2103,7 @@ test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
     // A by-id symlink pointing at ttyACM0.
     const byid_dir = root ++ "/by-id";
     try Dir.cwd().createDirPath(io, byid_dir);
-    Dir.cwd().symLink(io, "../../ttyACM0", byid_dir ++ "/usb-Klipper_stm32-if00") catch {};
+    Dir.cwd().symLink(io, "../../ttyACM0", byid_dir ++ "/usb-Klipper_stm32-if00", .{}) catch {};
     const by_id = collectSerialLinks(io, a, byid_dir);
 
     const v = (try buildSerialDevice(io, a, root, "ttyACM0", by_id, &.{})).?;

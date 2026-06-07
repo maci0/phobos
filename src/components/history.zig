@@ -59,6 +59,93 @@ pub const base_totals_values = [_]f64{ 0, 0, 0, 0, 0, 0 };
 // Context
 // ---------------------------------------------------------------------------
 
+/// Reporting strategy for an auxiliary history field (Moonraker HistoryFieldData).
+pub const AuxStrategy = enum {
+    basic, // last value seen this job
+    accumulate, // running sum of recorded values
+    maximum,
+    minimum,
+    average, // mean of recorded values
+    delta, // last - first
+
+    pub fn fromString(s: []const u8) AuxStrategy {
+        return std.meta.stringToEnum(AuxStrategy, s) orelse .basic;
+    }
+};
+
+/// One sensor-provided auxiliary field tracked across a print job and totalled
+/// across jobs (Moonraker `[history_field]` / sensor history_field config).
+pub const AuxField = struct {
+    provider: []const u8, // sensor name owning the value
+    name: []const u8, // field name reported in job auxiliary_data
+    field: []const u8, // parameter within the provider
+    units: ?[]const u8,
+    strategy: AuxStrategy,
+    // Per-job accumulators (reset at job start):
+    has_value: bool = false,
+    count: u64 = 0,
+    sum: f64 = 0,
+    max: f64 = 0,
+    min: f64 = 0,
+    first: f64 = 0,
+    last: f64 = 0,
+    // Cross-job total (accumulated on each finish):
+    total: f64 = 0,
+
+    pub fn resetJob(self: *AuxField) void {
+        self.has_value = false;
+        self.count = 0;
+        self.sum = 0;
+        self.max = 0;
+        self.min = 0;
+        self.first = 0;
+        self.last = 0;
+    }
+
+    pub fn record(self: *AuxField, value: f64) void {
+        if (!self.has_value) {
+            self.has_value = true;
+            self.first = value;
+            self.max = value;
+            self.min = value;
+        } else {
+            if (value > self.max) self.max = value;
+            if (value < self.min) self.min = value;
+        }
+        self.last = value;
+        self.sum += value;
+        self.count += 1;
+    }
+
+    /// Finalize this job's value per the strategy.
+    pub fn jobValue(self: *const AuxField) f64 {
+        if (!self.has_value) return 0;
+        return switch (self.strategy) {
+            .basic => self.last,
+            .accumulate => self.sum,
+            .maximum => self.max,
+            .minimum => self.min,
+            .average => if (self.count > 0) self.sum / @as(f64, @floatFromInt(self.count)) else 0,
+            .delta => self.last - self.first,
+        };
+    }
+
+    /// Fold this job's value into the cross-job total (sum, or max for the
+    /// max strategy).
+    pub fn accumulateTotal(self: *AuxField) void {
+        const v = self.jobValue();
+        switch (self.strategy) {
+            .maximum => if (v > self.total) {
+                self.total = v;
+            },
+            .minimum => if (!self.has_value) {} else if (self.total == 0 or v < self.total) {
+                self.total = v;
+            },
+            else => self.total += v,
+        }
+    }
+};
+
 pub const HistoryCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
@@ -67,9 +154,82 @@ pub const HistoryCtx = struct {
     current_job_id: ?u64,
     /// Username attributed to the current job.
     job_user: []const u8,
+    /// Registered auxiliary fields (sensor-provided), owned by gpa.
+    aux_fields: std.ArrayListUnmanaged(AuxField) = .empty,
+    /// Allocator for aux-field registrations.
+    gpa: std.mem.Allocator = std.heap.smp_allocator,
 
     pub fn setIo(self: *HistoryCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    pub fn deinit(self: *HistoryCtx) void {
+        for (self.aux_fields.items) |f| {
+            self.gpa.free(f.provider);
+            self.gpa.free(f.name);
+            self.gpa.free(f.field);
+            if (f.units) |u| self.gpa.free(u);
+        }
+        self.aux_fields.deinit(self.gpa);
+    }
+
+    /// Register a sensor-provided auxiliary history field.
+    pub fn registerAuxField(self: *HistoryCtx, provider: []const u8, name: []const u8, field: []const u8, units: ?[]const u8, strategy: AuxStrategy) !void {
+        try self.aux_fields.append(self.gpa, .{
+            .provider = try self.gpa.dupe(u8, provider),
+            .name = try self.gpa.dupe(u8, name),
+            .field = try self.gpa.dupe(u8, field),
+            .units = if (units) |u| try self.gpa.dupe(u8, u) else null,
+            .strategy = strategy,
+        });
+    }
+
+    /// Record a value for any aux field matching (provider, field).
+    pub fn recordAuxValue(self: *HistoryCtx, provider: []const u8, field: []const u8, value: f64) void {
+        for (self.aux_fields.items) |*f| {
+            if (std.mem.eql(u8, f.provider, provider) and std.mem.eql(u8, f.field, field)) f.record(value);
+        }
+    }
+
+    fn resetAuxJob(self: *HistoryCtx) void {
+        for (self.aux_fields.items) |*f| f.resetJob();
+    }
+
+    /// Build the per-job `auxiliary_data` array (only fields that saw a value).
+    fn buildAuxData(self: *HistoryCtx, alloc: std.mem.Allocator) std.json.Array {
+        var arr: std.json.Array = .init(alloc);
+        for (self.aux_fields.items) |*f| {
+            if (!f.has_value) continue;
+            var o: std.json.ObjectMap = .empty;
+            o.put(alloc, "provider", .{ .string = f.provider }) catch continue;
+            o.put(alloc, "name", .{ .string = f.name }) catch continue;
+            o.put(alloc, "value", .{ .float = f.jobValue() }) catch continue;
+            o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null) catch continue;
+            arr.append(.{ .object = o }) catch continue;
+        }
+        return arr;
+    }
+
+    fn accumulateAux(self: *HistoryCtx) void {
+        for (self.aux_fields.items) |*f| f.accumulateTotal();
+    }
+
+    /// Build the `auxiliary_totals` array across all registered fields.
+    pub fn buildAuxTotals(self: *HistoryCtx, alloc: std.mem.Allocator) std.json.Array {
+        var arr: std.json.Array = .init(alloc);
+        for (self.aux_fields.items) |*f| {
+            var o: std.json.ObjectMap = .empty;
+            o.put(alloc, "provider", .{ .string = f.provider }) catch continue;
+            o.put(alloc, "name", .{ .string = f.name }) catch continue;
+            o.put(alloc, "total", .{ .float = f.total }) catch continue;
+            o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null) catch continue;
+            arr.append(.{ .object = o }) catch continue;
+        }
+        return arr;
+    }
+
+    fn resetAuxTotals(self: *HistoryCtx) void {
+        for (self.aux_fields.items) |*f| f.total = 0;
     }
 
     /// Called by JobStateCtx when a job state transition is detected.
@@ -139,6 +299,8 @@ pub const HistoryCtx = struct {
 
     /// Create a new job record from print_stats and persist it.
     fn addJob(self: *HistoryCtx, pstats: std.json.ObjectMap) !void {
+        // Reset per-job auxiliary-field accumulators at the start of the job.
+        self.resetAuxJob();
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer arena.deinit();
         const a = arena.allocator();
@@ -242,10 +404,12 @@ pub const HistoryCtx = struct {
         try job_obj.put(a, "total_duration", .{ .float = total_duration });
         try job_obj.put(a, "filament_used", .{ .float = filament_used });
         try job_obj.put(a, "metadata", .{ .object = .empty });
-        try job_obj.put(a, "auxiliary_data", .{ .array = .init(a) });
+        try job_obj.put(a, "auxiliary_data", .{ .array = self.buildAuxData(a) });
         try job_obj.put(a, "user", .{ .string = self.job_user });
 
         try self.store.updateItem(a, ns_history, job_id_str, .{ .object = job_obj });
+        // Fold this job's aux values into the cross-job totals.
+        self.accumulateAux();
 
         // Update totals: total_time += total_duration, total_print_time += print_duration,
         // total_filament_used += filament_used, longest_job/longest_print = max.
@@ -570,7 +734,7 @@ pub fn handleTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator
     const totals = try loadTotals(c, alloc);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "job_totals", totals);
-    try obj.put(alloc, "auxiliary_totals", .{ .array = .init(alloc) });
+    try obj.put(alloc, "auxiliary_totals", .{ .array = c.buildAuxTotals(alloc) });
     return .{ .object = obj };
 }
 
@@ -580,9 +744,12 @@ pub fn handleResetTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
     const last_totals = try loadTotals(c, alloc);
     const new_totals = try buildBaseTotals(alloc);
     try saveTotals(c, alloc, new_totals);
+    // Snapshot aux totals before clearing them.
+    const last_aux = c.buildAuxTotals(alloc);
+    c.resetAuxTotals();
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "last_totals", last_totals);
-    try obj.put(alloc, "last_auxiliary_totals", .{ .array = .init(alloc) });
+    try obj.put(alloc, "last_auxiliary_totals", .{ .array = last_aux });
     return .{ .object = obj };
 }
 
@@ -740,6 +907,89 @@ pub fn registerHistory(reg: *Registry, ctx: *HistoryCtx) !void {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+// ---- AuxField tracker ----
+
+test "AuxField: per-strategy job value" {
+    var f: AuxField = .{ .provider = "s", .name = "n", .field = "p", .units = null, .strategy = .accumulate };
+    f.record(10);
+    f.record(5);
+    f.record(20);
+    try testing.expectEqual(@as(f64, 35), f.jobValue()); // accumulate (sum)
+    f.strategy = .maximum;
+    try testing.expectEqual(@as(f64, 20), f.jobValue());
+    f.strategy = .minimum;
+    try testing.expectEqual(@as(f64, 5), f.jobValue());
+    f.strategy = .basic;
+    try testing.expectEqual(@as(f64, 20), f.jobValue()); // last
+    f.strategy = .average;
+    try testing.expectEqual(@as(f64, 35.0 / 3.0), f.jobValue());
+    f.strategy = .delta;
+    try testing.expectEqual(@as(f64, 10), f.jobValue()); // last(20) - first(10)
+    f.resetJob();
+    try testing.expect(!f.has_value);
+    try testing.expectEqual(@as(f64, 0), f.jobValue());
+}
+
+test "AuxField: total accumulation across jobs" {
+    var acc: AuxField = .{ .provider = "s", .name = "n", .field = "p", .units = null, .strategy = .accumulate };
+    acc.record(10);
+    acc.accumulateTotal();
+    acc.resetJob();
+    acc.record(5);
+    acc.accumulateTotal();
+    try testing.expectEqual(@as(f64, 15), acc.total);
+
+    var mx: AuxField = .{ .provider = "s", .name = "n", .field = "p", .units = null, .strategy = .maximum };
+    mx.record(3);
+    mx.accumulateTotal();
+    mx.resetJob();
+    mx.record(7);
+    mx.accumulateTotal();
+    mx.resetJob();
+    mx.record(2);
+    mx.accumulateTotal();
+    try testing.expectEqual(@as(f64, 7), mx.total); // max across jobs
+}
+
+test "history aux fields: record → job auxiliary_data → totals" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const tio = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(tio);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "", .gpa = testing.allocator };
+    defer ctx.deinit();
+
+    try ctx.registerAuxField("chamber", "max_temp", "temperature", "C", .maximum);
+    ctx.resetAuxJob();
+    ctx.recordAuxValue("chamber", "temperature", 40);
+    ctx.recordAuxValue("chamber", "temperature", 55);
+    ctx.recordAuxValue("other", "x", 999); // no matching field → ignored
+
+    const aux = ctx.buildAuxData(a);
+    try testing.expectEqual(@as(usize, 1), aux.items.len);
+    const e = aux.items[0].object;
+    try testing.expectEqualStrings("chamber", e.get("provider").?.string);
+    try testing.expectEqualStrings("max_temp", e.get("name").?.string);
+    try testing.expectEqual(@as(f64, 55), e.get("value").?.float);
+    try testing.expectEqualStrings("C", e.get("units").?.string);
+
+    ctx.accumulateAux();
+    const totals = ctx.buildAuxTotals(a);
+    try testing.expectEqual(@as(usize, 1), totals.items.len);
+    try testing.expectEqual(@as(f64, 55), totals.items[0].object.get("total").?.float);
+
+    ctx.resetAuxTotals();
+    try testing.expectEqual(@as(f64, 0), ctx.buildAuxTotals(a).items[0].object.get("total").?.float);
+}
 
 // ---- In-memory store for tests ----
 

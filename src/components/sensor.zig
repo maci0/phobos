@@ -256,6 +256,8 @@ pub const SensorCtx = struct {
     bus: ?*NotifyBus,
     io: ?std.Io,
     sensors: std.StringHashMap(Sensor),
+    /// Optional history component for auxiliary-field value reporting (set by App).
+    history_ctx: ?*@import("history.zig").HistoryCtx = null,
 
     pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) SensorCtx {
         return .{
@@ -354,6 +356,8 @@ pub const SensorCtx = struct {
                 };
                 // key duped into gpa by setMeasurement.
                 s.setMeasurement(self.gpa, f.key_ptr.*, v) catch {};
+                // Report to history auxiliary fields (provider = sensor id).
+                if (self.history_ctx) |h| h.recordAuxValue(s.id, f.key_ptr.*, v);
             }
         }
         if (matched) self.emitSensorUpdate(a);

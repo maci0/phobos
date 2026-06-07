@@ -514,7 +514,7 @@ fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
         {
             var wa = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer wa.deinit();
-            self.checkWakes(wa.allocator());
+            checkWakes(self, wa.allocator());
         }
 
         elapsed += 1;
