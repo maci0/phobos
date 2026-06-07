@@ -44,8 +44,10 @@ pub const MeasurementRing = struct {
     len: usize,
 
     pub fn init(alloc: std.mem.Allocator, capacity: usize) !MeasurementRing {
+        // No @memset: the ring tracks head/len and never reads an unwritten slot
+        // (toSlice copies only `len` entries). Skipping the memset avoids
+        // committing every page of a large ring up front.
         const buf = try alloc.alloc(f64, capacity);
-        @memset(buf, 0.0);
         return .{ .buf = buf, .head = 0, .len = 0 };
     }
 

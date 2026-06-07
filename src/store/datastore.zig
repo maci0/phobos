@@ -51,8 +51,9 @@ pub const Error = error{
 
 /// Maximum number of dotted segments in a key. Moonraker imposes no hard
 /// limit, but a bound keeps stack walking simple and guards pathological
-/// fuzz inputs.
-pub const max_key_segments = 64;
+/// fuzz inputs. 16 is far beyond any real Moonraker key (typically 2-4); the
+/// previous 64 cost ~1 KiB of stack per parseKey on every get/insert/update.
+pub const max_key_segments = 16;
 
 /// Parsed dotted key: a list of non-empty segments. Backed by a caller-owned
 /// fixed buffer to avoid allocation on the hot path.

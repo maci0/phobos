@@ -283,7 +283,13 @@ fn procStatTimerThread(self: *MachineCtx) void {
 /// Reuses the same parser functions as handleProcStats.
 fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
     const bus = self.bus orelse return;
-    const alloc = std.heap.smp_allocator;
+    // Per-tick arena freed on return: emit/fanout copies params into its own
+    // frame buffer and the moonraker_stats ring stores only scalars, so nothing
+    // here outlives the call. Previously this used smp_allocator with no free —
+    // an unbounded leak once per second.
+    var arena = std.heap.ArenaAllocator.init(self.gpa);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
     var cpu_temp: std.json.Value = .null;
     var network: std.json.Value = .{ .object = .empty };

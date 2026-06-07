@@ -242,13 +242,19 @@ pub fn isNotification(frame: std.json.Value) bool {
 // ---------------------------------------------------------------------------
 
 pub const ReadBuf = struct {
+    gpa: std.mem.Allocator,
     buf: []u8,
     len: usize,
+    /// Hard upper bound; the buffer grows on demand up to this and never beyond.
+    max: usize,
 
-    /// Allocate a read buffer of `max_size` bytes.
+    /// Allocate a read buffer that grows lazily up to `max_size`. Starts small
+    /// (16 KiB or `max_size`, whichever is less) so a 20 MiB frame ceiling does
+    /// not commit 20 MiB up front — real Klippy frames are a few KB.
     pub fn init(alloc: std.mem.Allocator, max_size: usize) !ReadBuf {
-        const buf = try alloc.alloc(u8, max_size);
-        return .{ .buf = buf, .len = 0 };
+        const initial = @min(max_size, 16 * 1024);
+        const buf = try alloc.alloc(u8, initial);
+        return .{ .gpa = alloc, .buf = buf, .len = 0, .max = max_size };
     }
 
     pub fn deinit(self: *ReadBuf, alloc: std.mem.Allocator) void {
@@ -257,10 +263,19 @@ pub const ReadBuf = struct {
         self.buf = &.{};
     }
 
+    /// Grow `buf` (doubling, capped at `max`) so it can hold `need` bytes.
+    fn ensureCapacity(self: *ReadBuf, need: usize) !void {
+        if (need <= self.buf.len) return;
+        if (need > self.max) return error.BufferOverflow;
+        var new_cap = self.buf.len;
+        while (new_cap < need) new_cap = @min(self.max, new_cap *| 2);
+        self.buf = try self.gpa.realloc(self.buf, new_cap);
+    }
+
     /// Append bytes from a stream read. Returns the payload of the next complete
     /// frame (without \x03) if one is available. Call `consume` after processing.
     pub fn append(self: *ReadBuf, data: []const u8) ![]const u8 {
-        if (self.len + data.len > self.buf.len) return error.BufferOverflow;
+        try self.ensureCapacity(self.len + data.len);
         @memcpy(self.buf[self.len..][0..data.len], data);
         self.len += data.len;
         if (std.mem.indexOfScalar(u8, self.buf[0..self.len], FrameEnd)) |pos| {

@@ -581,8 +581,18 @@ fn parseThumbnails(alloc: std.mem.Allocator, text: []const u8) ![]Thumbnail {
         };
         const end_idx = header_end + end_rel;
 
+        // Clamp the allocation: `size` comes from the (untrusted) file header, so
+        // cap it at the actual bytes between header and end-tag — a bogus
+        // "begin 1x1 999999999" must not force a huge allocation on a 5 MB target.
+        if (size <= 0) {
+            search_start = begin_idx + 1;
+            continue;
+        }
+        const max_data = end_idx - header_end;
+        const cap: usize = @min(@as(usize, @intCast(size)), max_data);
+
         // Extract base64 data between begin and end (strip "; " prefix and newlines).
-        var data_buf = try alloc.alloc(u8, @intCast(size));
+        var data_buf = try alloc.alloc(u8, cap);
         var data_pos: usize = 0;
         var line_start = header_end + 1; // skip the \n after header
         while (line_start < end_idx) {

@@ -434,13 +434,16 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         }) catch null;
     };
 
-    // 64KB reader buffer: this same buffer backs the WebSocket input after an
-    // upgrade (std.http.WebSocket.input == server.reader.in), and
-    // `readSmallMessage` requires each WS message fit it (else MessageOversize).
-    // A generous size keeps ordinary JSON-RPC frames comfortably in-bounds.
-    var sbuf: [64 * 1024]u8 = undefined;
+    // Reader buffer also backs WebSocket input after upgrade
+    // (std.http.WebSocket.input == server.reader.in), and `readSmallMessage`
+    // requires each INBOUND WS message fit it. Inbound is JSON-RPC requests only
+    // (the largest being objects/subscribe|query with a big object list) — 16 KB
+    // is ample. The writer streams responses/notifications, so 8 KB suffices.
+    // These live for the whole connection; 64+64 KB × the WS-connection ceiling
+    // (default 50) was ~6.4 MB of stack — far over the RSS budget.
+    var sbuf: [16 * 1024]u8 = undefined;
     var s_r = stream.reader(io, &sbuf);
-    var wbuf: [64 * 1024]u8 = undefined;
+    var wbuf: [8 * 1024]u8 = undefined;
     var s_w = stream.writer(io, &wbuf);
 
     var http_server = std.http.Server.init(&s_r.interface, &s_w.interface);
