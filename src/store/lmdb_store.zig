@@ -211,7 +211,11 @@ pub const LmdbStore = struct {
         value: ?[]const u8,
     ) Error!void {
         const txn = try self.beginTxn(true);
-        errdefer c.mdb_txn_abort(txn);
+        // mdb_txn_commit frees the txn handle whether it succeeds OR fails, so once
+        // we reach the commit the handle must not be aborted again (double-free).
+        // The errdefer only covers the earlier error paths (openDbi / put / del).
+        var consumed = false;
+        errdefer if (!consumed) c.mdb_txn_abort(txn);
         const dbi = try openDbi(txn, namespace, true);
         var k = c.val(key);
         if (value) |val_bytes| {
@@ -221,6 +225,7 @@ pub const LmdbStore = struct {
             const rc = c.mdb_del(txn, dbi, &k, null);
             if (rc != c.MDB_SUCCESS and rc != c.MDB_NOTFOUND) return Error.PutFailed;
         }
+        consumed = true;
         if (c.mdb_txn_commit(txn) != c.MDB_SUCCESS) return Error.TxnFailed;
     }
 
