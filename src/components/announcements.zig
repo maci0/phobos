@@ -503,12 +503,11 @@ fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
 }
 
 fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
+    const io = self.io orelse return;
     var elapsed: u64 = 0;
     while (!self.refresh_stop.load(.acquire)) {
-        var req: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
-        _ = std.os.linux.nanosleep(&req, null);
+        io.sleep(std.Io.Duration.fromSeconds(1), .awake) catch {};
         if (self.refresh_stop.load(.acquire)) break;
-        if (self.io == null) break;
 
         // Each second: re-surface any dismissed entries past their wake time.
         {

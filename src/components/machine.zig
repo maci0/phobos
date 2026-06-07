@@ -270,17 +270,15 @@ pub const MachineCtx = struct {
 /// every second until `proc_stat_stop` is set.  First emission is immediate
 /// (matching Moonraker's behaviour of emitting on websocket connect).
 fn procStatTimerThread(self: *MachineCtx) void {
+    const io = self.io orelse return;
     var first: bool = true;
     while (!self.proc_stat_stop.load(.acquire)) {
         if (!first) {
-            var req: std.os.linux.timespec = .{ .sec = 1, .nsec = 0 };
-            _ = std.os.linux.nanosleep(&req, null);
+            io.sleep(std.Io.Duration.fromSeconds(1), .awake) catch {};
             if (self.proc_stat_stop.load(.acquire)) break;
         }
         first = false;
-        if (self.io) |io| {
-            emitProcStatUpdate(self, io) catch {};
-        } else break;
+        emitProcStatUpdate(self, io) catch {};
     }
 }
 

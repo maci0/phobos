@@ -334,9 +334,8 @@ pub const MqttCtx = struct {
         }
     }
 
-    fn sleepMs(ms: u64) void {
-        var req: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
-        _ = std.os.linux.nanosleep(&req, null);
+    fn sleepMs(io: std.Io, ms: u64) void {
+        io.sleep(std.Io.Duration.fromMilliseconds(@intCast(ms)), .awake) catch {};
     }
 
     /// Static MqttClient.on_publish trampoline → MqttCtx.on_message.
@@ -365,13 +364,14 @@ pub const MqttCtx = struct {
     /// dropped client (after the reader exits) before reconnecting. An unreachable
     /// broker just keeps retrying; it never crashes the server.
     pub fn connectBrokerBg(self: *MqttCtx) void {
+        const io = self.io orelse return; // no io → nothing the supervisor can do
         self.reader_stop.store(false, .release);
         var backoff_ms: u64 = 500;
         const max_backoff: u64 = 30_000;
         while (!self.reader_stop.load(.acquire)) {
             self.connectBroker() catch {
                 if (self.reader_stop.load(.acquire)) break;
-                sleepMs(backoff_ms);
+                sleepMs(io, backoff_ms);
                 backoff_ms = @min(backoff_ms * 2, max_backoff);
                 continue;
             };
@@ -384,7 +384,7 @@ pub const MqttCtx = struct {
             self.freeClientLocked();
             if (self.reader_stop.load(.acquire)) break;
             // Reconnect after an unexpected drop, with backoff.
-            sleepMs(backoff_ms);
+            sleepMs(io, backoff_ms);
             backoff_ms = @min(backoff_ms * 2, max_backoff);
         }
         if (self.state == .connected or self.state == .connecting) self.state = .disconnected;
@@ -831,6 +831,7 @@ pub const MqttCtx = struct {
     }
 
     fn statusFlushWorker(self: *MqttCtx) void {
+        const io = self.io orelse return;
         while (!self.status_flush_stop.load(.acquire)) {
             const interval_ns: u64 = @intFromFloat(
                 (if (self.config) |cfg| cfg.status_interval else 0.0) * 1e9,
@@ -838,8 +839,7 @@ pub const MqttCtx = struct {
             if (interval_ns == 0) break;
             // Poll every ~1 s or at the interval, whichever is smaller.
             const sleep_ns: u64 = @min(interval_ns, 1_000_000_000);
-            var req: std.os.linux.timespec = .{ .sec = @intCast(sleep_ns / 1_000_000_000), .nsec = @intCast(sleep_ns % 1_000_000_000) };
-            _ = std.os.linux.nanosleep(&req, null);
+            io.sleep(std.Io.Duration.fromNanoseconds(@intCast(sleep_ns)), .awake) catch {};
             if (self.status_flush_stop.load(.acquire)) break;
 
             // Only flush when enough time has elapsed since last flush.
@@ -3659,8 +3659,7 @@ test "connectBrokerBg supervisor: connects via the reconnect loop and shuts down
     // Wait (bounded) until the supervisor establishes the connection.
     var tries: usize = 0;
     while (!ctx.hasBrokerConnection() and tries < 400) : (tries += 1) {
-        var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 5_000_000 }; // 5 ms
-        _ = std.os.linux.nanosleep(&req, null);
+        io.sleep(std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
     try testing.expect(ctx.hasBrokerConnection());
 

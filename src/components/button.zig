@@ -145,11 +145,10 @@ pub const ButtonCtx = struct {
     }
 
     fn pollLoop(self: *ButtonCtx) void {
+        const io = self.io orelse return;
         while (!self.poll_stop.load(.acquire)) {
-            var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000_000 }; // 100 ms
-            _ = std.os.linux.nanosleep(&req, null);
+            io.sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
             if (self.poll_stop.load(.acquire)) break;
-            if (self.io == null) break;
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             self.pollAndEmitAll(arena.allocator());

@@ -93,26 +93,36 @@ const UsbIds = struct { vid: u16, pid: u16, serial: []const u8 };
 
 /// Walk up from `<tty_root>/<name>/device` looking for a level that has both
 /// idVendor and idProduct (the USB device dir sits a few levels above the tty's
-/// interface). Returns the ids + serial (serial duped into `alloc`).
+/// interface). Returns the ids + serial (serial duped into `alloc`). Paths are
+/// built into stack buffers so no per-iteration allocations are made (only the
+/// returned serial is allocated).
 fn readTd1Ids(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, name: []const u8) ?UsbIds {
-    var base = std.fmt.allocPrint(alloc, "{s}/{s}/device", .{ tty_root, name }) catch return null;
+    var base_buf: [512]u8 = undefined;
+    var path_buf: [560]u8 = undefined;
+    var base = std.fmt.bufPrint(&base_buf, "{s}/{s}/device", .{ tty_root, name }) catch return null;
     var level: usize = 0;
     while (level < 5) : (level += 1) {
         var vbuf: [16]u8 = undefined;
         var pbuf: [16]u8 = undefined;
-        const vpath = std.fmt.allocPrint(alloc, "{s}/idVendor", .{base}) catch return null;
-        const ppath = std.fmt.allocPrint(alloc, "{s}/idProduct", .{base}) catch return null;
+        const vpath = std.fmt.bufPrint(&path_buf, "{s}/idVendor", .{base}) catch return null;
         if (readSysfsLine(io, vpath, &vbuf)) |vs| {
+            // vs is copied into vbuf, so path_buf is free to reuse for ppath.
+            const ppath = std.fmt.bufPrint(&path_buf, "{s}/idProduct", .{base}) catch return null;
             if (readSysfsLine(io, ppath, &pbuf)) |ps| {
                 const vid = parseUsbHex(vs) orelse return null;
                 const pid = parseUsbHex(ps) orelse return null;
                 var sbuf: [128]u8 = undefined;
-                const spath = std.fmt.allocPrint(alloc, "{s}/serial", .{base}) catch return null;
+                const spath = std.fmt.bufPrint(&path_buf, "{s}/serial", .{base}) catch return null;
                 const ser = readSysfsLine(io, spath, &sbuf) orelse "";
                 return .{ .vid = vid, .pid = pid, .serial = alloc.dupe(u8, ser) catch return null };
             }
         }
-        base = std.fmt.allocPrint(alloc, "{s}/..", .{base}) catch return null;
+        // Append "/.." for the next level up. Build into path_buf, then copy back
+        // into base_buf (distinct buffers, so no aliasing).
+        const next = std.fmt.bufPrint(&path_buf, "{s}/..", .{base}) catch return null;
+        if (next.len > base_buf.len) return null;
+        @memcpy(base_buf[0..next.len], next);
+        base = base_buf[0..next.len];
     }
     return null;
 }
@@ -258,8 +268,7 @@ pub const Td1Ctx = struct {
         while (!self.poll_stop.load(.acquire)) {
             var i: u64 = 0;
             while (i < chunks and !self.poll_stop.load(.acquire)) : (i += 1) {
-                var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000_000 };
-                _ = std.os.linux.nanosleep(&req, null);
+                io.sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
             }
             if (self.poll_stop.load(.acquire)) break;
             // Run the scan under the Core lock so conns mutations are serialized

@@ -191,7 +191,7 @@ pub const SpoolmanCtx = struct {
         while (!self.ws_stop.load(.acquire)) {
             const w = ws_client_mod.WsClient.connect(self.gpa, io, host, self.ws_port, "/api/v1/spool") catch {
                 if (self.ws_stop.load(.acquire)) break;
-                sleepMs(backoff_ms);
+                sleepMs(io, backoff_ms);
                 backoff_ms = @min(backoff_ms * 2, max_backoff);
                 continue;
             };
@@ -214,7 +214,7 @@ pub const SpoolmanCtx = struct {
             self.emitStatus(false);
             self.freeWsLocked();
             if (self.ws_stop.load(.acquire)) break;
-            sleepMs(backoff_ms);
+            sleepMs(io, backoff_ms);
             backoff_ms = @min(backoff_ms * 2, max_backoff);
         }
     }
@@ -239,12 +239,13 @@ pub const SpoolmanCtx = struct {
             .float => |f| @intFromFloat(f),
             else => return,
         };
-        if (self.on_spool_deleted) |cb| cb(self.on_spool_deleted_ctx.?, id);
+        if (self.on_spool_deleted) |cb| {
+            if (self.on_spool_deleted_ctx) |c| cb(c, id);
+        }
     }
 
-    fn sleepMs(ms: u64) void {
-        var req: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
-        _ = std.os.linux.nanosleep(&req, null);
+    fn sleepMs(io: std.Io, ms: u64) void {
+        io.sleep(std.Io.Duration.fromMilliseconds(@intCast(ms)), .awake) catch {};
     }
 
     /// Clear the active spool if it matches `deleted_id` (Moonraker behaviour).
@@ -814,8 +815,7 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
     ctx.startWs();
     var tries: usize = 0;
     while (!(ctx.connected() and ws_sup_deleted.load(.acquire)) and tries < 400) : (tries += 1) {
-        var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 5_000_000 };
-        _ = std.os.linux.nanosleep(&req, null);
+        io.sleep(std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
     try testing.expect(ctx.connected());
     try testing.expect(ws_sup_deleted.load(.acquire));

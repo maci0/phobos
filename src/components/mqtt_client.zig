@@ -366,7 +366,9 @@ pub const MqttClient = struct {
         switch (pkt.ptype) {
             .publish => {
                 const view = try proto.parsePublish(pkt);
-                if (self.on_publish) |cb| cb(self.on_publish_ctx.?, view.topic, view.payload);
+                if (self.on_publish) |cb| {
+                    if (self.on_publish_ctx) |c| cb(c, view.topic, view.payload);
+                }
                 if (view.qos == 1) {
                     const ack = try proto.encodePuback(self.gpa, view.packet_id);
                     defer self.gpa.free(ack);
@@ -597,8 +599,7 @@ test "client connects over TLS (socat OpenSSL proxy → plaintext broker)" {
             client = c;
             break;
         } else |_| {
-            var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000_000 };
-            _ = std.os.linux.nanosleep(&req, null);
+            io.sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
         }
     }
 

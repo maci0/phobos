@@ -377,18 +377,17 @@ fn transitionDelayCallback(self: *JobQueueCtx) void {
         return;
     }
 
+    const io = self.io orelse {
+        self.delay_thread = null;
+        return;
+    };
     var remaining: f64 = self.transition_delay;
     while (remaining > 0) : (remaining -= 1.0) {
         const chunk_ns: i64 = if (remaining >= 1.0)
             @as(i64, 1_000_000_000)
         else
             @intFromFloat(remaining * 1_000_000_000.0);
-        // timespec fields are isize (i32 on 32-bit ARM) — cast from the i64 math.
-        var req: std.os.linux.timespec = .{
-            .sec = @intCast(@divTrunc(chunk_ns, 1_000_000_000)),
-            .nsec = @intCast(@rem(chunk_ns, 1_000_000_000)),
-        };
-        _ = std.os.linux.nanosleep(&req, null);
+        io.sleep(std.Io.Duration.fromNanoseconds(@intCast(chunk_ns)), .awake) catch {};
 
         if (self.delay_cancel.load(.acquire)) {
             self.delay_thread = null;
