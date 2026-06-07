@@ -66,6 +66,26 @@ pub const Td1Connection = struct {
     }
 };
 
+/// Current UTC time as an ISO-8601 string ("YYYY-MM-DDTHH:MM:SSZ"), written into
+/// `buf` (needs >= 20 bytes). Used for TD-1 scan timestamps.
+pub fn nowIso8601(buf: []u8) []const u8 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
+    const secs: u64 = @intCast(@max(0, ts.sec));
+    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,
+        md.month.numeric(),
+        @as(u32, md.day_index) + 1,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch "1970-01-01T00:00:00Z";
+}
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -105,8 +125,15 @@ pub const Td1Ctx = struct {
         const parsed = parseTd1Line(line) orelse return;
         const conn = self.conns.getPtr(serial_number) orelse return error.NotFound;
         const new_color = try self.gpa.dupe(u8, parsed.color);
+        errdefer self.gpa.free(new_color);
+        // Refresh scan_time on each successful reading (td1.py _parse_line sets
+        // `_scan_time = datetime.utcnow().isoformat()+"Z"`).
+        var ts_buf: [32]u8 = undefined;
+        const new_scan = try self.gpa.dupe(u8, nowIso8601(&ts_buf));
         if (conn.color) |c| self.gpa.free(c);
         conn.color = new_color;
+        self.gpa.free(conn.scan_time);
+        conn.scan_time = new_scan;
         conn.td = parsed.td;
         conn.done_initializing = true;
     }
@@ -234,6 +261,36 @@ const testing = std.testing;
 fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     const p = try std.json.parseFromSlice(std.json.Value, alloc, json_str, .{});
     return p.value;
+}
+
+// ---- nowIso8601 ----
+
+test "nowIso8601: ISO-8601 UTC shape (YYYY-MM-DDTHH:MM:SSZ)" {
+    var buf: [32]u8 = undefined;
+    const s = nowIso8601(&buf);
+    try testing.expectEqual(@as(usize, 20), s.len);
+    try testing.expectEqual(@as(u8, '-'), s[4]);
+    try testing.expectEqual(@as(u8, '-'), s[7]);
+    try testing.expectEqual(@as(u8, 'T'), s[10]);
+    try testing.expectEqual(@as(u8, ':'), s[13]);
+    try testing.expectEqual(@as(u8, ':'), s[16]);
+    try testing.expectEqual(@as(u8, 'Z'), s[19]);
+    // Year is past the epoch and plausibly current-era.
+    const year = try std.fmt.parseInt(u16, s[0..4], 10);
+    try testing.expect(year >= 2020 and year < 3000);
+}
+
+test "fuzz nowIso8601: any buffer size never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            // Buffer may be too small (then bufPrint fails → fallback literal);
+            // either way it must not crash and must return a non-empty string.
+            const n: usize = smith.valueRangeAtMostWithHash(u32, 0, 40, 0);
+            var buf: [40]u8 = undefined;
+            const s = nowIso8601(buf[0..n]);
+            try testing.expect(s.len > 0);
+        }
+    }.run, .{});
 }
 
 // ---- handleGetData ----

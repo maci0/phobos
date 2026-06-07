@@ -539,17 +539,40 @@ pub fn handleWebcamDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.me
     return .{ .object = result };
 }
 
-/// POST /server/webcams/test → {"name": ..., "snapshot_reachable": false, ...}
-/// Stub: the test endpoint does not probe the snapshot URL; snapshot_reachable
-/// is always false.
+/// GET an `http(s)://` snapshot URL and report whether it responded with a
+/// success status (Moonraker `_handle_webcam_test`: `snapshot_reachable = not
+/// ret.has_error()`). Returns false for non-http URLs or when no io is wired
+/// (tests). Note: std.http.Client.fetch has no per-request timeout here, mirroring
+/// spoolman's proxy — an unroutable host can block until the OS TCP timeout.
+fn probeSnapshot(io: std.Io, gpa: std.mem.Allocator, url: []const u8) bool {
+    if (!std.mem.startsWith(u8, url, "http")) return false;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var client: std.http.Client = .{ .allocator = aa, .io = io };
+    defer client.deinit();
+    var sink: [4096]u8 = undefined;
+    var disc: std.Io.Writer.Discarding = .init(&sink);
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .response_writer = &disc.writer,
+    }) catch return false;
+    return result.status.class() == .success;
+}
+
+/// POST /server/webcams/test → {"name", "snapshot_reachable", "snapshot_url", "stream_url"}.
+/// Probes the snapshot URL when io is wired and the URL is http(s).
 pub fn handleWebcamTest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
 
     const cam = lookupCamera(c, params, true) orelse return error.NotFound;
 
+    const reachable = if (c.io) |io| probeSnapshot(io, c.gpa, cam.snapshot_url) else false;
+
     var result: std.json.ObjectMap = .empty;
     try result.put(alloc, "name", .{ .string = cam.name });
-    try result.put(alloc, "snapshot_reachable", .{ .bool = false });
+    try result.put(alloc, "snapshot_reachable", .{ .bool = reachable });
     try result.put(alloc, "snapshot_url", .{ .string = cam.snapshot_url });
     try result.put(alloc, "stream_url", .{ .string = cam.stream_url });
     return .{ .object = result };
@@ -879,6 +902,32 @@ test "webcam: test endpoint returns snapshot_reachable=false" {
     const result = try handleWebcamTest(@ptrCast(&ctx), test_params, a);
     try testing.expectEqual(false, result.object.get("snapshot_reachable").?.bool);
     try testing.expectEqualStrings("cam2", result.object.get("name").?.string);
+}
+
+test "probeSnapshot: non-http URLs are unreachable (no network attempt)" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try testing.expect(!probeSnapshot(io, testing.allocator, "rtsp://example/stream"));
+    try testing.expect(!probeSnapshot(io, testing.allocator, "ftp://host/x"));
+    try testing.expect(!probeSnapshot(io, testing.allocator, ""));
+    try testing.expect(!probeSnapshot(io, testing.allocator, "webcam/?action=snapshot"));
+}
+
+test "fuzz probeSnapshot: non-http schemes never crash and never reach the network" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var tail: [32]u8 = undefined;
+            smith.bytesWithHash(&tail, 0);
+            // Force a non-http scheme so the guard returns before any fetch.
+            var url: [40]u8 = undefined;
+            const wrote = std.fmt.bufPrint(&url, "zz://{s}", .{tail[0..@min(tail.len, 30)]}) catch return;
+            try testing.expect(!probeSnapshot(io, testing.allocator, wrote));
+        }
+    }.run, .{});
 }
 
 test "webcam: POST missing name → InvalidParams" {

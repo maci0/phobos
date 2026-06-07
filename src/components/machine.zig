@@ -823,11 +823,40 @@ pub fn parseVirtualization(cgroup_text: []const u8) VirtParse {
     return .{};
 }
 
+/// Fallback container detection from /proc/1/sched + /.dockerenv, used when the
+/// cgroup text is inconclusive (common under cgroup v2). Matches the second half
+/// of machine.py's `_check_inside_container`: if pid 1's comm is not init/systemd
+/// we are in a container (lxc); the presence of /.dockerenv refines it to docker.
+/// Pure given its inputs.
+pub fn parseSchedContainer(sched_first_line: []const u8, has_dockerenv: bool) VirtParse {
+    const trimmed = std.mem.trim(u8, sched_first_line, " \t\r\n");
+    const sp = std.mem.indexOfScalar(u8, trimmed, ' ') orelse trimmed.len;
+    const comm = trimmed[0..sp];
+    if (comm.len == 0) return .{};
+    const is_init = std.mem.eql(u8, comm, "systemd") or std.mem.eql(u8, comm, "init");
+    if (!is_init) {
+        return .{ .virt_type = "container", .virt_identifier = if (has_dockerenv) "docker" else "lxc" };
+    }
+    return .{};
+}
+
 fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
     var v: VirtParse = .{};
     if (ctx.io) |io| {
         if (readFile(io, alloc, CGROUP_PATH)) |txt| {
             v = parseVirtualization(txt);
+        }
+        // cgroup inconclusive (e.g. cgroup v2): fall back to /proc/1/sched + /.dockerenv.
+        if (std.mem.eql(u8, v.virt_type, "none")) {
+            if (readFile(io, alloc, "/proc/1/sched")) |sched| {
+                const nl = std.mem.indexOfScalar(u8, sched, '\n') orelse sched.len;
+                const has_dockerenv = blk: {
+                    const f = Dir.cwd().openFile(io, "/.dockerenv", .{}) catch break :blk false;
+                    f.close(io);
+                    break :blk true;
+                };
+                v = parseSchedContainer(sched[0..nl], has_dockerenv);
+            }
         }
     }
     var obj: std.json.ObjectMap = .empty;
@@ -868,10 +897,13 @@ pub fn buildServiceState(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.V
 }
 
 fn buildServiceEntry(ctx: *const MachineCtx, name: []const u8, alloc: std.mem.Allocator) std.json.Value {
+    // A service we have not actually queried is "unknown/unknown" (matches
+    // Moonraker machine.py:_detect_active_services), NOT a fabricated
+    // "active/running" — clients must not be told a service is up unverified.
     const state: struct { active: []const u8, sub: []const u8 } = if (ctx.services.get(name)) |e|
         .{ .active = e.active_state, .sub = e.sub_state }
     else
-        .{ .active = "active", .sub = "running" };
+        .{ .active = "unknown", .sub = "unknown" };
     var entry: std.json.ObjectMap = .empty;
     entry.put(alloc, "active_state", .{ .string = state.active }) catch return errorOut();
     entry.put(alloc, "sub_state", .{ .string = state.sub }) catch return errorOut();
@@ -880,8 +912,8 @@ fn buildServiceEntry(ctx: *const MachineCtx, name: []const u8, alloc: std.mem.Al
 
 fn errorOut() std.json.Value {
     var entry: std.json.ObjectMap = .empty;
-    entry.put(std.heap.smp_allocator, "active_state", .{ .string = "active" }) catch unreachable;
-    entry.put(std.heap.smp_allocator, "sub_state", .{ .string = "running" }) catch unreachable;
+    entry.put(std.heap.smp_allocator, "active_state", .{ .string = "unknown" }) catch unreachable;
+    entry.put(std.heap.smp_allocator, "sub_state", .{ .string = "unknown" }) catch unreachable;
     return .{ .object = entry };
 }
 
@@ -1816,6 +1848,36 @@ test "parseVirtualization: bare metal yields none" {
     try testing.expectEqualStrings("none", parseVirtualization("").virt_type);
 }
 
+// ---- parseSchedContainer ----
+
+test "parseSchedContainer: pid1 init/systemd yields none" {
+    try testing.expectEqualStrings("none", parseSchedContainer("systemd (1, #threads: 1)", false).virt_type);
+    try testing.expectEqualStrings("none", parseSchedContainer("init (1, #threads: 1)", true).virt_type);
+    try testing.expectEqualStrings("none", parseSchedContainer("", true).virt_type);
+}
+
+test "parseSchedContainer: non-init pid1 is a container; dockerenv refines to docker" {
+    const lxc = parseSchedContainer("bash (1, #threads: 1)", false);
+    try testing.expectEqualStrings("container", lxc.virt_type);
+    try testing.expectEqualStrings("lxc", lxc.virt_identifier);
+    const docker = parseSchedContainer("sh (1, #threads: 1)", true);
+    try testing.expectEqualStrings("container", docker.virt_type);
+    try testing.expectEqualStrings("docker", docker.virt_identifier);
+}
+
+test "fuzz parseSchedContainer: arbitrary first line never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [48]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const has_dockerenv = smith.valueWithHash(bool, 1);
+            const r = parseSchedContainer(&buf, has_dockerenv);
+            const ok = std.mem.eql(u8, r.virt_type, "none") or std.mem.eql(u8, r.virt_type, "container");
+            try testing.expect(ok);
+        }
+    }.run, .{});
+}
+
 // ---- parseCpuStat ----
 
 test "parseCpuStat: computes busy percent per cpu" {
@@ -2074,11 +2136,11 @@ test "buildServiceState: reflects tracked service states" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Default: all services active/running
+    // Default (never queried): unknown/unknown, matching Moonraker.
     const s0 = try buildServiceState(&c, a);
     try testing.expect(s0.object.get("klipper") != null);
-    try testing.expectEqualStrings("active", s0.object.get("klipper").?.object.get("active_state").?.string);
-    try testing.expectEqualStrings("running", s0.object.get("klipper").?.object.get("sub_state").?.string);
+    try testing.expectEqualStrings("unknown", s0.object.get("klipper").?.object.get("active_state").?.string);
+    try testing.expectEqualStrings("unknown", s0.object.get("klipper").?.object.get("sub_state").?.string);
 
     // After stop: state changes
     _ = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
@@ -2086,8 +2148,8 @@ test "buildServiceState: reflects tracked service states" {
     try testing.expectEqualStrings("inactive", s1.object.get("klipper").?.object.get("active_state").?.string);
     try testing.expectEqualStrings("dead", s1.object.get("klipper").?.object.get("sub_state").?.string);
 
-    // Other service still default
-    try testing.expectEqualStrings("active", s1.object.get("mqtt").?.object.get("active_state").?.string);
+    // Other (never queried) service still unknown.
+    try testing.expectEqualStrings("unknown", s1.object.get("mqtt").?.object.get("active_state").?.string);
 }
 
 test "buildServiceState: all available_services present" {
