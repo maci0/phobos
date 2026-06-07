@@ -206,7 +206,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   state; handleServer reports dynamic safemode; handleJob/handlePrinter report live
   OctoPrint states (Offline/Operational/Printing/Paused/Error) with correct state
   flags. 13 unit tests + fuzz test.
-- Memory baseline: phobos daemon RSS = 5.4 MB vs stock Moonraker ~80-150 MB.
+- Memory baseline: phobos daemon idle RSS ~1.4 MB (with-lmdb, ReleaseSmall+LTO+
+  stripped) vs stock Moonraker ~80-150 MB (~50-90x less). Binary ~1.2 MB.
 
 ---
 

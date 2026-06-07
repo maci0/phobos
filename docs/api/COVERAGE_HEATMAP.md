@@ -39,7 +39,13 @@
 > - **Combined**: Surface × Depth — the effective completeness of each component
 > - **Overall**: weighted by API item count per component
 > - **Conformance**: 54/54 events pass normalized equality against vendored Moonraker 9008485
-> - **Memory**: phobos daemon RSS ~5.4 MB vs stock Moonraker ~80-150 MB (1 thread, VmSize 7992 kB)
+> - **Memory**: phobos daemon idle RSS ~1.4 MB (with-lmdb) / ~2.0 MB (no-lmdb),
+>   ReleaseSmall + LTO + stripped, 2 threads, binary ~1.2 MB. VmSize ~23 MB is
+>   reserved-but-uncommitted thread stacks/arenas, not real RAM. vs stock
+>   Moonraker ~80-150 MB (Python/asyncio) — roughly 50-90x less. (Measured via
+>   /proc/<pid>/status; down from a prior 5.4 MB after removing the eager 20 MiB
+>   Klippy ReadBuf, the proc_stat per-tick leak, the sensor-ring memset, and
+>   building ReleaseSmall.)
 > - **Tests**: 1104 pass / 2 skip / 0 fail (lmdb), 1089 pass / 5 skip / 0 fail (no-lmdb)
 > - **Fuzz**: every public JSON-RPC handler has both a unit test and a fuzz test
 >
