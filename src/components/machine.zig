@@ -1902,6 +1902,61 @@ pub fn handleVideo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloca
     return .{ .object = obj };
 }
 
+// v4l2 VIDIOC_QUERYCAP = _IOR('V', 0, struct v4l2_capability) (sizeof 104).
+const VIDIOC_QUERYCAP: u32 = 0x80685600;
+
+const V4l2Cap = struct { driver: []const u8, bus_info: []const u8, version: u32, caps: u32 };
+
+/// Trim a fixed-size C string field at its first NUL.
+fn cField(buf: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+    return buf[0..end];
+}
+
+/// Decode a v4l2 capability bitmask into Moonraker-style capability names.
+fn decodeV4l2Caps(alloc: std.mem.Allocator, caps: u32) std.json.Array {
+    const flags = [_]struct { bit: u32, name: []const u8 }{
+        .{ .bit = 0x00000001, .name = "VIDEO_CAPTURE" },
+        .{ .bit = 0x00001000, .name = "VIDEO_CAPTURE_MPLANE" },
+        .{ .bit = 0x00000002, .name = "VIDEO_OUTPUT" },
+        .{ .bit = 0x00002000, .name = "VIDEO_OUTPUT_MPLANE" },
+        .{ .bit = 0x00000004, .name = "VIDEO_OVERLAY" },
+        .{ .bit = 0x00000010, .name = "VBI_CAPTURE" },
+        .{ .bit = 0x00800000, .name = "META_CAPTURE" },
+        .{ .bit = 0x00010000, .name = "TUNER" },
+        .{ .bit = 0x00020000, .name = "AUDIO" },
+        .{ .bit = 0x01000000, .name = "READWRITE" },
+        .{ .bit = 0x04000000, .name = "STREAMING" },
+        .{ .bit = 0x80000000, .name = "DEVICE_CAPS" },
+    };
+    var arr: std.json.Array = .init(alloc);
+    for (flags) |f| {
+        if (caps & f.bit != 0) arr.append(.{ .string = f.name }) catch {};
+    }
+    return arr;
+}
+
+/// Format a v4l2 KERNEL_VERSION u32 as "major.minor.patch".
+fn formatV4l2Version(alloc: std.mem.Allocator, v: u32) []const u8 {
+    return std.fmt.allocPrint(alloc, "{d}.{d}.{d}", .{ (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff }) catch "";
+}
+
+/// Issue VIDIOC_QUERYCAP on a /dev/videoN node. Read-only ioctl; returns null
+/// when the node can't be opened or the ioctl fails (no device / not a v4l2 cap).
+fn queryV4l2Cap(io: std.Io, alloc: std.mem.Allocator, dev_path: []const u8) ?V4l2Cap {
+    const f = Dir.cwd().openFile(io, dev_path, .{}) catch return null;
+    defer f.close(io);
+    var buf: [104]u8 align(8) = [_]u8{0} ** 104;
+    const rc = std.os.linux.ioctl(f.handle, VIDIOC_QUERYCAP, @intFromPtr(&buf));
+    if (std.os.linux.E.init(rc) != .SUCCESS) return null;
+    return .{
+        .driver = alloc.dupe(u8, cField(buf[0..16])) catch return null,
+        .bus_info = alloc.dupe(u8, cField(buf[48..80])) catch return null,
+        .version = std.mem.readInt(u32, buf[80..84], .little),
+        .caps = std.mem.readInt(u32, buf[84..88], .little),
+    };
+}
+
 fn enumVideo(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
     var dir = Dir.cwd().openDir(io, "/sys/class/video4linux", .{ .iterate = true }) catch return;
     defer dir.close(io);
@@ -1925,10 +1980,21 @@ fn enumVideo(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
                 }
             }
         }
+        // Query the device for bus_info / version / capabilities (read-only
+        // ioctl; degrades to the sysfs-only values when no device is present).
+        var hardware_bus: []const u8 = "";
+        var version: []const u8 = "";
+        var caps_arr: std.json.Array = .init(alloc);
+        if (queryV4l2Cap(io, alloc, try std.fmt.allocPrint(alloc, "/dev/{s}", .{entry.name}))) |cap| {
+            hardware_bus = cap.bus_info;
+            version = formatV4l2Version(alloc, cap.version);
+            caps_arr = decodeV4l2Caps(alloc, cap.caps);
+            if (drv_name.len == 0 and cap.driver.len > 0) drv_name = cap.driver;
+        }
         try dev.put(alloc, "driver_name", .{ .string = drv_name });
-        try dev.put(alloc, "hardware_bus", .{ .string = "" });
-        try dev.put(alloc, "capabilities", .{ .array = .init(alloc) });
-        try dev.put(alloc, "version", .{ .string = "" });
+        try dev.put(alloc, "hardware_bus", .{ .string = hardware_bus });
+        try dev.put(alloc, "capabilities", .{ .array = caps_arr });
+        try dev.put(alloc, "version", .{ .string = version });
         try dev.put(alloc, "path_by_hardware", .null);
         try dev.put(alloc, "path_by_id", .null);
         try dev.put(alloc, "alt_name", .{ .string = name });
@@ -2077,6 +2143,40 @@ test "parseVirtualization: bare metal yields none" {
     try testing.expectEqualStrings("none", r.virt_type);
     try testing.expectEqualStrings("none", r.virt_identifier);
     try testing.expectEqualStrings("none", parseVirtualization("").virt_type);
+}
+
+// ---- decodeV4l2Caps / formatV4l2Version ----
+
+test "decodeV4l2Caps: capture + streaming + device_caps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // VIDEO_CAPTURE | STREAMING | DEVICE_CAPS
+    const arr = decodeV4l2Caps(a, 0x00000001 | 0x04000000 | 0x80000000);
+    try testing.expectEqual(@as(usize, 3), arr.items.len);
+    try testing.expectEqualStrings("VIDEO_CAPTURE", arr.items[0].string);
+    try testing.expectEqualStrings("STREAMING", arr.items[1].string);
+    try testing.expectEqualStrings("DEVICE_CAPS", arr.items[2].string);
+    try testing.expectEqual(@as(usize, 0), decodeV4l2Caps(a, 0).items.len);
+}
+
+test "formatV4l2Version: KERNEL_VERSION u32 → major.minor.patch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 5.15.0 = (5<<16)|(15<<8)|0 = 0x050F00
+    try testing.expectEqualStrings("5.15.0", formatV4l2Version(a, 0x050F00));
+    try testing.expectEqualStrings("6.1.27", formatV4l2Version(a, (6 << 16) | (1 << 8) | 27));
+}
+
+test "fuzz decodeV4l2Caps: any bitmask never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            _ = decodeV4l2Caps(arena.allocator(), smith.valueWithHash(u32, 0));
+        }
+    }.run, .{});
 }
 
 // ---- buildSerialDevice ----
