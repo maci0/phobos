@@ -337,9 +337,11 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
     // Check for non-success HTTP status.
     if (result.status != .ok and result.status != .created and result.status != .no_content) {
         if (use_v2) {
+            // Surface Spoolman's own {"message": ...} from the error body when present.
+            const msg = extractSpoolmanMessage(alloc, aw.written()) orelse "Spoolman request failed";
             var err_obj: std.json.ObjectMap = .empty;
             try err_obj.put(alloc, "status_code", .{ .integer = @intFromEnum(result.status) });
-            try err_obj.put(alloc, "message", .{ .string = "Spoolman request failed" });
+            try err_obj.put(alloc, "message", .{ .string = msg });
             var obj: std.json.ObjectMap = .empty;
             try obj.put(alloc, "response", .null);
             try obj.put(alloc, "error", .{ .object = err_obj });
@@ -384,6 +386,18 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
 //
 // Strategy: register GET+POST together (multi=true) for spool_id,
 // single-verb for proxy and status.
+
+/// Extract Spoolman's error `message` from a JSON error body (Moonraker reads
+/// `{"message": ...}`). Returns null when the body isn't JSON or has no string
+/// message. The result is duped into `alloc`.
+fn extractSpoolmanMessage(alloc: std.mem.Allocator, body: []const u8) ?[]const u8 {
+    if (body.len == 0) return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch return null;
+    if (parsed.value != .object) return null;
+    const m = parsed.value.object.get("message") orelse return null;
+    if (m != .string) return null;
+    return alloc.dupe(u8, m.string) catch null;
+}
 
 pub fn registerSpoolman(reg: *Registry, ctx: *SpoolmanCtx) !void {
     const c: *anyopaque = @ptrCast(ctx);
@@ -568,6 +582,29 @@ test "handleSpoolId POST: sets active spool and persists" {
     // Verify persistence via GET (no spool_id in params)
     const get_result = try handleSpoolId(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(@as(i64, 42), get_result.object.get("spool_id").?.integer);
+}
+
+test "extractSpoolmanMessage: pulls message from JSON error body" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("Spool not found", extractSpoolmanMessage(a, "{\"message\":\"Spool not found\"}").?);
+    try testing.expect(extractSpoolmanMessage(a, "") == null);
+    try testing.expect(extractSpoolmanMessage(a, "not json") == null);
+    try testing.expect(extractSpoolmanMessage(a, "{\"other\":1}") == null);
+    try testing.expect(extractSpoolmanMessage(a, "{\"message\":123}") == null);
+}
+
+test "fuzz extractSpoolmanMessage: arbitrary body never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var buf: [48]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = extractSpoolmanMessage(arena.allocator(), &buf);
+        }
+    }.run, .{});
 }
 
 test "handleSetActiveSpool: remote method sets/clears the active spool" {
