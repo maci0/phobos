@@ -10,14 +10,18 @@
 //! filament TD (transparency/diameter) and color data. Serial-port comms are
 //! implemented: `pollSerialOnce` opens the device via `serial.zig` and parses a
 //! TD-1 CSV line (`parseTd1Line`, matching td1.py `_parse_line`: field[4]=td,
-//! field[5]=color). The CSV parser is unit-tested; the live USB enumeration /
-//! hotplug loop and on-hardware timing are not verified here (no device).
+//! field[5]=color). USB discovery (`findTd1Devices`, matching `_find_td1_devices`:
+//! vid/pid 0xE4B2/0x0045) and the reboot handshake (`rebootSerial`/
+//! `nextRebootCommand`) are implemented; `scanOnce` ties discovery → connect →
+//! poll. The parser, discovery (sysfs scan), and reboot protocol are unit-tested;
+//! on-hardware serial timing is exercised only against a real device.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const serial_mod = @import("serial.zig");
 
 const Registry = registry.Registry;
+const Core = @import("../server/core.zig").Core;
 
 /// Parsed TD-1 serial line. Mirrors td1.py `_parse_line`: the device emits
 /// comma-separated lines; when there are ≥6 fields, field[4] is the TD value
@@ -41,6 +45,118 @@ pub fn parseTd1Line(line: []const u8) ?ParsedTd1Line {
     if (n < 6) return null;
     const td = std.fmt.parseFloat(f64, std.mem.trim(u8, fields[4], " \t\r\n")) catch return null;
     return .{ .td = td, .color = std.mem.trim(u8, fields[5], " \t\r\n") };
+}
+
+// ---------------------------------------------------------------------------
+// USB discovery (matches td1.py _find_td1_devices: comports() filtered by
+// vid==0xE4B2 && pid==0x0045 with a serial number)
+// ---------------------------------------------------------------------------
+
+const Dir = std.Io.Dir;
+
+pub const td1_vid: u16 = 0xE4B2;
+pub const td1_pid: u16 = 0x0045;
+
+/// True for the TD-1's USB vendor/product id.
+pub fn isTd1VidPid(vid: u16, pid: u16) bool {
+    return vid == td1_vid and pid == td1_pid;
+}
+
+/// Parse a sysfs idVendor/idProduct value ("e4b2\n") into a u16 (base-16).
+pub fn parseUsbHex(s: []const u8) ?u16 {
+    return std.fmt.parseInt(u16, std.mem.trim(u8, s, " \t\r\n"), 16) catch null;
+}
+
+/// Read the first line of a sysfs attribute file into `out`, trimmed. Returns
+/// null on any error / empty. (sysfs files report size 0, so read the line.)
+fn readSysfsLine(io: std.Io, path: []const u8, out: []u8) ?[]const u8 {
+    const f = Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer f.close(io);
+    var rbuf: [256]u8 = undefined;
+    var fr = f.reader(io, &rbuf);
+    const maybe = fr.interface.takeDelimiter('\n') catch return null;
+    const line = maybe orelse return null;
+    const t = std.mem.trim(u8, line, " \t\r\n");
+    if (t.len == 0 or t.len > out.len) return null;
+    @memcpy(out[0..t.len], t);
+    return out[0..t.len];
+}
+
+pub const Td1Device = struct {
+    /// Device node path (e.g. "/dev/ttyACM0"); gpa-owned by the caller's alloc.
+    path: []const u8,
+    /// USB serial number; gpa-owned by the caller's alloc.
+    serial: []const u8,
+};
+
+const UsbIds = struct { vid: u16, pid: u16, serial: []const u8 };
+
+/// Walk up from `<tty_root>/<name>/device` looking for a level that has both
+/// idVendor and idProduct (the USB device dir sits a few levels above the tty's
+/// interface). Returns the ids + serial (serial duped into `alloc`).
+fn readTd1Ids(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, name: []const u8) ?UsbIds {
+    var base = std.fmt.allocPrint(alloc, "{s}/{s}/device", .{ tty_root, name }) catch return null;
+    var level: usize = 0;
+    while (level < 5) : (level += 1) {
+        var vbuf: [16]u8 = undefined;
+        var pbuf: [16]u8 = undefined;
+        const vpath = std.fmt.allocPrint(alloc, "{s}/idVendor", .{base}) catch return null;
+        const ppath = std.fmt.allocPrint(alloc, "{s}/idProduct", .{base}) catch return null;
+        if (readSysfsLine(io, vpath, &vbuf)) |vs| {
+            if (readSysfsLine(io, ppath, &pbuf)) |ps| {
+                const vid = parseUsbHex(vs) orelse return null;
+                const pid = parseUsbHex(ps) orelse return null;
+                var sbuf: [128]u8 = undefined;
+                const spath = std.fmt.allocPrint(alloc, "{s}/serial", .{base}) catch return null;
+                const ser = readSysfsLine(io, spath, &sbuf) orelse "";
+                return .{ .vid = vid, .pid = pid, .serial = alloc.dupe(u8, ser) catch return null };
+            }
+        }
+        base = std.fmt.allocPrint(alloc, "{s}/..", .{base}) catch return null;
+    }
+    return null;
+}
+
+/// Enumerate TD-1 serial devices by scanning `tty_root` (e.g. /sys/class/tty)
+/// for ttys whose USB device matches the TD-1 vid/pid and has a serial number.
+/// Device paths are formed as `<dev_prefix>/<tty-name>` (e.g. /dev/ttyACM0).
+/// Returned slice + its strings are owned by `alloc`.
+pub fn findTd1Devices(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, dev_prefix: []const u8) []Td1Device {
+    var list: std.ArrayListUnmanaged(Td1Device) = .empty;
+    var dir = Dir.cwd().openDir(io, tty_root, .{ .iterate = true }) catch return &.{};
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        const ids = readTd1Ids(io, alloc, tty_root, entry.name) orelse continue;
+        if (!isTd1VidPid(ids.vid, ids.pid)) continue;
+        if (ids.serial.len == 0) continue;
+        const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dev_prefix, entry.name }) catch continue;
+        list.append(alloc, .{ .path = path, .serial = ids.serial }) catch continue;
+    }
+    return list.toOwnedSlice(alloc) catch &.{};
+}
+
+/// TD-1 reboot handshake step (td1.py reboot): after sending "change settings\n"
+/// the device replies; on "ready" the next command is "RGB_Enabled = True\ndone\n",
+/// otherwise no further command is sent. Pure so the protocol is unit-tested.
+pub fn nextRebootCommand(ack: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, std.mem.trim(u8, ack, " \t\r\n"), "ready"))
+        return "RGB_Enabled = True\ndone\n";
+    return null;
+}
+
+/// Perform the TD-1 reboot serial exchange (best-effort; needs the device).
+pub fn rebootSerial(io: std.Io, path: []const u8, baud: u32) !void {
+    var ser = try serial_mod.Serial.open(io, path, baud);
+    defer ser.close();
+    try ser.write("change settings\n");
+    var buf: [128]u8 = undefined;
+    const n = ser.readSome(&buf) catch 0;
+    const ack = if (std.mem.indexOfScalar(u8, buf[0..n], '\n')) |i| buf[0..i] else buf[0..n];
+    if (nextRebootCommand(ack)) |cmd| {
+        try ser.write(cmd);
+        _ = ser.readSome(&buf) catch 0; // drain final ack (ignored, like td1.py)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,12 +209,67 @@ pub fn nowIso8601(buf: []u8) []const u8 {
 pub const Td1Ctx = struct {
     gpa: std.mem.Allocator,
     conns: std.StringHashMap(Td1Connection),
+    /// Background discovery/poll plumbing (set via setIo/setCore + startPolling).
+    /// scanOnce mutates `conns`, which handleGetData reads under the Core lock, so
+    /// the poll thread runs scanOnce through core.run to serialize the two.
+    io: ?std.Io = null,
+    core: ?*Core = null,
+    poll_thread: ?std.Thread = null,
+    poll_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    tty_root: []const u8 = "/sys/class/tty",
+    dev_prefix: []const u8 = "/dev",
+    baud: u32 = 115200,
+    poll_interval_ns: u64 = 1_000_000_000, // 1 s
 
     pub fn init(alloc: std.mem.Allocator) Td1Ctx {
         return .{ .gpa = alloc, .conns = std.StringHashMap(Td1Connection).init(alloc) };
     }
 
+    pub fn setIo(self: *Td1Ctx, io: std.Io) void {
+        self.io = io;
+    }
+    pub fn setCore(self: *Td1Ctx, core: *Core) void {
+        self.core = core;
+    }
+
+    /// Start the background discovery/poll loop (no-op without io/core or if
+    /// already running). On a host without a TD-1, scanOnce simply finds nothing.
+    pub fn startPolling(self: *Td1Ctx) void {
+        if (self.poll_thread != null) return;
+        if (self.io == null or self.core == null) return;
+        self.poll_stop.store(false, .release);
+        self.poll_thread = std.Thread.spawn(.{}, pollLoop, .{self}) catch null;
+    }
+
+    pub fn stopPolling(self: *Td1Ctx) void {
+        self.poll_stop.store(true, .release);
+        if (self.poll_thread) |t| {
+            t.join();
+            self.poll_thread = null;
+        }
+    }
+
+    fn pollLoop(self: *Td1Ctx) void {
+        const io = self.io orelse return;
+        const core = self.core orelse return;
+        // Sleep the interval in 100 ms chunks so stopPolling's join returns
+        // promptly (≤100 ms) instead of blocking a full interval.
+        const chunks = @max(1, self.poll_interval_ns / 100_000_000);
+        while (!self.poll_stop.load(.acquire)) {
+            var i: u64 = 0;
+            while (i < chunks and !self.poll_stop.load(.acquire)) : (i += 1) {
+                var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000_000 };
+                _ = std.os.linux.nanosleep(&req, null);
+            }
+            if (self.poll_stop.load(.acquire)) break;
+            // Run the scan under the Core lock so conns mutations are serialized
+            // with handleGetData.
+            core.run(io, Td1Ctx.scanOnce, .{ self, io, self.tty_root, self.dev_prefix, self.baud });
+        }
+    }
+
     pub fn deinit(self: *Td1Ctx) void {
+        self.stopPolling();
         var it = self.conns.iterator();
         while (it.next()) |entry| {
             const conn = entry.value_ptr;
@@ -156,6 +327,26 @@ pub const Td1Ctx = struct {
             .done_initializing = conn.done_initializing,
         };
         try self.conns.put(k, v);
+    }
+
+    /// One discovery + poll pass (matches td1.py's enumerate→connect loop):
+    /// scan `tty_root` for TD-1 devices, register any new ones, and refresh each
+    /// from its serial port. Best-effort — a device that won't open is skipped.
+    pub fn scanOnce(self: *Td1Ctx, io: std.Io, tty_root: []const u8, dev_prefix: []const u8, baud: u32) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const devs = findTd1Devices(io, a, tty_root, dev_prefix);
+        for (devs) |d| {
+            if (!self.conns.contains(d.serial)) {
+                var ts_buf: [32]u8 = undefined;
+                self.addConnection(.{
+                    .serial_number = d.serial,
+                    .scan_time = nowIso8601(&ts_buf),
+                }) catch continue;
+            }
+            self.pollSerialOnce(io, d.serial, d.path, baud) catch {};
+        }
     }
 };
 
@@ -261,6 +452,91 @@ const testing = std.testing;
 fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     const p = try std.json.parseFromSlice(std.json.Value, alloc, json_str, .{});
     return p.value;
+}
+
+// ---- USB discovery ----
+
+test "isTd1VidPid / parseUsbHex" {
+    try testing.expect(isTd1VidPid(0xE4B2, 0x0045));
+    try testing.expect(!isTd1VidPid(0xE4B2, 0x0046));
+    try testing.expect(!isTd1VidPid(0x1234, 0x0045));
+    try testing.expectEqual(@as(?u16, 0xE4B2), parseUsbHex("e4b2\n"));
+    try testing.expectEqual(@as(?u16, 0x0045), parseUsbHex("  0045  "));
+    try testing.expectEqual(@as(?u16, null), parseUsbHex("zzzz"));
+}
+
+test "nextRebootCommand: 'ready' → enable cmd, else none" {
+    try testing.expectEqualStrings("RGB_Enabled = True\ndone\n", nextRebootCommand("ready\n").?);
+    try testing.expectEqualStrings("RGB_Enabled = True\ndone\n", nextRebootCommand("  ready ").?);
+    try testing.expect(nextRebootCommand("busy") == null);
+    try testing.expect(nextRebootCommand("") == null);
+}
+
+test "findTd1Devices: matches TD-1 vid/pid in a temp sysfs tree, skips others" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".testtmp-td1-sys";
+    Dir.cwd().deleteTree(io, root) catch {};
+    defer Dir.cwd().deleteTree(io, root) catch {};
+
+    // ttyACM0 → TD-1 (match); ttyACM1 → other vendor; ttyS0 → no device dir.
+    inline for (.{
+        .{ "ttyACM0", "e4b2", "0045", "TD1ABC" },
+        .{ "ttyACM1", "1234", "5678", "OTHER" },
+    }) |d| {
+        const dev = root ++ "/" ++ d[0] ++ "/device";
+        try Dir.cwd().createDirPath(io, dev);
+        try writeFileStr(io, dev ++ "/idVendor", d[1] ++ "\n");
+        try writeFileStr(io, dev ++ "/idProduct", d[2] ++ "\n");
+        try writeFileStr(io, dev ++ "/serial", d[3] ++ "\n");
+    }
+    try Dir.cwd().createDirPath(io, root ++ "/ttyS0");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const devs = findTd1Devices(io, arena.allocator(), root, "/dev");
+    try testing.expectEqual(@as(usize, 1), devs.len);
+    try testing.expectEqualStrings("/dev/ttyACM0", devs[0].path);
+    try testing.expectEqualStrings("TD1ABC", devs[0].serial);
+}
+
+test "scanOnce: registers a discovered TD-1 connection" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const root = ".testtmp-td1-scan";
+    Dir.cwd().deleteTree(io, root) catch {};
+    defer Dir.cwd().deleteTree(io, root) catch {};
+    const dev = root ++ "/ttyACM0/device";
+    try Dir.cwd().createDirPath(io, dev);
+    try writeFileStr(io, dev ++ "/idVendor", "e4b2\n");
+    try writeFileStr(io, dev ++ "/idProduct", "0045\n");
+    try writeFileStr(io, dev ++ "/serial", "SCANME\n");
+
+    var ctx = Td1Ctx.init(testing.allocator);
+    defer ctx.deinit();
+    // Device node won't open (no real serial) → poll fails, but the connection
+    // is registered from discovery.
+    ctx.scanOnce(io, root, "/dev", 115200);
+    try testing.expect(ctx.conns.contains("SCANME"));
+}
+
+fn writeFileStr(io: std.Io, path: []const u8, contents: []const u8) !void {
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = contents });
+}
+
+test "fuzz findTd1Devices/parseUsbHex: arbitrary inputs never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = parseUsbHex(&buf);
+            _ = nextRebootCommand(&buf);
+        }
+    }.run, .{});
 }
 
 // ---- nowIso8601 ----
@@ -589,7 +865,6 @@ test "pollSerialOnce: reads a line from the device and updates the connection" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const Dir = std.Io.Dir;
 
     const path = "/tmp/phobos_td1_serial.dev";
     Dir.cwd().deleteFile(io, path) catch {};

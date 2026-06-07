@@ -644,6 +644,8 @@ pub const App = struct {
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
         // Stop the Spoolman WS supervisor (uses io) before io/conns teardown.
         self.spoolman_ctx.stopWs();
+        // Stop the TD-1 discovery/poll thread (uses io + core) before teardown.
+        self.td1_ctx.stopPolling();
         // Stop the machine proc_stat timer thread before tearing down
         // connections (the timer thread may access conns within emitProcStatUpdate).
         self.machine_ctx.deinit();
@@ -827,6 +829,10 @@ pub const App = struct {
         self.spoolman_ctx.on_spool_deleted = spoolmanSpoolDeleted;
         self.spoolman_ctx.on_spool_deleted_ctx = self;
         self.spoolman_ctx.startWs();
+        // TD-1 filament sensor: background USB discovery + serial polling.
+        self.td1_ctx.setIo(io);
+        self.td1_ctx.setCore(self.core);
+        self.td1_ctx.startPolling();
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
         // Wire io into the machine component for /proc & /sys reads.
