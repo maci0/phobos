@@ -34,11 +34,8 @@ and what's next; read this for *how* to work in the codebase.
 > to **musl**, so the commands below work. **Never run a plain glibc `zig build`.**
 
 ```sh
-# Full suite (links vendored LMDB; first compile of the C sources is slow, wrap in timeout)
+# Full suite (always links vendored LMDB; first compile of the C sources is slow — timeout-wrap)
 timeout 220 zig build test --summary all
-
-# Without LMDB — much faster, use for most iteration
-zig build test
 
 # A single file that has NO ../ imports (e.g. config, jsonrpc, store):
 zig test -target x86_64-linux-musl src/config/confighelper.zig

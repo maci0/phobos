@@ -39,14 +39,13 @@
 > - **Combined**: Surface × Depth — the effective completeness of each component
 > - **Overall**: weighted by API item count per component
 > - **Conformance**: 54/54 events pass normalized equality against vendored Moonraker 9008485
-> - **Memory**: phobos daemon idle RSS ~1.4 MB (with-lmdb) / ~2.0 MB (no-lmdb),
->   ReleaseSmall + LTO + stripped, 2 threads, binary ~1.2 MB. VmSize ~23 MB is
->   reserved-but-uncommitted thread stacks/arenas, not real RAM. vs stock
->   Moonraker ~80-150 MB (Python/asyncio) — roughly 50-90x less. (Measured via
->   /proc/<pid>/status; down from a prior 5.4 MB after removing the eager 20 MiB
->   Klippy ReadBuf, the proc_stat per-tick leak, the sensor-ring memset, and
->   building ReleaseSmall.)
-> - **Tests**: 1104 pass / 2 skip / 0 fail (lmdb), 1089 pass / 5 skip / 0 fail (no-lmdb)
+> - **Memory**: phobos daemon idle RSS ~1.4 MB (ReleaseSmall + LTO + stripped,
+>   2 threads, binary ~1.2 MB). VmSize ~23 MB is reserved-but-uncommitted thread
+>   stacks/arenas, not real RAM. vs stock Moonraker ~80-150 MB (Python/asyncio) —
+>   roughly 50-90x less. (Measured via /proc/<pid>/status; down from a prior
+>   5.4 MB after removing the eager 20 MiB Klippy ReadBuf, the proc_stat per-tick
+>   leak, the sensor-ring memset, and building ReleaseSmall.)
+> - **Tests**: 1155 pass / 2 skip / 0 fail (194 fuzz)
 > - **Fuzz**: every public JSON-RPC handler has both a unit test and a fuzz test
 >
 > Depth key:
@@ -54,11 +53,10 @@
 > - **90%** — Fully implemented with edge-case coverage
 > - **85%** — Fully functional, minor edge cases
 > - **80%** — Mostly real, some stubs (e.g. webcam test endpoint)
-> - **75%** — Core real, major integration stubbed (e.g. MQTT client, Klippy bridge)
-> - **70%** — Real I/O for main paths, secondary paths stubbed (e.g. WLED serial, machine peripherals)
+> - **75%** — Core real, secondary integration stubbed (e.g. machine host-mutating actions are no-ops)
+> - **70%** — Real I/O for main paths, secondary paths stubbed (e.g. machine peripherals)
 > - **65%** — Real core logic, external integration deferred
-> - **60%** — Real HTTP/parsing, protocol-specific stubs
-> - **50%** — In-memory state tracking with notification emission, all hardware I/O stubbed
+> - **60%** — Real HTTP/parsing, protocol-specific stubs (e.g. spoolman websocket)
 >
 > P3 blockers (require hardware/external services):
 > - power: DONE — HTTP-URL devices send real GET requests; `type: gpio` devices

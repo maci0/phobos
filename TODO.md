@@ -75,7 +75,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1154 pass / 2 skip / 0 fail** (~192 fuzz). The 2 skips are
+- Tests: **1155 pass / 2 skip / 0 fail** (~194 fuzz). The 2 skips are
   update_manager git tests (need a real repo). phobos always links lmdb (no
   no-lmdb mode). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
@@ -228,7 +228,10 @@ Klippy protocol exchange.
 - `websocket_connections` live count from Connections registry.
 
 **Still needed:**
-- Real Klippy integration test (Unix socket round-trip with a real Klippy).
+- ~~Real Klippy integration test (Unix socket round-trip with a real Klippy).~~
+  DONE: a gated real-Klippy test (`.testenv/run-klippy.sh`) round-trips
+  info/objects.list/objects.query against a live Klippy; it skips when
+  `/tmp/klippy_uds` is absent.
   KlippySim (`src/testutil/klippy_sim.zig`) covers the protocol: handshake,
   gcode/script, pause_resume/*, emergency_stop, RESTART/FIRMWARE_RESTART
   disconnect, status updates, gcode responses, and shutdown. End-to-end
@@ -286,14 +289,17 @@ _norm_structure_compare array item masking (Python).
   timed flush thread, moonraker_status publication on state change.
   Connection state tracking (disconnected→connecting→connected→disconnecting).
   handlePublishPrefixed handler with full test suite (prefix/prefixed param).
-  Real MQTT broker connection (TLS/keepalive/reconnect) is P3.
+  Real MQTT 3.1.1 broker client is DONE (mqtt_client.zig: live TCP connect,
+  publish/subscribe, background reader, LWT); only TLS + auto-reconnect/backoff +
+  JSON-RPC-over-MQTT dispatch remain P3.
 - **spoolman/announcements** — announcements: real RSS fetch from Moonlight
   (arksine.github.io/moonlight) via fetchAndUpdateFeed using rss.zig parser,
   pruneByPrefix removes stale entries, notify_announcement_update on changes,
   handleFeedDispatchMulti branches on _method param for proper verb dispatch;
   spoolman: real HTTP proxy with query param support, GET+body rejection,
   notify_spoolman_status_changed on setIo/setServerUrl via emitLocked.
-  ETag not yet supported (Zig 0.16 FetchResult no response headers).
+  ETag conditional GET is DONE (http_get.zig stores per-feed ETags, replays
+  If-None-Match, 304 skips re-parse).
   Background periodic refresh timer wired (30 min, atomically stoppable, 1 s join latency).
 - **file_manager metadata** — record shape correct; deep gcode parsing (slicer/layers/
   thumbnails) now implements findObjectHeight (6 slicer patterns + G1 Z fallback),
@@ -309,10 +315,10 @@ _norm_structure_compare array item masking (Python).
   scenario (corporate directory auth on a 3D-printer appliance) that the target
   does not need. The auth DB still carries the `source` field for shape parity,
   but `source: "ldap"` logins are unsupported. Do not add it back.
-- **sensor** — ~~`notify_sensor_update` deferred (SensorCtx empty struct; only relevant
-  when MQTT/Klippy sensor integration lands).~~ DONE: real SensorCtx with sensors
-  StringHashMap, MeasurementRing history, change detection, emitSensorUpdate via
-  emitLocked, param_info tracking. 15 unit + 4 fuzz tests.
+- **sensor** — DONE: real SensorCtx with sensors StringHashMap, MeasurementRing
+  history, change detection, emitSensorUpdate via emitLocked, param_info tracking.
+  The MQTT sensor source has landed (ingestMqttMessage ← MqttClient reader, socket-
+  validated). 15 unit + 4 fuzz tests.
 - **button** — ~~notification-only, GPIO stubbed.~~ DONE: full ButtonCtx with
   addButton/sendEvent/emitButtonEvent/notification_sent guard, 10 unit + 3 fuzz tests.
 - **job_queue** — ~~transition_gcode/delay, remote methods~~ DONE: transition_gcode
@@ -326,15 +332,17 @@ _norm_structure_compare array item masking (Python).
 - ~~Re-enable the lmdb drop-in test.~~ Done: fixture generated via
   `tools/generate_lmdb_fixture.py`, test passes.
 - ~~Memory baseline: measure RSS of running phobos daemon vs stock Moonraker.~~
-  Done: phobos daemon RSS = 5.4 MB (VmSize 7992 kB, 1 thread) vs stock Moonraker
-  ~80-150 MB (Python asyncio, multiple threads).
+  Done: phobos daemon idle RSS ≈ 1.4 MB (VmSize ~23 MB reserved-but-uncommitted,
+  2 threads) vs stock Moonraker ~80-150 MB (Python asyncio, multiple threads).
 - ~~**Fuzz test gap:** every public JSON-RPC handler now has a unit test AND a fuzz test.~~
   Done: 18 fuzz tests added across machine (11), update_manager (4), wled (1), webcam (3),
   announcements (4), power (1), extensions (1). Total: ~1012 tests (~174 fuzz).
 
 ### P3 — remaining depth gaps (non-blocking, requires hardware/external services)
-- **mqtt** — real MQTT broker connection, TLS, keepalive, reconnect. Current: endpoints
-  return "not configured" with in-memory message store + subscription tracking.
+- **mqtt** — real broker client is DONE (mqtt_client.zig: live TCP connect, publish/
+  subscribe, background reader, LWT). Remaining P3: TLS, auto-reconnect/backoff,
+  JSON-RPC-over-MQTT request dispatch. The HTTP endpoints also keep an in-memory
+  message store + subscription tracking for the no-broker case.
   Pub API complete: `publishTopic`, `subscribeTopic`, `unsubscribe`, `close`,
   `setInstanceName`/`setClientId`/`setDefaultQos`, `storeMessage`/`getMessage`/
   `addSubscription` exposed. `retain`/`timeout` params parsed. Remote method
@@ -343,18 +351,17 @@ _norm_structure_compare array item masking (Python).
   `moonraker_status` publication on klippy state change. Connection state tracking
   (disconnected→connecting→connected→disconnecting). handlePublishPrefixed handler
   with full test suite (prefix/prefixed param). 58 tests (9 fuzz).
-- **power/wled/td1** — power: real GPIO sysfs/wiringPi, HTTP client for device URLs;
-  td1: UART; GPIO stubs. wled: serial-only strip communication (HTTP POST to WLED
-  JSON API is real for address-based strips via `std.http.Client`).
-  (machine.zig `RunCmdFn` mock pattern reusable here for GPIO/network test doubles.)
-- **spoolman/announcements** — ETag/If-Modified-Since conditional GET for RSS.
-  Current: real RSS fetch works (no ETag) with background periodic refresh timer
-  (30 min, atomically stoppable); notify_announcement_update +
-  notify_spoolman_status_changed emissions wire
-- **Klippy integration test** — full Unix-socket round-trip with a real Klippy (or
-  Klippy simulator) to validate the bridge end-to-end. The bridge skeleton
-  (connect/identify/subscribe/reconnect/proxy) is complete but untested against
-  real Klippy.
+- **power/wled/td1** — DONE: power HTTP-URL devices send real GET, `type: gpio`
+  drives the sysfs line (gpio_sysfs.zig); td1 reads CSV over UART (serial.zig);
+  wled drives serial strips and HTTP strips via `std.http.Client`. Remaining:
+  other vendor power backends + on-hardware verification.
+- **spoolman/announcements** — ETag/If-Modified-Since conditional GET is DONE
+  (http_get.zig). Real RSS fetch + background periodic refresh timer (30 min,
+  atomically stoppable); notify_announcement_update + notify_spoolman_status_changed
+  emissions wired.
+- **Klippy integration test** — DONE: a gated test round-trips info/objects.list/
+  objects.query against a live Klippy (`.testenv/run-klippy.sh`), skipping when
+  `/tmp/klippy_uds` is absent. Broader behavioral hardening continues.
 
 ---
 
@@ -380,7 +387,7 @@ _norm_structure_compare array item masking (Python).
    state flags. 13 unit tests + fuzz test.
 10. ~~Conformance oracle~~ (P1) — Done: 54/54 events pass normalized equality.
    Golden capture + replay harness complete. Normalizer bugs fixed (Zig + Python).
-11. ~~P2 cleanup~~ — Done: memory baseline (5.4 MB RSS), re-enable lmdb drop-in
+11. ~~P2 cleanup~~ — Done: memory baseline (~1.4 MB RSS), re-enable lmdb drop-in
     test, subsystem depth: machine sudo validation, machine services systemctl,
     update_manager git fetch/reset, file_manager gcode parsing, octoprint_compat
     live state, **every handler fuzzed** (17 new fuzz tests across machine,

@@ -431,7 +431,7 @@ fn loadTotals(c: *HistoryCtx, alloc: std.mem.Allocator) !std.json.Value {
 /// Save totals to store.
 fn saveTotals(c: *HistoryCtx, alloc: std.mem.Allocator, totals: std.json.Value) !void {
     c.store.insertItem(alloc, ns_totals, totals_key, totals) catch |err| switch (err) {
-        ds.Error.BackendError => {}, // no-lmdb: silently skip
+        ds.Error.BackendError => {}, // transient store failure: silently skip
         else => return err,
     };
 }

@@ -6,13 +6,15 @@
 //!   POST /server/mqtt/publish   → server.mqtt.publish
 //!   POST /server/mqtt/subscribe → server.mqtt.subscribe
 //!
-//! phobos has no MQTT broker client; no real broker connection is made.
-//! When a broker is not configured (the default), both endpoints return a
-//! Moonraker-shaped "MQTT not configured" error. When a broker IS configured
-//! via `setConfig` (host/port), the publish/subscribe endpoints operate on an
-//! in-memory message store: publish stores the last payload per topic,
-//! subscribe returns the last stored payload. No real MQTT frames are
-//! exchanged, but the API surface behaves faithfully.
+//! phobos has a real MQTT 3.1.1 broker client (mqtt_client.zig). When no broker
+//! is configured (the default), both endpoints return a Moonraker-shaped "MQTT
+//! not configured" error. When a broker IS configured via `setConfig` and io is
+//! wired, connectBroker establishes a live TCP connection: status/sensor flows
+//! publish real PUBLISH frames over the wire and subscribed topics are received
+//! by the background reader. The HTTP publish/subscribe endpoints additionally
+//! mirror into an in-memory store (publish keeps the last payload per topic,
+//! subscribe returns it) so the API surface behaves faithfully with or without a
+//! live broker.
 //!
 //! Publish response shape (mqtt.py):    {"topic": <topic>}
 //! Subscribe response shape (mqtt.py):  {"topic": <topic>, "payload": <any>}
@@ -108,9 +110,9 @@ pub const MqttCtx = struct {
     klipper_message: []const u8 = "",
     /// Last published message per topic. Owned by ctx; freed in deinit.
     messages: std.StringHashMap(StoredMessage),
-    /// Active subscriptions (tracked for notification emission when a message
-    /// arrives for a subscribed topic). phobos has no broker client, so
-    /// subscriptions are only stored; no callback is invoked.
+    /// HTTP-endpoint subscriptions: the in-memory subscribe API records topics
+    /// here (for notification emission on a matching in-store publish). The live
+    /// broker connection has its own subscriptions via the reader callback.
     subscriptions: std.StringHashMap(void),
     /// Duplicate API request timestamps (moonraker: timestamp_deque, maxlen 20).
     api_timestamps: std.ArrayList(i64),
@@ -1241,7 +1243,7 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
 
     if (!ctx.isConfigured()) return error.MqttNotConfigured;
 
-    // Track the subscription (always successful in stub mode).
+    // Record the in-memory subscription (HTTP-endpoint path).
     _ = try ctx.subscribeTopicQos(topic, qos);
 
     var obj: std.json.ObjectMap = .empty;

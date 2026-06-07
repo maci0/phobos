@@ -18,21 +18,22 @@
 //!
 //! (vendor/moonraker/moonraker/components/klippy_connection.py:605-607).
 //!
-//! Phobos has NO Klippy connection yet — server.info reports
-//! `klippy_connected:false`. Rather than dynamically registering these only when
-//! Klippy connects (as Moonraker does via `_request_endpoints`), phobos registers
-//! them STATICALLY so they appear in the API surface, and every handler returns
-//! Moonraker's exact disconnected error: a 503 `ServerError` carrying the message
-//! "Klippy Host not connected".
+//! Phobos has a real Klippy connection (klippy_connection.zig). Rather than
+//! dynamically registering these only when Klippy connects (as Moonraker does
+//! via `_request_endpoints`), phobos registers them STATICALLY so they always
+//! appear in the API surface; each handler proxies the request to Klippy when
+//! connected, and returns Moonraker's exact disconnected error — a 503
+//! `ServerError` "Klippy Host not connected" — only when Klippy is absent or
+//! disconnected.
 //!
-//! Error surfacing:
+//! Disconnected-error surfacing:
 //!   * HTTP   → status 503, body {"error":{"code":503,"message":"Klippy Host not connected"}}
 //!     (AuthorizedRequestHandler.write_error: {"code": status, "message": reason}).
 //!   * JSON-RPC → {"error":{"code":503,"message":"Klippy Host not connected"}}
 //!     (JsonRPC.execute_method maps ServerError.status_code verbatim unless it is
 //!     404 → -32601 or 401 → -32602; 503 stays 503 — common.py:846-852).
 //!
-//! The handlers therefore all return `error.KlippyDisconnected`, which the
+//! When Klippy is down the handlers return `error.KlippyDisconnected`, which the
 //! transports map to the 503 shape above (see http_transport.zig / jsonrpc.zig).
 
 const std = @import("std");
@@ -46,8 +47,8 @@ const KlippyCtx = @import("klippy_connection.zig").KlippyCtx;
 /// Klippy is not connected. Surfaced verbatim by both transports.
 pub const klippy_disconnected_message = "Klippy Host not connected";
 
-/// Stateless context — every handler short-circuits with the disconnected
-/// error until phobos grows a real Klippy connection.
+/// Holds an optional pointer to the Klippy connection; handlers proxy to Klippy
+/// when connected, else short-circuit with the disconnected error.
 pub const PrinterCtx = struct {
     /// Optional pointer to the Klippy connection; set by App after init.
     /// When non-null and Klippy is connected, handlers proxy to Klippy.

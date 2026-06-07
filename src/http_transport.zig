@@ -239,10 +239,8 @@ pub fn handleParsedAuth(
     // JSON-RPC bridge: POST /server/jsonrpc.
     if (method == .POST and std.mem.eql(u8, path, jsonrpc_path)) {
         const bytes = try srv.core.run(srv.io, jsonrpc.Dispatcher.handle, .{ srv.dispatcher, body, alloc });
-        // A JSON-RPC notification yields empty bytes; respond 204-style with an
-        // empty object to keep the body valid JSON.
-        // Response.body is []const u8, so the empty-notification reply can be the
-        // literal directly — no per-request allocation.
+        // A JSON-RPC notification yields empty bytes; reply with the literal `{}`
+        // (a []const u8, no allocation) so the body stays valid JSON.
         const out: []const u8 = if (bytes.len == 0) "{}" else bytes;
         return .{ .status = .ok, .body = out };
     }

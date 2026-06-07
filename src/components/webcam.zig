@@ -540,7 +540,8 @@ pub fn handleWebcamDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.me
 }
 
 /// POST /server/webcams/test → {"name": ..., "snapshot_reachable": false, ...}
-/// Stub: no HTTP client in phobos; snapshot_reachable is always false.
+/// Stub: the test endpoint does not probe the snapshot URL; snapshot_reachable
+/// is always false.
 pub fn handleWebcamTest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
 

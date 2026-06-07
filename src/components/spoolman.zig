@@ -16,9 +16,11 @@
 //! requires a live io; call setIo() after the App event loop starts. emitLocked
 //! is used because the POST handler runs under the held Core lock.
 //!
-//! NOTE: phobos has no Spoolman HTTP/WS client; ws_connected is always false.
-//! The proxy endpoint returns the v2 "not connected" error shape when
-//! use_v2_response=true, or a 503 error otherwise, exactly as Moonraker does.
+//! NOTE: phobos has an HTTP proxy client (handleProxy forwards to the configured
+//! Spoolman server_url via std.http), but no persistent websocket — ws_connected
+//! is always false. When no server_url is configured the proxy returns the v2
+//! "not connected" error shape when use_v2_response=true, or a 503 otherwise,
+//! exactly as Moonraker does.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");

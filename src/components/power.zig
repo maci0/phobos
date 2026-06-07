@@ -55,8 +55,9 @@ pub const DeviceType = enum {
     uhubctl,
 };
 
-/// A configured power device. State is tracked in memory; real hardware control
-/// is STUBBED (noted at processRequest).
+/// A configured power device. State is tracked in memory and, for HTTP and
+/// `type: gpio` devices, mirrored to real hardware on on/off (see
+/// processRequest); other vendor types are in-memory only.
 pub const Device = struct {
     name: []const u8,
     type_str: []const u8,
@@ -402,8 +403,9 @@ fn emitPowerChanged(ctx: *PowerCtx, alloc: std.mem.Allocator, dev: *const Device
 // ---------------------------------------------------------------------------
 
 /// Apply a power request ("on" | "off" | "toggle" | "status") to a device.
-/// For HTTP-type devices with URLs configured, real HTTP GET requests are sent
-/// via std.http.Client. GPIO/non-HTTP types update in-memory state only.
+/// HTTP-type devices with URLs configured send real HTTP GET requests via
+/// std.http.Client; `type: gpio` devices drive the sysfs line; other non-HTTP
+/// types update in-memory state only.
 /// Returns the resulting state string (points into ctx-owned memory or a
 /// literal — caller must not free).
 fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {

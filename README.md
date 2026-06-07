@@ -22,15 +22,15 @@ on a **32-bit ARM Cortex-A7** printer host.
 
 ## Status
 
-- **~65% overall implementation progress** (API surface 100%, implementation depth 64.7%
-  weighted by component — see [coverage heatmap](docs/api/COVERAGE_HEATMAP.md)).
+- **~92% overall implementation progress** (API surface 100%, implementation depth weighted
+  by component — see [coverage heatmap](docs/api/COVERAGE_HEATMAP.md)).
 - **100% of Moonraker's API surface is covered**: 120/120 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
-- ~580 in-tree tests pass; peak RSS for the full test run is ~12–18 MB.
-- This is **surface + shape parity**. Byte-identical *behavioral* parity (verified against a
-  running stock Moonraker) and the Klippy live-data path are still in progress — see
-  [`TODO.md`](TODO.md).
+- ~1155 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
+- This is **surface + shape parity**, plus a live Klippy path validated by a gated real-Klippy
+  integration test. Byte-identical *behavioral* parity (verified against a running stock
+  Moonraker) is still being hardened — see [`TODO.md`](TODO.md).
 
 ## What works today
 
@@ -40,9 +40,11 @@ hashing compatible with Moonraker's formats), machine info / proc stats / servic
 peripherals, update manager, power / WLED / device control, spoolman, sensors, webcams,
 notifiers, analysis, extensions, OctoPrint-compat, and the `printer.*` proxy surface.
 
-Subsystems that require external state (a connected Klippy, real systemctl/git/MQTT/GPIO,
-network fetches) return Moonraker-correct **shapes** with stubbed internals; see the
-"subsystem depth" section of [`TODO.md`](TODO.md) for the exact list.
+Many formerly-stubbed subsystems now do real I/O: a real MQTT 3.1.1 client, sysfs GPIO power,
+WLED/TD-1 serial, `git fetch/reset` update paths, RSS fetch with ETag conditional GET, and a
+live Klippy bridge. The remaining stubs are narrow (MQTT TLS/reconnect, package-manager
+updates, untested serial hotplug) and host-mutating actions (reboot/shutdown/apt/pip) are
+deliberate no-ops; see the "subsystem depth" section of [`TODO.md`](TODO.md).
 
 ## Architecture (one paragraph)
 
@@ -85,11 +87,8 @@ TODO.md                   status + remaining work (read this for what's next)
 Requires **Zig 0.16.0** and (for the tooling) Python 3 + `uv`.
 
 ```sh
-# Run the test suite (links the vendored LMDB; musl-static by default)
+# Run the test suite (always links the vendored LMDB; musl-static by default)
 zig build test --summary all
-
-# Faster iteration without LMDB
-zig build test
 
 # See the API surface phobos registers
 zig build && zig-out/bin/phobos --dump-api | less

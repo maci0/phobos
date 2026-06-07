@@ -6,8 +6,8 @@ Phobos is a memory-efficient Zig 0.16 reimplementation of Moonraker. See
 ## Project goals (weigh every change against these)
 
 - **Low memory usage is an EXPLICIT, primary goal.** Target is a static musl
-  binary on 32-bit ARM (Cortex-A7); daemon RSS is ~5.4 MB vs stock Moonraker's
-  ~80–150 MB, and it must stay tiny. Concretely:
+  binary on 32-bit ARM (Cortex-A7); daemon idle RSS is ~1.4 MB vs stock
+  Moonraker's ~80–150 MB, and it must stay tiny. Concretely:
     - prefer fixed/stack buffers and caller-provided buffers over heap; reach for
       `std.heap` allocators only when a fixed buffer genuinely can't bound the size
     - per-request work uses an arena that is freed on return — keep long-lived

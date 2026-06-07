@@ -1,10 +1,9 @@
 //! Thin Zig bindings over the vendored liblmdb C API.
 //!
 //! We hand-declare the subset of the LMDB C ABI that the datastore needs
-//! rather than relying on `@cImport`, which keeps the surface small, lets the
-//! no-lmdb build configuration compile this file out cleanly, and documents
-//! exactly which symbols we depend on. The declarations mirror `lmdb.h` from
-//! the vendored LMDB 0.9.31 (see `vendor/lmdb/`).
+//! rather than relying on `@cImport`, which keeps the surface small and
+//! documents exactly which symbols we depend on. The declarations mirror
+//! `lmdb.h` from the vendored LMDB 0.9.31 (see `vendor/lmdb/`).
 //!
 //! Always compiled — phobos has no no-lmdb build mode.
 

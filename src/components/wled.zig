@@ -46,8 +46,9 @@ pub const Strip = struct {
     speed: i64,
     error_state: ?[]const u8,
     send_full_chain_data: bool,
-    /// HTTP WLED device address (hostname or IP). When non-null, real HTTP
-    /// commands are sent to the WLED JSON API. Null means stub/serial-only.
+    /// HTTP WLED device address (hostname or IP). When non-null, on/off/control
+    /// send real HTTP commands to the WLED JSON API; when null, the strip is
+    /// serial-driven (sendWledBody writes the JSON line over serial.zig).
     address: ?[]const u8 = null,
     port: u16 = 80,
     protocol: []const u8 = "http",
