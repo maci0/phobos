@@ -846,6 +846,102 @@ pub fn parseSchedContainer(sched_first_line: []const u8, has_dockerenv: bool) Vi
     return .{};
 }
 
+// ===========================================================================
+// Network / canbus enumeration (parses `ip -json -det address`)
+// ===========================================================================
+
+const NetInfo = struct { network: std.json.Value, canbus: std.json.Value };
+
+fn jsonStr(o: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const v = o.get(key) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+fn jsonInt(o: std.json.ObjectMap, key: []const u8) ?i64 {
+    const v = o.get(key) orelse return null;
+    return switch (v) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => null,
+    };
+}
+
+/// Parse `ip -json -det address` output into Moonraker's network/canbus maps.
+/// network[ifname] = {mac_address, ip_addresses:[{family,address,is_link_local}]}
+/// for UP ethernet links; canbus[ifname] = {tx_queue_len, bitrate, driver} for
+/// CAN links. Mirrors machine.py `_parse_network_interfaces`. Pure given `text`;
+/// returns empty maps on any parse failure. Strings borrow `alloc`.
+fn parseIpAddrJson(alloc: std.mem.Allocator, text: []const u8) NetInfo {
+    var net: std.json.ObjectMap = .empty;
+    var can: std.json.ObjectMap = .empty;
+    const empty: NetInfo = .{ .network = .{ .object = net }, .canbus = .{ .object = can } };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, text, .{}) catch return empty;
+    if (parsed.value != .array) return empty;
+
+    for (parsed.value.array.items) |ifc| {
+        if (ifc != .object) continue;
+        const o = ifc.object;
+        const name = jsonStr(o, "ifname") orelse continue;
+        const link_type = jsonStr(o, "link_type") orelse "";
+
+        if (std.mem.eql(u8, link_type, "can")) {
+            var c: std.json.ObjectMap = .empty;
+            c.put(alloc, "tx_queue_len", .{ .integer = jsonInt(o, "txqueuelen") orelse 0 }) catch continue;
+            var bitrate: i64 = 0;
+            var driver: []const u8 = "";
+            if (o.get("linkinfo")) |li| {
+                if (li == .object) {
+                    if (jsonStr(li.object, "info_kind")) |k| driver = k;
+                    if (li.object.get("info_data")) |idv| {
+                        if (idv == .object) bitrate = jsonInt(idv.object, "bitrate") orelse 0;
+                    }
+                }
+            }
+            c.put(alloc, "bitrate", .{ .integer = bitrate }) catch continue;
+            c.put(alloc, "driver", .{ .string = alloc.dupe(u8, driver) catch "" }) catch continue;
+            can.put(alloc, alloc.dupe(u8, name) catch continue, .{ .object = c }) catch continue;
+            continue;
+        }
+
+        // Only UP ethernet links appear in `network`.
+        const operstate = jsonStr(o, "operstate") orelse "";
+        if (!std.mem.eql(u8, operstate, "UP")) continue;
+
+        var ips: std.json.Array = .init(alloc);
+        if (o.get("addr_info")) |ai| {
+            if (ai == .array) {
+                for (ai.array.items) |a| {
+                    if (a != .object) continue;
+                    const fam = jsonStr(a.object, "family") orelse continue;
+                    const local = jsonStr(a.object, "local") orelse continue;
+                    const famname = if (std.mem.eql(u8, fam, "inet")) "ipv4" else if (std.mem.eql(u8, fam, "inet6")) "ipv6" else fam;
+                    const is_ll = std.mem.startsWith(u8, local, "fe80") or std.mem.startsWith(u8, local, "169.254");
+                    var e: std.json.ObjectMap = .empty;
+                    e.put(alloc, "family", .{ .string = famname }) catch continue;
+                    e.put(alloc, "address", .{ .string = alloc.dupe(u8, local) catch continue }) catch continue;
+                    e.put(alloc, "is_link_local", .{ .bool = is_ll }) catch continue;
+                    ips.append(.{ .object = e }) catch continue;
+                }
+            }
+        }
+        var n: std.json.ObjectMap = .empty;
+        n.put(alloc, "mac_address", .{ .string = alloc.dupe(u8, jsonStr(o, "address") orelse "") catch "" }) catch continue;
+        n.put(alloc, "ip_addresses", .{ .array = ips }) catch continue;
+        net.put(alloc, alloc.dupe(u8, name) catch continue, .{ .object = n }) catch continue;
+    }
+    return .{ .network = .{ .object = net }, .canbus = .{ .object = can } };
+}
+
+/// Run `ip -json -det address` and parse it. Returns empty maps when io is
+/// absent or `ip` is unavailable/failed.
+fn buildNetworkInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) NetInfo {
+    const empty: NetInfo = .{ .network = .{ .object = .empty }, .canbus = .{ .object = .empty } };
+    const res = ctx.runCmd(alloc, &.{ "ip", "-json", "-det", "address" }) catch return empty;
+    if (res.stdout.len == 0) return empty;
+    return parseIpAddrJson(alloc, res.stdout);
+}
+
 fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
     var v: VirtParse = .{};
     if (ctx.io) |io| {
@@ -1005,10 +1101,10 @@ pub fn handleSystemInfo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.A
     try sys.put(alloc, "sd_info", try buildSdInfo(ctx, alloc));
     try sys.put(alloc, "distribution", try buildDistribution(ctx, alloc));
     try sys.put(alloc, "virtualization", try buildVirtualization(ctx, alloc));
-    // network/canbus require a NETLINK / `ip` shell walk; reported empty until
-    // that subsystem lands. Shape (object) matches upstream.
-    try sys.put(alloc, "network", .{ .object = .empty });
-    try sys.put(alloc, "canbus", .{ .object = .empty });
+    // network/canbus from `ip -json -det address` (empty when ip is absent).
+    const netinfo = buildNetworkInfo(ctx, alloc);
+    try sys.put(alloc, "network", netinfo.network);
+    try sys.put(alloc, "canbus", netinfo.canbus);
     try sys.put(alloc, "python", try buildPython(alloc));
     try sys.put(alloc, "available_services", try buildAvailableServices(ctx, alloc));
     try sys.put(alloc, "service_state", try buildServiceState(ctx, alloc));
@@ -1914,6 +2010,66 @@ test "parseVirtualization: bare metal yields none" {
     try testing.expectEqualStrings("none", r.virt_type);
     try testing.expectEqualStrings("none", r.virt_identifier);
     try testing.expectEqualStrings("none", parseVirtualization("").virt_type);
+}
+
+// ---- parseIpAddrJson ----
+
+test "parseIpAddrJson: UP ethernet + CAN interfaces" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const txt =
+        \\[
+        \\ {"ifname":"lo","link_type":"loopback","operstate":"UNKNOWN","address":"00:00:00:00:00:00","addr_info":[]},
+        \\ {"ifname":"eth0","link_type":"ether","operstate":"UP","address":"aa:bb:cc:dd:ee:ff",
+        \\  "addr_info":[{"family":"inet","local":"192.168.1.5"},{"family":"inet6","local":"fe80::1"}]},
+        \\ {"ifname":"wlan0","link_type":"ether","operstate":"DOWN","address":"11:22:33:44:55:66","addr_info":[]},
+        \\ {"ifname":"can0","link_type":"can","txqueuelen":10,
+        \\  "linkinfo":{"info_kind":"can","info_data":{"bitrate":500000}}}
+        \\]
+    ;
+    const r = parseIpAddrJson(a, txt);
+    const net = r.network.object;
+    // Only the UP ethernet link is present (lo/loopback + DOWN wlan0 excluded).
+    try testing.expectEqual(@as(usize, 1), net.count());
+    const eth0 = net.get("eth0").?.object;
+    try testing.expectEqualStrings("aa:bb:cc:dd:ee:ff", eth0.get("mac_address").?.string);
+    const ips = eth0.get("ip_addresses").?.array;
+    try testing.expectEqual(@as(usize, 2), ips.items.len);
+    try testing.expectEqualStrings("ipv4", ips.items[0].object.get("family").?.string);
+    try testing.expectEqualStrings("192.168.1.5", ips.items[0].object.get("address").?.string);
+    try testing.expectEqual(false, ips.items[0].object.get("is_link_local").?.bool);
+    try testing.expectEqualStrings("ipv6", ips.items[1].object.get("family").?.string);
+    try testing.expectEqual(true, ips.items[1].object.get("is_link_local").?.bool); // fe80::
+
+    const can = r.canbus.object;
+    try testing.expectEqual(@as(usize, 1), can.count());
+    const can0 = can.get("can0").?.object;
+    try testing.expectEqual(@as(i64, 10), can0.get("tx_queue_len").?.integer);
+    try testing.expectEqual(@as(i64, 500000), can0.get("bitrate").?.integer);
+    try testing.expectEqualStrings("can", can0.get("driver").?.string);
+}
+
+test "parseIpAddrJson: garbage/empty yields empty maps" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(@as(usize, 0), parseIpAddrJson(a, "").network.object.count());
+    try testing.expectEqual(@as(usize, 0), parseIpAddrJson(a, "not json").network.object.count());
+    try testing.expectEqual(@as(usize, 0), parseIpAddrJson(a, "{}").canbus.object.count());
+}
+
+test "fuzz parseIpAddrJson: arbitrary input never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var buf: [96]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = parseIpAddrJson(a, &buf);
+        }
+    }.run, .{});
 }
 
 // ---- parseSchedContainer ----
