@@ -38,7 +38,7 @@ and what's next; read this for *how* to work in the codebase.
 timeout 220 zig build test --summary all
 
 # Without LMDB — much faster, use for most iteration
-zig build test -Dwith_lmdb=false
+zig build test
 
 # A single file that has NO ../ imports (e.g. config, jsonrpc, store):
 zig test -target x86_64-linux-musl src/config/confighelper.zig
@@ -53,8 +53,7 @@ Notes:
   **only build via `zig build test`** (the module root is `src/main.zig`). Single-file
   `zig test` fails on them with "import of file outside module path".
 - Always run socket/WS tests under a `timeout` — a bug can deadlock and hang the suite.
-- `-Dwith_lmdb=false` swaps in a `NullStore`; store-backed code must still compile and the
-  suite must pass in **both** modes.
+- phobos always links the vendored lmdb (no no-lmdb / NullStore mode).
 
 ## 3. Zig 0.16 cheat sheet (verified against the installed std)
 
@@ -130,7 +129,7 @@ notification emission) and `src/components/database.zig` (store-backed CRUD) as 
    notification arrives (with a bounded wait so a deadlock fails fast). Match error shapes.
 5. **Verify**:
    ```sh
-   zig build test -Dwith_lmdb=false && timeout 220 zig build test
+   timeout 220 zig build test
    tools/coverage.sh            # must stay at / reach 100%
    ```
 6. **Commit** with a Conventional-Commits message, no AI attribution.
@@ -163,7 +162,7 @@ the delta in phobos, regenerate the baseline, and confirm `coverage` is back to 
 
 ## 7. Definition of done for a change
 
-- Both build modes green: `zig build test` and `zig build test -Dwith_lmdb=false`.
+- Suite green: `zig build test` (or the direct test binary).
 - `tools/coverage.sh` exits 0 (still 100%).
 - New/changed functions have unit **and** fuzz tests.
 - Emitting handlers have a socket-level notification test.

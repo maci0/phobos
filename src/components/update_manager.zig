@@ -501,7 +501,9 @@ fn emitResponse(
 }
 
 /// Monotonic proc-id source (stands in for Moonraker's `id(web_request)`).
-var proc_counter: std.atomic.Value(i64) = .init(1);
+// u32 (not i64): 32-bit ARM has no 64-bit atomic RMW, and a u32 id space is
+// ample for a monotonic proc counter.
+var proc_counter: std.atomic.Value(u32) = .init(1);
 fn nextProcId() i64 {
     return proc_counter.fetchAdd(1, .monotonic);
 }

@@ -344,9 +344,10 @@ fn transitionDelayCallback(self: *JobQueueCtx) void {
             @as(i64, 1_000_000_000)
         else
             @intFromFloat(remaining * 1_000_000_000.0);
+        // timespec fields are isize (i32 on 32-bit ARM) — cast from the i64 math.
         var req: std.os.linux.timespec = .{
-            .sec = @divTrunc(chunk_ns, 1_000_000_000),
-            .nsec = @rem(chunk_ns, 1_000_000_000),
+            .sec = @intCast(@divTrunc(chunk_ns, 1_000_000_000)),
+            .nsec = @intCast(@rem(chunk_ns, 1_000_000_000)),
         };
         _ = std.os.linux.nanosleep(&req, null);
 

@@ -371,7 +371,6 @@ test "fuzz_testserver: arbitrary paths never crash the server, always JSON back"
 // Database component integration tests
 // ---------------------------------------------------------------------------
 
-const build_options = @import("build_options");
 
 test "database: GET /server/database/list returns namespaces and backups" {
     const alloc = std.testing.allocator;
@@ -389,8 +388,7 @@ test "database: GET /server/database/list returns namespaces and backups" {
     try std.testing.expect(result.object.get("backups") != null);
 }
 
-test "database: POST item then GET it back — value round-trips (lmdb only)" {
-    if (!build_options.with_lmdb) return error.SkipZigTest;
+test "database: POST item then GET it back — value round-trips" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
     defer ts.stop();
@@ -418,8 +416,7 @@ test "database: POST item then GET it back — value round-trips (lmdb only)" {
     try std.testing.expectEqual(@as(i64, 99), get_result.object.get("value").?.object.get("x").?.integer);
 }
 
-test "database: GET /server/database/list includes namespace after POST (lmdb only)" {
-    if (!build_options.with_lmdb) return error.SkipZigTest;
+test "database: GET /server/database/list includes namespace after POST" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
     defer ts.stop();
@@ -436,8 +433,7 @@ test "database: GET /server/database/list includes namespace after POST (lmdb on
     try std.testing.expect(std.mem.indexOf(u8, list_body, "\"listtest\"") != null);
 }
 
-test "database: DELETE removes item; subsequent GET returns error shape (lmdb only)" {
-    if (!build_options.with_lmdb) return error.SkipZigTest;
+test "database: DELETE removes item; subsequent GET returns error shape" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
     defer ts.stop();

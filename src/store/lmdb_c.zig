@@ -6,7 +6,7 @@
 //! exactly which symbols we depend on. The declarations mirror `lmdb.h` from
 //! the vendored LMDB 0.9.31 (see `vendor/lmdb/`).
 //!
-//! Only used when `build_options.with_lmdb` is true.
+//! Always compiled — phobos has no no-lmdb build mode.
 
 const std = @import("std");
 

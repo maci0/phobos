@@ -75,11 +75,9 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1104 pass / 2 skip / 0 fail** (~191 fuzz) with `-Dwith_lmdb=true`;
-  **1089 pass / 5 skip / 0 fail** (~182 fuzz) with `-Dwith_lmdb=false`.
-  The 2 skips (lmdb) are update_manager git tests (need a real repo).
-  The 5 skips (no-lmdb) are: 3 lmdb-specific tests + 2 update_manager git tests.
-  Note: `zig build test` uses `--listen=-` protocol which may hang on this
+- Tests: **1154 pass / 2 skip / 0 fail** (~192 fuzz). The 2 skips are
+  update_manager git tests (need a real repo). phobos always links lmdb (no
+  no-lmdb mode). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
 - All register functions now have unit tests verifying all expected routes are wired
   in the Registry (machine, update_manager, power, wled, td1, button).
@@ -89,20 +87,19 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - This host's **system glibc cannot be linked** by Zig 0.16 (GCC 16 `.sframe` reloc).
   The build defaults the native target to **musl**, so normal commands work — but
   **never run plain `zig build` against a glibc target**.
-- Default build links the **vendored lmdb** (`vendor/lmdb/`, LMDB 0.9.31).
-  - Full suite (lmdb): `timeout 220 zig build test --summary all`
-  - No-lmdb (faster, no C compile): `zig build test -Dwith_lmdb=false`
+- Always links the **vendored lmdb** (`vendor/lmdb/`, LMDB 0.9.31); no no-lmdb mode.
+  - Full suite: `timeout 220 zig build test --summary all`
   - Build test binary without running (avoids `--listen=-` hang):
-    `zig build test-artifact -Dwith_lmdb=false && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
+    `zig build test-artifact && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
   - Single non-`../`-importing file: `zig test -target x86_64-linux-musl src/<f>.zig`
     (files under `src/components`, `src/testutil` use `../` imports and only build via
     `zig build test`).
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
   → static ARM binary.
-- Dump the API phobos actually registers: `zig build -Dwith_lmdb=false && zig-out/bin/phobos --dump-api`
+- Dump the API phobos actually registers: `zig build && zig-out/bin/phobos --dump-api`
 - **Coverage gate** (the "are we at 100%?" check):
   ```
-  zig build -Dwith_lmdb=false && zig-out/bin/phobos --dump-api > /tmp/d.json
+  zig build && zig-out/bin/phobos --dump-api > /tmp/d.json
   PYTHONPATH=tools python3 -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json
   ```
   Exit 0 = 100%. Or just `tools/coverage.sh`.
@@ -146,8 +143,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - **Config** (`src/config/`): confighelper-compatible parser (sections, `:`/`=`,
   comments, includes, type coercion).
 - **DataStore** (`src/store/`): `DataStore` interface + vendored-lmdb backend with
-  Moonraker's exact dotted-key + record-encoding semantics. `NullStore` when
-  `-Dwith_lmdb=false`.
+  Moonraker's exact dotted-key + record-encoding semantics (always compiled).
 - **Components** (`src/components/*.zig`): one per Moonraker component; each reads its
   `vendor/moonraker/moonraker/components/*.py` for exact shapes.
 
@@ -328,7 +324,7 @@ _norm_structure_compare array item masking (Python).
 ### P2 — misc
 - ~~Read host/port from config in `main()`.~~ Done: `-c`/`--config`, `extractBindAddr`, 5 tests.
 - ~~Re-enable the lmdb drop-in test.~~ Done: fixture generated via
-  `tools/generate_lmdb_fixture.py`, test passes with `-Dwith_lmdb=true`.
+  `tools/generate_lmdb_fixture.py`, test passes.
 - ~~Memory baseline: measure RSS of running phobos daemon vs stock Moonraker.~~
   Done: phobos daemon RSS = 5.4 MB (VmSize 7992 kB, 1 thread) vs stock Moonraker
   ~80-150 MB (Python asyncio, multiple threads).

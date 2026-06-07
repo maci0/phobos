@@ -9,7 +9,6 @@
 //! test share identical registration logic.
 
 const std = @import("std");
-const build_options = @import("build_options");
 
 const Core = @import("server/core.zig").Core;
 const jsonrpc = @import("jsonrpc.zig");
@@ -82,50 +81,6 @@ const KlippyConnectionCtx = klippy_connection_component.KlippyCtx;
 const OctoPrintCtx = octoprint_component.OctoPrintCtx;
 const ZeroconfCtx = zeroconf_component.ZeroconfCtx;
 
-// ---------------------------------------------------------------------------
-// Null DataStore — used when LMDB is compiled out. Handlers are still
-// registered (so --dump-api and tests enumerate all endpoints), but every
-// operation returns an error or empty result. This keeps the no-lmdb build
-// compiling and allows the coverage dump to enumerate routes.
-// ---------------------------------------------------------------------------
-
-const NullStore = struct {
-    fn vtGetItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!?std.json.Value {
-        return null;
-    }
-    fn vtInsertItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {
-        return ds.Error.BackendError;
-    }
-    fn vtUpdateItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {
-        return ds.Error.BackendError;
-    }
-    fn vtDeleteItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!std.json.Value {
-        return ds.Error.KeyNotFound;
-    }
-    fn vtListNamespaces(_: *anyopaque, arena: std.mem.Allocator) ds.Error![][]const u8 {
-        return arena.alloc([]const u8, 0);
-    }
-    fn vtGetNamespace(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8) ds.Error!std.json.Value {
-        return .{ .object = .empty };
-    }
-
-    const vtable: ds.VTable = .{
-        .getItem = vtGetItem,
-        .insertItem = vtInsertItem,
-        .updateItem = vtUpdateItem,
-        .deleteItem = vtDeleteItem,
-        .listNamespaces = vtListNamespaces,
-        .getNamespace = vtGetNamespace,
-    };
-
-    // A stable-lifetime singleton ctx pointer. The NullStore has no mutable
-    // state; any non-null pointer works. We use a single-byte global.
-    var _ctx: u8 = 0;
-
-    pub fn dataStore() ds.DataStore {
-        return .{ .ctx = @ptrCast(&_ctx), .vtable = &vtable };
-    }
-};
 
 /// Create a directory via the raw mkdir syscall (App.init has no live io yet).
 /// Ignores already-exists; other failures are non-fatal (the file_manager
@@ -181,8 +136,8 @@ pub const App = struct {
     /// strings owned alongside it.
     datadir: []u8,
     file_roots: []FileRoot,
-    /// Owns the LMDB environment when with_lmdb=true; void otherwise.
-    lmdb_store_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void,
+    /// Owns the LMDB environment.
+    lmdb_store_ptr: *@import("store/lmdb_store.zig").LmdbStore,
     /// Parsed config, populated by setConfig(). Null when no config file was
     /// loaded (dump-api, tests). Owned; freed in deinit.
     cfg: ?*config_helper.ConfigParser = null,
@@ -215,11 +170,8 @@ pub const App = struct {
         const db_ctx = try alloc.create(DbCtx);
         errdefer alloc.destroy(db_ctx);
 
-        // Build the DataStore. When LMDB is enabled, open a temporary directory
-        // for tests/dump-api. For no-lmdb builds, use the NullStore which
-        // satisfies the vtable without touching the filesystem.
-        const lmdb_ptr: if (build_options.with_lmdb) *@import("store/lmdb_store.zig").LmdbStore else void =
-            if (build_options.with_lmdb) blk: {
+        // Build the LMDB DataStore (a temporary directory for tests/dump-api).
+        const lmdb_ptr: *@import("store/lmdb_store.zig").LmdbStore = blk: {
             const LmdbStore = @import("store/lmdb_store.zig").LmdbStore;
             const store_ptr = try alloc.create(LmdbStore);
             errdefer alloc.destroy(store_ptr);
@@ -239,11 +191,7 @@ pub const App = struct {
             };
             db_ctx.* = .{ .store = store_ptr.dataStore() };
             break :blk store_ptr;
-        } else {};
-
-        if (!build_options.with_lmdb) {
-            db_ctx.* = .{ .store = NullStore.dataStore() };
-        }
+        };
 
         // --- History context ---
         const history_ctx = try alloc.create(HistoryCtx);
@@ -668,10 +616,8 @@ pub const App = struct {
         self.mqtt_ctx.deinit();
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
-        if (build_options.with_lmdb) {
-            self.lmdb_store_ptr.close();
-            self.alloc.destroy(self.lmdb_store_ptr);
-        }
+        self.lmdb_store_ptr.close();
+        self.alloc.destroy(self.lmdb_store_ptr);
         self.sensor_ctx.deinit();
         self.alloc.destroy(self.sensor_ctx);
         self.webcam_ctx.deinit();

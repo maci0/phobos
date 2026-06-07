@@ -155,12 +155,15 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 
 ## Build / test quick reference
 
+- phobos always links the vendored LMDB (no no-lmdb / NullStore mode). There is
+  no `-Dwith_lmdb` option.
 - Build test binary (avoids the `--listen=-` hang):
-  `zig build test-artifact -Dwith_lmdb=false && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
-- Full suite with lmdb: `timeout 220 zig build test --summary all`
+  `zig build test-artifact && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
+- Full suite: `timeout 220 zig build test --summary all`
 - Coverage gate (must stay 100%):
-  `zig build -Dwith_lmdb=false && zig-out/bin/phobos --dump-api > /tmp/d.json &&
+  `zig build && zig-out/bin/phobos --dump-api > /tmp/d.json &&
    PYTHONPATH=tools python3 -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json`
+- Release (LTO + stripped): add `-Doptimize=ReleaseSmall`.
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
 - Conformance oracle (normalized equality vs vendored Moonraker): see
   `conformance/replay.py` against `conformance/golden/`.

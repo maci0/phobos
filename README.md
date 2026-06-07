@@ -59,7 +59,7 @@ for detail.
 ## Repository layout
 
 ```
-build.zig                 build graph (musl default; -Dwith_lmdb, cross-target options)
+build.zig                 build graph (musl default; cross-target options)
 src/
   main.zig                entry point + --dump-api
   app.zig                 App: wires everything; registerAll() is the registration point
@@ -89,10 +89,10 @@ Requires **Zig 0.16.0** and (for the tooling) Python 3 + `uv`.
 zig build test --summary all
 
 # Faster iteration without LMDB
-zig build test -Dwith_lmdb=false
+zig build test
 
 # See the API surface phobos registers
-zig build -Dwith_lmdb=false && zig-out/bin/phobos --dump-api | less
+zig build && zig-out/bin/phobos --dump-api | less
 
 # Check API coverage against Moonraker (exit 0 == 100%)
 tools/coverage.sh
