@@ -263,7 +263,7 @@ pub fn registerPrinter(reg: *Registry, ctx: *PrinterCtx) !void {
     // Standard Klipper-proxied endpoints (is_remote). info / objects.* /
     // gcode.* / query_endstops.status. Each forwards to Klippy verbatim and
     // returns the 503 disconnected shape when Klippy is absent.
-    for (proxy_specs, 0..) |spec, i| {
+    inline for (proxy_specs, 0..) |spec, i| {
         ctx.proxies[i] = .{ .parent = ctx, .endpoint = spec.endpoint };
         try reg.registerEndpoint(
             .{ .path = spec.path, .methods = spec.methods, .is_remote = true },

@@ -146,37 +146,51 @@ fn appendStr(buf: []u8, len: usize, s: []const u8) error{NameTooLong}!usize {
     return len + s.len;
 }
 
+/// Derive the dotted JSON-RPC method name at COMPTIME into a static string that
+/// lives in `.rodata` — eliminating the ~150 per-endpoint heap dupes (and the
+/// name_pool ArrayList) that previously held the names for the process lifetime.
+/// The Dispatcher requires stable-lifetime keys; a comptime literal trivially
+/// satisfies that.
+fn deriveNameConst(comptime path: []const u8, comptime verb: RequestType, comptime multi: bool) []const u8 {
+    const arr = comptime blk: {
+        var buf: [max_method_name]u8 = undefined;
+        const s = deriveMethodName(&buf, path, verb, multi) catch @compileError("method name too long: " ++ path);
+        var out: [s.len]u8 = undefined;
+        @memcpy(&out, s);
+        break :blk out;
+    };
+    return &arr;
+}
+
 pub const Registry = struct {
     alloc: std.mem.Allocator,
     dispatcher: *jsonrpc.Dispatcher,
     routes: std.ArrayList(Route) = .empty,
-    /// Owns the method-name strings handed to the Dispatcher (which expects
-    /// caller-owned, stable-lifetime keys).
-    name_pool: std.ArrayList([]u8) = .empty,
 
     pub fn init(alloc: std.mem.Allocator, dispatcher: *jsonrpc.Dispatcher) Registry {
         return .{ .alloc = alloc, .dispatcher = dispatcher };
     }
 
     pub fn deinit(self: *Registry) void {
-        for (self.name_pool.items) |n| self.alloc.free(n);
-        self.name_pool.deinit(self.alloc);
         self.routes.deinit(self.alloc);
     }
 
     /// Register one endpoint: an HTTP route per declared verb plus the derived
     /// JSON-RPC method(s) on the shared dispatcher (when a non-HTTP transport is
     /// present, matching Moonraker which only derives rpc methods then).
+    ///
+    /// `def` is comptime so the dotted method names are derived at compile time
+    /// into static strings (no startup heap dupes). `ctx`/`handler` stay runtime.
     pub fn registerEndpoint(
         self: *Registry,
-        def: ApiDef,
+        comptime def: ApiDef,
         ctx: *anyopaque,
         handler: HandlerFn,
     ) !void {
-        const multi = def.methods.len > 1;
+        const multi = comptime def.methods.len > 1;
 
         // HTTP routes: one per verb.
-        for (def.methods) |verb| {
+        inline for (def.methods) |verb| {
             try self.routes.append(self.alloc, .{
                 .path = def.path,
                 .method = verb,
@@ -190,23 +204,13 @@ pub const Registry = struct {
 
         // JSON-RPC methods: derived only when a non-HTTP transport exists, to
         // mirror Moonraker (`transports != TransportType.HTTP`).
-        if (hasNonHttpTransport(def.transports)) {
-            if (def.is_remote) {
+        if (comptime hasNonHttpTransport(def.transports)) {
+            if (comptime def.is_remote) {
                 // Klipper-proxied: one plain dotted method regardless of verbs.
-                var buf: [max_method_name]u8 = undefined;
-                const derived = try deriveMethodName(&buf, def.path, def.methods[0], false);
-                const owned = try self.alloc.dupe(u8, derived);
-                errdefer self.alloc.free(owned);
-                try self.name_pool.append(self.alloc, owned);
-                try self.dispatcher.register(owned, ctx, handler);
+                try self.dispatcher.register(comptime deriveNameConst(def.path, def.methods[0], false), ctx, handler);
             } else {
-                for (def.methods) |verb| {
-                    var buf: [max_method_name]u8 = undefined;
-                    const derived = try deriveMethodName(&buf, def.path, verb, multi);
-                    const owned = try self.alloc.dupe(u8, derived);
-                    errdefer self.alloc.free(owned);
-                    try self.name_pool.append(self.alloc, owned);
-                    try self.dispatcher.register(owned, ctx, handler);
+                inline for (def.methods) |verb| {
+                    try self.dispatcher.register(comptime deriveNameConst(def.path, verb, multi), ctx, handler);
                 }
             }
         }
@@ -409,17 +413,22 @@ test "fuzz_registry: registerEndpoint then lookup is consistent" {
             var reg = Registry.init(alloc, &d);
             defer reg.deinit();
 
-            // Fixed valid path; vary the method set.
-            const methods: []const RequestType = switch (raw[0] % 4) {
-                0 => &.{.GET},
-                1 => &.{ .GET, .POST },
-                2 => &.{ .GET, .POST, .DELETE },
-                else => &.{.POST},
-            };
-            reg.registerEndpoint(.{ .path = "/server/x", .methods = methods }, @ptrCast(&_ctx), dummyHandler) catch return;
-
-            for (methods) |verb| {
-                try std.testing.expect(reg.lookup(verb, "/server/x") != null);
+            // Fixed valid path; vary the method set. registerEndpoint takes a
+            // comptime def, so select the literal set via an inline switch.
+            switch (raw[0] % 4) {
+                inline 0...3 => |k| {
+                    const methods: []const RequestType = comptime switch (k) {
+                        0 => &.{.GET},
+                        1 => &.{ .GET, .POST },
+                        2 => &.{ .GET, .POST, .DELETE },
+                        else => &.{.POST},
+                    };
+                    reg.registerEndpoint(.{ .path = "/server/x", .methods = methods }, @ptrCast(&_ctx), dummyHandler) catch return;
+                    for (methods) |verb| {
+                        try std.testing.expect(reg.lookup(verb, "/server/x") != null);
+                    }
+                },
+                else => unreachable,
             }
         }
     }.run, .{});

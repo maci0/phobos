@@ -807,18 +807,9 @@ pub fn registerWled(reg: *Registry, ctx: *WledCtx) !void {
     // Remote-only methods (no HTTP route, JSON-RPC only).
     // Moonraker: self.server.register_remote_method("set_wled_state", ...)
     //           self.server.register_remote_method("set_wled", ...)
-    {
-        const name = try reg.alloc.dupe(u8, "set_wled_state");
-        errdefer reg.alloc.free(name);
-        try reg.name_pool.append(reg.alloc, name);
-        try reg.dispatcher.register(name, c, handleSetWledState);
-    }
-    {
-        const name = try reg.alloc.dupe(u8, "set_wled");
-        errdefer reg.alloc.free(name);
-        try reg.name_pool.append(reg.alloc, name);
-        try reg.dispatcher.register(name, c, handleSetWled);
-    }
+    // Static literals → register directly (stable .rodata keys, no name_pool).
+    try reg.dispatcher.register("set_wled_state", c, handleSetWledState);
+    try reg.dispatcher.register("set_wled", c, handleSetWled);
 }
 
 // ===========================================================================

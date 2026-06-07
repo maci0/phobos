@@ -302,7 +302,7 @@ pub fn registerOctoPrint(reg: *Registry, ctx: *OctoPrintCtx) !void {
         .{ .path = "/api/files/moonraker/(?P<relative_path>.+)", .method = .POST, .handler = handleSelectFile },
     };
 
-    for (endpoints) |e| {
+    inline for (endpoints) |e| {
         try reg.registerEndpoint(
             .{
                 .path = e.path,

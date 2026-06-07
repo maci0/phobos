@@ -717,18 +717,10 @@ pub fn registerJobQueue(reg: *Registry, ctx: *JobQueueCtx) !void {
     // Remote-only methods (no HTTP route, JSON-RPC only).
     // Moonraker: self.server.register_remote_method("pause_job_queue", ...)
     //           self.server.register_remote_method("start_job_queue", ...)
-    {
-        const name = try reg.alloc.dupe(u8, "pause_job_queue");
-        errdefer reg.alloc.free(name);
-        try reg.name_pool.append(reg.alloc, name);
-        try reg.dispatcher.register(name, c, handlePause);
-    }
-    {
-        const name = try reg.alloc.dupe(u8, "start_job_queue");
-        errdefer reg.alloc.free(name);
-        try reg.name_pool.append(reg.alloc, name);
-        try reg.dispatcher.register(name, c, handleStart);
-    }
+    // Names are static literals → register directly (dispatcher keys must be
+    // stable-lifetime; .rodata literals are, no dupe/name_pool needed).
+    try reg.dispatcher.register("pause_job_queue", c, handlePause);
+    try reg.dispatcher.register("start_job_queue", c, handleStart);
 }
 
 // ---------------------------------------------------------------------------
