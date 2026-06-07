@@ -118,6 +118,16 @@ const known_active_states = [_][]const u8{ "active", "inactive", "failed", "acti
 /// Known systemd SubState values (systemctl show -p SubState).
 const known_sub_states = [_][]const u8{ "running", "dead", "exited", "plugged", "mounted", "waiting", "auto-restart" };
 
+/// Comptime perfect-hash intern map: a known systemd state string → its static
+/// literal. Derived from the arrays above at compile time (no duplication, no
+/// runtime/heap cost), replacing the per-query linear scan in `internState`.
+const state_intern_map = blk: {
+    const all = known_active_states ++ known_sub_states;
+    var kvs: [all.len]struct { []const u8, []const u8 } = undefined;
+    for (all, 0..) |s, i| kvs[i] = .{ s, s };
+    break :blk std.StaticStringMap([]const u8).initComptime(kvs);
+};
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -194,13 +204,7 @@ pub const MachineCtx = struct {
     /// Map a systemctl state string to an interned (static) slice. Returns
     /// "unknown" for states not in the known set.
     fn internState(state: []const u8) []const u8 {
-        for (known_active_states) |s| {
-            if (std.mem.eql(u8, s, state)) return s;
-        }
-        for (known_sub_states) |s| {
-            if (std.mem.eql(u8, s, state)) return s;
-        }
-        return "unknown";
+        return state_intern_map.get(state) orelse "unknown";
     }
 
     pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus, conns: ?*anyopaque) MachineCtx {

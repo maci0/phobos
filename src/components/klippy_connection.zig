@@ -59,6 +59,14 @@ pub const State = enum {
     shutdown,
 };
 
+/// Comptime perfect-hash map of Klippy `klippy_state` strings → State. Built
+/// entirely at compile time (no runtime/heap cost); unknown → .disconnected.
+const klippy_state_map = std.StaticStringMap(State).initComptime(.{
+    .{ "ready", .ready },
+    .{ "shutdown", .shutdown },
+    .{ "startup", .startup },
+});
+
 /// Parsed result from a Klippy `server.info` response.
 pub const KlippyInfo = struct {
     state: State,
@@ -177,14 +185,7 @@ pub fn parseKlippyInfoResponse(result: std.json.Value) ?KlippyInfo {
                 else => "",
             } else "";
 
-            const state: State = if (std.mem.eql(u8, state_str, "ready"))
-                .ready
-            else if (std.mem.eql(u8, state_str, "shutdown"))
-                .shutdown
-            else if (std.mem.eql(u8, state_str, "startup"))
-                .startup
-            else
-                .disconnected;
+            const state: State = klippy_state_map.get(state_str) orelse .disconnected;
 
             return .{
                 .state = state,
