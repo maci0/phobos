@@ -11,6 +11,33 @@ const std = @import("std");
 const proto = @import("mqtt_proto.zig");
 const net = std.Io.net;
 const Io = std.Io;
+const tls = std.crypto.tls;
+const Certificate = std.crypto.Certificate;
+
+/// TLS transport options for `connectTls`. When `insecure` is set, the server
+/// certificate is accepted as a self-signed cert with no host verification
+/// (for self-signed brokers / tests). Otherwise the cert is verified for `host`
+/// against `ca_path` (a PEM bundle) when given, or the system CA bundle.
+pub const TlsOpts = struct {
+    host: []const u8,
+    insecure: bool = false,
+    ca_path: ?[]const u8 = null,
+};
+
+/// Heap-stable TLS transport state. The std `tls.Client` recovers itself from
+/// `&client.reader`/`&client.writer` via @fieldParentPtr, and holds pointers to
+/// `net_reader`/`net_writer`, so this whole struct must never move after init.
+const TlsState = struct {
+    nrbuf: []u8, // ciphertext transport read buffer (>= tls min_buffer_len)
+    nwbuf: []u8, // ciphertext transport write buffer
+    rbuf: []u8, // decrypted read buffer
+    wbuf: []u8, // decrypted write buffer
+    net_reader: net.Stream.Reader,
+    net_writer: net.Stream.Writer,
+    bundle: ?Certificate.Bundle = null,
+    rwlock: Io.RwLock = .init,
+    client: tls.Client = undefined,
+};
 
 /// Callback invoked for each inbound application PUBLISH. `topic`/`payload`
 /// borrow client-owned memory valid only for the duration of the call — copy if
@@ -37,6 +64,9 @@ pub const MqttClient = struct {
     /// concurrent caller never race the increment. Never yields 0 (invalid id).
     next_id: std.atomic.Value(u16) = std.atomic.Value(u16).init(1),
     connected: bool = false,
+    /// When set, all I/O is routed through this TLS layer instead of the raw
+    /// stream. Heap-owned (must not move); freed in deinit.
+    tls: ?*TlsState = null,
     on_publish: ?PublishHandler = null,
     on_publish_ctx: ?*anyopaque = null,
     /// Serializes writes so a background reader's auto-replies cannot interleave
@@ -57,6 +87,30 @@ pub const MqttClient = struct {
         host: []const u8,
         port: u16,
         opts: proto.ConnectOptions,
+    ) !MqttClient {
+        return connectInner(gpa, io, host, port, opts, null);
+    }
+
+    /// Like `connect`, but wraps the transport in TLS (MQTT over TLS, e.g. port
+    /// 8883). The CONNECT/CONNACK handshake then flows over the encrypted channel.
+    pub fn connectTls(
+        gpa: std.mem.Allocator,
+        io: Io,
+        host: []const u8,
+        port: u16,
+        opts: proto.ConnectOptions,
+        tls_opts: TlsOpts,
+    ) !MqttClient {
+        return connectInner(gpa, io, host, port, opts, tls_opts);
+    }
+
+    fn connectInner(
+        gpa: std.mem.Allocator,
+        io: Io,
+        host: []const u8,
+        port: u16,
+        opts: proto.ConnectOptions,
+        tls_opts: ?TlsOpts,
     ) !MqttClient {
         const ip = if (std.mem.eql(u8, host, "localhost"))
             try net.IpAddress.parseIp4("127.0.0.1", port)
@@ -80,6 +134,12 @@ pub const MqttClient = struct {
         errdefer stream.close(io);
         errdefer self.body_scratch.deinit(gpa);
 
+        // Optional TLS handshake before MQTT CONNECT.
+        if (tls_opts) |to| {
+            self.tls = try setupTls(gpa, io, stream, to);
+        }
+        errdefer if (self.tls) |t| freeTls(gpa, io, t);
+
         // Send CONNECT.
         const connect_pkt = try proto.encodeConnect(gpa, opts);
         defer gpa.free(connect_pkt);
@@ -95,8 +155,74 @@ pub const MqttClient = struct {
         return self;
     }
 
+    /// Build the heap-stable TLS layer over an already-connected `stream` and run
+    /// the TLS handshake. The std `tls.Client` recovers itself via @fieldParentPtr
+    /// and references net_reader/net_writer, so everything lives in the heap struct.
+    fn setupTls(gpa: std.mem.Allocator, io: Io, stream: net.Stream, to: TlsOpts) !*TlsState {
+        const t = try gpa.create(TlsState);
+        errdefer gpa.destroy(t);
+        const min = tls.Client.min_buffer_len;
+        t.* = .{
+            .nrbuf = try gpa.alloc(u8, min + 256),
+            .nwbuf = try gpa.alloc(u8, min + 256),
+            .rbuf = try gpa.alloc(u8, 16384),
+            .wbuf = try gpa.alloc(u8, 16384),
+            .net_reader = undefined,
+            .net_writer = undefined,
+        };
+        errdefer gpa.free(t.nrbuf);
+        errdefer gpa.free(t.nwbuf);
+        errdefer gpa.free(t.rbuf);
+        errdefer gpa.free(t.wbuf);
+        t.net_reader = stream.reader(io, t.nrbuf);
+        t.net_writer = stream.writer(io, t.nwbuf);
+
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        // Fill the TLS entropy from the kernel CSPRNG (std.crypto.random is not
+        // available in this stripped std).
+        var got: usize = 0;
+        while (got < entropy.len) {
+            const rc = std.os.linux.getrandom(entropy[got..].ptr, entropy.len - got, 0);
+            const signed: isize = @bitCast(rc);
+            if (signed <= 0) return error.EntropyFailed;
+            got += rc;
+        }
+        const now = Io.Timestamp.now(io, .real);
+
+        var options: tls.Client.Options = .{
+            .host = if (to.insecure) .no_verification else .{ .explicit = to.host },
+            .ca = .self_signed, // overridden below when verifying
+            .write_buffer = t.wbuf,
+            .read_buffer = t.rbuf,
+            .entropy = &entropy,
+            .realtime_now = now,
+        };
+        if (!to.insecure) {
+            t.bundle = .{ .map = .empty, .bytes = .empty };
+            errdefer if (t.bundle) |*b| b.deinit(gpa);
+            if (to.ca_path) |p|
+                try t.bundle.?.addCertsFromFilePathAbsolute(gpa, io, now, p)
+            else
+                try t.bundle.?.rescan(gpa, io, now);
+            options.ca = .{ .bundle = .{ .gpa = gpa, .io = io, .lock = &t.rwlock, .bundle = &t.bundle.? } };
+        }
+        t.client = try tls.Client.init(&t.net_reader.interface, &t.net_writer.interface, options);
+        return t;
+    }
+
+    fn freeTls(gpa: std.mem.Allocator, io: Io, t: *TlsState) void {
+        _ = io;
+        if (t.bundle) |*b| b.deinit(gpa);
+        gpa.free(t.nrbuf);
+        gpa.free(t.nwbuf);
+        gpa.free(t.rbuf);
+        gpa.free(t.wbuf);
+        gpa.destroy(t);
+    }
+
     pub fn deinit(self: *MqttClient) void {
         self.disconnect();
+        if (self.tls) |t| freeTls(self.gpa, self.io, t);
         self.body_scratch.deinit(self.gpa);
         self.gpa.free(self.reader_buf);
         self.* = undefined;
@@ -112,10 +238,25 @@ pub const MqttClient = struct {
     }
 
     fn writeAll(self: *MqttClient, bytes: []const u8) !void {
+        if (self.tls) |t| {
+            try t.client.writer.writeAll(bytes);
+            // tls flush encrypts pending plaintext into the underlying (net)
+            // writer's buffer but does NOT flush that to the socket — do both.
+            try t.client.writer.flush();
+            try t.net_writer.interface.flush();
+            return;
+        }
         var wbuf: [256]u8 = undefined;
         var w = self.stream.writer(self.io, &wbuf);
         try w.interface.writeAll(bytes);
         try w.interface.flush();
+    }
+
+    /// The inbound byte stream: the decrypted TLS reader when TLS is active, else
+    /// the raw socket reader.
+    fn inIface(self: *MqttClient) *std.Io.Reader {
+        if (self.tls) |t| return &t.client.reader;
+        return &self.rdr.interface;
     }
 
     /// Encode + send a PUBLISH. QoS 1 allocates a packet id; the matching PUBACK
@@ -190,7 +331,7 @@ pub const MqttClient = struct {
     /// Read exactly one packet off the wire (blocking). The returned body
     /// borrows `body_scratch` and is valid only until the next read.
     fn readRawPacket(self: *MqttClient) !RawPacket {
-        const r = &self.rdr.interface;
+        const r = self.inIface();
         const b0 = try r.takeByte();
         // Remaining-length varint.
         var mult: u32 = 1;
@@ -390,6 +531,92 @@ test "client connects, CONNACK accepted, publishes to broker" {
 
     try testing.expectEqualStrings("phobos/instance/test", broker.got_topic[0..broker.got_topic_len]);
     try testing.expectEqualStrings("hello-broker", broker.got_payload[0..broker.got_payload_len]);
+}
+
+fn freeTcpPort(io: Io) !u16 {
+    var ip = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var srv = try ip.listen(io, .{ .reuse_address = true });
+    defer srv.deinit(io);
+    var sa: std.os.linux.sockaddr.in = undefined;
+    var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
+    _ = std.os.linux.getsockname(srv.socket.handle, @ptrCast(&sa), &slen);
+    return std.mem.bigToNative(u16, sa.port);
+}
+
+// End-to-end MQTT over TLS: socat TLS-terminates and forwards to the plaintext
+// TestBroker (std has no TLS server, so socat is the TLS peer). Skips cleanly if
+// openssl/socat aren't installed; a real handshake/CONNACK failure still fails.
+test "client connects over TLS (socat OpenSSL proxy → plaintext broker)" {
+    const alloc = testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir = "/tmp/phobos-mqtt-tls-test";
+    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
+
+    // Generate a self-signed cert (skip the test if openssl is unavailable).
+    const gen = std.process.run(alloc, io, .{ .argv = &.{
+        "openssl",          "req",                "-x509",          "-newkey",
+        "rsa:2048",         "-nodes",             "-keyout",        dir ++ "/key.pem",
+        "-out",             dir ++ "/cert.pem",   "-days",          "1",
+        "-subj",            "/CN=localhost",
+    } }) catch return;
+    alloc.free(gen.stdout);
+    alloc.free(gen.stderr);
+    if (gen.term != .exited or gen.term.exited != 0) return;
+
+    var broker = try TestBroker.bind(alloc, io);
+    const bport = try broker.port();
+    const tport = try freeTcpPort(io);
+
+    // socat: TLS listener on tport, forwarding plaintext to the broker on bport.
+    var lbuf: [128]u8 = undefined;
+    var fbuf: [64]u8 = undefined;
+    const listen = std.fmt.bufPrint(&lbuf, "OPENSSL-LISTEN:{d},cert={s}/cert.pem,key={s}/key.pem,verify=0,reuseaddr,fork", .{ tport, dir, dir }) catch return;
+    const fwd = std.fmt.bufPrint(&fbuf, "TCP:127.0.0.1:{d}", .{bport}) catch return;
+    var socat = std.process.spawn(io, .{
+        .argv = &.{ "socat", listen, fwd },
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch {
+        broker.deinit();
+        return;
+    };
+    defer socat.kill(io); // kill() reaps; wait() would assert id != null
+
+    var bf = io.async(TestBroker.run, .{ &broker, @as(usize, 1) });
+
+    // Connect over TLS, retrying while socat comes up (~up to 5 s).
+    var client: ?MqttClient = null;
+    var tries: usize = 0;
+    while (tries < 50) : (tries += 1) {
+        if (MqttClient.connectTls(alloc, io, "127.0.0.1", tport, .{ .client_id = "phobos-tls" }, .{ .host = "localhost", .insecure = true })) |c| {
+            client = c;
+            break;
+        } else |_| {
+            var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000_000 };
+            _ = std.os.linux.nanosleep(&req, null);
+        }
+    }
+
+    if (client) |*c| {
+        c.rebind();
+        try testing.expect(c.connected);
+        c.publish("phobos/tls", "secure-hi", 0, false) catch {};
+        bf.await(io);
+        c.deinit();
+        broker.deinit();
+        try testing.expectEqualStrings("phobos/tls", broker.got_topic[0..broker.got_topic_len]);
+        try testing.expectEqualStrings("secure-hi", broker.got_payload[0..broker.got_payload_len]);
+    } else {
+        // Never connected: unblock the broker's accept, drain, then fail.
+        broker.deinit();
+        bf.await(io);
+        return error.TlsConnectFailed;
+    }
 }
 
 test "client subscribes and receives an injected publish" {

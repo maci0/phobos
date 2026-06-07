@@ -250,7 +250,11 @@ pub const MqttCtx = struct {
             opts.will_retain = true;
         }
 
-        client.* = mqtt_client.MqttClient.connect(self.gpa, io, cfg.host, cfg.port, opts) catch |e| {
+        const connect_result = if (cfg.enable_tls)
+            mqtt_client.MqttClient.connectTls(self.gpa, io, cfg.host, cfg.port, opts, .{ .host = cfg.host })
+        else
+            mqtt_client.MqttClient.connect(self.gpa, io, cfg.host, cfg.port, opts);
+        client.* = connect_result catch |e| {
             // client.* is uninitialized (connect failed); the errdefer above
             // frees the raw allocation. Do NOT destroy here too (double-free).
             self.state = .disconnected;
