@@ -1065,7 +1065,6 @@ pub const KlippyCtx = struct {
         if (self.server_info) |info| {
             info.klippy_connected = self.isConnected();
             info.klippy_state = @tagName(self.state);
-            info.klippy_path = self.uds_path;
         }
         return true;
     }

@@ -61,6 +61,10 @@ pub const manifest: []const ManifestEntry = &.{
     .{ .method_pattern = "server.info", .field_path = "registered_directories", .rule = .path_relativize },
     .{ .method_pattern = "server.info", .field_path = "warnings", .rule = .structure_compare },
     .{ .method_pattern = "server.info", .field_path = "klippy_state", .rule = .mask },
+    // klippy_connected, like klippy_state, depends on whether a Klippy is up at
+    // capture/replay time (golden captured with none → false; replay against the
+    // sim → true), so it is volatile and masked.
+    .{ .method_pattern = "server.info", .field_path = "klippy_connected", .rule = .mask },
     .{ .method_pattern = "server.info", .field_path = "websocket_count", .rule = .mask },
     // --- server.config ---
     .{ .method_pattern = "server.config", .field_path = "config_file", .rule = .path_relativize },

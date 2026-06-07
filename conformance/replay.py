@@ -65,6 +65,7 @@ MANIFEST: List[Dict[str, Any]] = [
     {"method": "server.info", "field": "registered_directories", "rule": "path_relativize"},
     {"method": "server.info", "field": "warnings", "rule": "structure_compare"},
     {"method": "server.info", "field": "klippy_state", "rule": "mask"},
+    {"method": "server.info", "field": "klippy_connected", "rule": "mask"},
     {"method": "server.info", "field": "websocket_count", "rule": "mask"},
     # --- server.config ---
     {"method": "server.config", "field": "config_file", "rule": "path_relativize"},

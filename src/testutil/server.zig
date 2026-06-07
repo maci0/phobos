@@ -1639,7 +1639,6 @@ test "printer: with Klippy sim, server.info reports klippy_connected" {
     // Klippy state should be reflected as connected/ready.
     try std.testing.expectEqualStrings("ready", result.get("klippy_state").?.string);
     try std.testing.expect(result.get("klippy_connected").?.bool == true);
-    try std.testing.expect(result.get("klippy_path").?.string.len > 0);
 }
 
 test "printer: with Klippy sim, print.start returns success" {

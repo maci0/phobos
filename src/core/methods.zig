@@ -59,7 +59,6 @@ pub const ServerInfo = struct {
     /// transitions. Defaults match the disconnected spine.
     klippy_connected: bool = false,
     klippy_state: []const u8 = "disconnected",
-    klippy_path: []const u8 = "",
     /// Parsed config (set by App after init). Null during tests/dump-api.
     cfg: ?*const config_mod.ConfigParser = null,
     /// Config file path (set by App via setConfig). Used for the `files`
@@ -117,7 +116,6 @@ pub fn buildServerInfo(info: *const ServerInfo, raw: bool, alloc: std.mem.Alloca
 
     try obj.put(alloc, "klippy_connected", .{ .bool = info.klippy_connected });
     try obj.put(alloc, "klippy_state", .{ .string = info.klippy_state });
-    try obj.put(alloc, "klippy_path", .{ .string = info.klippy_path });
 
     var comps: std.json.Array = .init(alloc);
     for (components) |c| try comps.append(.{ .string = c });
