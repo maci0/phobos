@@ -6,9 +6,9 @@
 //!   notify_button_event  — emitted on GPIO button press/release
 //!
 //! No HTTP endpoints are registered; this is a notification-only component.
-//! GPIO hardware monitoring is stubbed (no real GPIO pin reads). The state
-//! machine and notification emission infrastructure are real and follow the
-//! same pattern as power/wled: state tracked in memory, hardware stubbed.
+//! GPIO lines are polled via sysfs (`pollButton`/`pollAndEmitAll`, driven by a
+//! 100 ms background thread started when buttons are configured); each edge
+//! fires notify_button_event. Pin specs are parsed by `parsePin` ("!"=active-low).
 //!
 //! Button status shape (GpioButton.get_status):
 //!   { name, type: "gpio", event: { elapsed_time, received_time, render_time, pressed } }
@@ -16,10 +16,39 @@
 const std = @import("std");
 const notify = @import("../server/notify.zig");
 const registry = @import("../server/registry.zig");
+const gpio_sysfs = @import("gpio_sysfs.zig");
 
 const Registry = registry.Registry;
 
 const NotifyBus = notify.NotifyBus;
+
+/// A parsed Klipper-style button pin: sysfs line number + active-low inversion.
+pub const ParsedPin = struct { line: u32, inverted: bool };
+
+/// Parse a Klipper pin spec into a sysfs line + inversion. Handles a leading
+/// "!" (active-low) and "^"/"~" (pull-up/down, irrelevant to reads), an optional
+/// "gpiochipN/" chip prefix, a "gpio" prefix, and a bare or trailing number.
+/// Returns null when no line number can be extracted.
+pub fn parsePin(spec: []const u8) ?ParsedPin {
+    var s = std.mem.trim(u8, spec, " \t");
+    var inverted = false;
+    // Strip modifier prefixes in any order.
+    while (s.len > 0 and (s[0] == '!' or s[0] == '^' or s[0] == '~')) {
+        if (s[0] == '!') inverted = true;
+        s = s[1..];
+    }
+    // Drop a "gpiochipN/" chip prefix.
+    if (std.mem.indexOfScalar(u8, s, '/')) |slash| s = s[slash + 1 ..];
+    // Drop a leading "gpio" token.
+    if (std.mem.startsWith(u8, s, "gpio")) s = s["gpio".len..];
+    // Take the trailing run of digits.
+    var i: usize = s.len;
+    while (i > 0 and std.ascii.isDigit(s[i - 1])) i -= 1;
+    const digits = s[i..];
+    if (digits.len == 0) return null;
+    const line = std.fmt.parseInt(u32, digits, 10) catch return null;
+    return .{ .line = line, .inverted = inverted };
+}
 
 // ---------------------------------------------------------------------------
 // Button state
@@ -38,6 +67,10 @@ pub const Button = struct {
     min_event_time: f64,
     notification_sent: bool,
     event: ButtonEvent,
+    /// GPIO-poll state: last sampled pressed level + whether a baseline has been
+    /// taken (the first sample sets the baseline without firing an event).
+    prev_pressed: bool = false,
+    initialized: bool = false,
 
     pub fn getStatus(self: *const Button, alloc: std.mem.Allocator) !std.json.Value {
         var obj: std.json.ObjectMap = .empty;
@@ -62,6 +95,11 @@ pub const ButtonCtx = struct {
     bus: ?*NotifyBus,
     io: ?std.Io,
     buttons: std.StringHashMap(Button),
+    /// sysfs GPIO root (overridable for tests).
+    gpio_root: []const u8 = "/sys/class/gpio",
+    /// Background GPIO poll thread (started by App when buttons are configured).
+    poll_thread: ?std.Thread = null,
+    poll_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) ButtonCtx {
         return .{
@@ -73,6 +111,7 @@ pub const ButtonCtx = struct {
     }
 
     pub fn deinit(self: *ButtonCtx) void {
+        self.stopPolling();
         var it = self.buttons.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -84,6 +123,37 @@ pub const ButtonCtx = struct {
 
     pub fn setIo(self: *ButtonCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Start the background GPIO poll thread (no-op if no buttons, no io, or
+    /// already running). Each tick polls all lines and emits on edges.
+    pub fn startPolling(self: *ButtonCtx) void {
+        if (self.poll_thread != null) return;
+        if (self.io == null) return;
+        if (self.buttons.count() == 0) return;
+        self.poll_stop.store(false, .release);
+        self.poll_thread = std.Thread.spawn(.{}, pollLoop, .{self}) catch null;
+    }
+
+    /// Stop and join the poll thread.
+    pub fn stopPolling(self: *ButtonCtx) void {
+        self.poll_stop.store(true, .release);
+        if (self.poll_thread) |t| {
+            t.join();
+            self.poll_thread = null;
+        }
+    }
+
+    fn pollLoop(self: *ButtonCtx) void {
+        while (!self.poll_stop.load(.acquire)) {
+            var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 100_000_000 }; // 100 ms
+            _ = std.os.linux.nanosleep(&req, null);
+            if (self.poll_stop.load(.acquire)) break;
+            if (self.io == null) break;
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            self.pollAndEmitAll(arena.allocator());
+        }
     }
 
     pub fn findButton(self: *ButtonCtx, name: []const u8) ?*Button {
@@ -130,6 +200,59 @@ pub const ButtonCtx = struct {
         b.event.received_time = now;
         b.event.render_time = now;
         b.event.pressed = pressed;
+    }
+
+    /// Sample one button's GPIO line and, on a level change, update its event
+    /// state. Returns true when an edge fired (caller may emit). The first
+    /// sample only establishes the baseline. Returns false when io is absent,
+    /// the pin is unparseable, or the line can't be read (no hardware).
+    pub fn pollButton(self: *ButtonCtx, name: []const u8) !bool {
+        const io = self.io orelse return false;
+        const b = self.buttons.getPtr(name) orelse return error.NotFound;
+        const pp = parsePin(b.pin) orelse return false;
+        const gpio = gpio_sysfs.SysfsGpio{ .io = io, .root = self.gpio_root };
+        const lvl = gpio.readValue(self.gpa, pp.line) catch return false;
+        const pressed = if (pp.inverted) (lvl == 0) else (lvl == 1);
+        if (!b.initialized) {
+            b.initialized = true;
+            b.prev_pressed = pressed;
+            return false; // baseline only
+        }
+        if (pressed == b.prev_pressed) return false; // no edge
+        b.prev_pressed = pressed;
+        try self.sendEvent(name, pressed);
+        self.resetNotificationSent(name);
+        return true;
+    }
+
+    /// Poll every button and emit notify_button_event on each edge. Emits via
+    /// the lock-taking `bus.emit` (safe to call from a standalone poll thread
+    /// that holds no Core lock).
+    pub fn pollAndEmitAll(self: *ButtonCtx, alloc: std.mem.Allocator) void {
+        const io = self.io orelse return;
+        const bus = self.bus orelse {
+            // No bus: still advance edge state (used by tests).
+            var it0 = self.buttons.keyIterator();
+            while (it0.next()) |k| _ = self.pollButton(k.*) catch {};
+            return;
+        };
+        var it = self.buttons.keyIterator();
+        while (it.next()) |k| {
+            const name = k.*;
+            const fired = self.pollButton(name) catch continue;
+            if (!fired) continue;
+            const b = self.buttons.getPtr(name) orelse continue;
+            const status = b.getStatus(alloc) catch continue;
+            var evt: std.json.ObjectMap = .empty;
+            evt.put(alloc, "aux", .{ .object = .empty }) catch continue;
+            inline for ([_][]const u8{ "name", "type", "event" }) |key| {
+                if (status.object.get(key)) |v| evt.put(alloc, key, v) catch {};
+            }
+            var arr: std.json.Array = .init(alloc);
+            arr.append(.{ .object = evt }) catch continue;
+            b.notification_sent = true;
+            bus.emit(io, notify.names.button_event, .{ .array = arr }) catch {};
+        }
     }
 
     /// Emit notify_button_event for a button. Called under the Core lock so
@@ -182,6 +305,91 @@ const testing = std.testing;
 
 fn testCtx(alloc: std.mem.Allocator) ButtonCtx {
     return ButtonCtx.init(alloc, null);
+}
+
+test "parsePin: gpio prefixes, chip prefix, inversion, bare number" {
+    try testing.expectEqual(@as(u32, 26), parsePin("gpio26").?.line);
+    try testing.expectEqual(false, parsePin("gpio26").?.inverted);
+    try testing.expectEqual(@as(u32, 27), parsePin("!gpio27").?.line);
+    try testing.expectEqual(true, parsePin("!gpio27").?.inverted);
+    try testing.expectEqual(@as(u32, 5), parsePin("^~gpio5").?.line); // pull modifiers ignored
+    try testing.expectEqual(@as(u32, 13), parsePin("gpiochip0/gpio13").?.line);
+    try testing.expectEqual(@as(u32, 7), parsePin("7").?.line); // bare number
+    try testing.expectEqual(@as(u32, 4), parsePin("!4").?.line);
+    // No trailing digits → unparseable.
+    try testing.expect(parsePin("") == null);
+    try testing.expect(parsePin("gpio") == null);
+    try testing.expect(parsePin("abc") == null);
+}
+
+test "pollButton: detects a debounced edge against a temp sysfs root" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Dir = std.Io.Dir;
+    const root = "/tmp/phobos_button_test_root";
+    const pindir = root ++ "/gpio26";
+    Dir.cwd().deleteTree(io, root) catch {};
+    try Dir.cwd().createDirPath(io, pindir);
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
+    defer Dir.cwd().deleteTree(io, root) catch {};
+
+    var ctx = ButtonCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.io = io;
+    ctx.gpio_root = root;
+    try ctx.addButton("btn", "gpio26", 0.0);
+
+    // First poll: baseline (level 0 = not pressed), no edge.
+    try testing.expectEqual(false, try ctx.pollButton("btn"));
+    try testing.expect(!ctx.findButton("btn").?.event.pressed);
+
+    // Drive the line high → next poll detects a press edge.
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "1" });
+    try testing.expectEqual(true, try ctx.pollButton("btn"));
+    try testing.expect(ctx.findButton("btn").?.event.pressed);
+
+    // No change → no edge.
+    try testing.expectEqual(false, try ctx.pollButton("btn"));
+
+    // Back to low → release edge.
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
+    try testing.expectEqual(true, try ctx.pollButton("btn"));
+    try testing.expect(!ctx.findButton("btn").?.event.pressed);
+}
+
+test "pollButton: inverted pin (active-low) reads pressed at level 0" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Dir = std.Io.Dir;
+    const root = "/tmp/phobos_button_inv_root";
+    const pindir = root ++ "/gpio9";
+    Dir.cwd().deleteTree(io, root) catch {};
+    try Dir.cwd().createDirPath(io, pindir);
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "1" });
+    defer Dir.cwd().deleteTree(io, root) catch {};
+
+    var ctx = ButtonCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.io = io;
+    ctx.gpio_root = root;
+    try ctx.addButton("b", "!gpio9", 0.0);
+    _ = try ctx.pollButton("b"); // baseline: level 1 + inverted → not pressed
+    try testing.expect(!ctx.findButton("b").?.event.pressed);
+    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
+    try testing.expectEqual(true, try ctx.pollButton("b")); // level 0 + inverted → pressed
+    try testing.expect(ctx.findButton("b").?.event.pressed);
+}
+
+test "fuzz parsePin: arbitrary specs never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = parsePin(&buf);
+        }
+    }.run, .{});
 }
 
 test "init/deinit: no leak" {

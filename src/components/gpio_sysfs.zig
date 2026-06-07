@@ -49,6 +49,24 @@ pub const SysfsGpio = struct {
         try self.writePath(alloc, "{s}/gpio{d}/direction", .{ self.root, pin }, "out");
         try self.writePath(alloc, "{s}/gpio{d}/value", .{ self.root, pin }, if (physical_high) "1" else "0");
     }
+
+    /// Read the physical level of `pin` (export + direction=in best-effort first).
+    /// Returns 1 if the value file's first byte is '1', else 0. Errors if the pin
+    /// is not exported / value file is missing.
+    pub fn readValue(self: SysfsGpio, alloc: std.mem.Allocator, pin: u32) !u1 {
+        self.exportPin(alloc, pin);
+        // Direction=in is best-effort: some pins are input-only / already set.
+        self.writePath(alloc, "{s}/gpio{d}/direction", .{ self.root, pin }, "in") catch {};
+        const path = try std.fmt.allocPrint(alloc, "{s}/gpio{d}/value", .{ self.root, pin });
+        defer alloc.free(path);
+        const f = try Dir.cwd().openFile(self.io, path, .{});
+        defer f.close(self.io);
+        var buf: [8]u8 = undefined;
+        var r = f.reader(self.io, &buf);
+        const n = try r.interface.readSliceShort(&buf);
+        if (n == 0) return error.EmptyValue;
+        return if (buf[0] == '1') 1 else 0;
+    }
 };
 
 // ===========================================================================
