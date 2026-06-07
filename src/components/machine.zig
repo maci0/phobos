@@ -168,6 +168,10 @@ pub const MachineCtx = struct {
     /// typically the test harness. Caller owns returned stdout and stderr.
     run_cmd_fn: ?RunCmdFn = null,
     run_cmd_ctx: ?*anyopaque = null,
+    /// Previous-tick per-interface byte totals for computing proc_stats network
+    /// bandwidth (bytes/sec). Inline + fixed-size (no heap); touched only by the
+    /// single proc_stat timer thread, so no lock.
+    net_prev: [max_net_ifaces]NetSample = [_]NetSample{.{}} ** max_net_ifaces,
 
     pub const ServiceEntry = struct {
         active_state: []const u8,
@@ -303,9 +307,11 @@ fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
         if (parseCpuTemp(txt)) |t| cpu_temp = .{ .float = t };
     }
 
-    // Read network stats.
+    // Read network stats, then fill in per-interface bandwidth from the delta
+    // against the previous tick.
     if (readFile(io, alloc, NET_DEV_PATH)) |txt| {
         network = try parseNetDev(alloc, txt);
+        applyBandwidth(self, network, nowSeconds());
     }
 
     // Read system CPU usage.
@@ -1106,6 +1112,68 @@ fn parseSecondInt(line: []const u8) ?i64 {
 ///   { "<dev>": { rx_bytes, tx_bytes, rx_packets, tx_packets,
 ///                rx_errs, tx_errs, rx_drop, tx_drop, bandwidth } }
 /// Robust against the two header lines and malformed rows. Keys borrow `text`.
+/// Cap on tracked interfaces for bandwidth computation (lo, eth0, wlan0, can0,
+/// usb0… — 8 is ample for an appliance).
+const max_net_ifaces = 8;
+
+/// One interface's previous byte total + timestamp, for bandwidth deltas.
+const NetSample = struct {
+    name: [16]u8 = undefined,
+    name_len: u8 = 0,
+    total: u64 = 0,
+    time: f64 = 0,
+    used: bool = false,
+};
+
+/// Bytes/sec between two cumulative totals over `dt` seconds. Returns 0 for a
+/// non-positive interval or a counter reset/rollover (cur < prev).
+fn computeBandwidth(prev_total: u64, cur_total: u64, dt: f64) f64 {
+    if (dt <= 0) return 0;
+    if (cur_total < prev_total) return 0;
+    return @as(f64, @floatFromInt(cur_total - prev_total)) / dt;
+}
+
+/// Overwrite each interface's `bandwidth` field in a parsed /proc/net/dev object
+/// with the real bytes/sec delta vs the previous tick, and refresh the cache.
+/// First sighting of an interface leaves bandwidth at 0 (no baseline yet).
+/// Matches proc_stats.py's per-tick `bytes_sec` computation.
+fn applyBandwidth(self: *MachineCtx, network: std.json.Value, now: f64) void {
+    if (network != .object) return;
+    var it = network.object.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const dev = entry.value_ptr.*;
+        if (dev != .object) continue;
+        const rx: i64 = if (dev.object.get("rx_bytes")) |v| (if (v == .integer) v.integer else 0) else 0;
+        const tx: i64 = if (dev.object.get("tx_bytes")) |v| (if (v == .integer) v.integer else 0) else 0;
+        const cur_total: u64 = @intCast(@max(@as(i64, 0), rx) + @max(@as(i64, 0), tx));
+
+        var slot: ?*NetSample = null;
+        var free_slot: ?*NetSample = null;
+        for (&self.net_prev) |*s| {
+            if (s.used and std.mem.eql(u8, s.name[0..s.name_len], name)) {
+                slot = s;
+                break;
+            }
+            if (!s.used and free_slot == null) free_slot = s;
+        }
+        if (slot) |s| {
+            const bw = computeBandwidth(s.total, cur_total, now - s.time);
+            if (dev.object.getPtr("bandwidth")) |bp| bp.* = .{ .float = bw };
+            s.total = cur_total;
+            s.time = now;
+        } else if (free_slot) |s| {
+            if (name.len <= s.name.len) {
+                @memcpy(s.name[0..name.len], name);
+                s.name_len = @intCast(name.len);
+                s.total = cur_total;
+                s.time = now;
+                s.used = true;
+            }
+        }
+    }
+}
+
 pub fn parseNetDev(alloc: std.mem.Allocator, text: []const u8) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -1947,6 +2015,71 @@ test "parseNetDev: garbage safe (no crash, empty)" {
     const a = arena.allocator();
     const v = try parseNetDev(a, "eth0: not enough fields\nrandom\n");
     try testing.expectEqual(@as(usize, 0), v.object.count());
+}
+
+// ---- computeBandwidth ----
+
+test "computeBandwidth: bytes/sec delta, guards reset and zero interval" {
+    try testing.expectEqual(@as(f64, 1000.0), computeBandwidth(1000, 2000, 1.0));
+    try testing.expectEqual(@as(f64, 500.0), computeBandwidth(0, 1000, 2.0));
+    try testing.expectEqual(@as(f64, 0.0), computeBandwidth(2000, 1000, 1.0)); // counter reset
+    try testing.expectEqual(@as(f64, 0.0), computeBandwidth(1000, 2000, 0.0)); // zero interval
+    try testing.expectEqual(@as(f64, 0.0), computeBandwidth(1000, 2000, -1.0)); // negative interval
+}
+
+test "fuzz computeBandwidth: never crashes, never negative" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const prev = smith.valueWithHash(u64, 0);
+            const cur = smith.valueWithHash(u64, 1);
+            const dt: f64 = @floatFromInt(smith.valueRangeAtMostWithHash(u32, 0, 1_000_000, 2));
+            const bw = computeBandwidth(prev, cur, dt);
+            try testing.expect(bw >= 0.0);
+        }
+    }.run, .{});
+}
+
+// ---- applyBandwidth ----
+
+test "applyBandwidth: zero on first sight, real delta on second tick" {
+    var c = MachineCtx.init(testing.allocator, null, null);
+    defer c.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const t1 =
+        \\eth0: 1000 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0
+    ;
+    const n1 = try parseNetDev(a, t1);
+    applyBandwidth(&c, n1, 10.0);
+    // First sighting: no baseline → bandwidth stays 0.
+    try testing.expectEqual(@as(f64, 0.0), n1.object.get("eth0").?.object.get("bandwidth").?.float);
+
+    // Second tick 2s later: rx+tx grew 1500→4500 → 3000 bytes / 2s = 1500 B/s.
+    const t2 =
+        \\eth0: 3000 0 0 0 0 0 0 0 1500 0 0 0 0 0 0 0
+    ;
+    const n2 = try parseNetDev(a, t2);
+    applyBandwidth(&c, n2, 12.0);
+    try testing.expectEqual(@as(f64, 1500.0), n2.object.get("eth0").?.object.get("bandwidth").?.float);
+}
+
+test "fuzz applyBandwidth: arbitrary net objects never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var c = MachineCtx.init(testing.allocator, null, null);
+            defer c.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var raw: [64]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            const net = parseNetDev(a, &raw) catch return;
+            applyBandwidth(&c, net, 1.0);
+            applyBandwidth(&c, net, 2.0);
+        }
+    }.run, .{});
 }
 
 // ---- parseCpuTemp ----
