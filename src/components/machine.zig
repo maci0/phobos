@@ -1355,7 +1355,10 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
     try out.put(alloc, "system_cpu_usage", sys_cpu);
     try out.put(alloc, "system_uptime", .{ .float = uptimeSeconds() });
     try out.put(alloc, "system_memory", sys_mem);
-    const ws_count: i64 = if (ctx.conns) |c| @intCast(c.count(ctx.io.?)) else 0;
+    const ws_count: i64 = if (ctx.conns) |c| blk: {
+        const cio = ctx.io orelse break :blk 0;
+        break :blk @intCast(c.count(cio));
+    } else 0;
     try out.put(alloc, "websocket_connections", .{ .integer = ws_count });
     return .{ .object = out };
 }

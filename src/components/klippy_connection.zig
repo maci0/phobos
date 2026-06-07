@@ -554,9 +554,9 @@ pub const KlippyCtx = struct {
                 self.closeStream(io);
                 // Check stopping before reconnect sleep.
                 if (self.stopping) break;
-                // Sleep ~1s between reconnect attempts.
-                const delay: std.Io.Duration = .{ .nanoseconds = 1_000_000_000 };
-                std.Io.sleep(self.io.?, delay, .real) catch {};
+                // Sleep ~1s between reconnect attempts (monotonic, so a wall-clock
+                // adjustment can't lengthen/shorten the backoff).
+                std.Io.sleep(self.io.?, std.Io.Duration.fromSeconds(1), .awake) catch {};
                 if (self.stopping) break;
                 continue;
             };
