@@ -36,6 +36,7 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const clock = @import("../util/clock.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 
@@ -245,9 +246,7 @@ pub const WebcamCtx = struct {
     fn newUid(self: *WebcamCtx, alloc: std.mem.Allocator) ![]const u8 {
         // Use a simple counter-based approach since we can't call UUID4 easily.
         // In production Moonraker uses uuid.uuid4(). We use a timestamp + count.
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-        const now_ns = @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+        const now_ns = clock.wallNanos();
         var attempt: u64 = 0;
         while (attempt < 1000) : (attempt += 1) {
             var buf: [40]u8 = undefined;

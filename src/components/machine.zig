@@ -41,6 +41,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
+const clock = @import("../util/clock.zig");
 
 const Registry = registry.Registry;
 const NotifyBus = notify.NotifyBus;
@@ -368,9 +369,7 @@ fn parseProcMem(text: []const u8) i64 {
 /// Process CPU usage since last call (thread-local state). Returns 0 on first
 /// call, then the percentage of one CPU core consumed between successive calls.
 fn procCpuUsage() f64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.PROCESS_CPUTIME_ID, &ts);
-    const proc_now = @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+    const proc_now = clock.processCpuSeconds();
     const wall_now = nowSeconds();
 
     const S = struct {
@@ -1364,16 +1363,12 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
 }
 
 fn nowSeconds() f64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+    return clock.wallSeconds();
 }
 
 /// System uptime from CLOCK_BOOTTIME (seconds). 0 on failure.
 fn uptimeSeconds() f64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.BOOTTIME, &ts);
-    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+    return clock.bootSeconds();
 }
 
 // ===========================================================================

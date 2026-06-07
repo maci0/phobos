@@ -32,6 +32,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
+const clock = @import("../util/clock.zig");
 const notify = @import("../server/notify.zig");
 
 const Registry = registry.Registry;
@@ -439,16 +440,12 @@ pub const QueuedJob = struct {
 
 /// Get current time as float seconds (CLOCK_REALTIME).
 fn nowSecs() f64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+    return clock.wallSeconds();
 }
 
 /// Generate a unique job_id using monotonic time + address.
 fn genJobId(alloc: std.mem.Allocator, seq: u32) ![]u8 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts);
-    const ns = @as(u64, @intCast(@as(i64, ts.sec))) *% 1_000_000_000 +% @as(u64, @intCast(@as(i64, ts.nsec)));
+    const ns = clock.monotonicNanos();
     // 16 hex ns + 4 hex seq → unique even within one nanosecond.
     var buf: [20]u8 = undefined;
     const s = try std.fmt.bufPrint(&buf, "{X:0>16}{X:0>4}", .{ ns, seq & 0xFFFF });

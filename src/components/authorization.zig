@@ -49,6 +49,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
+const clock = @import("../util/clock.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -781,15 +782,11 @@ pub const AuthCtx = struct {
 };
 
 fn nowSeconds() f64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1e9;
+    return clock.wallSeconds();
 }
 
 fn nowSecondsInt() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    return @intCast(ts.sec);
+    return clock.wallSecondsInt();
 }
 
 // ---------------------------------------------------------------------------

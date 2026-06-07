@@ -22,6 +22,7 @@ const serial_mod = @import("serial.zig");
 
 const Registry = registry.Registry;
 const Core = @import("../server/core.zig").Core;
+const clock = @import("../util/clock.zig");
 
 /// Parsed TD-1 serial line. Mirrors td1.py `_parse_line`: the device emits
 /// comma-separated lines; when there are ≥6 fields, field[4] is the TD value
@@ -195,21 +196,7 @@ pub const Td1Connection = struct {
 /// Current UTC time as an ISO-8601 string ("YYYY-MM-DDTHH:MM:SSZ"), written into
 /// `buf` (needs >= 20 bytes). Used for TD-1 scan timestamps.
 pub fn nowIso8601(buf: []u8) []const u8 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    const secs: u64 = @intCast(@max(0, ts.sec));
-    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
-    const yd = es.getEpochDay().calculateYearDay();
-    const md = yd.calculateMonthDay();
-    const ds = es.getDaySeconds();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year,
-        md.month.numeric(),
-        @as(u32, md.day_index) + 1,
-        ds.getHoursIntoDay(),
-        ds.getMinutesIntoHour(),
-        ds.getSecondsIntoMinute(),
-    }) catch "1970-01-01T00:00:00Z";
+    return clock.iso8601(buf);
 }
 
 // ---------------------------------------------------------------------------

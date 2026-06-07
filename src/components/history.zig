@@ -35,6 +35,7 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
+const clock = @import("../util/clock.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -495,11 +496,8 @@ pub const HistoryCtx = struct {
         try saveTotals(self, alloc, .{ .object = new_obj });
     }
 
-    fn nowSecs(self: *HistoryCtx) f64 {
-        _ = self;
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-        return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+    fn nowSecs(_: *HistoryCtx) f64 {
+        return clock.wallSeconds();
     }
 };
 

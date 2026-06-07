@@ -37,6 +37,7 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const clock = @import("../util/clock.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 const rss = @import("rss.zig");
@@ -469,9 +470,7 @@ fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
     const ns = self.store.getNamespace(alloc, ns_entries) catch return;
     if (ns != .object) return;
 
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-    const now: f64 = @floatFromInt(ts.sec);
+    const now: f64 = @floatFromInt(clock.wallSecondsInt());
 
     var it = ns.object.iterator();
     while (it.next()) |kv| {
@@ -715,9 +714,7 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
         while (it.next()) |kv| try new_entry.put(alloc, kv.key_ptr.*, kv.value_ptr.*);
     }
     try new_entry.put(alloc, "dismissed", .{ .bool = true });
-    var _ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &_ts);
-    const cur_time = @as(f64, @floatFromInt(_ts.sec)) + @as(f64, @floatFromInt(_ts.nsec)) / 1.0e9;
+    const cur_time = clock.wallSeconds();
     try new_entry.put(alloc, "date_dismissed", .{ .float = cur_time });
     if (wake_time) |wt| {
         try new_entry.put(alloc, "dismiss_wake", .{ .float = cur_time + @as(f64, @floatFromInt(wt)) });

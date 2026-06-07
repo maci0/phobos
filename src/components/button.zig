@@ -16,6 +16,7 @@
 const std = @import("std");
 const notify = @import("../server/notify.zig");
 const registry = @import("../server/registry.zig");
+const clock = @import("../util/clock.zig");
 const gpio_sysfs = @import("gpio_sysfs.zig");
 
 const Registry = registry.Registry;
@@ -190,9 +191,7 @@ pub const ButtonCtx = struct {
     /// Returns the new pressed state or error.NotFound.
     pub fn sendEvent(self: *ButtonCtx, name: []const u8, pressed: bool) !void {
         const b = self.buttons.getPtr(name) orelse return error.NotFound;
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
-        const now = @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1.0e9;
+        const now = clock.wallSeconds();
         // Seconds since the previous event for this button (Moonraker GpioButton
         // reports elapsed time between presses). 0 on the first event.
         b.event.elapsed_time = if (b.event.received_time > 0) now - b.event.received_time else 0;
