@@ -98,10 +98,13 @@ pub const Sensor = struct {
     history: std.StringHashMap(MeasurementRing),
     param_info: std.ArrayList(ParameterInfo),
     error_state: ?[]const u8,
-    store_size: usize,
     /// MQTT state topic (Moonraker `[sensor] type: mqtt`, `state_topic:`). When
     /// set, inbound MQTT messages on this topic feed measurements.
     state_topic: ?[]const u8 = null,
+
+    /// Ring capacity per parameter. Constant (Moonraker's sensor_store_size
+    /// default) — a comptime const, not a per-sensor field.
+    pub const store_size: usize = 1200;
 
     pub fn init(alloc: std.mem.Allocator, sensor_id: []const u8, sensor_type: []const u8) !Sensor {
         return .{
@@ -113,7 +116,6 @@ pub const Sensor = struct {
             .history = std.StringHashMap(MeasurementRing).init(alloc),
             .param_info = .empty,
             .error_state = null,
-            .store_size = 1200,
             .state_topic = null,
         };
     }
@@ -157,7 +159,7 @@ pub const Sensor = struct {
         if (!gop.found_existing) {
             // Build the ring + key first; if either fails, remove the
             // half-initialized entry so deinit never frees an uninitialized ring.
-            const ring = MeasurementRing.init(alloc, self.store_size) catch |e| {
+            const ring = MeasurementRing.init(alloc, store_size) catch |e| {
                 _ = self.history.remove(param);
                 return e;
             };

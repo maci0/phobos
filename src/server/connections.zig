@@ -155,6 +155,9 @@ pub const Connections = struct {
         {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
+            // Count is known under the lock — size the list once instead of
+            // growing it by doubling on every broadcast.
+            targets.ensureTotalCapacity(alloc, self.list.items.len) catch {};
             for (self.list.items) |conn| {
                 if (topic) |t| {
                     if (!conn.subs.contains(t)) continue;

@@ -182,7 +182,8 @@ pub const MachineCtx = struct {
         time: f64 = 0,
         cpu_usage: f64 = 0,
         memory: i64 = 0,
-        mem_units: []const u8 = "kB",
+        // mem_units is always "kB" — emitted as a constant at JSON-build time
+        // (buildMoonrakerStats) rather than stored per sample (×30 slots).
     };
 
     /// Map a systemctl state string to an interned (static) slice. Returns
@@ -431,7 +432,7 @@ fn buildMoonrakerStats(self: *MachineCtx, alloc: std.mem.Allocator, io: ?std.Io)
         sample.put(alloc, "time", .{ .float = s.time }) catch continue;
         sample.put(alloc, "cpu_usage", .{ .float = s.cpu_usage }) catch continue;
         sample.put(alloc, "memory", .{ .integer = s.memory }) catch continue;
-        sample.put(alloc, "mem_units", .{ .string = s.mem_units }) catch continue;
+        sample.put(alloc, "mem_units", .{ .string = "kB" }) catch continue;
         arr.append(.{ .object = sample }) catch continue;
     }
     return .{ .array = arr };
@@ -493,6 +494,9 @@ fn readFile(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
     var rbuf: [4096]u8 = undefined;
     var fr = f.reader(io, &rbuf);
     var out: std.ArrayList(u8) = .empty;
+    // One up-front reservation avoids the realloc chain as chunks append; /proc
+    // files read here (stat, meminfo, net/dev, temp) fit comfortably in 4 KiB.
+    out.ensureTotalCapacity(alloc, 4096) catch {};
     // Cap total read to guard against unbounded /proc files.
     const max_total: usize = 4 * 1024 * 1024;
     while (out.items.len < max_total) {
@@ -1214,13 +1218,17 @@ pub fn handleShutdown(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocat
 /// True if a service name is allowed (matches machine.py `is_service_allowed`):
 /// the default allowed list, any phobos-registered service, or anything
 /// matching moonraker[_-]?\d* / klipper[_-]?\d*.
+/// Comptime perfect-hash set of all statically-allowed service names (in
+/// .rodata, no runtime allocation), replacing two linear scans per call.
+const allowed_services_set = std.StaticStringMap(void).initComptime(blk: {
+    const all = default_allowed_services ++ available_services;
+    var kvs: [all.len]struct { []const u8 } = undefined;
+    for (all, 0..) |s, i| kvs[i] = .{s};
+    break :blk kvs;
+});
+
 pub fn isServiceAllowed(name: []const u8) bool {
-    for (default_allowed_services) |s| {
-        if (std.mem.eql(u8, s, name)) return true;
-    }
-    for (available_services) |s| {
-        if (std.mem.eql(u8, s, name)) return true;
-    }
+    if (allowed_services_set.has(name)) return true;
     return prefixWithOptIndex(name, "moonraker") or prefixWithOptIndex(name, "klipper");
 }
 

@@ -238,11 +238,11 @@ pub const JobQueueCtx = struct {
             }
         }
 
-        var script_buf: [512]u8 = undefined;
-        const script = try std.fmt.bufPrint(&script_buf, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{front.filename});
+        // Build on the arena (no fixed 512B cap → no truncation, no extra dupe).
+        const script = try std.fmt.allocPrint(a, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{front.filename});
 
         var params_obj = try std.json.ObjectMap.init(a, &.{}, &.{});
-        try params_obj.put(a, "script", .{ .string = try a.dupe(u8, script) });
+        try params_obj.put(a, "script", .{ .string = script });
         _ = try self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = params_obj }, a);
     }
 

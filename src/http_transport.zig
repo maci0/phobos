@@ -241,7 +241,9 @@ pub fn handleParsedAuth(
         const bytes = try srv.core.run(srv.io, jsonrpc.Dispatcher.handle, .{ srv.dispatcher, body, alloc });
         // A JSON-RPC notification yields empty bytes; respond 204-style with an
         // empty object to keep the body valid JSON.
-        const out = if (bytes.len == 0) try alloc.dupe(u8, "{}") else bytes;
+        // Response.body is []const u8, so the empty-notification reply can be the
+        // literal directly — no per-request allocation.
+        const out: []const u8 = if (bytes.len == 0) "{}" else bytes;
         return .{ .status = .ok, .body = out };
     }
 
