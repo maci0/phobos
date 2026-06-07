@@ -1948,7 +1948,9 @@ fn queryV4l2Cap(io: std.Io, alloc: std.mem.Allocator, dev_path: []const u8) ?V4l
     defer f.close(io);
     var buf: [104]u8 align(8) = [_]u8{0} ** 104;
     const rc = std.os.linux.ioctl(f.handle, VIDIOC_QUERYCAP, @intFromPtr(&buf));
-    if (std.os.linux.E.init(rc) != .SUCCESS) return null;
+    // Raw linux syscalls return -errno (a large usize) on failure.
+    const signed: isize = @bitCast(rc);
+    if (signed < 0) return null;
     return .{
         .driver = alloc.dupe(u8, cField(buf[0..16])) catch return null,
         .bus_info = alloc.dupe(u8, cField(buf[48..80])) catch return null,
