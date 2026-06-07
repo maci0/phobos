@@ -1818,11 +1818,45 @@ fn readLinkBasename(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?[]c
     return alloc.dupe(u8, std.fs.path.basename(buf[0..n])) catch null;
 }
 
+/// A /dev/serial/by-{id,path} symlink: its full path + the tty basename it
+/// points at (e.g. link=/dev/serial/by-id/usb-Klipper..., target_base=ttyACM0).
+const SerialLink = struct { link: []const u8, target_base: []const u8 };
+
+/// Scan a /dev/serial/by-* directory into a list of (link, target-basename).
+/// Returns an empty slice when the directory is absent.
+fn collectSerialLinks(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) []const SerialLink {
+    var list: std.ArrayListUnmanaged(SerialLink) = .empty;
+    var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return &.{};
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        const link = std.fs.path.join(alloc, &.{ dir_path, entry.name }) catch continue;
+        const target_base = readLinkBasename(io, alloc, link) orelse continue;
+        list.append(alloc, .{ .link = link, .target_base = target_base }) catch continue;
+    }
+    return list.items;
+}
+
+fn findSerialLink(links: []const SerialLink, dev_name: []const u8) ?[]const u8 {
+    for (links) |l| {
+        if (std.mem.eql(u8, l.target_base, dev_name)) return l.link;
+    }
+    return null;
+}
+
 /// Build the JSON object for one tty under `tty_root` (e.g. /sys/class/tty).
 /// Returns null when the tty has no backing `device` folder. driver_name comes
 /// from the `device/driver` symlink; device_type from `device/subsystem`
-/// (usb → "usb", else "hardware_uart"). Matches machine.py find_serial_devices.
-fn buildSerialDevice(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, dev_name: []const u8) !?std.json.Value {
+/// (usb → "usb", else "hardware_uart"). path_by_id/by_hardware are resolved from
+/// the supplied by-id/by-path link tables. Matches machine.py find_serial_devices.
+fn buildSerialDevice(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    tty_root: []const u8,
+    dev_name: []const u8,
+    by_id: []const SerialLink,
+    by_path: []const SerialLink,
+) !?std.json.Value {
     const dev_dir = try std.fs.path.join(alloc, &.{ tty_root, dev_name, "device" });
     _ = Dir.cwd().statFile(io, dev_dir, .{}) catch return null;
     const driver = readLinkBasename(io, alloc, try std.fs.path.join(alloc, &.{ dev_dir, "driver" })) orelse "";
@@ -1837,18 +1871,20 @@ fn buildSerialDevice(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8,
     try dev.put(alloc, "device_path", .{ .string = try std.fmt.allocPrint(alloc, "/dev/{s}", .{dev_name}) });
     try dev.put(alloc, "device_name", .{ .string = try alloc.dupe(u8, dev_name) });
     try dev.put(alloc, "driver_name", .{ .string = driver });
-    try dev.put(alloc, "path_by_hardware", .null);
-    try dev.put(alloc, "path_by_id", .null);
+    try dev.put(alloc, "path_by_hardware", if (findSerialLink(by_path, dev_name)) |p| .{ .string = p } else .null);
+    try dev.put(alloc, "path_by_id", if (findSerialLink(by_id, dev_name)) |p| .{ .string = p } else .null);
     try dev.put(alloc, "usb_location", .null);
     return .{ .object = dev };
 }
 
 fn enumSerial(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
+    const by_id = collectSerialLinks(io, alloc, "/dev/serial/by-id");
+    const by_path = collectSerialLinks(io, alloc, "/dev/serial/by-path");
     var dir = Dir.cwd().openDir(io, "/sys/class/tty", .{ .iterate = true }) catch return;
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (try buildSerialDevice(io, alloc, "/sys/class/tty", entry.name)) |dev| try arr.append(dev);
+        if (try buildSerialDevice(io, alloc, "/sys/class/tty", entry.name, by_id, by_path)) |dev| try arr.append(dev);
     }
 }
 
@@ -2064,15 +2100,23 @@ test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
     Dir.cwd().symLink(io, "../drivers/cdc_acm", dd ++ "/driver", .{}) catch {};
     Dir.cwd().symLink(io, "../bus/usb", dd ++ "/subsystem", .{}) catch {};
 
-    const v = (try buildSerialDevice(io, a, root, "ttyACM0")).?;
+    // A by-id symlink pointing at ttyACM0.
+    const byid_dir = root ++ "/by-id";
+    try Dir.cwd().createDirPath(io, byid_dir);
+    Dir.cwd().symLink(io, "../../ttyACM0", byid_dir ++ "/usb-Klipper_stm32-if00") catch {};
+    const by_id = collectSerialLinks(io, a, byid_dir);
+
+    const v = (try buildSerialDevice(io, a, root, "ttyACM0", by_id, &.{})).?;
     const o = v.object;
     try testing.expectEqualStrings("/dev/ttyACM0", o.get("device_path").?.string);
     try testing.expectEqualStrings("cdc_acm", o.get("driver_name").?.string);
     try testing.expectEqualStrings("usb", o.get("device_type").?.string);
+    try testing.expectEqualStrings(byid_dir ++ "/usb-Klipper_stm32-if00", o.get("path_by_id").?.string);
+    try testing.expectEqual(std.json.Value.null, o.get("path_by_hardware").?);
 
     // A tty with no device folder → null.
     try Dir.cwd().createDirPath(io, root ++ "/tty0");
-    try testing.expect((try buildSerialDevice(io, a, root, "tty0")) == null);
+    try testing.expect((try buildSerialDevice(io, a, root, "tty0", &.{}, &.{})) == null);
 }
 
 // ---- buildUsbDevice ----
