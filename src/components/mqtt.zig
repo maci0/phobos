@@ -236,7 +236,8 @@ pub const MqttCtx = struct {
         }
 
         client.* = mqtt_client.MqttClient.connect(self.gpa, io, cfg.host, cfg.port, opts) catch |e| {
-            self.gpa.destroy(client);
+            // client.* is uninitialized (connect failed); the errdefer above
+            // frees the raw allocation. Do NOT destroy here too (double-free).
             self.state = .disconnected;
             return e;
         };
@@ -271,10 +272,9 @@ pub const MqttCtx = struct {
         self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch |e| {
             client.disconnect();
             client.deinit();
-            self.gpa.destroy(client);
-            self.client = null;
+            self.client = null; // clear the dangling pointer before errdefer frees it
             self.state = .disconnected;
-            return e;
+            return e; // errdefer above does the destroy (don't double-free)
         };
     }
 
@@ -3574,4 +3574,23 @@ test "mqtt: inbound broker PUBLISH fires the on_message hook" {
 
     try testing.expectEqualStrings("phobos/chamber/state", cap.topic[0..cap.topic_len]);
     try testing.expectEqualStrings("{\"temperature\":21.0}", cap.payload[0..cap.payload_len]);
+}
+
+test "connectBroker: failed connect frees client exactly once (no double-free)" {
+    // Regression: the connect-failure path must not destroy(client) AND fire the
+    // errdefer (double-free). testing.allocator aborts on a double-free.
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = MqttCtx.init(alloc);
+    defer ctx.deinit();
+    try ctx.setConfig("127.0.0.1", 1, null, null); // port 1: connect refused
+    ctx.setIo(io);
+
+    // Connect is expected to fail (refused). Freeing happens inside connectBroker;
+    // a double-free would abort the test under testing.allocator.
+    ctx.connectBroker() catch {};
+    try std.testing.expect(!ctx.hasBrokerConnection());
 }

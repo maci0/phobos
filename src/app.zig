@@ -186,7 +186,7 @@ pub const App = struct {
                 return error.MkdirFailed;
             }
             store_ptr.* = LmdbStore.open(tmp_path, false) catch |e| {
-                alloc.destroy(store_ptr);
+                // errdefer above frees store_ptr; don't destroy here too.
                 return e;
             };
             db_ctx.* = .{ .store = store_ptr.dataStore() };

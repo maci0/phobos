@@ -74,6 +74,11 @@ pub const MqttClient = struct {
             .reader_buf = reader_buf,
             .rdr = stream.reader(io, reader_buf),
         };
+        // On any handshake-failure return below, release the socket + the
+        // (possibly grown) body scratch. These do NOT fire on the success path
+        // (the returned struct owns them; the caller's deinit frees them).
+        errdefer stream.close(io);
+        errdefer self.body_scratch.deinit(gpa);
 
         // Send CONNECT.
         const connect_pkt = try proto.encodeConnect(gpa, opts);
