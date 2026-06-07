@@ -1810,23 +1810,45 @@ pub fn handleSerial(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
     return .{ .object = obj };
 }
 
+/// Read a symlink and return the basename of its target, duped into `alloc`.
+fn readLinkBasename(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    var buf: [512]u8 = undefined;
+    const n = Dir.cwd().readLink(io, path, &buf) catch return null;
+    if (n == 0) return null;
+    return alloc.dupe(u8, std.fs.path.basename(buf[0..n])) catch null;
+}
+
+/// Build the JSON object for one tty under `tty_root` (e.g. /sys/class/tty).
+/// Returns null when the tty has no backing `device` folder. driver_name comes
+/// from the `device/driver` symlink; device_type from `device/subsystem`
+/// (usb → "usb", else "hardware_uart"). Matches machine.py find_serial_devices.
+fn buildSerialDevice(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, dev_name: []const u8) !?std.json.Value {
+    const dev_dir = try std.fs.path.join(alloc, &.{ tty_root, dev_name, "device" });
+    _ = Dir.cwd().statFile(io, dev_dir, .{}) catch return null;
+    const driver = readLinkBasename(io, alloc, try std.fs.path.join(alloc, &.{ dev_dir, "driver" })) orelse "";
+    const subsystem = readLinkBasename(io, alloc, try std.fs.path.join(alloc, &.{ dev_dir, "subsystem" }));
+    const device_type: []const u8 = if (subsystem) |s|
+        (if (std.mem.eql(u8, s, "usb")) "usb" else "hardware_uart")
+    else
+        "unknown";
+
+    var dev: std.json.ObjectMap = .empty;
+    try dev.put(alloc, "device_type", .{ .string = device_type });
+    try dev.put(alloc, "device_path", .{ .string = try std.fmt.allocPrint(alloc, "/dev/{s}", .{dev_name}) });
+    try dev.put(alloc, "device_name", .{ .string = try alloc.dupe(u8, dev_name) });
+    try dev.put(alloc, "driver_name", .{ .string = driver });
+    try dev.put(alloc, "path_by_hardware", .null);
+    try dev.put(alloc, "path_by_id", .null);
+    try dev.put(alloc, "usb_location", .null);
+    return .{ .object = dev };
+}
+
 fn enumSerial(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
     var dir = Dir.cwd().openDir(io, "/sys/class/tty", .{ .iterate = true }) catch return;
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        const dev_dir = try std.fs.path.join(alloc, &.{ "/sys/class/tty", entry.name, "device" });
-        // Skip ttys without a backing device folder.
-        _ = Dir.cwd().statFile(io, dev_dir, .{}) catch continue;
-        var dev: std.json.ObjectMap = .empty;
-        try dev.put(alloc, "device_type", .{ .string = "unknown" });
-        try dev.put(alloc, "device_path", .{ .string = try std.fmt.allocPrint(alloc, "/dev/{s}", .{entry.name}) });
-        try dev.put(alloc, "device_name", .{ .string = try alloc.dupe(u8, entry.name) });
-        try dev.put(alloc, "driver_name", .{ .string = "" });
-        try dev.put(alloc, "path_by_hardware", .null);
-        try dev.put(alloc, "path_by_id", .null);
-        try dev.put(alloc, "usb_location", .null);
-        try arr.append(.{ .object = dev });
+        if (try buildSerialDevice(io, alloc, "/sys/class/tty", entry.name)) |dev| try arr.append(dev);
     }
 }
 
@@ -2019,6 +2041,38 @@ test "parseVirtualization: bare metal yields none" {
     try testing.expectEqualStrings("none", r.virt_type);
     try testing.expectEqualStrings("none", r.virt_identifier);
     try testing.expectEqualStrings("none", parseVirtualization("").virt_type);
+}
+
+// ---- buildSerialDevice ----
+
+test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const root = "/tmp/phobos_tty_test";
+    Dir.cwd().deleteTree(io, root) catch {};
+    defer Dir.cwd().deleteTree(io, root) catch {};
+    // ttyACM0: a USB serial device (subsystem→usb, driver→cdc_acm).
+    const dd = root ++ "/ttyACM0/device";
+    try Dir.cwd().createDirPath(io, dd);
+    try Dir.cwd().createDirPath(io, root ++ "/drivers/cdc_acm");
+    try Dir.cwd().createDirPath(io, root ++ "/bus/usb");
+    Dir.cwd().symLink(io, "../drivers/cdc_acm", dd ++ "/driver", .{}) catch {};
+    Dir.cwd().symLink(io, "../bus/usb", dd ++ "/subsystem", .{}) catch {};
+
+    const v = (try buildSerialDevice(io, a, root, "ttyACM0")).?;
+    const o = v.object;
+    try testing.expectEqualStrings("/dev/ttyACM0", o.get("device_path").?.string);
+    try testing.expectEqualStrings("cdc_acm", o.get("driver_name").?.string);
+    try testing.expectEqualStrings("usb", o.get("device_type").?.string);
+
+    // A tty with no device folder → null.
+    try Dir.cwd().createDirPath(io, root ++ "/tty0");
+    try testing.expect((try buildSerialDevice(io, a, root, "tty0")) == null);
 }
 
 // ---- buildUsbDevice ----
