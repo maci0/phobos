@@ -687,7 +687,10 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, filename
     // temperatures, layer height, and embedded thumbnails.
     if (isGcodeExt(filename)) {
         if (readFileHeader(io, alloc, abs)) |header_text| {
-            const meta = gcode_metadata.parse(alloc, header_text);
+            // Real PrusaSlicer/Orca/Bambu files carry their config block at the
+            // end, so also scan the footer for est-time/filament/height/temps.
+            const footer_text = readFileFooter(io, alloc, abs);
+            const meta = gcode_metadata.parseFull(alloc, header_text, footer_text);
 
             if (meta.slicer) |s| {
                 try obj.put(alloc, "slicer", .{ .string = s });
@@ -736,13 +739,30 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, filename
 
 /// Read the first max_bytes of a file into `alloc`-owned memory. Returns
 /// an error if the file cannot be opened or read (best-effort enrichment).
+const header_max_bytes = 256 * 1024;
+const footer_max_bytes = 32 * 1024;
+
 fn readFileHeader(io: std.Io, alloc: std.mem.Allocator, abs: []const u8) ![]u8 {
-    const max_bytes = 256 * 1024;
     const f = Dir.cwd().openFile(io, abs, .{}) catch return error.FileNotFound;
     defer f.close(io);
     var rbuf: [8 * 1024]u8 = undefined;
     var fr = f.reader(io, &rbuf);
-    return fr.interface.allocRemaining(alloc, .limited(max_bytes));
+    return fr.interface.allocRemaining(alloc, .limited(header_max_bytes));
+}
+
+/// Read the last `footer_max_bytes` of the file (slicer config block for
+/// PrusaSlicer/Orca/Bambu). Returns "" when the file is no larger than the
+/// header window (the header already covers it).
+fn readFileFooter(io: std.Io, alloc: std.mem.Allocator, abs: []const u8) []u8 {
+    const f = Dir.cwd().openFile(io, abs, .{}) catch return "";
+    defer f.close(io);
+    const st = f.stat(io) catch return "";
+    const size: u64 = st.size;
+    if (size <= header_max_bytes) return ""; // header already has the whole file
+    const n: usize = @intCast(@min(size, @as(u64, footer_max_bytes)));
+    const buf = alloc.alloc(u8, n) catch return "";
+    const got = f.readPositionalAll(io, buf, size - n) catch return "";
+    return buf[0..got];
 }
 
 /// A deterministic uuid-shaped string derived from the filename (NOT a parsed
