@@ -12,8 +12,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 
 ## 1. Snapshot (current state)
 
-- Branch: **`spine`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~92%** (est., weighted by API item count per component).
+- Branch: **`main`**. Tree is clean and green at HEAD.
+- **Overall implementation progress: ~94%** (est., weighted by API item count per component).
   See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
   **Recent depth improvements:**
   wled depth up from 70%→80%: real HTTP POST to WLED JSON API for address-based
@@ -75,7 +75,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1155 pass / 2 skip / 0 fail** (~194 fuzz). The 2 skips are
+- Tests: **1185 pass / 2 skip / 0 fail** (~205 fuzz). The 2 skips are
   update_manager git tests (need a real repo). phobos always links lmdb (no
   no-lmdb mode). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
