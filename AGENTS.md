@@ -3,12 +3,35 @@
 Phobos is a memory-efficient Zig 0.16 reimplementation of Moonraker. See
 `TODO.md`, `DEVELOPMENT.md`, and `docs/` for status and architecture.
 
+## Project goals (weigh every change against these)
+
+- **Low memory usage is an EXPLICIT, primary goal.** Target is a static musl
+  binary on 32-bit ARM (Cortex-A7); daemon RSS is ~5.4 MB vs stock Moonraker's
+  ~80–150 MB, and it must stay tiny. Concretely:
+    - prefer fixed/stack buffers and caller-provided buffers over heap; reach for
+      `std.heap` allocators only when a fixed buffer genuinely can't bound the size
+    - per-request work uses an arena that is freed on return — keep long-lived
+      state minimal; don't cache what you can recompute cheaply
+    - bound every buffer/ring/queue; no unbounded growth on hostile/large input
+    - avoid per-item heap churn in hot paths (status fan-out, parsing); reuse
+      buffers, stream rather than accumulate
+    - a new dependency or a large static table needs a memory justification
+- **100% Moonraker API parity** (surface + behaviour) — the coverage gate and
+  conformance oracle must stay green.
+- **Idiomatic Zig.** Lean on the language: `comptime` and `@typeInfo` to generate
+  tables/dispatch instead of runtime duplication; tagged unions + exhaustive
+  `switch` (no `else` when you want the compiler to catch new cases); explicit
+  error sets and `try`/`errdefer`; slices over pointers; `defer` for cleanup.
+  Push work to compile time wherever it removes runtime cost or branches.
+
 ## Stay on Zig 0.16.0
 
-Avoid writing code that assumes older `std.fs`, `std.net`, `std.posix`, or
-`std.Thread` APIs. This Zig build is stripped: `std.fs.cwd`,
-`std.posix.access`, and `std.Thread.Mutex` are NOT available — verify an API
-exists before using it, and prefer the `std.Io` paths below.
+Avoid writing code that assumes older `std.fs`, `std.net`, or `std.Thread`
+synchronization APIs. This Zig build is stripped: `std.fs.cwd`,
+`std.posix.access`, `std.Thread.Mutex`, and `std.Thread.sleep` are NOT available
+— verify an API exists before using it, and prefer the `std.Io` paths below.
+(`std.Thread.spawn`/`join` ARE available and used for background workers; only
+the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 
 - Prefer `std.Io` paths:
     - filesystem through `std.Io.Dir.cwd().<op>(io, ...)` (e.g. `openFile`,
@@ -17,11 +40,17 @@ exists before using it, and prefer the `std.Io` paths below.
     - avoid reintroducing `std.fs.cwd()`, `std.net`, `std.Thread.sleep`,
       `std.Thread.Mutex`
 
-- Prefer Zig builtins and comptime where natural:
+- Prefer Zig builtins and comptime — push work to compile time:
     - `@typeInfo`, `@TypeOf`, `@import("builtin")`
     - `@intCast`, `@enumFromInt`, `@intFromEnum`
     - `@memcpy`, `@memset`
     - `@atomicLoad`, `@atomicStore`
+    - use `comptime` to build lookup tables, derive enum↔string maps, and
+      generate per-variant dispatch from a tagged union instead of hand-writing
+      parallel runtime code; `inline for` over a comptime spec list (e.g. the
+      proxy/endpoint spec arrays) keeps the data in one place with zero runtime cost
+    - exhaustive `switch` on enums/tagged unions WITHOUT an `else` where you want
+      the compiler to flag every new case
     - Note: Zig has no `@builtin`; platform/build info is `const builtin =
       @import("builtin");`.
 
@@ -30,6 +59,10 @@ exists before using it, and prefer the `std.Io` paths below.
     - no new fork/exec code
     - avoid `std.os`, `std.posix`, raw libc unless there is no Zig 0.16 API
     - keep any unavoidable low-level code behind a local wrapper
+    - sanctioned exceptions already in use (no `std.Io` equivalent — reuse these
+      patterns, don't invent new ones): termios in `serial.zig`, the bound-port
+      read via `std.os.linux.getsockname` (mirror `io.zig` `Listener.port`),
+      `std.os.linux.clock_gettime` for timestamps, sysfs GPIO in `gpio_sysfs.zig`
 
 - Prefer structured stdlib helpers:
     - `std.mem` for slicing/search/copying
@@ -41,10 +74,24 @@ exists before using it, and prefer the `std.Io` paths below.
     - functions that allocate should document who frees
     - prefer caller-provided buffers for hot paths and config serialization
     - use `defer` / `errdefer` consistently
-    - watch for the classic bugs: a StringHashMap key and a struct field duped
-      from the same source must be SEPARATE allocations (else double-free in
-      deinit); a setter that replaces an owned slice must free the old one;
-      `*Locked` emit variants assume the Core lock is already held
+    - watch for the classic bugs (all hit real defects in this codebase):
+        - a StringHashMap key and a struct field duped from the same source must
+          be SEPARATE allocations (else double-free in deinit)
+        - a setter that replaces an owned slice must free the old one
+        - `*Locked` emit variants assume the Core lock is already held
+
+- Allocator lifetime — the #1 source of UAF/leaks here:
+    - NEVER store memory allocated from a per-request / per-message arena into a
+      structure that outlives that arena (maps, caches, `last_value`, etc.). Dupe
+      into the owning *stable* allocator (`self.gpa`) instead. The arena is freed
+      on return → dangling keys + cross-allocator free at `deinit`.
+    - "store" APIs that DEEP-COPY their input (e.g. `publishTopic` →
+      `deepCopyValue`, `setMeasurement`) leave the caller owning the builder —
+      `defer builder.deinit(gpa)` it; do not assume the store took ownership.
+    - keys/values in a map must be freed with the SAME allocator that made them;
+      a snapshot map that aliases another map's entries must not be cleared with
+      `clearRetainingCapacity` (leaks the entries) — deep-copy + free, or free
+      the entries explicitly.
 
 - Prefer slices over raw pointers internally:
     - use `[]const u8` / `[]u8` for Zig logic
@@ -62,15 +109,25 @@ exists before using it, and prefer the `std.Io` paths below.
 
 - For concurrency:
     - use `std.Io.Mutex` (lock via the `io` handle: `lockUncancelable(io)` /
-      `unlock(io)`); use `std.atomic.Value(T)` for cross-thread scalar flags
+      `unlock(io)`); use `std.atomic.Value(T)` for cross-thread scalar flags.
+      On teardown paths use `lockUncancelable` — `lock(io) catch {}` then mutating
+      is a bug (you'd unlock without holding it).
     - the `Core` mutex (`src/server/core.zig`) serializes handler execution and
-      notification fan-out; background tasks run outside it
-    - hold a lock for the WHOLE fan-out, not just selection, so a concurrent
-      teardown cannot free state mid-iteration
-    - do not hold locks during long blocking I/O where avoidable; when a lock
-      must span a write, ensure no inverse lock-order path exists
-    - background threads: atomic stop flag + join in deinit; shut down the read
-      side (`shutdown(.recv)`) to unblock a blocked read before joining
+      notification fan-out; background tasks run OUTSIDE it. Inbound work from a
+      background thread (e.g. the MQTT reader) that mutates shared state or emits
+      MUST run under `core.run(io, fn, args)` so it serializes with handlers.
+    - fan-out over a shared list while connections can be concurrently removed:
+      do NOT hold the registry lock across the (blocking) socket writes — that
+      stalls all add/remove. Instead pin under the lock (refcount++), release,
+      write, re-lock and drop the refs; `remove` defers the free while pinned.
+      See `Connections.broadcast`. (Holding the lock the whole time is also
+      memory-safe but a liveness hazard; the refcount pattern is preferred.)
+    - never select-then-act across a dropped lock without pinning — the classic
+      snapshot-pointers-then-write UAF.
+    - background threads/tasks: store EVERY spawned thread/future that references
+      ctx state and join it before freeing that state (a fire-and-forget
+      `io.async`/`std.Thread.spawn` racing `deinit` is a UAF). Use an atomic stop
+      flag; `shutdown(.recv)` to unblock a blocked read before joining.
 
 - For process spawning:
     - use `std.process` only where Zig 0.16 environment handling is safe
@@ -105,3 +162,7 @@ exists before using it, and prefer the `std.Io` paths below.
   `zig build -Dwith_lmdb=false && zig-out/bin/phobos --dump-api > /tmp/d.json &&
    PYTHONPATH=tools python3 -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json`
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
+- Conformance oracle (normalized equality vs vendored Moonraker): see
+  `conformance/replay.py` against `conformance/golden/`.
+- Gated real-Klippy integration test: boot the stack with `.testenv/run-klippy.sh`
+  (native linux host MCU + klippy via uv); the test skips when `/tmp/klippy_uds` is absent.
