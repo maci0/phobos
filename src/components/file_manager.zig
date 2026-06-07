@@ -564,12 +564,26 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
 /// `Dir.copyFile` (whose atomic sendfile path can stall on the threaded io in
 /// tests). Sufficient for gcode/config files in the spine.
 fn copyFileSimple(io: std.Io, alloc: std.mem.Allocator, src_abs: []const u8, dst_abs: []const u8) !void {
+    _ = alloc; // streamed, not buffered whole-file
     const f = try Dir.cwd().openFile(io, src_abs, .{});
     defer f.close(io);
-    var rbuf: [64 * 1024]u8 = undefined;
+    const out = try Dir.cwd().createFile(io, dst_abs, .{});
+    defer out.close(io);
+
+    // Stream chunks src -> dst so a multi-MB gcode file is never held whole in
+    // RAM (allocRemaining(.unlimited) previously buffered the entire file, a peak
+    // far over the RSS budget). 32 KiB buffers, transient to this call.
+    var rbuf: [32 * 1024]u8 = undefined;
     var fr = f.reader(io, &rbuf);
-    const data = try fr.interface.allocRemaining(alloc, .unlimited);
-    try Dir.cwd().writeFile(io, .{ .sub_path = dst_abs, .data = data });
+    var wbuf: [32 * 1024]u8 = undefined;
+    var fw = out.writer(io, &wbuf);
+    while (true) {
+        _ = fr.interface.stream(&fw.interface, .unlimited) catch |e| switch (e) {
+            error.EndOfStream => break,
+            else => return e,
+        };
+    }
+    try fw.interface.flush();
 }
 
 fn copyTree(io: std.Io, alloc: std.mem.Allocator, src_abs: []const u8, dst_abs: []const u8) !void {
