@@ -406,6 +406,39 @@ pub const KlippyCtx = struct {
     /// Set by stop() to signal the background klippyTask to exit.
     stopping: bool = false,
 
+    /// Extra Klipper object names that other components want subscribed (e.g. the
+    /// MQTT bridge's status_objects: heaters, fans...). Merged with the base set
+    /// at handshake. Keys are gpa-owned. Mirrors Moonraker's merged
+    /// `host_subscription`.
+    extra_sub_objects: std.StringHashMapUnmanaged(void) = .empty,
+
+    /// Register a Klipper object to include in the objects/subscribe set. Safe to
+    /// call before connect; the merged set is sent at the next handshake.
+    pub fn addSubscriptionObject(self: *KlippyCtx, name: []const u8) !void {
+        if (self.extra_sub_objects.contains(name)) return;
+        const k = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(k);
+        try self.extra_sub_objects.put(self.gpa, k, {});
+    }
+
+    /// Build the objects/subscribe JSON value: the base objects (webhooks,
+    /// toolhead, print_stats) plus any registered extras, each mapped to null.
+    fn buildSubObjectsJson(self: *const KlippyCtx, alloc: std.mem.Allocator) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(alloc);
+        defer aw.deinit();
+        const w = &aw.writer;
+        try w.writeAll("{\"webhooks\":null,\"toolhead\":null,\"print_stats\":null");
+        var it = self.extra_sub_objects.keyIterator();
+        while (it.next()) |k| {
+            const name = k.*;
+            if (std.mem.eql(u8, name, "webhooks") or std.mem.eql(u8, name, "toolhead") or std.mem.eql(u8, name, "print_stats")) continue;
+            // Klipper object names contain no JSON-special chars; quote directly.
+            try w.print(",\"{s}\":null", .{name});
+        }
+        try w.writeAll("}");
+        return aw.toOwnedSlice();
+    }
+
     pub fn init(
         gpa: std.mem.Allocator,
         bus: *notify.NotifyBus,
@@ -424,6 +457,9 @@ pub const KlippyCtx = struct {
 
     pub fn deinit(self: *KlippyCtx) void {
         self.read_buf.deinit(self.gpa);
+        var sit = self.extra_sub_objects.keyIterator();
+        while (sit.next()) |k| self.gpa.free(k.*);
+        self.extra_sub_objects.deinit(self.gpa);
         self.state = .disconnected;
         self.klippy_info = null;
         // Null out cross-component pointers so any late emitDisconnected
@@ -583,10 +619,13 @@ pub const KlippyCtx = struct {
         var sub_buf: [512]u8 = undefined;
         var rid_buf: [32]u8 = undefined;
         {
+            // Merge base objects with any extras registered by other components.
+            const objs = try self.buildSubObjectsJson(self.gpa);
+            defer self.gpa.free(objs);
+            const fbuf = try self.gpa.alloc(u8, objs.len + 256);
+            defer self.gpa.free(fbuf);
             const sub_id = self.nextReqId(&rid_buf);
-            const sub_frame = try buildSubscribeRequest(
-                \\{"webhooks":null,"toolhead":null,"print_stats":null}
-            , sub_id, &sub_buf);
+            const sub_frame = try buildSubscribeRequest(objs, sub_id, fbuf);
             try self.writeFrame(io, sub_frame);
             const sub_resp = try self.readFrame(io);
             self.gpa.free(sub_resp);
@@ -1151,6 +1190,62 @@ test "KlippyCtx.init: starts disconnected" {
     defer ctx.deinit();
     try std.testing.expect(!ctx.isConnected());
     try std.testing.expectEqual(State.disconnected, ctx.state);
+}
+
+test "buildSubObjectsJson: base set, plus deduped extras (dynamic subscriptions)" {
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+
+    // No extras → just the base objects.
+    const base = try ctx.buildSubObjectsJson(alloc);
+    defer alloc.free(base);
+    try std.testing.expectEqualStrings("{\"webhooks\":null,\"toolhead\":null,\"print_stats\":null}", base);
+
+    // Add extras, including a duplicate of a base object (must be skipped).
+    try ctx.addSubscriptionObject("extruder");
+    try ctx.addSubscriptionObject("extruder"); // idempotent
+    try ctx.addSubscriptionObject("heater_bed");
+    try ctx.addSubscriptionObject("print_stats"); // base dup → skipped in output
+
+    const merged = try ctx.buildSubObjectsJson(alloc);
+    defer alloc.free(merged);
+    // Base prefix is always present; extras appended (order is map-dependent).
+    try std.testing.expect(std.mem.startsWith(u8, merged, "{\"webhooks\":null,\"toolhead\":null,\"print_stats\":null"));
+    try std.testing.expect(std.mem.indexOf(u8, merged, "\"extruder\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, merged, "\"heater_bed\":null") != null);
+    // print_stats appears exactly once (the base one), not duplicated.
+    try std.testing.expect(std.mem.indexOf(u8, merged, "print_stats") == std.mem.lastIndexOf(u8, merged, "print_stats"));
+    // Valid JSON object.
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, merged, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+}
+
+test "fuzz addSubscriptionObject + buildSubObjectsJson: never crashes, valid JSON" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const alloc = std.testing.allocator;
+            const nb = try NullBus.init(alloc);
+            defer nb.deinit(alloc);
+            var ctx = try KlippyCtx.init(alloc, &nb.bus);
+            defer ctx.deinit();
+            var name: [12]u8 = undefined;
+            smith.bytesWithHash(&name, 0);
+            // Only register names without JSON-special chars (config invariant).
+            var ok = true;
+            for (name) |ch| if (ch == '"' or ch == '\\' or ch < 0x20) {
+                ok = false;
+            };
+            if (ok) ctx.addSubscriptionObject(&name) catch return;
+            const j = ctx.buildSubObjectsJson(alloc) catch return;
+            defer alloc.free(j);
+            const p = std.json.parseFromSlice(std.json.Value, alloc, j, .{}) catch return;
+            defer p.deinit();
+        }
+    }.run, .{});
 }
 
 test "KlippyCtx.setIo: stores io handle" {
