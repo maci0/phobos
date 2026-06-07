@@ -156,7 +156,7 @@ pub const HistoryCtx = struct {
     /// Username attributed to the current job.
     job_user: []const u8,
     /// Registered auxiliary fields (sensor-provided), owned by gpa.
-    aux_fields: std.ArrayListUnmanaged(AuxField) = .empty,
+    aux_fields: std.ArrayList(AuxField) = .empty,
     /// Allocator for aux-field registrations.
     gpa: std.mem.Allocator = std.heap.smp_allocator,
 

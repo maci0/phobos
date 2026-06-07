@@ -1821,7 +1821,7 @@ const SerialLink = struct { link: []const u8, target_base: []const u8 };
 /// Scan a /dev/serial/by-* directory into a list of (link, target-basename).
 /// Returns an empty slice when the directory is absent.
 fn collectSerialLinks(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) []const SerialLink {
-    var list: std.ArrayListUnmanaged(SerialLink) = .empty;
+    var list: std.ArrayList(SerialLink) = .empty;
     var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return &.{};
     defer dir.close(io);
     var it = dir.iterate();

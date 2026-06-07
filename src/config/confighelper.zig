@@ -41,7 +41,7 @@ const Section = struct {
 
 pub const ConfigParser = struct {
     alloc: std.mem.Allocator,
-    section_order: std.ArrayListUnmanaged([]const u8),
+    section_order: std.ArrayList([]const u8),
     sections_map: std.StringHashMap(Section),
 
     pub fn init(alloc: std.mem.Allocator) ConfigParser {
@@ -82,7 +82,7 @@ pub const ConfigParser = struct {
         source: []const u8,
         file_label: []const u8,
     ) ConfigError!void {
-        var visited: std.ArrayListUnmanaged(u64) = .empty;
+        var visited: std.ArrayList(u64) = .empty;
         defer visited.deinit(self.alloc);
         try self.parseInner(null, source, file_label, null, &visited);
     }
@@ -101,7 +101,7 @@ pub const ConfigParser = struct {
         ) catch return ConfigError.ParseError;
         defer self.alloc.free(data);
 
-        var visited: std.ArrayListUnmanaged(u64) = .empty;
+        var visited: std.ArrayList(u64) = .empty;
         defer visited.deinit(self.alloc);
 
         // Record this file's inode to detect recursive includes.
@@ -124,14 +124,14 @@ pub const ConfigParser = struct {
         source: []const u8,
         _file_label: []const u8,
         base_file: ?[]const u8,
-        visited: *std.ArrayListUnmanaged(u64),
+        visited: *std.ArrayList(u64),
     ) ConfigError!void {
         _ = _file_label;
 
         var current_section: ?[]const u8 = null;
         var current_key: ?[]const u8 = null;
         var current_indent: usize = 0;
-        var value_parts: std.ArrayListUnmanaged([]const u8) = .empty;
+        var value_parts: std.ArrayList([]const u8) = .empty;
         defer {
             // Free pending key (not yet flushed to the section map).
             if (current_key) |k| self.alloc.free(k);
@@ -268,7 +268,7 @@ pub const ConfigParser = struct {
         self: *ConfigParser,
         section_name: []const u8,
         key: []const u8,
-        value_parts: *std.ArrayListUnmanaged([]const u8),
+        value_parts: *std.ArrayList([]const u8),
     ) ConfigError!void {
         const sec = self.sections_map.getPtr(section_name) orelse return;
         const joined = std.mem.join(self.alloc, "\n", value_parts.items) catch return ConfigError.OutOfMemory;
@@ -303,7 +303,7 @@ pub const ConfigParser = struct {
         io: std.Io,
         glob_pat: []const u8,
         base_file: []const u8,
-        visited: *std.ArrayListUnmanaged(u64),
+        visited: *std.ArrayList(u64),
     ) ConfigError!void {
         const dir_path = std.fs.path.dirname(base_file) orelse ".";
 
@@ -506,8 +506,8 @@ fn globExpandIo(
     alloc: std.mem.Allocator,
     io: std.Io,
     pattern: []const u8,
-) !std.ArrayListUnmanaged([]const u8) {
-    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+) !std.ArrayList([]const u8) {
+    var result: std.ArrayList([]const u8) = .empty;
 
     const dir_part = std.fs.path.dirname(pattern) orelse ".";
     const file_pat = std.fs.path.basename(pattern);
@@ -524,7 +524,7 @@ fn globExpandIo(
     var dir = std.Io.Dir.cwd().openDir(io, dir_part, .{ .iterate = true }) catch return result;
     defer dir.close(io);
 
-    var entries: std.ArrayListUnmanaged([]const u8) = .empty;
+    var entries: std.ArrayList([]const u8) = .empty;
     defer {
         for (entries.items) |e| alloc.free(e);
         entries.deinit(alloc);
@@ -634,7 +634,7 @@ test "parse: multiline indented continuation" {
     , "");
     const val = p.get("test_options", "test_list").?;
     var iter = std.mem.splitScalar(u8, val, '\n');
-    var parts: std.ArrayListUnmanaged([]const u8) = .empty;
+    var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(std.testing.allocator);
     while (iter.next()) |l| {
         const t = std.mem.trim(u8, l, &std.ascii.whitespace);

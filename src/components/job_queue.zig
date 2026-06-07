@@ -56,7 +56,7 @@ pub const JobQueueCtx = struct {
     /// Owned allocator for the in-memory job list (persisted on each change).
     gpa: std.mem.Allocator,
     /// In-memory ordered list of queued jobs (owned by gpa).
-    jobs: std.ArrayListUnmanaged(QueuedJob),
+    jobs: std.ArrayList(QueuedJob),
     /// Current queue state string.
     queue_state: []const u8,
     /// Opaque pointer to KlippyCtx for print dispatch. Set by app.zig via

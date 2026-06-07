@@ -133,7 +133,7 @@ fn readTd1Ids(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, name: 
 /// Device paths are formed as `<dev_prefix>/<tty-name>` (e.g. /dev/ttyACM0).
 /// Returned slice + its strings are owned by `alloc`.
 pub fn findTd1Devices(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8, dev_prefix: []const u8) []Td1Device {
-    var list: std.ArrayListUnmanaged(Td1Device) = .empty;
+    var list: std.ArrayList(Td1Device) = .empty;
     var dir = Dir.cwd().openDir(io, tty_root, .{ .iterate = true }) catch return &.{};
     defer dir.close(io);
     var it = dir.iterate();

@@ -59,7 +59,7 @@ pub const MqttClient = struct {
     /// Reusable inbound packet-body buffer — grown to the largest packet seen and
     /// reused, so steady inbound traffic does not alloc/free per packet. The body
     /// returned by readRawPacket borrows this; valid only until the next read.
-    body_scratch: std.ArrayListUnmanaged(u8) = .empty,
+    body_scratch: std.ArrayList(u8) = .empty,
     /// Packet-id source. Atomic so a foreground publish/subscribe and any future
     /// concurrent caller never race the increment. Never yields 0 (invalid id).
     next_id: std.atomic.Value(u16) = std.atomic.Value(u16).init(1),

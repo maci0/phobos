@@ -380,7 +380,7 @@ pub const KlippyCtx = struct {
 
     /// Registered /klippysocket bridge WebSocket connections. Every frame
     /// received from Klippy is forwarded to every registered bridge writer.
-    bridges: std.ArrayListUnmanaged(Bridge) = .empty,
+    bridges: std.ArrayList(Bridge) = .empty,
     /// Guards `bridges` — mutated from /klippysocket WS threads (add/remove) and
     /// read from the frame-forwarding path. Locked via `self.io`; the
     /// `if (self.io)` guard is sound (not a mixed-state hazard) because every

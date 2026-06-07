@@ -62,7 +62,7 @@ pub const AnnouncementsCtx = struct {
     /// Owned allocator for in-memory feed list.
     gpa: std.mem.Allocator,
     /// In-memory list of feed names (includes built-in + stored extras).
-    feeds: std.ArrayListUnmanaged([]u8),
+    feeds: std.ArrayList([]u8),
     /// Counter for new entry keys (hex sequence).
     next_key: u64,
     /// Background refresh timer stop flag. Set by deinit, polled by the timer thread.

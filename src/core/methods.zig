@@ -164,7 +164,7 @@ pub fn buildServerConfig(alloc: std.mem.Allocator, cfg: ?*const config_mod.Confi
     var config_obj = try buildConfigDefaults(alloc);
 
     // Track which sections came from the parsed config file for the `files` field.
-    var file_sections: std.ArrayListUnmanaged([]const u8) = .empty;
+    var file_sections: std.ArrayList([]const u8) = .empty;
 
     // Overlay parsed config sections on top of defaults.
     if (cfg) |c| {

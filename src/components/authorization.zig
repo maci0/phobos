@@ -601,7 +601,7 @@ pub const AuthCtx = struct {
     /// "trust localhost" default and is set by the App. Explicit JWT / API-key
     /// credentials still take precedence and an invalid JWT still fails closed.
     trust_unknown_ip: bool = false,
-    oneshot: std.ArrayListUnmanaged(OneshotToken) = .empty,
+    oneshot: std.ArrayList(OneshotToken) = .empty,
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, issuer: []const u8) !AuthCtx {
         var ctx = AuthCtx{
