@@ -803,15 +803,25 @@ pub const KlippyCtx = struct {
         }
 
         // Fan out each object to connections subscribed to that object name.
+        // Reuse one map + array across the loop (clearRetainingCapacity) so the
+        // backing stores are allocated at most once per tick, not per object —
+        // emit copies params into its own frame, so the scaffolding is safe to
+        // recycle. Freed once at the end (defer).
+        const scratch = std.heap.smp_allocator;
+        var per_obj_map: std.json.ObjectMap = .empty;
+        defer per_obj_map.deinit(scratch);
+        var params_arr: std.json.Array = .init(scratch);
+        defer params_arr.deinit();
+
         var it = status_dict.object.iterator();
         while (it.next()) |entry| {
             const obj_name = entry.key_ptr.*;
             // Build per-object status params: [eventtime, {obj_name: obj_data}].
-            var per_obj_map: std.json.ObjectMap = .empty;
-            try per_obj_map.put(std.heap.smp_allocator, obj_name, entry.value_ptr.*);
+            per_obj_map.clearRetainingCapacity();
+            try per_obj_map.put(scratch, obj_name, entry.value_ptr.*);
             const per_obj_val = std.json.Value{ .object = per_obj_map };
 
-            var params_arr: std.json.Array = .init(std.heap.smp_allocator);
+            params_arr.clearRetainingCapacity();
             try params_arr.append(arr.items[0]);
             try params_arr.append(per_obj_val);
             const params_array = std.json.Value{ .array = params_arr };
@@ -821,12 +831,6 @@ pub const KlippyCtx = struct {
             } else {
                 _ = self.bus.emitStatus(io, notify.names.status_update, params_array, obj_name) catch {};
             }
-            // emit serializes params into its own frame buffer (read-only), so
-            // the per-object scaffolding can be freed now. Without this every
-            // status update leaked the map + array backing stores (smp_allocator)
-            // — an unbounded leak during a live print.
-            params_arr.deinit();
-            per_obj_map.deinit(std.heap.smp_allocator);
         }
 
         // Feed print_stats into the job state machine (job_state component).

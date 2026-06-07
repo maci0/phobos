@@ -29,6 +29,10 @@ pub const MqttClient = struct {
     /// buffer pointer stays valid for the client's lifetime.
     reader_buf: []u8,
     rdr: net.Stream.Reader,
+    /// Reusable inbound packet-body buffer — grown to the largest packet seen and
+    /// reused, so steady inbound traffic does not alloc/free per packet. The body
+    /// returned by readRawPacket borrows this; valid only until the next read.
+    body_scratch: std.ArrayListUnmanaged(u8) = .empty,
     /// Packet-id source. Atomic so a foreground publish/subscribe and any future
     /// concurrent caller never race the increment. Never yields 0 (invalid id).
     next_id: std.atomic.Value(u16) = std.atomic.Value(u16).init(1),
@@ -76,9 +80,8 @@ pub const MqttClient = struct {
         defer gpa.free(connect_pkt);
         try self.writeAll(connect_pkt);
 
-        // Await CONNACK.
+        // Await CONNACK (body borrows body_scratch; consumed before next read).
         const owned = try self.readRawPacket();
-        defer gpa.free(owned.body);
         const pkt = proto.Packet{ .ptype = owned.ptype(), .flags = owned.flags(), .body = owned.body, .total = 0 };
         if (pkt.ptype != .connack) return error.ConnectionRejected;
         const code = try proto.parseConnack(pkt);
@@ -89,6 +92,7 @@ pub const MqttClient = struct {
 
     pub fn deinit(self: *MqttClient) void {
         self.disconnect();
+        self.body_scratch.deinit(self.gpa);
         self.gpa.free(self.reader_buf);
         self.* = undefined;
     }
@@ -169,7 +173,7 @@ pub const MqttClient = struct {
 
     const RawPacket = struct {
         b0: u8,
-        body: []u8, // gpa-owned
+        body: []u8, // borrows client.body_scratch; valid until the next read
         fn ptype(self: RawPacket) proto.PacketType {
             return @enumFromInt(@as(u4, @intCast(self.b0 >> 4)));
         }
@@ -178,7 +182,8 @@ pub const MqttClient = struct {
         }
     };
 
-    /// Read exactly one packet off the wire (blocking). Returns gpa-owned body.
+    /// Read exactly one packet off the wire (blocking). The returned body
+    /// borrows `body_scratch` and is valid only until the next read.
     fn readRawPacket(self: *MqttClient) !RawPacket {
         const r = &self.rdr.interface;
         const b0 = try r.takeByte();
@@ -198,8 +203,9 @@ pub const MqttClient = struct {
         // ~256 MB in the remaining-length field. Reject oversized packets rather
         // than allocate attacker-controlled memory.
         if (rl > max_packet_len) return error.PacketTooLarge;
-        const body = try self.gpa.alloc(u8, rl);
-        errdefer self.gpa.free(body);
+        try self.body_scratch.ensureTotalCapacity(self.gpa, rl);
+        self.body_scratch.items.len = rl;
+        const body = self.body_scratch.items[0..rl];
         if (rl > 0) try r.readSliceAll(body);
         return .{ .b0 = b0, .body = body };
     }
@@ -210,7 +216,6 @@ pub const MqttClient = struct {
     /// packet type handled.
     pub fn readOne(self: *MqttClient) !proto.PacketType {
         const raw = try self.readRawPacket();
-        defer self.gpa.free(raw.body);
         const pkt = proto.Packet{ .ptype = raw.ptype(), .flags = raw.flags(), .body = raw.body, .total = 0 };
         switch (pkt.ptype) {
             .publish => {
