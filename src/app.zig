@@ -1113,6 +1113,7 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.websocket.id",
         "set_wled_state",
         "set_wled",
+        "spoolman_set_active_spool",
     };
     try std.testing.expectEqual(@as(usize, expected.len), app.dispatcher.methods.count());
     for (expected) |m| {

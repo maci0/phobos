@@ -408,6 +408,29 @@ pub fn registerSpoolman(reg: *Registry, ctx: *SpoolmanCtx) !void {
         c,
         handleStatus,
     );
+
+    // Klipper remote method: gcode macros can set the active spool
+    // (Moonraker register_remote_method("spoolman_set_active_spool", ...)).
+    try reg.dispatcher.register("spoolman_set_active_spool", c, handleSetActiveSpool);
+}
+
+/// Klipper remote method `spoolman_set_active_spool` → setSpoolId. Params carry
+/// `spool_id` (int or null). Returns null (remote methods produce no response).
+pub fn handleSetActiveSpool(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    _ = alloc;
+    const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx_ptr));
+    const sid: ?i64 = switch (params) {
+        .object => |o| switch (o.get("spool_id") orelse .null) {
+            .integer => |i| i,
+            .float => |f| @intFromFloat(f),
+            else => null,
+        },
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        else => null,
+    };
+    c.setSpoolId(sid);
+    return .null;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +570,42 @@ test "handleSpoolId POST: sets active spool and persists" {
     try testing.expectEqual(@as(i64, 42), get_result.object.get("spool_id").?.integer);
 }
 
+test "handleSetActiveSpool: remote method sets/clears the active spool" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(a, &mem, &nb);
+
+    // Set via the remote method.
+    _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 7}"), a);
+    try testing.expectEqual(@as(i64, 7), (try handleSpoolId(@ptrCast(&ctx), .null, a)).object.get("spool_id").?.integer);
+
+    // Clear via the remote method (spool_id null).
+    _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": null}"), a);
+    try testing.expectEqual(std.json.Value.null, (try handleSpoolId(@ptrCast(&ctx), .null, a)).object.get("spool_id").?);
+}
+
+test "fuzz handleSetActiveSpool: arbitrary params never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var nb = NullBus.init(a);
+            var ctx = makeCtx(a, &mem, &nb);
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const p = std.json.parseFromSlice(std.json.Value, a, &buf, .{}) catch return;
+            _ = handleSetActiveSpool(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
 test "handleSpoolId POST: set to null clears active spool" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -670,6 +729,7 @@ test "registerSpoolman: wires expected routes and JSON-RPC methods" {
     try testing.expect(d.methods.get("server.spoolman.post_spool_id") != null);
     try testing.expect(d.methods.get("server.spoolman.proxy") != null);
     try testing.expect(d.methods.get("server.spoolman.status") != null);
+    try testing.expect(d.methods.get("spoolman_set_active_spool") != null);
 }
 
 // --- Fuzz tests ---
