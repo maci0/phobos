@@ -145,6 +145,26 @@ pub const PowerCtx = struct {
         self.io = io;
     }
 
+    /// Drive every device configured with an `initial_state` to that state at
+    /// startup (Moonraker `_set_initial_state`). Hardware (HTTP/gpio) is driven
+    /// when io is wired; the in-memory state is always updated. Does not emit a
+    /// change notification (this is the boot baseline, not a user action).
+    pub fn applyInitialStates(self: *PowerCtx) void {
+        var it = self.devices.valueIterator();
+        while (it.next()) |dev| {
+            const target = dev.initial_state orelse continue;
+            const on = std.mem.eql(u8, target, "on");
+            if (!on and !std.mem.eql(u8, target, "off")) continue;
+            if (on) {
+                if (dev.on_url) |u| self.sendDeviceHttpGet(u);
+            } else {
+                if (dev.off_url) |u| self.sendDeviceHttpGet(u);
+            }
+            self.driveGpio(dev, on);
+            self.setState(dev.name, target) catch {};
+        }
+    }
+
     /// Drive a `type: gpio` device's sysfs line on power on/off. No-op for
     /// non-gpio devices, devices without a configured pin, or when io is not
     /// wired (unit-test path). Best-effort: hardware errors are swallowed since
@@ -1006,6 +1026,23 @@ test "addDeviceFull: accepts full Device opts" {
     try testing.expectEqualStrings("on", dev.initial_state.?);
     try testing.expectEqual(true, dev.restrict_actions);
     try testing.expectEqual(30.0, dev.timer);
+}
+
+test "applyInitialStates: drives configured devices to their initial_state" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+
+    try ctx.addDeviceFull(.{ .name = "lamp", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .initial_state = "on" });
+    try ctx.addDeviceFull(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .initial_state = "off" });
+    try ctx.addDeviceFull(.{ .name = "keep", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false }); // no initial_state
+
+    ctx.applyInitialStates();
+    try testing.expectEqualStrings("on", ctx.findDevice("lamp").?.state);
+    try testing.expectEqualStrings("off", ctx.findDevice("fan").?.state);
+    try testing.expectEqualStrings("off", ctx.findDevice("keep").?.state); // untouched
 }
 
 test "addDeviceFull: optional fields default to null/false" {

@@ -810,6 +810,7 @@ pub const App = struct {
         self.update_ctx.setIo(io);
         // Wire io into the power component so it can emit notify_power_changed.
         self.power_ctx.setIo(io);
+        self.power_ctx.applyInitialStates();
         // Wire io into the button component so it can emit notify_button_event.
         self.button_ctx.setIo(io);
         self.sensor_ctx.setIo(io);
