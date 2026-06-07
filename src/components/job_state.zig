@@ -83,6 +83,21 @@ pub const JobStateCtx = struct {
         _ = self;
     }
 
+    /// True if a print is in progress (state "printing" or "paused"), matching
+    /// Moonraker `KlippyAPIs.is_printing()`. Used to refuse update operations.
+    pub fn isActive(self: *const JobStateCtx) bool {
+        const sv = self.last_print_stats.get("state") orelse return false;
+        if (sv != .string) return false;
+        return std.mem.eql(u8, sv.string, "printing") or std.mem.eql(u8, sv.string, "paused");
+    }
+
+    /// Type-erased adapter for components (e.g. update_manager) that hold an
+    /// opaque printing-check callback rather than importing this module.
+    pub fn isActiveErased(ctx: *anyopaque) bool {
+        const self: *const JobStateCtx = @ptrCast(@alignCast(ctx));
+        return self.isActive();
+    }
+
     /// Called when Klippy disconnects or shuts down while a job is active.
     /// Updates internal state to error so that getLastStats() reflects the
     /// forced error. Does NOT fire a JobEvent — the caller (klippy_connection
@@ -385,6 +400,40 @@ test "statusUpdate idle to printing emits started" {
     js.statusUpdate(ps_val);
 
     try testing.expectEqual(JobEvent.started, js.last_event);
+}
+
+test "isActive: true for printing/paused, false otherwise" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+
+    try testing.expect(!js.isActive()); // no state yet
+    for ([_]struct { s: []const u8, active: bool }{
+        .{ .s = "printing", .active = true },
+        .{ .s = "paused", .active = true },
+        .{ .s = "standby", .active = false },
+        .{ .s = "complete", .active = false },
+        .{ .s = "error", .active = false },
+    }) |c| {
+        try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = c.s });
+        try testing.expectEqual(c.active, js.isActive());
+        // isActiveErased must agree with isActive.
+        try testing.expectEqual(js.isActive(), JobStateCtx.isActiveErased(&js));
+    }
+}
+
+test "fuzz isActive: arbitrary state string never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const bus: @import("../server/notify.zig").NotifyBus = undefined;
+            var js = try JobStateCtx.init(testing.allocator, &bus);
+            defer js.deinit();
+            var sbuf: [16]u8 = undefined;
+            smith.bytesWithHash(&sbuf, 0);
+            try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = &sbuf });
+            _ = js.isActive();
+        }
+    }.run, .{});
 }
 
 test "statusUpdate printing to complete" {

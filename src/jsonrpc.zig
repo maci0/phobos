@@ -133,6 +133,7 @@ pub const Dispatcher = struct {
                 error.KlippyDisconnected => 503,
                 error.MqttNotConfigured => 503,
                 error.ServiceUnavailable => 503,
+                error.UpdateRefusedPrinting => 503,
                 else => -32603,
             };
             const msg: []const u8 = switch (err) {
@@ -140,6 +141,7 @@ pub const Dispatcher = struct {
                 error.KlippyDisconnected => "Klippy Host not connected",
                 error.MqttNotConfigured => "MQTT not configured",
                 error.ServiceUnavailable => "Service Unavailable",
+                error.UpdateRefusedPrinting => "Update Refused: Klippy is printing",
                 else => "Internal error",
             };
             return jv.errorResponse(alloc, id, code, msg);

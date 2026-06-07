@@ -331,6 +331,9 @@ pub const App = struct {
             .gpa = alloc,
             .sources = &update_manager_component.default_sources,
             .bus = bus,
+            // Refuse update operations while a print is active (Moonraker 503).
+            .printing_check = JobStateCtx.isActiveErased,
+            .printing_ctx = job_state_ctx,
         };
 
         // --- Power device context (machine.device_power.*) ---

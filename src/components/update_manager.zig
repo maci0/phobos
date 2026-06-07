@@ -106,9 +106,21 @@ pub const UpdateCtx = struct {
     /// phobos updates are stubbed and synchronous, so this is only ever briefly
     /// true within a handler; it is reported in the status `busy` field.
     busy: bool = false,
+    /// Optional printing-state check. When it returns true, mutating update
+    /// operations are refused (Moonraker: 503 "Update Refused: Klippy is
+    /// printing"). Wired by App to job_state.isActiveErased.
+    printing_check: ?*const fn (*anyopaque) bool = null,
+    printing_ctx: ?*anyopaque = null,
 
     pub fn setIo(self: *UpdateCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// True if a print is currently in progress (via the wired callback).
+    pub fn isPrinting(self: *const UpdateCtx) bool {
+        const f = self.printing_check orelse return false;
+        const c = self.printing_ctx orelse return false;
+        return f(c);
     }
 
     pub fn findSource(self: *const UpdateCtx, name: []const u8) ?Source {
@@ -567,6 +579,7 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 /// real installation (apt/pip are not invoked — phobos does not touch the host
 /// package manager).
 fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerror!std.json.Value {
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const src = ctx.findSource(app) orelse return error.NotFound;
     const proc_id = nextProcId();
     ctx.busy = true;
@@ -631,6 +644,7 @@ pub fn handleUpgrade(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 /// "Full Update Complete"). STUB: does not run real updates; phobos never
 /// invokes apt/pip.
 fn runFullUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const proc_id = nextProcId();
     ctx.busy = true;
     defer ctx.busy = false;
@@ -663,6 +677,7 @@ pub fn handleFull(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocat
 /// `_handle_repo_recovery`.
 pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const app = try getStr(params, "name");
     _ = getBool(params, "hard", false); // accepted, unused (stub)
     _ = getBool(params, "update_deps", false); // accepted, unused (stub)
@@ -690,6 +705,7 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 /// `_handle_rollback`.
 pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const app = try getStr(params, "name");
     const src = ctx.findSource(app) orelse return error.NotFound;
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
@@ -744,6 +760,58 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 
 fn testCtx() UpdateCtx {
     return .{ .gpa = testing.allocator, .sources = &default_sources, .bus = null, .io = null };
+}
+
+var test_printing_flag: bool = false;
+fn testPrintingCheck(_: *anyopaque) bool {
+    return test_printing_flag;
+}
+
+test "update refused while printing (U1): 503-mapped error, allowed otherwise" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dummy: u8 = 0;
+    var ctx = testCtx();
+    ctx.printing_check = testPrintingCheck;
+    ctx.printing_ctx = &dummy;
+
+    // Not printing → updates proceed.
+    test_printing_flag = false;
+    try testing.expectEqualStrings("ok", (try handleUpdateMoonraker(@ptrCast(&ctx), .null, a)).string);
+    try testing.expectEqualStrings("ok", (try handleFull(@ptrCast(&ctx), .null, a)).string);
+
+    // Printing → every mutating op is refused with error.UpdateRefusedPrinting.
+    test_printing_flag = true;
+    try testing.expectError(error.UpdateRefusedPrinting, handleUpdateMoonraker(@ptrCast(&ctx), .null, a));
+    try testing.expectError(error.UpdateRefusedPrinting, handleUpdateKlipper(@ptrCast(&ctx), .null, a));
+    try testing.expectError(error.UpdateRefusedPrinting, handleFull(@ptrCast(&ctx), .null, a));
+    const recover_params = try std.json.parseFromSlice(std.json.Value, a, "{\"name\":\"klipper\"}", .{});
+    try testing.expectError(error.UpdateRefusedPrinting, handleRecover(@ptrCast(&ctx), recover_params.value, a));
+    try testing.expectError(error.UpdateRefusedPrinting, handleRollback(@ptrCast(&ctx), recover_params.value, a));
+    test_printing_flag = false; // reset for other tests
+}
+
+test "isPrinting: false without a wired check" {
+    var ctx = testCtx();
+    try testing.expect(!ctx.isPrinting());
+}
+
+test "fuzz isPrinting: never crashes regardless of flag" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var dummy: u8 = 0;
+            var ctx = testCtx();
+            const wired = smith.valueWithHash(bool, 0);
+            if (wired) {
+                ctx.printing_check = testPrintingCheck;
+                ctx.printing_ctx = &dummy;
+                test_printing_flag = smith.valueWithHash(bool, 1);
+            }
+            _ = ctx.isPrinting();
+            test_printing_flag = false;
+        }
+    }.run, .{});
 }
 
 // ---- buildSourceStatus / version_info shape ----
