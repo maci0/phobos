@@ -150,6 +150,15 @@ pub const MqttCtx = struct {
     /// each reconnect). The app uses it to (re)subscribe sensor topics.
     on_connected: ?*const fn (ctx: *anyopaque) void = null,
     on_connected_ctx: ?*anyopaque = null,
+    /// Reserved API request/response topics (gpa-owned), cached at connect time
+    /// for the JSON-RPC-over-MQTT bridge. Freed on disconnect/deinit.
+    api_request_topic: ?[]const u8 = null,
+    api_response_topic: ?[]const u8 = null,
+    /// Dispatch callback for inbound api_request frames: App wires this to
+    /// `core.run(dispatcher.handle)`. Returns the JSON-RPC response bytes (empty
+    /// for a notification), allocated in the passed allocator.
+    api_dispatch: ?*const fn (ctx: *anyopaque, payload: []const u8, alloc: std.mem.Allocator) anyerror![]u8 = null,
+    api_dispatch_ctx: ?*anyopaque = null,
 
     pub fn init(gpa: std.mem.Allocator) MqttCtx {
         return .{
@@ -263,6 +272,12 @@ pub const MqttCtx = struct {
         const api_qos: u2 = if (self.config) |c| @intCast(@max(0, @min(2, c.api_qos))) else 0;
         client.subscribe(rtopics.api_request, api_qos) catch {};
 
+        // Cache the request/response topics for the JSON-RPC-over-MQTT bridge.
+        if (self.api_request_topic) |t| self.gpa.free(t);
+        if (self.api_response_topic) |t| self.gpa.free(t);
+        self.api_request_topic = self.gpa.dupe(u8, rtopics.api_request) catch null;
+        self.api_response_topic = self.gpa.dupe(u8, rtopics.api_response) catch null;
+
         // Let the app subscribe sensor (and other) topics now we are connected.
         if (self.on_connected) |cb| cb(self.on_connected_ctx.?);
 
@@ -283,6 +298,13 @@ pub const MqttCtx = struct {
     /// Static MqttClient.on_publish trampoline → MqttCtx.on_message.
     fn mqttOnPublish(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
         const self: *MqttCtx = @ptrCast(@alignCast(ctx));
+        // JSON-RPC-over-MQTT bridge: api_request frames dispatch + reply.
+        if (self.api_request_topic) |art| {
+            if (std.mem.eql(u8, topic, art)) {
+                self.processApiRequest(payload) catch {};
+                return;
+            }
+        }
         if (self.on_message) |cb| cb(self.on_message_ctx.?, topic, payload);
     }
 
@@ -333,6 +355,14 @@ pub const MqttCtx = struct {
             client.deinit();
             self.gpa.destroy(client);
             self.client = null;
+        }
+        if (self.api_request_topic) |t| {
+            self.gpa.free(t);
+            self.api_request_topic = null;
+        }
+        if (self.api_response_topic) |t| {
+            self.gpa.free(t);
+            self.api_response_topic = null;
         }
         if (self.state == .connected or self.state == .connecting) self.state = .disconnected;
     }
@@ -805,14 +835,28 @@ pub const MqttCtx = struct {
         defer parsed.deinit();
         // Check for duplicate timestamp.
         if (parsed.value.object.get("mqtt_timestamp")) |ts_val| {
-            if (ts_val == .number) {
-                const ts: i64 = @intFromFloat(ts_val.number);
-                if (self.isDuplicateTimestamp(ts)) return;
+            const ts: ?i64 = switch (ts_val) {
+                .integer => |i| i,
+                .float => |f| @intFromFloat(f),
+                else => null,
+            };
+            if (ts) |t| {
+                if (self.isDuplicateTimestamp(t)) return;
             }
         }
-        // In a full implementation, we would dispatch to the JSON-RPC
-        // handler and publish the response to api_response. For now,
-        // store the request for test observation.
+
+        // Dispatch through the JSON-RPC handler (App wires this to
+        // core.run(dispatcher.handle)) and publish the response to api_response.
+        const dispatch = self.api_dispatch orelse return;
+        const dctx = self.api_dispatch_ctx orelse return;
+        const resp_topic = self.api_response_topic orelse return;
+        const resp = dispatch(dctx, payload, self.gpa) catch return;
+        defer self.gpa.free(resp);
+        if (resp.len == 0) return; // JSON-RPC notification: no response published
+        const rparsed = std.json.parseFromSlice(std.json.Value, self.gpa, resp, .{}) catch return;
+        defer rparsed.deinit();
+        const qos: i64 = if (self.config) |c| c.api_qos else 0;
+        self.publishTopic(resp_topic, rparsed.value, qos, false) catch {};
     }
 
     /// Moonraker: publish_topic_with_response — publish and wait for a
@@ -3525,6 +3569,61 @@ test "mqtt: connectBroker without io returns MqttNotConfigured" {
     // No io wired → cannot connect.
     try testing.expectError(error.MqttNotConfigured, ctx.connectBroker());
     try testing.expect(!ctx.hasBrokerConnection());
+}
+
+const TestApiDispatch = struct {
+    fn cb(_: *anyopaque, _: []const u8, alloc: std.mem.Allocator) anyerror![]u8 {
+        return alloc.dupe(u8, "{\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true},\"id\":1}");
+    }
+    fn cbEmpty(_: *anyopaque, _: []const u8, alloc: std.mem.Allocator) anyerror![]u8 {
+        return alloc.dupe(u8, ""); // notification → no response published
+    }
+};
+
+test "processApiRequest: dispatches and publishes the response (JSON-RPC-over-MQTT bridge)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.setConfig("mqtt.local", 1883, null, null);
+    ctx.config.?.enable_moonraker_api = true;
+    ctx.api_request_topic = try a.dupe(u8, "phobos/moonraker/api/request");
+    ctx.api_response_topic = try a.dupe(u8, "phobos/moonraker/api/response");
+    var dummy: u8 = 0;
+    ctx.api_dispatch = TestApiDispatch.cb;
+    ctx.api_dispatch_ctx = &dummy;
+
+    try ctx.processApiRequest("{\"jsonrpc\":\"2.0\",\"method\":\"server.info\",\"id\":1}");
+    const resp = ctx.getMessage("phobos/moonraker/api/response").?;
+    try testing.expectEqualStrings("2.0", resp.object.get("jsonrpc").?.string);
+    try testing.expectEqual(true, resp.object.get("result").?.object.get("ok").?.bool);
+
+    // A notification (empty dispatch result) publishes nothing new.
+    ctx.api_dispatch = TestApiDispatch.cbEmpty;
+    try ctx.processApiRequest("{\"jsonrpc\":\"2.0\",\"method\":\"x\"}");
+}
+
+test "fuzz processApiRequest: arbitrary payloads never crash the bridge" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = testCtx(a);
+            defer ctx.deinit();
+            ctx.setConfig("mqtt.local", 1883, null, null) catch return;
+            ctx.config.?.enable_moonraker_api = true;
+            ctx.api_request_topic = a.dupe(u8, "req") catch return;
+            ctx.api_response_topic = a.dupe(u8, "resp") catch return;
+            var dummy: u8 = 0;
+            ctx.api_dispatch = TestApiDispatch.cb;
+            ctx.api_dispatch_ctx = &dummy;
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            ctx.processApiRequest(&buf) catch {};
+        }
+    }.run, .{});
 }
 
 test "mqtt: inbound broker PUBLISH fires the on_message hook" {

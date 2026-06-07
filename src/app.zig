@@ -797,6 +797,10 @@ pub const App = struct {
         self.sensor_mqtt_bridge = .{ .app = self };
         self.mqtt_ctx.on_message = SensorMqttBridge.onMessage;
         self.mqtt_ctx.on_message_ctx = &self.sensor_mqtt_bridge;
+        // JSON-RPC-over-MQTT bridge: dispatch api_request frames through the
+        // shared dispatcher (under the Core lock) and publish the response.
+        self.mqtt_ctx.api_dispatch = mqttApiDispatch;
+        self.mqtt_ctx.api_dispatch_ctx = self;
         self.mqtt_ctx.on_connected = SensorMqttBridge.onConnected;
         self.mqtt_ctx.on_connected_ctx = &self.sensor_mqtt_bridge;
         if (self.mqtt_ctx.isConfigured()) {
@@ -833,6 +837,15 @@ fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerro
 /// Glue between the MQTT client (background reader thread) and the sensor
 /// component. Inbound messages are dispatched into the sensor store under the
 /// Core lock so they serialize with JSON-RPC handlers and notifications.
+/// Dispatch an inbound MQTT api_request payload through the JSON-RPC dispatcher
+/// under the Core lock (the mqtt reader thread does not hold it), returning the
+/// response bytes. Wired into MqttCtx.api_dispatch.
+fn mqttApiDispatch(ctx: *anyopaque, payload: []const u8, alloc: std.mem.Allocator) anyerror![]u8 {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const io = app.mqtt_ctx.io orelse return error.NotReady;
+    return app.core.run(io, Dispatcher.handle, .{ app.dispatcher, payload, alloc });
+}
+
 pub const SensorMqttBridge = struct {
     app: *App = undefined,
 
