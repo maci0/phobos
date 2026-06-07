@@ -1735,34 +1735,43 @@ pub fn handleUsb(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
     return .{ .object = obj };
 }
 
+/// Build the JSON object for one USB device folder `base` (e.g.
+/// /sys/bus/usb/devices/1-1). Returns null if `base` is not a device folder
+/// (no bDeviceClass). class/subclass/protocol carry the raw hex codes
+/// (Moonraker falls back to these when usb.ids name resolution is unavailable).
+fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8) !?std.json.Value {
+    const cls = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceClass" })) orelse return null;
+    const subcls = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceSubClass" })) orelse "";
+    const proto = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceProtocol" })) orelse "";
+    const devnum = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "devnum" })) orelse "";
+    const busnum = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "busnum" })) orelse "";
+    const vid = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idVendor" })) orelse "";
+    const pid = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idProduct" })) orelse "";
+
+    var dev: std.json.ObjectMap = .empty;
+    try dev.put(alloc, "device_num", .{ .integer = std.fmt.parseInt(i64, devnum, 10) catch 0 });
+    try dev.put(alloc, "bus_num", .{ .integer = std.fmt.parseInt(i64, busnum, 10) catch 0 });
+    try dev.put(alloc, "vendor_id", .{ .string = try toLowerDup(alloc, vid) });
+    try dev.put(alloc, "product_id", .{ .string = try toLowerDup(alloc, pid) });
+    try dev.put(alloc, "usb_location", .{ .string = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ busnum, devnum }) });
+    try dev.put(alloc, "manufacturer", manuf(io, alloc, base));
+    try dev.put(alloc, "product", attrOrNull(io, alloc, base, "product"));
+    try dev.put(alloc, "serial", attrOrNull(io, alloc, base, "serial"));
+    // Raw hex class codes (no usb.ids DB to resolve names → description null).
+    try dev.put(alloc, "class", if (cls.len > 0) .{ .string = try toLowerDup(alloc, cls) } else .null);
+    try dev.put(alloc, "subclass", if (subcls.len > 0) .{ .string = try toLowerDup(alloc, subcls) } else .null);
+    try dev.put(alloc, "protocol", if (proto.len > 0) .{ .string = try toLowerDup(alloc, proto) } else .null);
+    try dev.put(alloc, "description", .null);
+    return .{ .object = dev };
+}
+
 fn enumUsb(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
     var dir = Dir.cwd().openDir(io, "/sys/bus/usb/devices", .{ .iterate = true }) catch return;
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         const base = try std.fs.path.join(alloc, &.{ "/sys/bus/usb/devices", entry.name });
-        // Only device folders have a bDeviceClass file.
-        const cls_path = try std.fs.path.join(alloc, &.{ base, "bDeviceClass" });
-        const cls = sysAttr(io, alloc, cls_path) orelse continue;
-        var dev: std.json.ObjectMap = .empty;
-        const devnum = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "devnum" })) orelse "";
-        const busnum = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "busnum" })) orelse "";
-        const vid = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idVendor" })) orelse "";
-        const pid = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idProduct" })) orelse "";
-        try dev.put(alloc, "device_num", .{ .integer = std.fmt.parseInt(i64, devnum, 10) catch 0 });
-        try dev.put(alloc, "bus_num", .{ .integer = std.fmt.parseInt(i64, busnum, 10) catch 0 });
-        try dev.put(alloc, "vendor_id", .{ .string = try toLowerDup(alloc, vid) });
-        try dev.put(alloc, "product_id", .{ .string = try toLowerDup(alloc, pid) });
-        try dev.put(alloc, "usb_location", .{ .string = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ busnum, devnum }) });
-        try dev.put(alloc, "manufacturer", manuf(io, alloc, base));
-        try dev.put(alloc, "product", attrOrNull(io, alloc, base, "product"));
-        try dev.put(alloc, "serial", attrOrNull(io, alloc, base, "serial"));
-        try dev.put(alloc, "class", .null);
-        try dev.put(alloc, "subclass", .null);
-        try dev.put(alloc, "protocol", .null);
-        try dev.put(alloc, "description", .null);
-        _ = cls;
-        try arr.append(.{ .object = dev });
+        if (try buildUsbDevice(io, alloc, base)) |dev| try arr.append(dev);
     }
 }
 
@@ -2010,6 +2019,45 @@ test "parseVirtualization: bare metal yields none" {
     try testing.expectEqualStrings("none", r.virt_type);
     try testing.expectEqualStrings("none", r.virt_identifier);
     try testing.expectEqualStrings("none", parseVirtualization("").virt_type);
+}
+
+// ---- buildUsbDevice ----
+
+test "buildUsbDevice: emits ids + raw hex class/subclass/protocol" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const base = "/tmp/phobos_usb_test/1-1";
+    Dir.cwd().deleteTree(io, "/tmp/phobos_usb_test") catch {};
+    try Dir.cwd().createDirPath(io, base);
+    defer Dir.cwd().deleteTree(io, "/tmp/phobos_usb_test") catch {};
+    inline for (.{
+        .{ "bDeviceClass", "00" },     .{ "bDeviceSubClass", "00" }, .{ "bDeviceProtocol", "00" },
+        .{ "devnum", "4" },            .{ "busnum", "1" },           .{ "idVendor", "1D50" },
+        .{ "idProduct", "614E" },      .{ "manufacturer", "Klipper" }, .{ "product", "stm32" },
+    }) |kv| {
+        try Dir.cwd().writeFile(io, .{ .sub_path = base ++ "/" ++ kv[0], .data = kv[1] });
+    }
+
+    const v = (try buildUsbDevice(io, a, base)).?;
+    const o = v.object;
+    try testing.expectEqual(@as(i64, 4), o.get("device_num").?.integer);
+    try testing.expectEqual(@as(i64, 1), o.get("bus_num").?.integer);
+    try testing.expectEqualStrings("1d50", o.get("vendor_id").?.string); // lower-cased
+    try testing.expectEqualStrings("614e", o.get("product_id").?.string);
+    try testing.expectEqualStrings("1:4", o.get("usb_location").?.string);
+    try testing.expectEqualStrings("00", o.get("class").?.string);
+    try testing.expectEqualStrings("00", o.get("subclass").?.string);
+    try testing.expectEqualStrings("00", o.get("protocol").?.string);
+
+    // A non-device folder (no bDeviceClass) → null.
+    const empty = "/tmp/phobos_usb_test/usb1";
+    try Dir.cwd().createDirPath(io, empty);
+    try testing.expect((try buildUsbDevice(io, a, empty)) == null);
 }
 
 // ---- parseIpAddrJson ----
