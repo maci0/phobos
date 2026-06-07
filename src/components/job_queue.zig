@@ -327,7 +327,15 @@ pub const JobQueueCtx = struct {
             .object => |obj| {
                 if (obj.get("queue_state")) |qs| {
                     if (qs == .string) {
-                        self.queue_state = try self.gpa.dupe(u8, qs.string);
+                        // Map the persisted value to a static literal (no dupe →
+                        // queue_state stays a non-owned literal everywhere, so
+                        // the later literal assignments never leak a duped string).
+                        for ([_][]const u8{ "ready", "paused", "loading", "standby" }) |k| {
+                            if (std.mem.eql(u8, qs.string, k)) {
+                                self.queue_state = k;
+                                break;
+                            }
+                        }
                     }
                 }
                 if (obj.get("queued_jobs")) |qj| {

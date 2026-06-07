@@ -141,6 +141,10 @@ pub const MqttCtx = struct {
     /// an in-flight connect frees the ctx while connectBroker still uses it.
     connect_thread: ?std.Thread = null,
     reader_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    /// Guards `client` lifetime against the reconnect supervisor freeing it while
+    /// disconnectBroker reads it for shutdownRecv (io-guarded; null io = no
+    /// concurrency / single-threaded path).
+    client_mutex: std.Io.Mutex = std.Io.Mutex.init,
     /// Inbound-message hook: invoked (on the reader thread) for each application
     /// PUBLISH with (topic, payload). The app routes this to subscribers (e.g.
     /// MQTT sensors) under the Core lock.
@@ -256,7 +260,9 @@ pub const MqttCtx = struct {
         // Route inbound PUBLISH frames (from the reader thread) to on_message.
         client.on_publish = mqttOnPublish;
         client.on_publish_ctx = self;
+        self.lockClient();
         self.client = client;
+        self.unlockClient();
         // setState(.connected) publishes moonraker_status — now sent live.
         self.setState(.connected);
 
@@ -285,14 +291,48 @@ pub const MqttCtx = struct {
         // cannot be spawned, tear the connection down rather than leaving a
         // connected-but-unserviced client (no PINGRESP/keepalive → broker would
         // silently drop it); the caller can retry.
-        self.reader_stop.store(false, .release);
         self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch |e| {
             client.disconnect();
             client.deinit();
+            self.lockClient();
             self.client = null; // clear the dangling pointer before errdefer frees it
+            self.unlockClient();
             self.state = .disconnected;
             return e; // errdefer above does the destroy (don't double-free)
         };
+        // If a stop/disconnect raced this (re)connect, self-interrupt the reader
+        // we just spawned so the supervisor's join returns and it won't reconnect.
+        if (self.reader_stop.load(.acquire)) {
+            self.lockClient();
+            if (self.client) |c| c.shutdownRecv();
+            self.unlockClient();
+        }
+    }
+
+    fn lockClient(self: *MqttCtx) void {
+        if (self.io) |io| self.client_mutex.lockUncancelable(io);
+    }
+    fn unlockClient(self: *MqttCtx) void {
+        if (self.io) |io| self.client_mutex.unlock(io);
+    }
+
+    /// Free the live client (disconnect + deinit + destroy) under the client lock.
+    /// Called by the reconnect supervisor after the reader exits.
+    fn freeClientLocked(self: *MqttCtx) void {
+        self.lockClient();
+        const c = self.client;
+        self.client = null;
+        self.unlockClient();
+        if (c) |client| {
+            client.disconnect();
+            client.deinit();
+            self.gpa.destroy(client);
+        }
+    }
+
+    fn sleepMs(ms: u64) void {
+        var req: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * 1_000_000) };
+        _ = std.os.linux.nanosleep(&req, null);
     }
 
     /// Static MqttClient.on_publish trampoline → MqttCtx.on_message.
@@ -315,11 +355,35 @@ pub const MqttCtx = struct {
         client.subscribe(topic, 0) catch {};
     }
 
-    /// Background-task entry point: connect to the broker, ignoring errors (an
-    /// unreachable broker must not crash the server). Spawned via `io.async` from
-    /// app startup so a slow TCP connect never stalls the serve path.
+    /// Reconnect supervisor (the connect_thread entry). Connects, runs until the
+    /// broker drops, then reconnects with exponential backoff — until
+    /// disconnectBroker signals stop. Owns the client lifecycle: it frees each
+    /// dropped client (after the reader exits) before reconnecting. An unreachable
+    /// broker just keeps retrying; it never crashes the server.
     pub fn connectBrokerBg(self: *MqttCtx) void {
-        self.connectBroker() catch {};
+        self.reader_stop.store(false, .release);
+        var backoff_ms: u64 = 500;
+        const max_backoff: u64 = 30_000;
+        while (!self.reader_stop.load(.acquire)) {
+            self.connectBroker() catch {
+                if (self.reader_stop.load(.acquire)) break;
+                sleepMs(backoff_ms);
+                backoff_ms = @min(backoff_ms * 2, max_backoff);
+                continue;
+            };
+            backoff_ms = 500; // reset after a successful connect
+            // Wait for the reader to end (broker drop or stop), then free.
+            if (self.reader_thread) |t| {
+                t.join();
+                self.reader_thread = null;
+            }
+            self.freeClientLocked();
+            if (self.reader_stop.load(.acquire)) break;
+            // Reconnect after an unexpected drop, with backoff.
+            sleepMs(backoff_ms);
+            backoff_ms = @min(backoff_ms * 2, max_backoff);
+        }
+        if (self.state == .connected or self.state == .connecting) self.state = .disconnected;
     }
 
     /// Background reader: drain inbound packets until stopped or the socket
@@ -335,17 +399,24 @@ pub const MqttCtx = struct {
     /// Disconnect the broker client and stop the reader thread. Safe to call
     /// when not connected.
     pub fn disconnectBroker(self: *MqttCtx) void {
-        // Join the connect task first so client/reader_thread are fully set (or
-        // the connect has finished failing) before we tear anything down — this
-        // closes the deinit-vs-in-flight-connect UAF window.
+        // 1. Signal stop FIRST so the supervisor won't reconnect and the reader
+        //    loop won't restart.
+        self.reader_stop.store(true, .release);
+        // 2. Unblock the reader's blocking recv so the supervisor's reader.join
+        //    returns. Done under client_mutex so we never shutdownRecv a client
+        //    the supervisor is concurrently freeing (closes the UAF window).
+        self.lockClient();
+        if (self.client) |c| c.shutdownRecv();
+        self.unlockClient();
+        // 3. Join the supervisor; on exit it has freed the client + joined the
+        //    reader (supervisor mode).
         if (self.connect_thread) |t| {
             t.join();
             self.connect_thread = null;
         }
-        self.reader_stop.store(true, .release);
+        // 4. Direct-mode fallback (no supervisor, e.g. a test that called
+        //    connectBroker directly): tear down any remaining client/reader.
         if (self.client) |client| {
-            // Interrupt the reader's blocking recv, then join it before any
-            // teardown that frees the buffers the reader is using.
             client.shutdownRecv();
             if (self.reader_thread) |t| {
                 t.join();
@@ -3559,6 +3630,43 @@ test "mqtt: connectBroker connects; publishTopic reaches the broker live" {
     try testing.expect(broker.saw_subscribe);
     try testing.expectEqualStrings("phobos/instance/live-test", broker.got_topic[0..broker.got_topic_len]);
     try testing.expectEqualStrings("\"hi-live\"", broker.got_payload[0..broker.got_payload_len]);
+}
+
+test "connectBrokerBg supervisor: connects via the reconnect loop and shuts down cleanly" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try mqtt_client.TestBroker.bind(alloc, io);
+    const p = try broker.port();
+    // Broker keeps reading client frames (status publish, subscribe, ...) until
+    // the client drops on shutdown.
+    var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 20) });
+
+    var ctx = MqttCtx.init(alloc);
+    try ctx.setConfig("127.0.0.1", p, null, null);
+    try ctx.setInstanceName("phobos");
+    ctx.setIo(io);
+
+    // Launch the reconnect supervisor (as App does).
+    ctx.connect_thread = std.Thread.spawn(.{}, MqttCtx.connectBrokerBg, .{&ctx}) catch unreachable;
+
+    // Wait (bounded) until the supervisor establishes the connection.
+    var tries: usize = 0;
+    while (!ctx.hasBrokerConnection() and tries < 400) : (tries += 1) {
+        var req: std.os.linux.timespec = .{ .sec = 0, .nsec = 5_000_000 }; // 5 ms
+        _ = std.os.linux.nanosleep(&req, null);
+    }
+    try testing.expect(ctx.hasBrokerConnection());
+
+    // Clean shutdown: disconnectBroker signals stop, unblocks the reader, and
+    // joins the supervisor (which frees the client). testing.allocator catches
+    // any leak/double-free; a deadlock would hang the suite (caught by timeout).
+    ctx.deinit();
+    bf.await(io);
+    broker.deinit();
+    try testing.expect(!ctx.hasBrokerConnection());
 }
 
 test "mqtt: connectBroker without io returns MqttNotConfigured" {
