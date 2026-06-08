@@ -40,6 +40,8 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     "component:authorization": (S_FULL, "JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity."),
     # --- Spoolman -----------------------------------------------------------
     "server.spoolman.proxy": (S_FULL, "Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted."),
+    # --- Power --------------------------------------------------------------
+    "component:power": (S_FULL, "http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented)."),
     # --- Sensors ------------------------------------------------------------
     "component:sensor": (S_FULL, "MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance)."),
     # --- Klippy-proxied printer.* ------------------------------------------

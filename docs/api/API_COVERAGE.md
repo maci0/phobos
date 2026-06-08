@@ -36,11 +36,11 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/debug/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/table` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/notifiers/test` | POST | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
-| `/machine/device_power/device` | GET, POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | Matches Moonraker. |
-| `/machine/device_power/devices` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | Matches Moonraker. |
-| `/machine/device_power/off` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | Matches Moonraker. |
-| `/machine/device_power/on` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | Matches Moonraker. |
-| `/machine/device_power/status` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | Matches Moonraker. |
+| `/machine/device_power/device` | GET, POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `/machine/device_power/devices` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `/machine/device_power/off` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `/machine/device_power/on` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `/machine/device_power/status` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `/machine/peripherals/canbus` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/peripherals/serial` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/peripherals/usb` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
@@ -159,12 +159,12 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `debug.database.list` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.table` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.notifiers.test` |  | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
-| `machine.device_power.devices` |  | power | ✅ Full | Matches Moonraker. |
-| `machine.device_power.get_device` |  | power | ✅ Full | Matches Moonraker. |
-| `machine.device_power.off` |  | power | ✅ Full | Matches Moonraker. |
-| `machine.device_power.on` |  | power | ✅ Full | Matches Moonraker. |
-| `machine.device_power.post_device` |  | power | ✅ Full | Matches Moonraker. |
-| `machine.device_power.status` |  | power | ✅ Full | Matches Moonraker. |
+| `machine.device_power.devices` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `machine.device_power.get_device` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `machine.device_power.off` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `machine.device_power.on` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `machine.device_power.post_device` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `machine.device_power.status` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `machine.peripherals.canbus` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.peripherals.serial` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.peripherals.usb` |  | machine | ✅ Full | Matches Moonraker. |

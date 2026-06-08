@@ -12,10 +12,12 @@
 //!
 //! HTTP power devices (type "http" or any type with on_url/off_url configured)
 //! send real HTTP GET requests to the configured URLs via `std.http.Client`.
-//! `type: gpio` devices with a configured `gpio_pin` drive the line via the
-//! sysfs GPIO driver (`gpio_sysfs.zig`) on power on/off, honouring active-low.
-//! Other vendor device types (tplink, tasmota, shelly, …) still track state in
-//! memory only.
+//! `tasmota` and `shelly` devices derive their on/off URLs from the configured
+//! address (see tasmotaUrls/shellyUrls, wired in app.setConfig) and so also issue
+//! real HTTP. `type: gpio` devices with a configured `gpio_pin` drive the line
+//! via the sysfs GPIO driver (`gpio_sysfs.zig`), honouring active-low. The
+//! remaining vendor types (tplink_smartplug, homeseer) still track state in
+//! memory only — no device-specific protocol is implemented for them.
 //!
 //! DEVICES FROM CONFIG. Without `[power <name>]` config sections (the spine
 //! carries none), the devices map is empty and the list endpoint returns [].
