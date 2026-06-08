@@ -88,6 +88,11 @@ const Parser = struct {
     src: []const u8,
     pos: usize = 0,
     ctx: *Ctx,
+    /// Recursion guard: parseExpr recurses on nested `(...)` / `[...]`. Bounded so
+    /// a pathological template can't overflow the stack.
+    depth: u16 = 0,
+
+    const max_depth: u16 = 64;
 
     fn skipWs(self: *Parser) void {
         while (self.pos < self.src.len and (self.src[self.pos] == ' ' or self.src[self.pos] == '\t')) self.pos += 1;
@@ -101,6 +106,9 @@ const Parser = struct {
     }
 
     fn parseExpr(self: *Parser) RenderError!Value {
+        self.depth += 1;
+        defer self.depth -= 1;
+        if (self.depth > max_depth) return error.ParseError;
         var v = try self.parsePostfix();
         while (self.peek()) |c| {
             if (c != '|') break;
@@ -414,6 +422,21 @@ test "malformed templates error, never crash" {
     try testing.expectError(error.ParseError, render(a, "{{ unclosed", "{}", &out));
     try testing.expectError(error.EvalError, render(a, "{{ set_result(\"a\") }}", "{}", &out)); // wrong arity
     try testing.expectError(error.EvalError, render(a, "{{ undefined_var }}", "{}", &out));
+}
+
+test "deeply nested expression errors instead of overflowing the stack" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(a);
+    try buf.appendSlice(a, "{{ ");
+    try buf.appendNTimes(a, '(', 500);
+    try buf.appendSlice(a, "1");
+    try buf.appendNTimes(a, ')', 500);
+    try buf.appendSlice(a, " }}");
+    var out: std.json.ObjectMap = .empty;
+    try testing.expectError(error.ParseError, render(a, buf.items, "{}", &out));
 }
 
 test "fuzz render: arbitrary templates + payloads never crash" {
