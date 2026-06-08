@@ -1,6 +1,6 @@
 //! Minimal hand-declared bindings for the vendored SQLite amalgamation
 //! (vendor/sqlite/sqlite3.c, 3.47.0). Only the symbols the DataStore backend
-//! needs — hand-declared rather than `@cImport` to match the codebase's lmdb_c
+//! needs — hand-declared rather than `@cImport`, matching the codebase's C-binding
 //! style and keep cross-compilation simple. Built with SQLITE_OMIT_AUTOINIT, so
 //! `sqlite3_initialize` must be called once before use.
 

@@ -35,7 +35,7 @@ phobos idles in **less RAM than an empty Python interpreter that has only import
 `json`/`asyncio`/`sqlite3`** — i.e. below the floor Moonraker starts from, before
 its ~30 components load. That is a **~15–20× reduction** versus a full Moonraker,
 in a single dependency-free binary. (The binary grew ~0.9 MB when the store
-moved from lmdb to a vendored SQLite for moonraker-sql.db compatibility.) Details:
+uses a vendored SQLite for moonraker-sql.db compatibility.) Details:
 [`docs/MEMORY.md`](docs/MEMORY.md).
 
 ## Status

@@ -4,9 +4,9 @@
 
 **Goal:** Build the phobos server spine — `std.Io.net` + `std.Io.Threaded` networking, HTTP/1.1 + WebSocket transports, a JSON-RPC 2.0 dispatcher, the always-on `server.info`/`server.config`/`server.connection.identify` methods, a notification bus, and a golden-capture conformance oracle — in Zig 0.16, byte-for-byte behavior-equal (after the §8a normalization manifest) to stock Moonraker.
 
-**Architecture:** Networking via `std.Io.net` over the `std.Io.Threaded` backend (the only std Io backend on 32-bit ARM Cortex-A7; `std.net` and the old socket layer are gone in 0.16). Listener accept loop spawns a per-connection `io.async` task; connection IO uses `std.Io.net` `Stream` reader/writer with caller-provided fixed buffers. Moonraker's single-loop observable ordering is restored by a **serialized server core**: JSON-RPC execution, shared-state mutation, and notification fan-out run under one core mutex/queue while connection IO stays concurrent. All transports (HTTP REST, `/server/jsonrpc`, `/websocket`) converge on one JSON-RPC dispatcher consulting a runtime method table. Arena-per-request allocation, bounded buffers, small thread-pool stacks. liblmdb linked for the drop-in data store; phobos-owned data uses Zig std allocators.
+**Architecture:** Networking via `std.Io.net` over the `std.Io.Threaded` backend (the only std Io backend on 32-bit ARM Cortex-A7; `std.net` and the old socket layer are gone in 0.16). Listener accept loop spawns a per-connection `io.async` task; connection IO uses `std.Io.net` `Stream` reader/writer with caller-provided fixed buffers. Moonraker's single-loop observable ordering is restored by a **serialized server core**: JSON-RPC execution, shared-state mutation, and notification fan-out run under one core mutex/queue while connection IO stays concurrent. All transports (HTTP REST, `/server/jsonrpc`, `/websocket`) converge on one JSON-RPC dispatcher consulting a runtime method table. Arena-per-request allocation, bounded buffers, small thread-pool stacks. SQLite linked for the drop-in data store; phobos-owned data uses Zig std allocators.
 
-**Tech Stack:** Zig 0.16.0; target `arm-linux-musleabihf -mcpu=cortex_a7` static (deploy) + native `x86_64-linux` (dev/CI); liblmdb (C); Python `uv`-run stock Moonraker as the golden oracle source.
+**Tech Stack:** Zig 0.16.0; target `arm-linux-musleabihf -mcpu=cortex_a7` static (deploy) + native `x86_64-linux` (dev/CI); SQLite (C); Python `uv`-run stock Moonraker as the golden oracle source.
 
 **Reference docs (read before starting):**
 - Spec: `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (authoritative)
@@ -37,7 +37,7 @@
   Caller-provided fixed reader/writer buffers = our memory control. `getsockname` for ephemeral-port readback is the lone raw-syscall exception (no std wrapper).
 - **HTTP + WebSocket = `std.http` over `std.Io.net` Stream** (adopted; supersedes the custom HTTP/1.1 parser + custom RFC6455 framing tasks). `std.http.Server.init(stream_reader_iface, stream_writer_iface)` → `receiveHead()` returns a `Request` (`.head` has method/target/content_length/...). Respond with `request.respond(body, .{ .status = ..., .extra_headers = &.{ .{ .name="content-type", .value="application/json" } } })` — full control of status/headers/body for parity. WebSocket: `request.upgradeRequested()` → `request.respondWebSocket(.{...})` → `ws.readSmallMessage()` / `ws.writeMessage(data, .text)`. `readSmallMessage` requires the message fit the input buffer (`error.MessageOversize` otherwise) — size the per-WS-connection buffer for the largest JSON-RPC payload (status dumps, file lists); grow on `MessageOversize`. Test client uses `std.http.Client.fetch(...)`. We do NOT hand-roll HTTP/WS framing.
 - **JSON:** parse with `std.json.parseFromSlice(std.json.Value, alloc, src, .{})`. Serialize with `std.json.Stringify` (struct: `Stringify.valueAlloc(alloc, v, .{})`) — there is no free `std.json.stringify`. Insertion-order key output: `std.json.Value`'s `object` is an `ArrayHashMap`, so it preserves insertion order; verify against goldens before assuming.
-- **Build: link flags live on the Module, not the Compile.** Pass `.link_libc = true` into `b.createModule(...)`, then `mod.linkSystemLibrary("lmdb", .{})` on that module (or `exe.root_module.linkSystemLibrary(...)`). `exe.linkLibC()` does not exist in 0.16.
+- **Build: link flags live on the Module, not the Compile.** Pass `.link_libc = true` into `b.createModule(...)`, then `mod.addCSourceFile (vendored SQLite)` on that module (or `exe.root_module.linkSystemLibrary(...)`). `exe.linkLibC()` does not exist in 0.16.
 - **ArenaAllocator.reset** returns `bool`: `_ = self.arena.reset(.retain_capacity);` is correct.
 
 **Conventions for every task:**
@@ -55,7 +55,7 @@
 ```
 phobos/
   build.zig                     # build graph: exe, test step, fuzz step, cross-target option
-  build.zig.zon                 # package manifest (name, version, deps: lmdb via system lib)
+  build.zig.zon                 # package manifest (name, version, deps: sqlite via system lib)
   src/
     main.zig                    # entry: parse args, load config, build server, run std.Io listener
     io.zig                      # std.Io.Threaded bootstrap, Io handle, accept loop, conn spawn
@@ -71,7 +71,7 @@ phobos/
     config/confighelper.zig     # INI-ish parser behind ConfigBackend interface
     config/backend.zig          # ConfigBackend interface
     store/datastore.zig         # DataStore interface
-    store/lmdb_store.zig        # drop-in liblmdb impl
+    store/sqlite_store.zig        # drop-in SQLite impl
     oracle/normalize.zig        # §8a field-normalization manifest (mask/sort/relativize)
     util/arena.zig              # arena-per-request helper, fixed pools
   conformance/
@@ -147,27 +147,27 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{}); // override: -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7
     const optimize = b.standardOptimizeOption(.{}); // deploy: -Doptimize=ReleaseSmall
-    const with_lmdb = b.option(bool, "with_lmdb", "Link liblmdb") orelse true;
+    const with_sqlite = b.option(bool, "with_sqlite", "Link SQLite") orelse true;
 
     // Link flags live on the Module in 0.16. Helper builds a module + applies them.
     const mkmod = struct {
-        fn f(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, lmdb: bool) *std.Build.Module {
+        fn f(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, sqlite: bool) *std.Build.Module {
             const m = bb.createModule(.{
                 .root_source_file = bb.path("src/main.zig"),
-                .target = t, .optimize = o, .link_libc = lmdb,
+                .target = t, .optimize = o, .link_libc = sqlite,
             });
-            if (lmdb) m.linkSystemLibrary("lmdb", .{});
+            if (sqlite) m.addCSourceFile (vendored SQLite);
             return m;
         }
     }.f;
 
-    const exe = b.addExecutable(.{ .name = "phobos", .root_module = mkmod(b, target, optimize, with_lmdb) });
+    const exe = b.addExecutable(.{ .name = "phobos", .root_module = mkmod(b, target, optimize, with_sqlite) });
     b.installArtifact(exe);
 
-    const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_lmdb) });
+    const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_sqlite) });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit).step);
 
-    const fuzz = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_lmdb) });
+    const fuzz = b.addTest(.{ .root_module = mkmod(b, target, optimize, with_sqlite) });
     const fuzz_run = b.addRunArtifact(fuzz);
     fuzz_run.addArg("--fuzz");
     b.step("fuzz", "Run fuzz harnesses").dependOn(&fuzz_run.step);
@@ -190,7 +190,7 @@ test { std.testing.refAllDecls(@This()); }
 ```
 
 - [ ] **Step 5: Run** `zig build test` → arena tests PASS. `zig build fuzz -- --fuzz` runs the fuzz smoke. Verify native build: `zig build`.
-- [ ] **Step 6: Verify cross-compile** `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall` produces a static ARM binary (`file zig-out/bin/phobos` → "ARM, EABI5 ... statically linked"). *Note:* requires a `liblmdb` for the cross target; if unavailable, gate `linkSystemLibrary("lmdb")` behind a `-Dwith_lmdb` option (default true) and disable for the cross smoke until Task 9.
+- [ ] **Step 6: Verify cross-compile** `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall` produces a static ARM binary (`file zig-out/bin/phobos` → "ARM, EABI5 ... statically linked"). *Note:* requires a `SQLite` for the cross target; if unavailable, gate `vendored SQLite` behind a `-Ddb-backend` option (default true) and disable for the cross smoke until Task 9.
 - [ ] **Step 7: Commit** — `git commit -m "build: scaffold phobos zig project with arena, test and fuzz steps"`
 
 ---
@@ -228,8 +228,8 @@ test "listener accepts and a registered handler echoes a line" {
 }
 ```
 
-- [ ] **Step 2:** Run `zig build test -Dwith_lmdb=false` (or `zig test -target x86_64-linux-musl src/io.zig`) → FAIL.
-- [ ] **Step 3: Minimal impl** — `Listener.bind(io, host, port)` wraps `IpAddress.parseIp4 + listen(.{.reuse_address=true})`; `port()` reads the bound port via `getsockname`; `serveOnce(io, handler)` does one `accept` + calls handler with the `Stream`; `serve(io, handler)` loops `accept` and `io.async`-spawns a connection task per accept. `deinit`. Define `echoHandler` as an in-file test helper. **Run/test builds use `-Dwith_lmdb=false`** (no libc needed yet; host glibc link is broken — use musl).
+- [ ] **Step 2:** Run `zig build test ` (or `zig test -target x86_64-linux-musl src/io.zig`) → FAIL.
+- [ ] **Step 3: Minimal impl** — `Listener.bind(io, host, port)` wraps `IpAddress.parseIp4 + listen(.{.reuse_address=true})`; `port()` reads the bound port via `getsockname`; `serveOnce(io, handler)` does one `accept` + calls handler with the `Stream`; `serve(io, handler)` loops `accept` and `io.async`-spawns a connection task per accept. `deinit`. Define `echoHandler` as an in-file test helper. **Run/test builds use ``** (no libc needed yet; host glibc link is broken — use musl).
 - [ ] **Step 4:** Run → PASS.
 - [ ] **Step 5: Serialized core** — in `src/server/core.zig`, add `Core` holding a `std.Thread.Mutex` and a monotonic sequence counter. Test that two `io.async` tasks calling `core.run(fn)` are mutually exclusive and that emitted notifications preserve a single total order (enqueue under the lock, drain in FIFO). This is the mechanism that makes thread-pool concurrency observably equal to Moonraker's single loop. Implement until green.
 - [ ] **Step 6: Fuzz** — `fuzz_core`: many concurrent `io.async` tasks pushing notifications through `Core`; assert the drained order is a valid serialization (per-producer order preserved, no loss, no data race — run under `-fsanitize` / ThreadSanitizer-style assertions where available, else assert invariants). For `Listener`, a fuzz harness feeds random byte payloads through the echo path asserting no crash.
@@ -438,15 +438,15 @@ test "notifications delivered in FIFO emit order" {
 
 ---
 
-## Task 9: Drop-in liblmdb DataStore (read path)
+## Task 9: Drop-in SQLite DataStore (read path)
 
-**Files:** Create `src/store/datastore.zig` (interface), `src/store/lmdb_store.zig`. Spine needs only read access to bootstrap config-adjacent state (full `server.database.*` is a later slice). Link liblmdb; open the existing env read-only; namespaced get/list.
+**Files:** Create `src/store/datastore.zig` (interface), `src/store/sqlite_store.zig`. Spine needs only read access to bootstrap config-adjacent state (full `server.database.*` is a later slice). Link SQLite; open the existing env read-only; namespaced get/list.
 
-- [ ] **Step 1: Failing test — open vendored asset db and read a known namespace key** (use `vendor/moonraker/tests/assets` lmdb seed; copy into a temp dir in the test).
-- [ ] **Step 2:** FAIL. **Step 3:** Impl `LmdbStore` over `mdb_env_open`/`mdb_txn_begin`/`mdb_get` (read-only), `DataStore` vtable. **Step 4:** PASS.
-- [ ] **Step 5:** Test missing-key and missing-namespace semantics match Moonraker (returns null vs error). Implement until green. Now re-enable `linkSystemLibrary("lmdb")` for the cross target (Task 0 Step 6) or document the cross-lmdb build.
+- [ ] **Step 1: Failing test — open vendored asset db and read a known namespace key** (use `vendor/moonraker/tests/assets` sqlite seed; copy into a temp dir in the test).
+- [ ] **Step 2:** FAIL. **Step 3:** Impl `SqliteStore` over the SQLite C API, `DataStore` vtable. **Step 4:** PASS.
+- [ ] **Step 5:** Test missing-key and missing-namespace semantics match Moonraker (returns null vs error). Implement until green. Now re-enable `vendored SQLite` for the cross target (Task 0 Step 6) or document the cross-sqlite build.
 - [ ] **Step 6: Fuzz** — `fuzz_datastore`: random keys/namespaces against the open env; never crash.
-- [ ] **Step 7: Commit** — `feat: drop-in liblmdb datastore read path`
+- [ ] **Step 7: Commit** — `feat: drop-in SQLite datastore read path`
 
 ---
 
@@ -475,7 +475,7 @@ test "normalize masks volatile fields per manifest" {
 
 **Files:** Create `conformance/capture.py`, `conformance/replay.zig`, `conformance/golden/`.
 
-- [ ] **Step 1:** `capture.py` — boot stock Moonraker **without Klippy** using the documented bring-up (`uv run --with pytest --with 'pytest-asyncio==0.21.2' --with 'pytest-timeout>=2.1.0' --with lmdb` + the vendor `conftest.py`) and the vendored `HttpClient`/`WebsocketClient` fixtures; record responses + notification stream for a scripted sequence (`server.info` over REST + `/server/jsonrpc` + WS; `server.config`; `server.connection.identify` over WS; one notification). Write normalized goldens to `conformance/golden/`.
+- [ ] **Step 1:** `capture.py` — boot stock Moonraker **without Klippy** using the documented bring-up (`uv run --with pytest --with 'pytest-asyncio==0.21.2' --with 'pytest-timeout>=2.1.0' --with sqlite` + the vendor `conftest.py`) and the vendored `HttpClient`/`WebsocketClient` fixtures; record responses + notification stream for a scripted sequence (`server.info` over REST + `/server/jsonrpc` + WS; `server.config`; `server.connection.identify` over WS; one notification). Write normalized goldens to `conformance/golden/`.
 - [ ] **Step 2:** Run capture once; commit goldens (`git add conformance/golden`).
 - [ ] **Step 3:** `replay.zig` — boot phobos with the same config/datadir, replay the identical sequence, assert `normalizedEqual` (Task 10) against each golden and the ordered notification stream. Wire as `zig build oracle`.
 - [ ] **Step 4:** Run `zig build oracle` → PASS (this is the parity gate).

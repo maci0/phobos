@@ -39,7 +39,7 @@ RSS, not to imitate Python.
   removes glibc malloc-arena / dynamic-loader overhead for a long-running daemon.
 - **Dev/CI target:** native `x86_64-linux` for fast iteration and to run the golden
   oracle next to a real Moonraker process.
-- **libc:** linked only because liblmdb (C) needs it; Zig code uses Zig std allocators,
+- **libc:** linked only because SQLite (C) needs it; Zig code uses Zig std allocators,
   not libc malloc, for its own data.
 
 ## 3a. Zig 0.16 constraints & the std.Io decision (revised)
@@ -65,7 +65,7 @@ where it fits) rather than hand-rolling sockets or a reactor.
   `async_limit`/`concurrent_limit`, and we do not hold a worker per idle connection any
   longer than a request needs. Document the realistic concurrency ceiling.
 - **Allocator boundary:** Zig std allocators (`DebugAllocator`, arenas, page allocator)
-  manage their own pages via `mmap`, not libc `malloc`. Linked C (liblmdb, resolver,
+  manage their own pages via `mmap`, not libc `malloc`. Linked C (SQLite, resolver,
   stdio) uses libc `malloc` — musl mallocng on the static target (lean), glibc arenas on
   a glibc dev build. **Host note:** this dev machine's system glibc cannot be linked by
   Zig 0.16 (GCC 16 `.sframe` reloc); dev/CI/oracle builds use `x86_64-linux-musl` (Zig's
@@ -123,7 +123,7 @@ Each module has one purpose, a defined interface, and is independently testable.
 | `server` | component registry, lifecycle, **serialized core** (mutex/queue), event/notification bus | io |
 | `core` | transport-agnostic `server.info`, `server.config`, notify plumbing | server, jsonrpc |
 | `config` | confighelper port behind `ConfigBackend` interface | (none) |
-| `store` | `DataStore` interface; default drop-in liblmdb impl | (none) |
+| `store` | `DataStore` interface; default drop-in SQLite impl | (none) |
 
 **HTTP build-vs-buy (idiomatic + lean):** prefer `std.http`/`std.Io.net` primitives
 over re-implementing where they give byte-exact control. The spine evaluates
@@ -144,9 +144,9 @@ WS connection object), NOT in `core`. `core` holds only the transport-agnostic
   include resolution. Default impl parses `moonraker.conf` identically to confighelper
   (INI-ish: `[section]`, `#`/`;` comments, multiline, type coercion, `[include ...]`).
 - **`DataStore`**: namespaced get/insert/update/delete/list. For the spine slice the
-  default impl = drop-in liblmdb reading the existing database file. The
+  default impl = drop-in SQLite reading the existing database file. The
   leaner-native-backend question (Q2) is **deferred to the database component slice**
-  (review M2): `server.database.*` has LMDB-specific semantics (compact, backup format,
+  (review M2): `server.database.*` has SQLite-specific semantics (compact, backup format,
   namespace ordering) that cannot be validated as "preserved" without that slice's own
   conformance fixtures. The spine only needs read access to bootstrap config-adjacent
   state; it does not pre-authorize a store swap.
