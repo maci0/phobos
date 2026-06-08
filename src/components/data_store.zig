@@ -14,16 +14,14 @@
 //!   Default capacity: 1000 (matches data_store.py gcode_store_size default)
 //!
 //! Temperature Store:
-//!   Per-sensor ring-buffer of temperature/target/power/speed readings.
-//!   Without Klippy there are no sensors → empty object is correct.
+//!   Per-sensor ring-buffer of temperature/target/power/speed readings, fed a
+//!   ~1 Hz-throttled sample from the Klippy status stream (DataStoreCtx.pushTemp,
+//!   called from klippy_connection on each status update). Empty until Klippy
+//!   sends temperatures.
 //!   GET param: include_monitors (bool, false) — include temperature monitors
 //!   Response: {"<sensor_name>": {"temperatures": [...], "targets": [...], ...}}
 //!   (field names are pluralised: "temperature" → "temperatures", etc.)
 //!   Default capacity: 1200 (matches data_store.py temperature_store_size default)
-//!
-//! NOTE: Without Klippy there are no live sensors. The temperature store always
-//! returns an empty object. The gcode ring buffer accumulates entries pushed via
-//! `GcodeStoreCtx.push`; with no Klippy it starts empty (which is correct).
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
