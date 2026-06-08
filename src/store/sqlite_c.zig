@@ -24,8 +24,11 @@ pub const SQLITE_TEXT: c_int = 3;
 pub const SQLITE_BLOB: c_int = 4;
 pub const SQLITE_NULL: c_int = 5;
 
-// Special destructor sentinels for bind_* (value must be copied).
-pub const SQLITE_TRANSIENT: ?*const fn (?*anyopaque) callconv(.c) void = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+// Special destructor sentinel for bind_* (value must be copied). It is the C
+// `(sqlite3_destructor_type)-1` sentinel — never actually called — typed as an
+// opaque pointer (alignment 1) so the -1 address is valid on every target (a
+// fn-pointer type would require an aligned address and fail to compile on ARM).
+pub const SQLITE_TRANSIENT: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
 
 pub extern "c" fn sqlite3_initialize() c_int;
 pub extern "c" fn sqlite3_open_v2(filename: [*:0]const u8, ppDb: *?*sqlite3, flags: c_int, zVfs: ?[*:0]const u8) c_int;
@@ -39,8 +42,8 @@ pub extern "c" fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
 pub extern "c" fn sqlite3_reset(stmt: ?*sqlite3_stmt) c_int;
 pub extern "c" fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
 
-pub extern "c" fn sqlite3_bind_text(stmt: ?*sqlite3_stmt, idx: c_int, text: [*]const u8, n: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) c_int;
-pub extern "c" fn sqlite3_bind_blob(stmt: ?*sqlite3_stmt, idx: c_int, blob: ?*const anyopaque, n: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) c_int;
+pub extern "c" fn sqlite3_bind_text(stmt: ?*sqlite3_stmt, idx: c_int, text: [*]const u8, n: c_int, destructor: ?*const anyopaque) c_int;
+pub extern "c" fn sqlite3_bind_blob(stmt: ?*sqlite3_stmt, idx: c_int, blob: ?*const anyopaque, n: c_int, destructor: ?*const anyopaque) c_int;
 
 pub extern "c" fn sqlite3_column_type(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
 pub extern "c" fn sqlite3_column_bytes(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
