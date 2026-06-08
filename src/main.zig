@@ -6,6 +6,7 @@ pub const clock = @import("util/clock.zig");
 pub const lmdb_c = @import("store/lmdb_c.zig");
 pub const datastore = @import("store/datastore.zig");
 pub const lmdb_store = @import("store/lmdb_store.zig");
+pub const file_store = @import("store/file_store.zig");
 pub const config_backend = @import("config/backend.zig");
 pub const config = @import("config/confighelper.zig");
 pub const io = @import("io.zig");
