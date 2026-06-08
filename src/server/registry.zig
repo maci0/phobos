@@ -68,6 +68,11 @@ pub const ApiDef = struct {
     /// accept GET|POST on the HTTP route but map to a SINGLE dotted JSON-RPC
     /// method with no `get_`/`post_` verb prefix (common.py APIDefinition.create).
     is_remote: bool = false,
+    /// Force verb-prefixed JSON-RPC names even for a single-verb registration.
+    /// Use when one HTTP path is split across separate registrations per verb
+    /// (different handlers) but Moonraker treats it as multi-verb — e.g.
+    /// `/server/files/directory` → `server.files.get_directory`/`post_`/`delete_`.
+    multi_verb: bool = false,
 };
 
 /// A registered HTTP route: matched by (path, method).
@@ -205,7 +210,7 @@ pub const Registry = struct {
         ctx: *anyopaque,
         handler: HandlerFn,
     ) !void {
-        const multi = comptime def.methods.len > 1;
+        const multi = comptime (def.methods.len > 1 or def.multi_verb);
 
         // HTTP routes: one per verb.
         inline for (def.methods) |verb| {

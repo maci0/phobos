@@ -5,17 +5,17 @@
 //! `vendor/moonraker/moonraker/components/database.py`:
 //!
 //!   GET    /server/database/list    → server.database.list
-//!   GET    /server/database/item    → server.database.item  (JSON-RPC GET semantics)
-//!   POST   /server/database/item    → HTTP only (no separate JSON-RPC name)
-//!   DELETE /server/database/item    → HTTP only (no separate JSON-RPC name)
+//!   GET    /server/database/item    → server.database.get_item
+//!   POST   /server/database/item    → server.database.post_item
+//!   DELETE /server/database/item    → server.database.delete_item
 //!   POST   /server/database/compact → server.database.compact
 //!   POST   /server/database/backup  → server.database.post_backup
 //!   DELETE /server/database/backup  → server.database.delete_backup
 //!   POST   /server/database/restore → server.database.restore
 //!   GET    /debug/database/list     → debug.database.list
-//!   GET    /debug/database/item     → debug.database.item
-//!   POST   /debug/database/item     → HTTP only
-//!   DELETE /debug/database/item     → HTTP only
+//!   GET    /debug/database/item     → debug.database.get_item
+//!   POST   /debug/database/item     → debug.database.post_item
+//!   DELETE /debug/database/item     → debug.database.delete_item
 //!   GET    /debug/database/table    → debug.database.table
 //!
 //! Namespace access rules (database.py):
@@ -376,21 +376,21 @@ pub fn registerDatabase(reg: *Registry, ctx: *DbCtx) !void {
     );
 
     // ---- /server/database/item ----
-    // GET: normal transports → derives "server.database.item" JSON-RPC method.
+    // Moonraker verb-prefixes all three: server.database.get_item / post_item /
+    // delete_item (Mainsail/Fluidd call these over WS on init). One HTTP path,
+    // three handlers → multi_verb on each.
     try reg.registerEndpoint(
-        .{ .path = "/server/database/item", .methods = &.{.GET} },
+        .{ .path = "/server/database/item", .methods = &.{.GET}, .multi_verb = true },
         c,
         handleGetItem,
     );
-    // POST: HTTP-only → no JSON-RPC method (baseline has no post_item name).
     try reg.registerEndpoint(
-        .{ .path = "/server/database/item", .methods = &.{.POST}, .transports = &.{.HTTP} },
+        .{ .path = "/server/database/item", .methods = &.{.POST}, .multi_verb = true },
         c,
         handlePostItem,
     );
-    // DELETE: HTTP-only → no JSON-RPC method.
     try reg.registerEndpoint(
-        .{ .path = "/server/database/item", .methods = &.{.DELETE}, .transports = &.{.HTTP} },
+        .{ .path = "/server/database/item", .methods = &.{.DELETE}, .multi_verb = true },
         c,
         handleDeleteItem,
     );
@@ -429,21 +429,20 @@ pub fn registerDatabase(reg: *Registry, ctx: *DbCtx) !void {
     );
 
     // ---- /debug/database/item ----
-    // GET: normal transports → derives "debug.database.item" JSON-RPC method.
+    // Verb-prefixed like the public endpoint: debug.database.get_item /
+    // post_item / delete_item.
     try reg.registerEndpoint(
-        .{ .path = "/debug/database/item", .methods = &.{.GET} },
+        .{ .path = "/debug/database/item", .methods = &.{.GET}, .multi_verb = true },
         c,
         handleGetItemDebug,
     );
-    // POST: HTTP-only.
     try reg.registerEndpoint(
-        .{ .path = "/debug/database/item", .methods = &.{.POST}, .transports = &.{.HTTP} },
+        .{ .path = "/debug/database/item", .methods = &.{.POST}, .multi_verb = true },
         c,
         handlePostItemDebug,
     );
-    // DELETE: HTTP-only.
     try reg.registerEndpoint(
-        .{ .path = "/debug/database/item", .methods = &.{.DELETE}, .transports = &.{.HTTP} },
+        .{ .path = "/debug/database/item", .methods = &.{.DELETE}, .multi_verb = true },
         c,
         handleDeleteItemDebug,
     );
@@ -876,13 +875,16 @@ test "registerDatabase: wires expected routes and JSON-RPC methods" {
 
     // JSON-RPC methods present.
     try testing.expect(d.methods.get("server.database.list") != null);
-    try testing.expect(d.methods.get("server.database.item") != null);
+    try testing.expect(d.methods.get("server.database.get_item") != null);
+    try testing.expect(d.methods.get("server.database.post_item") != null);
+    try testing.expect(d.methods.get("server.database.delete_item") != null);
+    try testing.expect(d.methods.get("server.database.item") == null); // renamed
     try testing.expect(d.methods.get("server.database.compact") != null);
     try testing.expect(d.methods.get("server.database.post_backup") != null);
     try testing.expect(d.methods.get("server.database.delete_backup") != null);
     try testing.expect(d.methods.get("server.database.restore") != null);
     try testing.expect(d.methods.get("debug.database.list") != null);
-    try testing.expect(d.methods.get("debug.database.item") != null);
+    try testing.expect(d.methods.get("debug.database.get_item") != null);
     try testing.expect(d.methods.get("debug.database.table") != null);
 }
 

@@ -9,7 +9,7 @@
 //!   GET    /server/files/metadata   → server.files.metadata
 //!   POST   /server/files/metascan   → server.files.metascan
 //!   GET    /server/files/thumbnails → server.files.thumbnails
-//!   ALL    /server/files/directory  → server.files.directory (GET/POST/DELETE)
+//!   ALL    /server/files/directory  → server.files.get_directory/post_directory/delete_directory
 //!   POST   /server/files/move       → server.files.move
 //!   POST   /server/files/copy       → server.files.copy
 //!   POST   /server/files/zip        → server.files.zip
@@ -390,7 +390,7 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 }
 
 // ---------------------------------------------------------------------------
-// GET /server/files/directory → server.files.directory (GET branch)
+// GET /server/files/directory → server.files.get_directory
 // POST/DELETE handled by handlePostDirectory / handleDeleteDirectory.
 // ---------------------------------------------------------------------------
 // GET response:
@@ -909,10 +909,12 @@ pub fn registerFileManager(reg: *Registry, ctx: *FileCtx) !void {
     try reg.registerEndpoint(.{ .path = "/server/files/metascan", .methods = &.{.POST} }, c, handleMetascan);
     try reg.registerEndpoint(.{ .path = "/server/files/thumbnails", .methods = &.{.GET} }, c, handleThumbnails);
 
-    // directory: GET derives the single rpc name; POST/DELETE HTTP-only.
-    try reg.registerEndpoint(.{ .path = "/server/files/directory", .methods = &.{.GET} }, c, handleGetDirectory);
-    try reg.registerEndpoint(.{ .path = "/server/files/directory", .methods = &.{.POST}, .transports = &.{.HTTP} }, c, handlePostDirectory);
-    try reg.registerEndpoint(.{ .path = "/server/files/directory", .methods = &.{.DELETE}, .transports = &.{.HTTP} }, c, handleDeleteDirectory);
+    // directory: one HTTP path split across three handlers, but Moonraker
+    // verb-prefixes ALL of them → server.files.get_directory / post_directory /
+    // delete_directory (each also a JSON-RPC method, used by Mainsail/Fluidd).
+    try reg.registerEndpoint(.{ .path = "/server/files/directory", .methods = &.{.GET}, .multi_verb = true }, c, handleGetDirectory);
+    try reg.registerEndpoint(.{ .path = "/server/files/directory", .methods = &.{.POST}, .multi_verb = true }, c, handlePostDirectory);
+    try reg.registerEndpoint(.{ .path = "/server/files/directory", .methods = &.{.DELETE}, .multi_verb = true }, c, handleDeleteDirectory);
 
     try reg.registerEndpoint(.{ .path = "/server/files/move", .methods = &.{.POST} }, c, handleMove);
     try reg.registerEndpoint(.{ .path = "/server/files/copy", .methods = &.{.POST} }, c, handleCopy);
@@ -1447,17 +1449,19 @@ test "registerFileManager: wires routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/server/files/zip") != null);
 
     const expected_methods = [_][]const u8{
-        "server.files.roots",      "server.files.list",
-        "server.files.metadata",   "server.files.metascan",
-        "server.files.thumbnails", "server.files.directory",
-        "server.files.move",       "server.files.copy",
-        "server.files.zip",        "server.files.delete_file",
+        "server.files.roots",            "server.files.list",
+        "server.files.metadata",         "server.files.metascan",
+        "server.files.thumbnails",       "server.files.get_directory",
+        "server.files.post_directory",   "server.files.delete_directory",
+        "server.files.move",             "server.files.copy",
+        "server.files.zip",              "server.files.delete_file",
     };
     for (expected_methods) |m| {
         try testing.expect(d.methods.get(m) != null);
     }
-    try testing.expect(d.methods.get("server.files.post_directory") == null);
-    try testing.expect(d.methods.get("server.files.delete_directory") == null);
+    // The old single-name "server.files.directory" must NOT exist (renamed to
+    // the verb-prefixed get_/post_/delete_ trio above).
+    try testing.expect(d.methods.get("server.files.directory") == null);
 }
 
 // ---- Fuzz tests ----
