@@ -136,8 +136,8 @@ pub const App = struct {
     /// strings owned alongside it.
     datadir: []u8,
     file_roots: []FileRoot,
-    /// Owns the LMDB environment.
-    lmdb_store_ptr: *@import("store/lmdb_store.zig").LmdbStore,
+    /// Owns the SQLite database connection (the DataStore backend).
+    db_store_ptr: *@import("store/sqlite_store.zig").SqliteStore,
     /// Parsed config, populated by setConfig(). Null when no config file was
     /// loaded (dump-api, tests). Owned; freed in deinit.
     cfg: ?*config_helper.ConfigParser = null,
@@ -170,25 +170,21 @@ pub const App = struct {
         const db_ctx = try alloc.create(DbCtx);
         errdefer alloc.destroy(db_ctx);
 
-        // Build the LMDB DataStore (a temporary directory for tests/dump-api).
-        const lmdb_ptr: *@import("store/lmdb_store.zig").LmdbStore = blk: {
-            const LmdbStore = @import("store/lmdb_store.zig").LmdbStore;
-            const store_ptr = try alloc.create(LmdbStore);
+        // Build the SQLite DataStore (Moonraker `moonraker-sql.db`-compatible).
+        // A temporary file path for tests/dump-api; the daemon points it at the
+        // datadir. SQLite needs no `io` handle (it does its own file I/O), so it
+        // can be opened here at init time.
+        const db_ptr: *@import("store/sqlite_store.zig").SqliteStore = blk: {
+            const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
+            const store_ptr = try alloc.create(SqliteStore);
             errdefer alloc.destroy(store_ptr);
             var path_buf: [256]u8 = undefined;
-            const tmp_path = try std.fmt.bufPrintZ(
+            const db_path = try std.fmt.bufPrintZ(
                 &path_buf,
-                "/tmp/phobos-db-{x}",
+                "/tmp/phobos-db-{x}.db",
                 .{@intFromPtr(store_ptr)},
             );
-            const rc = std.os.linux.mkdir(tmp_path.ptr, 0o755);
-            if (std.os.linux.errno(rc) != .SUCCESS and std.os.linux.errno(rc) != .EXIST) {
-                return error.MkdirFailed;
-            }
-            store_ptr.* = LmdbStore.open(tmp_path, false) catch |e| {
-                // errdefer above frees store_ptr; don't destroy here too.
-                return e;
-            };
+            store_ptr.* = SqliteStore.open(alloc, db_path) catch |e| return e;
             db_ctx.* = .{ .store = store_ptr.dataStore() };
             break :blk store_ptr;
         };
@@ -443,7 +439,7 @@ pub const App = struct {
             .zeroconf_ctx = zeroconf_ctx,
             .datadir = datadir,
             .file_roots = file_roots,
-            .lmdb_store_ptr = lmdb_ptr,
+            .db_store_ptr = db_ptr,
         };
 
         try app.registerAll();
@@ -709,8 +705,8 @@ pub const App = struct {
         self.mqtt_ctx.deinit();
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
-        self.lmdb_store_ptr.close();
-        self.alloc.destroy(self.lmdb_store_ptr);
+        self.db_store_ptr.deinit();
+        self.alloc.destroy(self.db_store_ptr);
         self.sensor_ctx.deinit();
         self.alloc.destroy(self.sensor_ctx);
         self.webcam_ctx.deinit();

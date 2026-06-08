@@ -11,7 +11,7 @@
 //! segment selects the top-level record within the namespace; subsequent
 //! segments index into the decoded JSON tree of that record. This file owns
 //! the dotted-path tree-walking semantics; concrete backends (see
-//! `lmdb_store.zig`) own persistence and record encoding.
+//! backends (sqlite_store.zig / file_store.zig) own persistence + encoding.
 //!
 //! Dotted-key semantics replicated from database.py `SqliteProvider`:
 //!   * parse_namespace_key: split on '.'; empty key or any empty segment is
@@ -271,7 +271,7 @@ pub fn deletePath(
 // ---------------------------------------------------------------------------
 
 /// A DataStore is a backend-agnostic handle to a namespaced JSON store. The
-/// LMDB backend (`lmdb_store.zig`) provides one via `dataStore()`. All ops
+/// Each backend (SQLite / file) provides one via `dataStore()`. All ops
 /// allocate results in the supplied `arena`.
 pub const VTable = struct {
     getItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value,

@@ -17,8 +17,10 @@ pub fn build(b: *std.Build) void {
     // on-disk binary; tests keep symbols for readable failure traces).
     const release = optimize != .Debug;
 
-    // phobos always uses the vendored LMDB datastore (links libc + compiles the
-    // vendored C). There is no no-lmdb / NullStore fallback.
+    // phobos's DataStore is backed by the vendored SQLite amalgamation
+    // (Moonraker `moonraker-sql.db`-compatible), compiled in + linked against
+    // Zig's bundled musl libc. The pure-Zig atomic-rename file backend
+    // (`store/file_store.zig`) is the dependency-free alternative.
     const mkmod = struct {
         fn f(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, opts: *std.Build.Step.Options, strip: bool) *std.Build.Module {
             const m = bb.createModule(.{
@@ -28,7 +30,6 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .strip = strip,
             });
-            addVendoredLmdb(bb, m);
             addVendoredSqlite(bb, m);
             m.addOptions("build_options", opts);
             return m;
@@ -51,9 +52,6 @@ pub fn build(b: *std.Build) void {
     b.step("fuzz", "Run fuzz harnesses").dependOn(&fuzz_run.step);
 }
 
-/// Compile the vendored liblmdb C sources into `module` and expose its headers.
-/// We vendor `vendor/lmdb/{mdb.c,midl.c}` rather than linking a system
-/// liblmdb so the on-disk format is pinned and the build is fully static.
 /// Compile the vendored SQLite amalgamation into `module`. Built with
 /// size/feature-reducing defines (no extension loading, no deprecated APIs, no
 /// shared cache) to keep the static binary small — SQLite is the heaviest part
@@ -80,20 +78,3 @@ fn addVendoredSqlite(b: *std.Build, module: *std.Build.Module) void {
     });
 }
 
-fn addVendoredLmdb(b: *std.Build, module: *std.Build.Module) void {
-    module.addIncludePath(b.path("vendor/lmdb"));
-    module.addCSourceFiles(.{
-        .root = b.path("vendor/lmdb"),
-        .files = &.{ "mdb.c", "midl.c" },
-        .flags = &.{
-            "-O2",
-            "-pthread",
-            // LMDB's own recommended portable flags. It deliberately avoids
-            // _GNU_SOURCE; these silence the warnings it expects from libc.
-            "-Wno-unused-parameter",
-            "-Wno-format-extra-args",
-            "-Wbad-function-cast",
-            "-Wuninitialized",
-        },
-    });
-}

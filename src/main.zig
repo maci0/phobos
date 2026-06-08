@@ -2,10 +2,7 @@ const std = @import("std");
 pub const arena = @import("util/arena.zig");
 pub const clock = @import("util/clock.zig");
 
-/// LMDB-backed datastore modules (always compiled — phobos has no no-lmdb mode).
-pub const lmdb_c = @import("store/lmdb_c.zig");
 pub const datastore = @import("store/datastore.zig");
-pub const lmdb_store = @import("store/lmdb_store.zig");
 pub const file_store = @import("store/file_store.zig");
 pub const sqlite_c = @import("store/sqlite_c.zig");
 pub const sqlite_store = @import("store/sqlite_store.zig");
