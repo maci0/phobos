@@ -123,8 +123,19 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 
 ## 2. Architecture (how it fits together)
 
-- **Runtime**: `std.Io.Threaded` thread-pool backend (the only std Io backend on
-  32-bit ARM). One `std.Io` handle threaded through `App`.
+- **Runtime**: `std.Io.Threaded` thread-pool backend (the production default).
+  One `std.Io` handle threaded through `App`; everything is coded against the
+  abstract `std.Io` interface, so the backend is a single rebindable `aio` in
+  `main()`.
+  - **io_uring opt-in — BLOCKED on std (revisit on Zig bump).** Wired a `--io=uring`
+    opt-in (≈20 lines in `main.zig`) but reverted: `std.Io.Evented`/`std.Io.Uring`
+    is a **proof-of-concept in 0.16.0, lacking Networking + error handling + test
+    coverage** (per the 0.16.0 release notes). It doesn't even compile —
+    `Uring.openDir` returns `error.ReadOnlyFileSystem`, absent from `Dir.OpenError`
+    (Uring.zig:2732); Zig's lazy analysis let it ship unchecked. Reproduces with a
+    5-line standalone on musl+glibc. And it has no sockets, so it's a non-starter
+    for a network server regardless. When the backend grows networking + compiles,
+    re-add the opt-in (Threaded default, fall back if io_uring unavailable/disabled).
 - **Serialized core** (`src/server/core.zig`): a single `Io.Mutex` + monotonic seq.
   All JSON-RPC handler execution and notification fan-out run **under this lock** so the
   observable order matches Moonraker's single asyncio loop. `core.run(io, fn, args)`
