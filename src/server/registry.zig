@@ -166,6 +166,13 @@ pub const Registry = struct {
     alloc: std.mem.Allocator,
     dispatcher: *jsonrpc.Dispatcher,
     routes: std.ArrayList(Route) = .empty,
+    /// path → route index per verb, so `lookup`/`pathExists` are O(1) instead of
+    /// a linear scan of every route on each HTTP request. Values are indices into
+    /// `routes.items` (stable across ArrayList reallocation, unlike pointers).
+    /// Keys are the comptime-literal `def.path` strings — stable, no dup needed.
+    path_index: std.StringHashMapUnmanaged(VerbSlots) = .empty,
+
+    const VerbSlots = struct { get: ?u32 = null, post: ?u32 = null, delete: ?u32 = null };
 
     pub fn init(alloc: std.mem.Allocator, dispatcher: *jsonrpc.Dispatcher) Registry {
         return .{ .alloc = alloc, .dispatcher = dispatcher };
@@ -173,6 +180,17 @@ pub const Registry = struct {
 
     pub fn deinit(self: *Registry) void {
         self.routes.deinit(self.alloc);
+        self.path_index.deinit(self.alloc);
+    }
+
+    fn indexRoute(self: *Registry, path: []const u8, verb: RequestType, idx: u32) !void {
+        const gop = try self.path_index.getOrPut(self.alloc, path);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        switch (verb) {
+            .GET => gop.value_ptr.get = idx,
+            .POST => gop.value_ptr.post = idx,
+            .DELETE => gop.value_ptr.delete = idx,
+        }
     }
 
     /// Register one endpoint: an HTTP route per declared verb plus the derived
@@ -191,6 +209,7 @@ pub const Registry = struct {
 
         // HTTP routes: one per verb.
         inline for (def.methods) |verb| {
+            const idx: u32 = @intCast(self.routes.items.len);
             try self.routes.append(self.alloc, .{
                 .path = def.path,
                 .method = verb,
@@ -200,6 +219,7 @@ pub const Registry = struct {
                 .ctx = ctx,
                 .handler = handler,
             });
+            try self.indexRoute(def.path, verb, idx);
         }
 
         // JSON-RPC methods: derived only when a non-HTTP transport exists, to
@@ -216,21 +236,22 @@ pub const Registry = struct {
         }
     }
 
-    /// Look up a route by (verb, path). Returns null when no match.
+    /// Look up a route by (verb, path). Returns null when no match. O(1) via the
+    /// path index.
     pub fn lookup(self: *Registry, method: RequestType, path: []const u8) ?*const Route {
-        for (self.routes.items) |*r| {
-            if (r.method == method and std.mem.eql(u8, r.path, path)) return r;
-        }
-        return null;
+        const slots = self.path_index.get(path) orelse return null;
+        const idx = switch (method) {
+            .GET => slots.get,
+            .POST => slots.post,
+            .DELETE => slots.delete,
+        } orelse return null;
+        return &self.routes.items[idx];
     }
 
     /// Look up a route by path alone (any verb) — used to distinguish a 404
-    /// (no such path) from a 405 (path exists, wrong verb).
+    /// (no such path) from a 405 (path exists, wrong verb). O(1).
     pub fn pathExists(self: *Registry, path: []const u8) bool {
-        for (self.routes.items) |*r| {
-            if (std.mem.eql(u8, r.path, path)) return true;
-        }
-        return false;
+        return self.path_index.contains(path);
     }
 };
 
