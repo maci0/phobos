@@ -20,14 +20,33 @@ the same external contract — every HTTP/WebSocket/JSON-RPC endpoint and notifi
 a static native binary, bounded buffers, and a thread-pool runtime, so it fits comfortably
 on a **32-bit ARM Cortex-A7** printer host.
 
+## Memory footprint
+
+Measured on this host (`ReleaseSmall` + LTO + stripped), reproducible with
+[`scripts/measure-memory.sh`](scripts/measure-memory.sh):
+
+| | phobos | bare Python 3 (stdlib only) | Moonraker (typical) |
+|---|---|---|---|
+| On-disk | **1.2 MB** static binary | interpreter + site-packages | + interpreter + deps |
+| Idle RSS | **~3.7 MB** | ~25 MB | ~50–80 MB |
+| Runtime deps | **none** | CPython | CPython + tornado + lmdb + jinja2 + … |
+
+phobos idles in **less RAM than an empty Python interpreter that has only imported
+`json`/`asyncio`/`sqlite3`** — i.e. below the floor Moonraker starts from, before
+its ~30 components load. That is a **~15–20× reduction** versus a full Moonraker,
+in a single dependency-free binary. (Its large `VmSize`/`VmData` is lmdb's
+reserved-but-uncommitted 200 MiB mmap, not resident RAM.) Details + methodology:
+[`docs/MEMORY.md`](docs/MEMORY.md).
+
 ## Status
 
-- **~92% overall implementation progress** (API surface 100%, implementation depth weighted
-  by component — see [coverage heatmap](docs/api/COVERAGE_HEATMAP.md)).
+- **~99% overall implementation progress** (API surface 100%, implementation depth weighted
+  by component — see [coverage heatmap](docs/api/COVERAGE_HEATMAP.md) and the per-call
+  [API coverage table](docs/api/API_COVERAGE.md)).
 - **100% of Moonraker's API surface is covered**: 120/120 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
-- ~1232 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
+- ~1240 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
 - This is **surface + shape parity**, plus a live Klippy path validated by a gated real-Klippy
   integration test. Byte-identical *behavioral* parity (verified against a running stock
   Moonraker) is still being hardened — see [`TODO.md`](TODO.md).

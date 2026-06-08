@@ -13,9 +13,16 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 1. Snapshot (current state)
 
 - Branch: **`main`**. Tree is clean and green at HEAD.
-- **Overall implementation progress: ~94%** (est., weighted by API item count per component).
-  See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown.
-  **Recent depth improvements:**
+- **Overall implementation progress: ~99%** (est., weighted by API item count per component).
+  See `docs/api/COVERAGE_HEATMAP.md` for the per-component breakdown and
+  `docs/api/API_COVERAGE.md` for the authoritative per-call status + Moonraker
+  deltas. Memory footprint: `docs/MEMORY.md` (~3.7 MB idle RSS, 1.2 MB binary).
+  > NOTE: the "Recent depth improvements" log below is **historical** — many
+  > components have advanced well past the percentages quoted in it (e.g. power,
+  > sensor, mqtt, machine are all done now; MQTT TLS+reconnect, Spoolman WS, TD-1
+  > discovery, the sensor Jinja engine, and machine init-system providers all
+  > landed). Trust `API_COVERAGE.md` / the heatmap for current status, not this log.
+  **Recent depth improvements (historical log):**
   wled depth up from 70%→80%: real HTTP POST to WLED JSON API for address-based
   strips via std.http.Client; sendWledBody, wledOn/wledOff/wledControl/setWled
   fully implemented with chain_data color management.
@@ -75,7 +82,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1232 pass / 2 skip / 0 fail** (~230 fuzz). The 2 skips are
+- Tests: **1240 pass / 2 skip / 0 fail** (~230 fuzz). The 2 skips are
   update_manager git tests (need a real repo). phobos always links lmdb (no
   no-lmdb mode). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
