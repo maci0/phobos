@@ -75,10 +75,12 @@ PYTHONPATH=tools python3 -m api_scanner <mode> [--source DIR] [--baseline FILE]
   from Moonraker, plus a reverse section listing phobos calls beyond the static
   baseline (classified: Klipper remote method, is_remote-proxied, or genuine
   phobos shim). Per-call notes come from the curated `DELTAS` map in `table.py`.
+  Writes `docs/api/API_COVERAGE.md` by default; pass `--check` to instead exit 1
+  when that file is stale (CI gate against doc rot).
   ```sh
   zig-out/bin/phobos --dump-api > /tmp/phobos.json
-  PYTHONPATH=tools python3 -m api_scanner table --phobos /tmp/phobos.json \
-      > docs/api/API_COVERAGE.md
+  PYTHONPATH=tools python3 -m api_scanner table --phobos /tmp/phobos.json
+  PYTHONPATH=tools python3 -m api_scanner table --phobos /tmp/phobos.json --check
   ```
 
 Defaults: `--source vendor/moonraker/moonraker`, `--baseline api/api_surface.json`.

@@ -84,6 +84,28 @@ def test_extensions_section_lists_extras():
     assert "`printer.info`" in md
 
 
+def test_table_check_detects_stale(tmp_path):
+    import json
+    from api_scanner import __main__ as cli
+
+    base = tmp_path / "baseline.json"
+    base.write_text(json.dumps(BASELINE))
+    dump = tmp_path / "dump.json"
+    dump.write_text(json.dumps(PHOBOS))
+    out = tmp_path / "API_COVERAGE.md"
+
+    # Generate → writes the file, exit 0.
+    rc = cli.main(["table", "--baseline", str(base), "--phobos", str(dump), "--output", str(out)])
+    assert rc == 0 and out.is_file()
+    # --check on the fresh file passes.
+    rc = cli.main(["table", "--baseline", str(base), "--phobos", str(dump), "--output", str(out), "--check"])
+    assert rc == 0
+    # Corrupt the file → --check fails (exit 1).
+    out.write_text("stale\n")
+    rc = cli.main(["table", "--baseline", str(base), "--phobos", str(dump), "--output", str(out), "--check"])
+    assert rc == 1
+
+
 def test_no_crash_on_empty_inputs():
     md = generate({"summary": {}, "endpoints": [], "jsonrpc_methods": [],
                    "notifications": [], "remote_methods": []},

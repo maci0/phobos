@@ -78,7 +78,27 @@ def cmd_table(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.phobos):
         sys.stderr.write(f"phobos dump not found: {args.phobos}\n")
         return 2
-    sys.stdout.write(table_module.generate(_load(args.baseline), _load(args.phobos)))
+    rendered = table_module.generate(_load(args.baseline), _load(args.phobos))
+    if args.check:
+        if not os.path.isfile(args.output):
+            sys.stderr.write(f"{args.output} not found; run `table --output {args.output}`\n")
+            return 1
+        with open(args.output, "r", encoding="utf-8") as fh:
+            current = fh.read()
+        if current != rendered:
+            sys.stderr.write(
+                f"{args.output} is stale — regenerate with "
+                f"`python3 -m api_scanner table --phobos <dump> --output {args.output}`\n"
+            )
+            return 1
+        sys.stderr.write(f"{args.output} is up to date\n")
+        return 0
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write(rendered)
+        sys.stderr.write(f"wrote {args.output}\n")
+    else:
+        sys.stdout.write(rendered)
     return 0
 
 
@@ -131,6 +151,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Moonraker baseline JSON (default: %(default)s)")
     tbl.add_argument("--phobos", required=True,
                      help="Path to phobos --dump-api JSON output")
+    tbl.add_argument("--output", default="docs/api/API_COVERAGE.md",
+                     help="Write the table here instead of stdout (default: %(default)s)")
+    tbl.add_argument("--check", action="store_true",
+                     help="Exit 1 if --output is stale (CI gate); don't rewrite it.")
     tbl.set_defaults(func=cmd_table)
 
     return p
