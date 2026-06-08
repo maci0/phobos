@@ -1,4 +1,4 @@
-"""Unit tests for the AST extractor."""
+"""Unit tests for the tree-sitter extractor."""
 
 from api_scanner import extractor as ex
 from api_scanner.extractor import DYNAMIC, derive_rpc_methods, extract_from_source
@@ -212,8 +212,12 @@ def test_dynamic_notification_forwarding_skipped():
 # --- flag parsing helpers --------------------------------------------------
 
 def test_flag_names_dynamic_operand():
-    import ast
-    node = ast.parse("RequestType.GET | foo()", mode="eval").body
+    # Build the binary_operator node tree-sitter produces for the OR-chain.
+    tree = ex._PARSER.parse(b"x = RequestType.GET | foo()")
+    node = (tree.root_node
+            .named_children[0]      # expression_statement
+            .named_children[0]      # assignment
+            .child_by_field_name("right"))
     assert ex._flag_names(node) == ["GET", DYNAMIC]
 
 

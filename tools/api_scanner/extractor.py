@@ -1,9 +1,11 @@
-"""AST-based extraction of Moonraker's API surface.
+"""tree-sitter extraction of Moonraker's API surface.
 
 Walks Python source and pulls out endpoint, JSON-RPC method, remote method,
 static/upload handler and notification registrations.  All extraction is done
-with the :mod:`ast` module so the result is robust to formatting and does not
-depend on importing Moonraker.
+with tree-sitter (tree-sitter-python) so the result is robust to formatting and
+does not depend on importing Moonraker.  The same grammar backs the sibling
+TypeScript scanner, which is why we parse with tree-sitter here too rather than
+the stdlib :mod:`ast`.
 
 Non-literal / dynamic arguments are recorded as the sentinel string
 ``"<dynamic>"`` rather than raising, so the scanner never fails on source it
@@ -12,13 +14,15 @@ cannot fully reason about statically.
 
 from __future__ import annotations
 
-import ast
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-# ast.literal_eval safely parses Python literals only (no code execution).
-_safe_parse_literal = ast.literal_eval
+import tree_sitter as ts
+import tree_sitter_python as tspy
+
+_LANGUAGE = ts.Language(tspy.language())
+_PARSER = ts.Parser(_LANGUAGE)
 
 DYNAMIC = "<dynamic>"
 
@@ -129,7 +133,103 @@ def component_from_path(path: str, source_root: str) -> str:
     return os.path.splitext(parts[0])[0]
 
 
-def _flag_names(node: ast.AST) -> List[str]:
+# --- node helpers ----------------------------------------------------------
+# tree-sitter exposes a Concrete Syntax Tree, so the helpers below skip the
+# punctuation children (commas, parens, ``=``) and work off the node ``type``.
+
+def _text(node: ts.Node) -> str:
+    return node.text.decode("utf-8")
+
+
+def _decode_string(node: ts.Node) -> Optional[str]:
+    """Return the Python value of a ``string`` node, or None if it is not a
+    plain ``str`` literal (bytes prefix, or a value we cannot reduce).
+
+    tree-sitter splits literal runs (``string_content``) from escapes
+    (``escape_sequence``), so the literal text is taken verbatim and only the
+    escape tokens are decoded.  A raw (``r``) prefix keeps escapes literal.
+    """
+    prefix = ""
+    out = ""
+    for child in node.children:
+        if child.type == "string_start":
+            prefix = _text(child).rstrip("'\"").lower()
+            out = ""
+        elif child.type == "string_content":
+            out += _text(child)
+        elif child.type == "escape_sequence":
+            out += _text(child) if "r" in prefix else _unescape(_text(child))
+        elif child.type == "interpolation":
+            # An f-string with a substitution is not a plain literal.
+            return None
+    if "b" in prefix:
+        return None
+    return out
+
+
+def _unescape(escape: str) -> str:
+    """Decode a single ``escape_sequence`` token (e.g. ``\\n``) the way the
+    parser would, without depending on ``ast``.  Non-ASCII codepoints survive
+    intact; an unrecognised escape is left verbatim."""
+    try:
+        return (escape.encode("utf-8")
+                      .decode("unicode_escape")
+                      .encode("latin-1", "backslashreplace")
+                      .decode("utf-8", "replace"))
+    except (UnicodeDecodeError, ValueError):
+        return escape
+
+
+def _string_value(node: Optional[ts.Node]) -> Any:
+    """Best-effort literal value of a string-bearing node.
+
+    Plain ``str`` literals decode to their value.  f-strings return the trailing
+    run of literal characters (so ``f"{prefix}/server/redirect"`` surfaces as
+    ``/server/redirect``); when no constant suffix exists the result is DYNAMIC.
+    Concatenated adjacent literals are joined.
+    """
+    if node is None:
+        return None
+    if node.type == "string":
+        if _has_interpolation(node):
+            return _fstring_suffix(node)
+        val = _decode_string(node)
+        return val if val is not None else DYNAMIC
+    if node.type == "concatenated_string":
+        out = ""
+        for child in node.named_children:
+            part = _string_value(child)
+            if not isinstance(part, str) or part == DYNAMIC:
+                return DYNAMIC
+            out += part
+        return out
+    return DYNAMIC
+
+
+def _has_interpolation(node: ts.Node) -> bool:
+    return any(c.type == "interpolation" for c in node.children)
+
+
+def _fstring_suffix(node: ts.Node) -> Any:
+    """Mirror the ``ast.JoinedStr`` handling: keep the trailing literal run.
+
+    Walk the f-string segments and accumulate the longest suffix made purely of
+    literal characters, dropping anything after a variable substitution.
+    """
+    suffix = ""
+    for child in node.children:
+        if child.type == "string_content":
+            suffix += _text(child)
+        elif child.type == "escape_sequence":
+            suffix += _unescape(_text(child))
+        elif child.type == "interpolation":
+            suffix = ""  # a substitution resets the literal run
+    if suffix:
+        return suffix
+    return DYNAMIC
+
+
+def _flag_names(node: ts.Node) -> List[str]:
     """Collect the leaf attribute names of an OR-chain of ``X.NAME`` accesses.
 
     ``RequestType.GET | RequestType.POST`` yields ``["GET", "POST"]``.
@@ -137,13 +237,26 @@ def _flag_names(node: ast.AST) -> List[str]:
     """
     names: List[str] = []
 
-    def visit(n: ast.AST) -> None:
-        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr):
-            visit(n.left)
-            visit(n.right)
-        elif isinstance(n, ast.Attribute):
+    def visit(n: ts.Node) -> None:
+        if n.type == "binary_operator":
+            op = n.child_by_field_name("operator")
+            left = n.child_by_field_name("left")
+            right = n.child_by_field_name("right")
+            if op is not None and _text(op) == "|" and left and right:
+                visit(left)
+                visit(right)
+            else:
+                names.append(DYNAMIC)
+        elif n.type == "attribute":
+            attr = n.child_by_field_name("attribute")
             # X.NAME -> NAME (X is not verified, to tolerate import aliases)
-            names.append(n.attr)
+            names.append(_text(attr) if attr is not None else DYNAMIC)
+        elif n.type == "parenthesized_expression":
+            inner = [c for c in n.named_children]
+            if len(inner) == 1:
+                visit(inner[0])
+            else:
+                names.append(DYNAMIC)
         else:
             names.append(DYNAMIC)
 
@@ -151,38 +264,15 @@ def _flag_names(node: ast.AST) -> List[str]:
     return names
 
 
-def _literal(node: Optional[ast.AST]) -> Any:
-    """Return a Python literal for ``node`` or DYNAMIC if not statically known.
-
-    For f-strings (``ast.JoinedStr``) the constant suffix (the last run of
-    literal characters) is returned so that paths like
-    ``f"{prefix}/server/redirect"`` still surface as ``/server/redirect``.
-    When no constant segments exist the result is DYNAMIC.
-    """
+def _bool_value(node: Optional[ts.Node]) -> Any:
+    """Return the Python bool for a ``True``/``False`` node, else DYNAMIC/None."""
     if node is None:
         return None
-    # f-strings: collect the literal constant parts in order
-    if isinstance(node, ast.JoinedStr):
-        parts = []
-        for v in node.values:
-            if isinstance(v, ast.Constant) and isinstance(v.value, str):
-                parts.append(v.value)
-            else:
-                parts.append(None)  # variable placeholder
-        # Build the best static approximation: drop leading variable segments,
-        # keep any trailing literal run that looks like a path.
-        literal_suffix = ""
-        for p in reversed(parts):
-            if p is None:
-                break
-            literal_suffix = p + literal_suffix
-        if literal_suffix:
-            return literal_suffix
-        return DYNAMIC
-    try:
-        return _safe_parse_literal(node)
-    except (ValueError, TypeError, SyntaxError):
-        return DYNAMIC
+    if node.type == "true":
+        return True
+    if node.type == "false":
+        return False
+    return DYNAMIC
 
 
 def derive_rpc_methods(
@@ -228,24 +318,53 @@ def derive_rpc_methods(
     return [".".join(name_parts)], False
 
 
-def _kw(call: ast.Call, name: str) -> Optional[ast.AST]:
-    for kw in call.keywords:
-        if kw.arg == name:
-            return kw.value
+def _call_args(call: ts.Node) -> List[ts.Node]:
+    """Positional argument nodes of a ``call`` (keyword args excluded)."""
+    arglist = call.child_by_field_name("arguments")
+    if arglist is None:
+        return []
+    args: List[ts.Node] = []
+    for child in arglist.named_children:
+        if child.type in ("keyword_argument", "comment"):
+            continue
+        args.append(child)
+    return args
+
+
+def _kw(call: ts.Node, name: str) -> Optional[ts.Node]:
+    arglist = call.child_by_field_name("arguments")
+    if arglist is None:
+        return None
+    for child in arglist.named_children:
+        if child.type != "keyword_argument":
+            continue
+        key = child.child_by_field_name("name")
+        if key is not None and _text(key) == name:
+            return child.child_by_field_name("value")
     return None
 
 
-def _bool_kw(call: ast.Call, name: str, default: Any) -> Any:
+def _bool_kw(call: ts.Node, name: str, default: Any) -> Any:
     node = _kw(call, name)
     if node is None:
         return default
-    val = _literal(node)
+    val = _bool_value(node)
     if isinstance(val, bool):
         return val
     return DYNAMIC
 
 
-class _Visitor(ast.NodeVisitor):
+def _attr_name(node: ts.Node) -> Optional[str]:
+    """``register_endpoint`` from a ``X.Y.register_endpoint`` call target."""
+    if node.type == "attribute":
+        attr = node.child_by_field_name("attribute")
+        return _text(attr) if attr is not None else None
+    return None
+
+
+class _Visitor:
+    """Recursive descent over the tree-sitter CST collecting API records."""
+
     def __init__(self, path: str, source_root: str, str_consts: Dict[str, str]):
         self.path = path
         self.source_root = source_root
@@ -256,23 +375,38 @@ class _Visitor(ast.NodeVisitor):
         self.static_handlers: List[StaticHandler] = []
         self.notifications: List[Notification] = []
         self.router_routes: List[RouterRoute] = []
-        # AST node ids of add_handler Call nodes already unpacked via visit_For,
-        # so visit_Call doesn't produce a duplicate <dynamic> entry for them.
+        # add_handler Call nodes already unpacked via a for-loop, so the plain
+        # call visit doesn't produce a duplicate <dynamic> entry for them.
         self._handled_call_ids: set = set()
 
-    def _src(self, node: ast.AST) -> str:
+    # -- traversal ----------------------------------------------------------
+    def visit(self, node: ts.Node) -> None:
+        node_type = node.type
+        if node_type == "call":
+            self._visit_call(node)
+        elif node_type == "for_statement":
+            self._try_unpack_router_for_loop(node)
+        elif node_type == "string":
+            self._visit_string(node)
+        for child in node.children:
+            self.visit(child)
+
+    def _src(self, node: ts.Node) -> str:
         rel = os.path.relpath(self.path, self.source_root)
-        return f"{rel}:{node.lineno}"
+        return f"{rel}:{node.start_point[0] + 1}"
 
-    def _resolve_str(self, node: Optional[ast.AST]) -> Any:
+    def _resolve_str(self, node: Optional[ts.Node]) -> Any:
         """Literal parse, also resolving module-level string constants by name."""
-        if isinstance(node, ast.Name) and node.id in self.str_consts:
-            return self.str_consts[node.id]
-        return _literal(node)
+        if node is not None and node.type == "identifier":
+            name = _text(node)
+            if name in self.str_consts:
+                return self.str_consts[name]
+            return DYNAMIC
+        return _string_value(node)
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
-        func = node.func
-        attr = func.attr if isinstance(func, ast.Attribute) else None
+    def _visit_call(self, node: ts.Node) -> None:
+        func = node.child_by_field_name("function")
+        attr = _attr_name(func) if func is not None else None
 
         if attr == "register_endpoint":
             self._handle_register_endpoint(node, debug_only=False)
@@ -294,84 +428,84 @@ class _Visitor(ast.NodeVisitor):
         elif attr == "register_websocket_handler":
             self._handle_websocket_handler(node)
 
-        self.generic_visit(node)
-
-    def visit_For(self, node: ast.For) -> None:  # noqa: N802
-        """Detect `for (ptrn, hdlr) in (...): router.add_handler(ptrn, hdlr, ...)`
+    def _try_unpack_router_for_loop(self, node: ts.Node) -> None:
+        """Detect ``for (ptrn, hdlr) in (...): router.add_handler(ptrn, hdlr, ...)``
         and unpack the tuple pairs directly for static extraction."""
-        self._try_unpack_router_for_loop(node)
-        self.generic_visit(node)
-
-    def _try_unpack_router_for_loop(self, node: ast.For) -> None:
-        """If the For loop matches the add_handler pattern, extract each pair."""
-        # Target must be a 2-tuple of Names
-        if not (isinstance(node.target, ast.Tuple) and
-                len(node.target.elts) == 2 and
-                all(isinstance(e, ast.Name) for e in node.target.elts)):
+        target = node.child_by_field_name("left")
+        iterable = node.child_by_field_name("right")
+        body = node.child_by_field_name("body")
+        if target is None or iterable is None or body is None:
             return
-        ptrn_var = node.target.elts[0].id  # type: ignore[attr-defined]
-        hdlr_var = node.target.elts[1].id  # type: ignore[attr-defined]
 
-        # Iter must be a Tuple of 2-element Tuples (the pairs)
-        if not isinstance(node.iter, ast.Tuple):
+        # Target must be a 2-tuple of names.
+        if target.type != "tuple_pattern":
             return
-        pairs = node.iter.elts
+        target_names = [c for c in target.named_children if c.type == "identifier"]
+        if len(target_names) != 2:
+            return
+        ptrn_var = _text(target_names[0])
+        hdlr_var = _text(target_names[1])
 
-        # Body must contain exactly one add_handler call using those variables
+        # Iter must be a tuple of 2-element tuples (the pairs).
+        if iterable.type != "tuple":
+            return
+        pairs = [c for c in iterable.named_children if c.type == "tuple"]
+
+        # Body must contain exactly one add_handler call using those variables.
         body_calls = [
-            s.value for s in node.body
-            if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+            c for c in _statement_calls(body)
+            if (c.child_by_field_name("function") is not None and
+                _attr_name(c.child_by_field_name("function")) == "add_handler")
         ]
         if len(body_calls) != 1:
             return
         call = body_calls[0]
-        func = call.func
-        if not (isinstance(func, ast.Attribute) and func.attr == "add_handler"):
+        args = _call_args(call)
+        if len(args) < 2:
             return
-        if len(call.args) < 2:
+        arg0, arg1 = args[0], args[1]
+        if not (arg0.type == "identifier" and _text(arg0) == ptrn_var):
             return
-        arg0, arg1 = call.args[0], call.args[1]
-        if not (isinstance(arg0, ast.Name) and arg0.id == ptrn_var):
-            return
-        if not (isinstance(arg1, ast.Name) and arg1.id == hdlr_var):
+        if not (arg1.type == "identifier" and _text(arg1) == hdlr_var):
             return
 
-        # Mark the inner call as already-handled so visit_Call skips it.
+        # Mark the inner call as already-handled so the call visit skips it.
         self._handled_call_ids.add(id(call))
 
-        # Unpack each (path, handler) pair from the tuple literal
+        # Unpack each (path, handler) pair from the tuple literal.
         for pair in pairs:
-            if not (isinstance(pair, ast.Tuple) and len(pair.elts) == 2):
+            elts = pair.named_children
+            if len(elts) != 2:
                 continue
-            path = self._resolve_str(pair.elts[0])
+            path = self._resolve_str(elts[0])
             if not isinstance(path, str):
-                # Try module-level str consts; resolve returns DYNAMIC if unknown
                 path = DYNAMIC
-            handler_elt = pair.elts[1]
-            if isinstance(handler_elt, ast.Name):
-                handler = handler_elt.id
-            elif isinstance(handler_elt, ast.Attribute):
-                handler = handler_elt.attr
+            handler_elt = elts[1]
+            if handler_elt.type == "identifier":
+                handler = _text(handler_elt)
+            elif handler_elt.type == "attribute":
+                handler = _attr_name(handler_elt) or DYNAMIC
             else:
                 handler = DYNAMIC
             self.router_routes.append(RouterRoute(
                 kind="router_route", path=path, handler=handler,
                 component=self.component, source=self._src(call)))
 
-    def visit_Constant(self, node: ast.Constant) -> None:  # noqa: N802
+    def _visit_string(self, node: ts.Node) -> None:
         # Capture hard-coded wire names such as the printer status push
         # ('method': "notify_status_update" in common.py) that are emitted
         # without going through register_notification / send_notification.
-        val = node.value
+        if _has_interpolation(node):
+            return
+        val = _decode_string(node)
         if isinstance(val, str) and val.startswith("notify_") and len(val) > 7:
             self.notifications.append(Notification(
                 name=val, event_name=None, component=self.component,
                 source=self._src(node)))
-        self.generic_visit(node)
 
     # -- endpoint -----------------------------------------------------------
-    def _handle_register_endpoint(self, node: ast.Call, debug_only: bool) -> None:
-        args = node.args
+    def _handle_register_endpoint(self, node: ts.Node, debug_only: bool) -> None:
+        args = _call_args(node)
         # positional: endpoint, request_types, callback, [transports]
         path = self._resolve_str(args[0]) if len(args) >= 1 else DYNAMIC
         if not isinstance(path, str):
@@ -381,7 +515,7 @@ class _Visitor(ast.NodeVisitor):
         if len(args) >= 2:
             request_types = _flag_names(args[1])
 
-        transports_node: Optional[ast.AST] = None
+        transports_node: Optional[ts.Node] = None
         if len(args) >= 4:
             transports_node = args[3]
         kw_transports = _kw(node, "transports")
@@ -399,7 +533,7 @@ class _Visitor(ast.NodeVisitor):
         auth_required = _bool_kw(node, "auth_required", default=True)
         auth_alt = _kw(node, "auth")
         if auth_alt is not None:
-            v = _literal(auth_alt)
+            v = _bool_value(auth_alt)
             auth_required = v if isinstance(v, bool) else DYNAMIC
 
         is_remote = _bool_kw(node, "is_remote", default=False)
@@ -425,16 +559,18 @@ class _Visitor(ast.NodeVisitor):
         ))
 
     # -- remote method ------------------------------------------------------
-    def _handle_remote_method(self, node: ast.Call) -> None:
-        name = self._resolve_str(node.args[0]) if node.args else DYNAMIC
+    def _handle_remote_method(self, node: ts.Node) -> None:
+        args = _call_args(node)
+        name = self._resolve_str(args[0]) if args else DYNAMIC
         if not isinstance(name, str):
             name = DYNAMIC
         self.remote_methods.append(RemoteMethod(
             name=name, component=self.component, source=self._src(node)))
 
     # -- static / upload ----------------------------------------------------
-    def _handle_static(self, node: ast.Call, kind: str) -> None:
-        pattern = self._resolve_str(node.args[0]) if node.args else DYNAMIC
+    def _handle_static(self, node: ts.Node, kind: str) -> None:
+        args = _call_args(node)
+        pattern = self._resolve_str(args[0]) if args else DYNAMIC
         if not isinstance(pattern, str):
             pattern = DYNAMIC
         self.static_handlers.append(StaticHandler(
@@ -442,11 +578,12 @@ class _Visitor(ast.NodeVisitor):
             source=self._src(node)))
 
     # -- notification (register_notification) -------------------------------
-    def _handle_notification(self, node: ast.Call) -> None:
-        event = self._resolve_str(node.args[0]) if node.args else DYNAMIC
+    def _handle_notification(self, node: ts.Node) -> None:
+        args = _call_args(node)
+        event = self._resolve_str(args[0]) if args else DYNAMIC
         notify_name: Any = None
-        if len(node.args) >= 2:
-            notify_name = self._resolve_str(node.args[1])
+        if len(args) >= 2:
+            notify_name = self._resolve_str(args[1])
         kw_nn = _kw(node, "notify_name")
         if kw_nn is not None:
             notify_name = self._resolve_str(kw_nn)
@@ -465,8 +602,9 @@ class _Visitor(ast.NodeVisitor):
             source=self._src(node)))
 
     # -- send_notification("name", ...) -> notify_name ----------------------
-    def _handle_send_notification(self, node: ast.Call) -> None:
-        name = self._resolve_str(node.args[0]) if node.args else DYNAMIC
+    def _handle_send_notification(self, node: ts.Node) -> None:
+        args = _call_args(node)
+        name = self._resolve_str(args[0]) if args else DYNAMIC
         if not isinstance(name, str) or name == DYNAMIC:
             return
         self.notifications.append(Notification(
@@ -474,18 +612,19 @@ class _Visitor(ast.NodeVisitor):
             source=self._src(node)))
 
     # -- mutable_router.add_handler(path, HandlerClass, ...) ----------------
-    def _handle_add_handler(self, node: ast.Call) -> None:
+    def _handle_add_handler(self, node: ts.Node) -> None:
         """Capture direct Tornado router registrations (router_route kind)."""
-        if len(node.args) < 2:
+        args = _call_args(node)
+        if len(args) < 2:
             return
-        path = self._resolve_str(node.args[0])
+        path = self._resolve_str(args[0])
         if not isinstance(path, str):
             path = DYNAMIC
-        handler_node = node.args[1]
-        if isinstance(handler_node, ast.Name):
-            handler = handler_node.id
-        elif isinstance(handler_node, ast.Attribute):
-            handler = handler_node.attr
+        handler_node = args[1]
+        if handler_node.type == "identifier":
+            handler = _text(handler_node)
+        elif handler_node.type == "attribute":
+            handler = _attr_name(handler_node) or DYNAMIC
         else:
             handler = DYNAMIC
         self.router_routes.append(RouterRoute(
@@ -493,34 +632,58 @@ class _Visitor(ast.NodeVisitor):
             component=self.component, source=self._src(node)))
 
     # -- app.register_websocket_handler(path, HandlerClass) -----------------
-    def _handle_websocket_handler(self, node: ast.Call) -> None:
+    def _handle_websocket_handler(self, node: ts.Node) -> None:
         """Capture websocket transport route registrations."""
-        if len(node.args) < 1:
+        args = _call_args(node)
+        if len(args) < 1:
             return
-        path = self._resolve_str(node.args[0])
+        path = self._resolve_str(args[0])
         if not isinstance(path, str):
             path = DYNAMIC
         handler = DYNAMIC
-        if len(node.args) >= 2:
-            handler_node = node.args[1]
-            if isinstance(handler_node, ast.Name):
-                handler = handler_node.id
-            elif isinstance(handler_node, ast.Attribute):
-                handler = handler_node.attr
+        if len(args) >= 2:
+            handler_node = args[1]
+            if handler_node.type == "identifier":
+                handler = _text(handler_node)
+            elif handler_node.type == "attribute":
+                handler = _attr_name(handler_node) or DYNAMIC
         self.router_routes.append(RouterRoute(
             kind="websocket_route", path=path, handler=handler,
             component=self.component, source=self._src(node)))
 
 
-def _collect_str_consts(tree: ast.AST) -> Dict[str, str]:
+def _statement_calls(block: ts.Node) -> List[ts.Node]:
+    """``call`` nodes that are the sole expression of a statement in ``block``."""
+    calls: List[ts.Node] = []
+    for stmt in block.named_children:
+        if stmt.type != "expression_statement":
+            continue
+        exprs = stmt.named_children
+        if len(exprs) == 1 and exprs[0].type == "call":
+            calls.append(exprs[0])
+    return calls
+
+
+def _collect_str_consts(root: ts.Node) -> Dict[str, str]:
     """Module-level ``NAME = "literal"`` assignments, for resolving constants."""
     consts: Dict[str, str] = {}
-    for stmt in getattr(tree, "body", []):
-        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) \
-                and isinstance(stmt.value.value, str):
-            for tgt in stmt.targets:
-                if isinstance(tgt, ast.Name):
-                    consts[tgt.id] = stmt.value.value
+    for stmt in root.named_children:
+        if stmt.type != "expression_statement":
+            continue
+        for expr in stmt.named_children:
+            if expr.type != "assignment":
+                continue
+            target = expr.child_by_field_name("left")
+            value = expr.child_by_field_name("right")
+            if target is None or value is None:
+                continue
+            if target.type != "identifier" or value.type != "string":
+                continue
+            if _has_interpolation(value):
+                continue
+            val = _decode_string(value)
+            if val is not None:
+                consts[_text(target)] = val
     return consts
 
 
@@ -529,15 +692,13 @@ def extract_from_source(
 ) -> _Visitor:
     """Parse ``source`` and return a visitor holding the extracted records.
 
-    On a syntax error the visitor is returned empty (the scanner skips the
-    file) rather than raising.
+    Malformed source still parses (tree-sitter is error-tolerant); the visitor
+    simply yields whatever could be recovered rather than raising.
     """
-    root = source_root or os.path.dirname(path)
-    try:
-        tree = ast.parse(source, filename=path)
-    except SyntaxError:
-        return _Visitor(path, root, {})
-    consts = _collect_str_consts(tree)
-    visitor = _Visitor(path, root, consts)
-    visitor.visit(tree)
+    root_dir = source_root or os.path.dirname(path)
+    tree = _PARSER.parse(source.encode("utf-8"))
+    root = tree.root_node
+    consts = _collect_str_consts(root)
+    visitor = _Visitor(path, root_dir, consts)
+    visitor.visit(root)
     return visitor

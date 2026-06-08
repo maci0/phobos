@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import os
 import subprocess
 from typing import Any, Dict, List
@@ -14,16 +13,12 @@ def _read_version_literal(ver_path: str) -> Any:
     """Parse ``__version__ = "..."`` from a file without importing it."""
     try:
         with open(ver_path, "r", encoding="utf-8") as fh:
-            tree = ast.parse(fh.read(), filename=ver_path)
-    except (OSError, SyntaxError):
+            source = fh.read()
+    except OSError:
         return None
-    for stmt in tree.body:
-        if isinstance(stmt, ast.Assign):
-            for tgt in stmt.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == "__version__":
-                    if isinstance(stmt.value, ast.Constant):
-                        return stmt.value.value
-    return None
+    consts = ex._collect_str_consts(
+        ex._PARSER.parse(source.encode("utf-8")).root_node)
+    return consts.get("__version__")
 
 
 def discover_version(source_root: str) -> Dict[str, Any]:

@@ -6,8 +6,10 @@ Zig reimplementation of Moonraker; this tool lets us detect exactly what changed
 in the API whenever the vendored Moonraker is bumped, replacing the hand-written
 (and easily stale) `docs/api/API_SURFACE.md`.
 
-Parsing is done with the Python `ast` module — no regexes, no importing Moonraker.
-Python 3 standard library only; runs anywhere `python3` runs.
+Parsing is done with tree-sitter (`tree-sitter-python`) — no regexes, no
+importing Moonraker. The same grammar backs the sibling TypeScript scanner, so
+both share one parsing approach. Requires `tree_sitter` and `tree_sitter_python`
+(e.g. `pip install tree-sitter tree-sitter-python`).
 
 ## What it extracts
 
