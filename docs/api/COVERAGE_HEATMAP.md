@@ -77,8 +77,12 @@
 >   MqttClient reader → MqttCtx.on_message → app bridge → core.run → sensor
 >   ingest (under the Core lock); topics subscribed on connect. Hook firing
 >   validated over a real socket. state_response_template is supported via an
->   in-tree Jinja-subset evaluator (sensor_template.zig): payload|fromjson, member/
->   index access, float/int/round/abs/default/string filters, and set_result.
+>   in-tree Jinja-subset engine (sensor_template.zig) using Moonraker's exact
+>   delimiters ({% %}, single-brace { }, {# #}): set/if/elif/else/for control flow,
+>   operators (arithmetic/comparison/logical/concat/in), ~20 filters
+>   (fromjson/float/int/round/abs/default/upper/lower/replace/join/length/...),
+>   is-tests, and set_result. A renderText() entry point is ready for future
+>   notifier title/body templates.
 > - mqtt: DONE — real MQTT 3.1.1 TCP client (mqtt_proto codec + mqtt_client),
 >   CONNECT/CONNACK/PUBLISH/SUBSCRIBE/PUBACK/PING, LWT, live publish wired into
 >   MqttCtx (connectBroker + background reader), connects at startup when a
