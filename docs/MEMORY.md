@@ -1,13 +1,28 @@
 # Memory footprint
 
-> **Note (post-SQLite switch):** the binary/RSS figures below were measured when
-> the DataStore was lmdb. The store has since moved to a vendored SQLite (for
-> Moonraker `moonraker-sql.db` compatibility), which grew the binary to **~2.1 MB**
-> and replaces lmdb's reserved 200 MiB mmap with SQLite's (small, resident) page
-> cache. The orders of magnitude vs Moonraker still hold; the detailed lmdb-mmap
-> discussion is retained as background but the exact RSS needs re-measuring on the
-> SQLite build (`scripts/measure-memory.sh`). The pure-Zig atomic-rename file
-> backend (`store/file_store.zig`) is the leaner, no-SQLite alternative.
+## Storage backend vs footprint (measured on a real armv7 printer, idle)
+
+The DataStore backend is runtime-selectable (`[database] backend`). Measured idle
+RSS on the actual printer:
+
+| Backend | Idle RSS | Private_Dirty | VmData | Notes |
+|---|---|---|---|---|
+| `sqlite` (default) | **2.18 MB** | 2.28 MB | 21.8 MB | Moonraker `moonraker-sql.db`-compatible; ≈ same RSS as the old lmdb (~2.2 MB) |
+| `file` (atomic-rename) | **1.20 MB** | 1.33 MB | 21.6 MB | pure-Zig, no C dep; **~1 MB lighter** |
+
+Binary is **~2.15 MB** either way (SQLite is always linked so it stays runtime-
+selectable; a build option could drop it for a ~1.2 MB binary with the file
+backend only).
+
+Findings:
+- **The file backend nearly halves resident RAM** (1.2 MB vs 2.18 MB) — SQLite's
+  page cache + touched code is ~1 MB resident; the file backend avoids it. Pick it
+  when minimum memory matters and Moonraker-DB compatibility doesn't.
+- **Removing lmdb cut VmData from ~75 MB to ~21.6 MB** — lmdb's reserved 200 MiB
+  mmap is gone; the remaining VmData is just the (1 MiB-capped) thread stacks +
+  arenas. So the "scary big VmSize" largely disappeared with the lmdb removal.
+
+The lmdb-era discussion below is retained as background.
 
 phobos is a from-scratch Zig reimplementation of Moonraker (a Python/asyncio
 service). The headline reason to care is resource use on small printer hosts:
