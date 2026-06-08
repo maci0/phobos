@@ -53,7 +53,11 @@ pub fn main(init: std.process.Init) !void {
     const host, const bind_port = try resolveBindAddr(alloc, init.arena.allocator(), aio, config_path);
     std.debug.print("phobos: bind host='{s}' port={d}\n", .{ host, bind_port });
 
-    var server_app = try app.App.init(alloc);
+    // Select the DataStore backend from `[database] backend` (sqlite | file).
+    const db_backend = resolveDbBackend(alloc, aio, config_path);
+    std.debug.print("phobos: datastore backend = {s}\n", .{@tagName(db_backend)});
+
+    var server_app = try app.App.initWithStore(alloc, db_backend, aio);
     defer server_app.deinit(aio);
 
     if (config_path) |path| {
@@ -72,6 +76,17 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("phobos listening on http://{s}:{d}\n", .{ host, bind_port });
     try listener.serveWith(aio, @ptrCast(&srv), http_transport.connHandler);
+}
+
+/// Read `[database] backend` (sqlite | file) from the config; defaults to sqlite.
+pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]const u8) app.StoreBackend {
+    const path = config_path orelse return .sqlite;
+    var cfg = config.ConfigParser.init(gpa);
+    defer cfg.deinit();
+    cfg.parseFile(aio, path) catch return .sqlite;
+    const v = cfg.get("database", "backend") orelse return .sqlite;
+    if (std.mem.eql(u8, v, "file")) return .file;
+    return .sqlite;
 }
 
 /// Resolve the bind address from a config file (or defaults).

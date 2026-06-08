@@ -91,6 +91,33 @@ fn mkdirRaw(path_z: [:0]const u8) void {
     if (e != .SUCCESS and e != .EXIST) {}
 }
 
+/// Which DataStore backend to use. `sqlite` (default) is Moonraker
+/// `moonraker-sql.db`-compatible and needs no `io` handle; `file` is the pure-Zig
+/// atomic-rename JSON backend (no C dependency) and requires an `io` handle.
+/// Selected via `[database] backend` in the config.
+pub const StoreBackend = enum { sqlite, file };
+
+/// Owns the concrete store backend behind the DataStore vtable, so App can hold
+/// either without a comptime-fixed type. Dispatches dataStore()/deinit.
+const StoreHolder = union(StoreBackend) {
+    sqlite: *@import("store/sqlite_store.zig").SqliteStore,
+    file: *@import("store/file_store.zig").FileStore,
+
+    fn dataStore(self: StoreHolder) ds.DataStore {
+        return switch (self) {
+            inline else => |s| s.dataStore(),
+        };
+    }
+    fn deinit(self: StoreHolder, alloc: std.mem.Allocator) void {
+        switch (self) {
+            inline else => |s| {
+                s.deinit();
+                alloc.destroy(s);
+            },
+        }
+    }
+};
+
 /// The fully-assembled server application. All fields are heap-allocated and
 /// owned by this struct; call `deinit` to release them.
 pub const App = struct {
@@ -136,13 +163,20 @@ pub const App = struct {
     /// strings owned alongside it.
     datadir: []u8,
     file_roots: []FileRoot,
-    /// Owns the SQLite database connection (the DataStore backend).
-    db_store_ptr: *@import("store/sqlite_store.zig").SqliteStore,
+    /// Owns the active DataStore backend (SQLite or atomic-rename file).
+    db_store: StoreHolder,
     /// Parsed config, populated by setConfig(). Null when no config file was
     /// loaded (dump-api, tests). Owned; freed in deinit.
     cfg: ?*config_helper.ConfigParser = null,
 
+    /// Default entry point: SQLite backend, no io needed at init time.
     pub fn init(alloc: std.mem.Allocator) !App {
+        return initWithStore(alloc, .sqlite, null);
+    }
+
+    /// Assemble the App with an explicit DataStore backend. The `file` backend
+    /// needs a live `io` handle (filesystem); `sqlite` ignores it.
+    pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, db_io: ?std.Io) !App {
         const core = try alloc.create(Core);
         errdefer alloc.destroy(core);
         core.* = Core.init();
@@ -170,24 +204,32 @@ pub const App = struct {
         const db_ctx = try alloc.create(DbCtx);
         errdefer alloc.destroy(db_ctx);
 
-        // Build the SQLite DataStore (Moonraker `moonraker-sql.db`-compatible).
-        // A temporary file path for tests/dump-api; the daemon points it at the
-        // datadir. SQLite needs no `io` handle (it does its own file I/O), so it
-        // can be opened here at init time.
-        const db_ptr: *@import("store/sqlite_store.zig").SqliteStore = blk: {
-            const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
-            const store_ptr = try alloc.create(SqliteStore);
-            errdefer alloc.destroy(store_ptr);
+        // Build the DataStore behind the selected backend. A temporary path keyed
+        // by `db_ctx`'s address keeps tests/dump-api isolated. SQLite (default)
+        // opens at init with no io; the file backend needs the live io handle.
+        const db_store: StoreHolder = blk: {
             var path_buf: [256]u8 = undefined;
-            const db_path = try std.fmt.bufPrintZ(
-                &path_buf,
-                "/tmp/phobos-db-{x}.db",
-                .{@intFromPtr(store_ptr)},
-            );
-            store_ptr.* = SqliteStore.open(alloc, db_path) catch |e| return e;
-            db_ctx.* = .{ .store = store_ptr.dataStore() };
-            break :blk store_ptr;
+            switch (db_backend) {
+                .sqlite => {
+                    const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
+                    const store_ptr = try alloc.create(SqliteStore);
+                    errdefer alloc.destroy(store_ptr);
+                    const db_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/phobos-db-{x}.db", .{@intFromPtr(db_ctx)});
+                    store_ptr.* = try SqliteStore.open(alloc, db_path);
+                    break :blk .{ .sqlite = store_ptr };
+                },
+                .file => {
+                    const io = db_io orelse return error.FileBackendNeedsIo;
+                    const FileStore = @import("store/file_store.zig").FileStore;
+                    const store_ptr = try alloc.create(FileStore);
+                    errdefer alloc.destroy(store_ptr);
+                    const dir_path = try std.fmt.bufPrint(&path_buf, "/tmp/phobos-db-{x}", .{@intFromPtr(db_ctx)});
+                    store_ptr.* = FileStore.open(alloc, io, dir_path) catch return error.BackendOpenFailed;
+                    break :blk .{ .file = store_ptr };
+                },
+            }
         };
+        db_ctx.* = .{ .store = db_store.dataStore() };
 
         // --- History context ---
         const history_ctx = try alloc.create(HistoryCtx);
@@ -439,7 +481,7 @@ pub const App = struct {
             .zeroconf_ctx = zeroconf_ctx,
             .datadir = datadir,
             .file_roots = file_roots,
-            .db_store_ptr = db_ptr,
+            .db_store = db_store,
         };
 
         try app.registerAll();
@@ -705,8 +747,7 @@ pub const App = struct {
         self.mqtt_ctx.deinit();
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
-        self.db_store_ptr.deinit();
-        self.alloc.destroy(self.db_store_ptr);
+        self.db_store.deinit(self.alloc);
         self.sensor_ctx.deinit();
         self.alloc.destroy(self.sensor_ctx);
         self.webcam_ctx.deinit();
@@ -1025,6 +1066,24 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
     defer arena.deinit();
     app.sensor_ctx.ingestMqttMessage("test/chamber", "{\"t\": 42.5}", arena.allocator());
     try std.testing.expectEqual(@as(f64, 42.5), s.last_measurements.get("temp").?);
+}
+
+test "initWithStore: file backend builds + database round-trips" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var app = try App.initWithStore(alloc, .file, io);
+    defer app.deinit(io);
+    try std.testing.expect(app.db_store == .file);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try app.db_ctx.store.insertItem(a, "moonraker", "file_manager.version", .{ .integer = 7 });
+    const got = (try app.db_ctx.store.getItem(a, "moonraker", "file_manager.version")).?;
+    try std.testing.expectEqual(@as(i64, 7), got.integer);
 }
 
 test "App.init registers WS-only methods in the dispatcher" {
