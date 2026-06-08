@@ -75,7 +75,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1185 pass / 2 skip / 0 fail** (~205 fuzz). The 2 skips are
+- Tests: **1232 pass / 2 skip / 0 fail** (~230 fuzz). The 2 skips are
   update_manager git tests (need a real repo). phobos always links lmdb (no
   no-lmdb mode). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
@@ -339,10 +339,10 @@ _norm_structure_compare array item masking (Python).
   announcements (4), power (1), extensions (1). Total: ~1012 tests (~174 fuzz).
 
 ### P3 — remaining depth gaps (non-blocking, requires hardware/external services)
-- **mqtt** — real broker client is DONE (mqtt_client.zig: live TCP connect, publish/
-  subscribe, background reader, LWT). Remaining P3: TLS, auto-reconnect/backoff,
-  JSON-RPC-over-MQTT request dispatch. The HTTP endpoints also keep an in-memory
-  message store + subscription tracking for the no-broker case.
+- **mqtt** — DONE incl. P3: live TCP connect, publish/subscribe, background reader,
+  LWT, **TLS** (connectTls over std.crypto.tls), **automatic reconnect/backoff**
+  (supervisor), and JSON-RPC-over-MQTT request dispatch. The HTTP endpoints also
+  keep an in-memory message store + subscription tracking for the no-broker case.
   Pub API complete: `publishTopic`, `subscribeTopic`, `unsubscribe`, `close`,
   `setInstanceName`/`setClientId`/`setDefaultQos`, `storeMessage`/`getMessage`/
   `addSubscription` exposed. `retain`/`timeout` params parsed. Remote method
@@ -393,9 +393,10 @@ _norm_structure_compare array item masking (Python).
     live state, **every handler fuzzed** (17 new fuzz tests across machine,
     update_manager, wled, webcam, announcements, power).
 12. ~~Conformance oracle follow-up~~ — merged into (10).
-13. **P3 remaining depth gaps** — real MQTT client (TLS/keepalive/reconnect),
-    GPIO/WLED/TD1 hardware I/O, spoolman/announcements HTTP/RSS fetch,
-    Klippy integration test (real Klippy or simulator). All non-blocking;
+13. ~~**P3 remaining depth gaps**~~ — DONE: MQTT client (TLS/keepalive/reconnect),
+    GPIO/WLED/TD1 hardware I/O, spoolman/announcements HTTP/RSS fetch, Klippy
+    integration test (gated, against the sim). Remaining only need external tools
+    (klipper_estimator, apprise) or are forbidden host mutations (apt/pip/reboot);
     require hardware or external services.
 
 Keep the coverage gate at 100% and the full suite green after every step.

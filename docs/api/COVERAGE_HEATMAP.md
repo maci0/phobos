@@ -83,8 +83,9 @@
 >   CONNECT/CONNACK/PUBLISH/SUBSCRIBE/PUBACK/PING, LWT, live publish wired into
 >   MqttCtx (connectBroker + background reader), connects at startup when a
 >   broker is configured. Validated over a real socket against an in-tree broker
->   double. Remaining P3: TLS, automatic reconnect/backoff, JSON-RPC-over-MQTT
->   request dispatch.
+>   double. P3 also DONE: TLS (connectTls, validated end-to-end via a socat
+>   OpenSSL terminator), automatic reconnect/backoff (supervisor), and
+>   JSON-RPC-over-MQTT request dispatch.
 > - klippy_apis: DONE — real Klippy handshake (info/poll/subscribe with
 >   response_template), is_remote proxied endpoints (printer.info, objects.*,
 >   gcode.script/help, query_endstops.status), validated end-to-end against a

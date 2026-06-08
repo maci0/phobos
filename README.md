@@ -27,7 +27,7 @@ on a **32-bit ARM Cortex-A7** printer host.
 - **100% of Moonraker's API surface is covered**: 120/120 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
-- ~1155 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
+- ~1232 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
 - This is **surface + shape parity**, plus a live Klippy path validated by a gated real-Klippy
   integration test. Byte-identical *behavioral* parity (verified against a running stock
   Moonraker) is still being hardened — see [`TODO.md`](TODO.md).
@@ -40,11 +40,13 @@ hashing compatible with Moonraker's formats), machine info / proc stats / servic
 peripherals, update manager, power / WLED / device control, spoolman, sensors, webcams,
 notifiers, analysis, extensions, OctoPrint-compat, and the `printer.*` proxy surface.
 
-Many formerly-stubbed subsystems now do real I/O: a real MQTT 3.1.1 client, sysfs GPIO power,
-WLED/TD-1 serial, `git fetch/reset` update paths, RSS fetch with ETag conditional GET, and a
-live Klippy bridge. The remaining stubs are narrow (MQTT TLS/reconnect, package-manager
-updates, untested serial hotplug) and host-mutating actions (reboot/shutdown/apt/pip) are
-deliberate no-ops; see the "subsystem depth" section of [`TODO.md`](TODO.md).
+Many formerly-stubbed subsystems now do real I/O: a real MQTT 3.1.1 client with TLS and
+automatic reconnect/backoff, a Spoolman WebSocket, sysfs GPIO power, WLED/TD-1 serial with
+USB auto-discovery, MQTT sensors with `state_response_template` (an in-tree Jinja subset),
+`git fetch/reset` update paths, RSS fetch with ETag conditional GET, and a live Klippy bridge.
+The remaining gaps need external tools (klipper_estimator binary, apprise) or are host-mutating
+actions (reboot/shutdown/apt/pip) kept as deliberate no-ops; see the "subsystem depth" section
+of [`TODO.md`](TODO.md).
 
 ## Architecture (one paragraph)
 
