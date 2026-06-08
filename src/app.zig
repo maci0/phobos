@@ -990,6 +990,36 @@ test "App.init registers server.info and server.config" {
     try std.testing.expect(app.dispatcher.methods.get("server.config") != null);
 }
 
+test "setConfig parses [sensor <name>] and wires topic + state_response_template" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg_path = "/tmp/phobos-sensor-config-test.cfg";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data =
+        "[sensor chamber]\n" ++
+        "type: mqtt\n" ++
+        "state_topic: test/chamber\n" ++
+        "state_response_template: {% set d = payload|fromjson %}{ set_result(\"temp\", d.t|float) }\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+
+    // Sensor registered with its topic + template.
+    const s = app.sensor_ctx.findSensor("chamber") orelse return error.SensorNotRegistered;
+    try std.testing.expectEqualStrings("test/chamber", s.state_topic.?);
+    try std.testing.expect(s.state_response_template != null);
+
+    // A payload on its topic flows through the template into a measurement.
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    app.sensor_ctx.ingestMqttMessage("test/chamber", "{\"t\": 42.5}", arena.allocator());
+    try std.testing.expectEqual(@as(f64, 42.5), s.last_measurements.get("temp").?);
+}
+
 test "App.init registers WS-only methods in the dispatcher" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
