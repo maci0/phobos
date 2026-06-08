@@ -4,10 +4,10 @@
 # Reproduces the numbers quoted in docs/MEMORY.md: builds the release binary,
 # starts an idle server, lets it settle, and samples VmRSS from /proc. Also
 # samples a bare Python interpreter (Moonraker's runtime floor — Moonraker itself
-# needs tornado/lmdb/jinja2 + ~30 components on top, which weigh far more).
+# needs tornado/sqlite/jinja2 + ~30 components on top, which weigh far more).
 #
 # Read-only / non-destructive: binds a local port, samples /proc, kills its own
-# child. Does not touch the host beyond a temp config + temp lmdb dir.
+# child. Does not touch the host beyond a temp config + temp db file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,6 +45,6 @@ printf '%-28s %12s %12s\n'   "idle RSS (settled)"   "$(awk "BEGIN{printf \"%.1f 
 printf '%-28s %12s\n'        "peak RSS (VmHWM)"      "$(awk "BEGIN{printf \"%.1f MB\", $PH_HWM/1024}")"
 printf '%-28s %12s\n'        "threads"               "$PH_THREADS"
 echo
-echo "Note: phobos VmData (~75 MB) is lmdb's reserved-but-uncommitted mmap, not"
+echo "Note: phobos VmData is mostly reserved thread-stack address space, not"
 echo "resident RAM. The Python figure is the interpreter floor; a full Moonraker"
-echo "install (tornado + lmdb + jinja2 + ~30 components) is typically 50-80 MB RSS."
+echo "install (tornado + sqlite + jinja2 + ~30 components) is typically 50-80 MB RSS."

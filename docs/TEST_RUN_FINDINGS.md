@@ -34,7 +34,7 @@ install. On a fresh checkout this is broken in several independent ways:
 3. **Moved module.** `tests/test_klippy_connection.py` imports
    `from moonraker.klippy_connection import KlippyRequest`, but the module now lives
    at `moonraker.components.klippy_connection`.
-4. **Missing test deps.** `lmdb` (used by `scripts/dbtool.py`) and the pytest plugins
+4. **Missing test deps.** the pytest plugins
    (`pytest-asyncio`, `pytest-timeout`) are not in any dependency group, only named
    in `required_plugins`.
 
@@ -52,7 +52,7 @@ Run command that collects all 473 tests:
 ```
 cd vendor/moonraker
 uv run --with pytest --with 'pytest-asyncio==0.21.2' --with 'pytest-timeout>=2.1.0' \
-  --with lmdb pytest -o "pythonpath=scripts tests"
+  pytest -o "pythonpath=scripts tests"
 ```
 
 No source logic is modified. Delete `conftest.py` to reproduce the broken state.

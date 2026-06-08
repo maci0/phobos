@@ -181,8 +181,9 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 
 ## Build / test quick reference
 
-- phobos always links the vendored LMDB (no no-lmdb / NullStore mode). There is
-  no `-Dwith_lmdb` option.
+- The DataStore backend is selectable via `[database] backend` (sqlite | file).
+  SQLite (default) vendors the amalgamation in `vendor/sqlite/`; the file backend
+  is pure Zig (no C dependency).
 - Build test binary (avoids the `--listen=-` hang):
   `zig build test-artifact && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
 - Full suite: `timeout 220 zig build test --summary all`

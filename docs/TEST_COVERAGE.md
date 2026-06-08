@@ -144,7 +144,7 @@ non-threaded variants (`ThreadedTest`/`BaseTest`). Exercises CRUD end-to-end:
 - Update: record, nested, replace-nested, replace-nested-dict, namespace/record/key fail paths.
 - Delete: nested item, nested dict, record, last-nested, drop-db, fail paths.
 - Core-server-loaded vs preloaded state, unallowed-method registration guard, namespace wrapping.
-Uses the prebuilt `assets/moonraker/bare_db.cdb` lmdb fixture.
+(The legacy store drop-in fixture/test were removed when the store moved to SQLite/file.)
 
 ### `test_klippy_connection.py` (260 LOC)
 Targets `klippy_connection.KlippyConnection` + `KlippyRequest`, against a **real Klipper
@@ -253,7 +253,7 @@ These are the reusable harness pieces — valuable for building a real conforman
 - `klipper/`: `base_printer.cfg`, `error_printer.cfg`, `missing_reqs.cfg`, `klipper.dict`.
 - `moonraker/`: `base_server.conf`, `base_server_ssl.conf`, `invalid_config.conf`,
   `unparsed_server.conf`, `supplemental.conf`, `secrets.ini`, `secrets.json`,
-  `bare_db.cdb` (prebuilt lmdb database).
+  (removed when the store moved to SQLite/file).
 
 ---
 

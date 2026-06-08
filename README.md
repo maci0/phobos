@@ -29,7 +29,7 @@ Measured on this host (`ReleaseSmall` + LTO + stripped), reproducible with
 |---|---|---|---|
 | On-disk | **2.1 MB** static binary | interpreter + site-packages | + interpreter + deps |
 | Idle RSS | **~3.7 MB** | ~25 MB | ~50–80 MB |
-| Runtime deps | **none** | CPython | CPython + tornado + lmdb + jinja2 + … |
+| Runtime deps | **none** | CPython | CPython + tornado + sqlite + jinja2 + … |
 
 phobos idles in **less RAM than an empty Python interpreter that has only imported
 `json`/`asyncio`/`sqlite3`** — i.e. below the floor Moonraker starts from, before
@@ -108,7 +108,7 @@ TODO.md                   status + remaining work (read this for what's next)
 Requires **Zig 0.16.0** and (for the tooling) Python 3 + `uv`.
 
 ```sh
-# Run the test suite (always links the vendored LMDB; musl-static by default)
+# Run the test suite (musl-static by default)
 zig build test --summary all
 
 # See the API surface phobos registers
@@ -149,4 +149,4 @@ PYTHONPATH=tools python3 -m api_scanner diff --source vendor/moonraker/moonraker
 ## License
 
 The phobos source follows the upstream project's license intent (GPL-3.0-only, matching
-Moonraker). Vendored LMDB under `vendor/lmdb/` retains its original OpenLDAP license.
+Moonraker). Vendored SQLite under `vendor/sqlite/` is public domain.

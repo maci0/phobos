@@ -1,5 +1,5 @@
 //! SqliteStore — a SQLite-backed DataStore, drop-in compatible with Moonraker's
-//! `moonraker-sql.db` (the backend Moonraker migrated to from LMDB).
+//! `moonraker-sql.db` (the database backend current Moonraker uses).
 //!
 //! Stores the namespaced key/value data in the `namespace_store` table
 //! (`namespace TEXT, key TEXT, value record, PRIMARY KEY(namespace,key)`), with
@@ -169,7 +169,7 @@ pub const SqliteStore = struct {
         }
     }
 
-    // --- DataStore API (same structure as lmdb_store) ---------------------
+    // --- DataStore API (shared dotted-key path helpers) -------------------
 
     pub fn getItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
         const pk = try ds.parseKey(key);

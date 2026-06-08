@@ -10,7 +10,7 @@ The normalization rules are a Python port of ``src/oracle/normalize.zig``
 (the authoritative implementation).  Keep them in sync.
 
 Usage:
-  zig build -Dwith_lmdb=false
+  zig build
   python3 conformance/replay.py --phobos ./zig-out/bin/phobos --golden conformance/golden/capture.json
 """
 

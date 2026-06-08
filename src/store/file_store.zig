@@ -71,7 +71,7 @@ pub const FileStore = struct {
         self.dir.rename(tmp, self.dir, fname, self.io) catch return Error.BackendError;
     }
 
-    // --- DataStore API (mirrors lmdb_store; shared path helpers) -----------
+    // --- DataStore API (shared dotted-key path helpers) -------------------
 
     pub fn getItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
         const pk = try ds.parseKey(key);
@@ -241,7 +241,7 @@ test "FileStore: insert / get / update / delete round-trip + persistence" {
     }
 }
 
-test "FileStore: missing key/namespace behave like lmdb" {
+test "FileStore: missing key/namespace error/empty as expected" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();

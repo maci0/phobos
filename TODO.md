@@ -83,8 +83,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
 - Tests: **1240 pass / 2 skip / 0 fail** (~230 fuzz). The 2 skips are
-  update_manager git tests (need a real repo). phobos always links lmdb (no
-  no-lmdb mode). Note: `zig build test` uses `--listen=-` which may hang on this
+  update_manager git tests (need a real repo). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
 - All register functions now have unit tests verifying all expected routes are wired
   in the Registry (machine, update_manager, power, wled, td1, button).
@@ -94,7 +93,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - This host's **system glibc cannot be linked** by Zig 0.16 (GCC 16 `.sframe` reloc).
   The build defaults the native target to **musl**, so normal commands work — but
   **never run plain `zig build` against a glibc target**.
-- Always links the **vendored lmdb** (`vendor/lmdb/`, LMDB 0.9.31); no no-lmdb mode.
+- DataStore backend is selectable (`[database] backend`): vendored **SQLite** (default,
+  `vendor/sqlite/`, moonraker-sql.db-compatible) or the pure-Zig atomic-rename file backend.
   - Full suite: `timeout 220 zig build test --summary all`
   - Build test binary without running (avoids `--listen=-` hang):
     `zig build test-artifact && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
@@ -160,7 +160,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   monotonic ids, subscription gating for `notify_status_update`.
 - **Config** (`src/config/`): confighelper-compatible parser (sections, `:`/`=`,
   comments, includes, type coercion).
-- **DataStore** (`src/store/`): `DataStore` interface + vendored-lmdb backend with
+- **DataStore** (`src/store/`): `DataStore` interface + SQLite/atomic-rename-file backends with
   Moonraker's exact dotted-key + record-encoding semantics (always compiled).
 - **Components** (`src/components/*.zig`): one per Moonraker component; each reads its
   `vendor/moonraker/moonraker/components/*.py` for exact shapes.
@@ -178,7 +178,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 ## 3. What is DONE
 
 - Full spine: io/listener, serialized core, JSON-RPC dispatcher, HTTP + WS transports,
-  config parser, lmdb datastore, notification bus.
+  config parser, SQLite/file datastore, notification bus.
 - All ~24 components registered, **100% method/endpoint/notification surface coverage**.
 - Authorization with **byte-exact PBKDF2-HMAC-SHA256 + EdDSA JWT parity** (tokens/hashes
   interchangeable with Moonraker).
@@ -220,7 +220,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   state; handleServer reports dynamic safemode; handleJob/handlePrinter report live
   OctoPrint states (Offline/Operational/Printing/Paused/Error) with correct state
   flags. 13 unit tests + fuzz test.
-- Memory baseline: phobos daemon idle RSS ~1.4 MB (with-lmdb, ReleaseSmall+LTO+
+- Memory baseline: idle RSS ~1.2-2.2 MB by backend (file/SQLite), ReleaseSmall+LTO+
   stripped) vs stock Moonraker ~80-150 MB (~50-90x less). Binary ~1.2 MB.
 
 ---
@@ -347,8 +347,7 @@ _norm_structure_compare array item masking (Python).
 
 ### P2 — misc
 - ~~Read host/port from config in `main()`.~~ Done: `-c`/`--config`, `extractBindAddr`, 5 tests.
-- ~~Re-enable the lmdb drop-in test.~~ Done: fixture generated via
-  `tools/generate_lmdb_fixture.py`, test passes.
+- ~~store drop-in test~~ — removed when the store moved to SQLite/file.
 - ~~Memory baseline: measure RSS of running phobos daemon vs stock Moonraker.~~
   Done: phobos daemon idle RSS ≈ 1.4 MB (VmSize ~23 MB reserved-but-uncommitted,
   2 threads) vs stock Moonraker ~80-150 MB (Python asyncio, multiple threads).
@@ -405,7 +404,7 @@ _norm_structure_compare array item masking (Python).
    state flags. 13 unit tests + fuzz test.
 10. ~~Conformance oracle~~ (P1) — Done: 54/54 events pass normalized equality.
    Golden capture + replay harness complete. Normalizer bugs fixed (Zig + Python).
-11. ~~P2 cleanup~~ — Done: memory baseline (~1.4 MB RSS), re-enable lmdb drop-in
+11. ~~P2 cleanup~~ — Done: memory baseline measured per backend
     test, subsystem depth: machine sudo validation, machine services systemctl,
     update_manager git fetch/reset, file_manager gcode parsing, octoprint_compat
     live state, **every handler fuzzed** (17 new fuzz tests across machine,

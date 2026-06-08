@@ -7,7 +7,7 @@ RSS on the actual printer:
 
 | Backend | Idle RSS | Private_Dirty | VmData | Notes |
 |---|---|---|---|---|
-| `sqlite` (default) | **2.18 MB** | 2.28 MB | 21.8 MB | Moonraker `moonraker-sql.db`-compatible; ≈ same RSS as the old lmdb (~2.2 MB) |
+| `sqlite` (default) | **2.18 MB** | 2.28 MB | 21.8 MB | Moonraker `moonraker-sql.db`-compatible (~2.2 MB RSS) |
 | `file` (atomic-rename) | **1.20 MB** | 1.33 MB | 21.6 MB | pure-Zig, no C dep; **~1 MB lighter** |
 
 Binary is **~2.15 MB** either way (SQLite is always linked so it stays runtime-
@@ -18,11 +18,9 @@ Findings:
 - **The file backend nearly halves resident RAM** (1.2 MB vs 2.18 MB) — SQLite's
   page cache + touched code is ~1 MB resident; the file backend avoids it. Pick it
   when minimum memory matters and Moonraker-DB compatibility doesn't.
-- **Removing lmdb cut VmData from ~75 MB to ~21.6 MB** — lmdb's reserved 200 MiB
-  mmap is gone; the remaining VmData is just the (1 MiB-capped) thread stacks +
-  arenas. So the "scary big VmSize" largely disappeared with the lmdb removal.
-
-The lmdb-era discussion below is retained as background.
+- **VmData dropped to ~21.6 MB** — the old store's reserved 200 MiB mmap is gone;
+  the remaining VmData is just the (1 MiB-capped) thread stacks +
+  arenas. So the "scary big VmSize" largely disappeared.
 
 phobos is a from-scratch Zig reimplementation of Moonraker (a Python/asyncio
 service). The headline reason to care is resource use on small printer hosts:
@@ -40,11 +38,11 @@ Reproduce the numbers below with [`scripts/measure-memory.sh`](../scripts/measur
 | On-disk | **1.2 MB** static binary | interpreter + `site-packages` (tens–hundreds of MB) | + interpreter + deps |
 | Idle RSS (settled) | **~3.7 MB** | ~25 MB | ~50–80 MB |
 | Peak RSS at startup | ~6.3 MB (scratch frees to ~3.7 MB) | — | — |
-| Runtime dependencies | none (static) | CPython | CPython + tornado + lmdb + jinja2 + … |
+| Runtime dependencies | none (static) | CPython | CPython + tornado + sqlite + jinja2 + … |
 
 - **~3.7 MB idle RSS** vs **~25 MB** for a Python interpreter that has only
   imported `json`/`asyncio`/`sqlite3` — i.e. phobos uses **less than the floor**
-  Moonraker starts from, before tornado, lmdb, jinja2, and its ~30 components are
+  Moonraker starts from, before tornado, sqlite, jinja2, and its ~30 components are
   even loaded. Against a full Moonraker (~50–80 MB) that is a **~15–20× reduction**.
 - The Python figure is measured here; a full Moonraker can't run in this sandbox
   (its deps aren't installed), so its number is the well-known production range,
@@ -55,10 +53,10 @@ Reproduce the numbers below with [`scripts/measure-memory.sh`](../scripts/measur
 Sampling `/proc/<pid>/smaps_rollup`, the resident set breaks down as:
 
 - **`Private_Dirty` ≈ 0.7 MB** — the only pages that are genuinely phobos's own
-  committed RAM (heap: registry + dispatch tables, component state, lmdb internal
+  committed RAM (heap: registry + dispatch tables, component state, SQLite internal
   structures). This is the real floor, and it is already sub-megabyte.
 - **The rest (~3 MB)** is `Private_Clean` / file-backed code+rodata: the binary's
-  own pages and lmdb's, mapped from disk. These are **reclaimable** — under memory
+  own pages and SQLite's, mapped from disk. These are **reclaimable** — under memory
   pressure the kernel drops them and re-reads from disk, so they don't pin RAM the
   way dirty pages do.
 
@@ -77,8 +75,8 @@ arenas freed at the end of each request.
   **16 MiB** — so the worst-case reserved stack space drops ~16× (e.g. ~80 MB →
   ~5 MB at 5 threads). Only the few touched pages are ever resident, so this is a
   `VmSize` win, not an RSS one, but it stops the footprint *looking* huge.
-- **lmdb** maps its database with a 200 MiB `map_size`; the mapping is lazy, so an
-  empty/idle store commits almost none of it.
+- **SQLite** uses a small (resident) page cache rather than a large reserved
+  mmap, so it adds little to `VmSize` (and ~1 MB to RSS vs the file backend).
 
 `VmRSS` is the number that reflects real RAM pressure, and that is the ~3.7 MB
 above (of which only ~0.7 MB is unreclaimable).

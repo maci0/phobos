@@ -26,12 +26,12 @@
 //! Response shapes match Moonraker exactly:
 //!   list    → {"namespaces": [...], "backups": [...]}
 //!   item    → {"namespace": "ns", "key": "k", "value": <v>}
-//!   compact → {"old_size": 0, "new_size": 0}  (LMDB: stub)
-//!   backup  → {"backup_path": ""}             (LMDB: stub)
-//!   restore → {"status": "ok"}                (LMDB: stub)
+//!   compact → {"old_size": 0, "new_size": 0}  (stub)
+//!   backup  → {"backup_path": ""}             (stub)
+//!   restore → {"status": "ok"}                (stub)
 //!
 //! NOTE: compact/backup/restore are registered with faithful response shapes.
-//! The underlying SQLite-specific operations are stubs; phobos uses LMDB.
+//! The underlying compact/backup/restore operations are stubs.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
@@ -296,7 +296,7 @@ fn handleItemDelete(
 // ---------------------------------------------------------------------------
 // /debug/database/table (GET)
 // ---------------------------------------------------------------------------
-// Stub: phobos uses LMDB, no SQL tables. Registered for API-surface coverage.
+// Stub: compact/backup/restore not implemented. Registered for API-surface coverage.
 
 pub fn handleTableDebug(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const table = try getStr(params, "table");
@@ -462,7 +462,7 @@ pub fn registerDatabase(reg: *Registry, ctx: *DbCtx) !void {
 
 const testing = std.testing;
 
-// --- In-memory backend for unit tests (no LMDB required) ---
+// --- In-memory backend for unit tests (no real store required) ---
 
 const MemNamespace = struct {
     name: []const u8,

@@ -1418,7 +1418,7 @@ pub fn handleApiKeyDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.
 
 const testing = std.testing;
 
-// --- In-memory store (no LMDB) ---
+// --- In-memory store (no real backend) ---
 
 const MemStore = struct {
     alloc: std.mem.Allocator,

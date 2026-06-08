@@ -34,7 +34,7 @@ and what's next; read this for *how* to work in the codebase.
 > to **musl**, so the commands below work. **Never run a plain glibc `zig build`.**
 
 ```sh
-# Full suite (always links vendored LMDB; first compile of the C sources is slow — timeout-wrap)
+# Full suite (vendors SQLite; first compile of the C amalgamation is slow — timeout-wrap)
 timeout 220 zig build test --summary all
 
 # A single file that has NO ../ imports (e.g. config, jsonrpc, store):
@@ -50,7 +50,7 @@ Notes:
   **only build via `zig build test`** (the module root is `src/main.zig`). Single-file
   `zig test` fails on them with "import of file outside module path".
 - Always run socket/WS tests under a `timeout` — a bug can deadlock and hang the suite.
-- phobos always links the vendored lmdb (no no-lmdb / NullStore mode).
+- DataStore backend selectable via `[database] backend`: vendored SQLite (default) or pure-Zig file backend.
 
 ## 3. Zig 0.16 cheat sheet (verified against the installed std)
 

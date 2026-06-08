@@ -114,7 +114,7 @@ tools/coverage.sh
 ```
 
 This script:
-1. Builds phobos with `zig build -Dwith_lmdb=false`.
+1. Builds phobos with `zig build`.
 2. Runs `phobos --dump-api` and saves the output to a temp file.
 3. Runs `python3 -m api_scanner coverage` against `api/api_surface.json`.
 4. Prints a summary line and the MISSING list; exits 1 if not 100% covered.
@@ -132,7 +132,7 @@ MISSING endpoints (123):
 
 ```sh
 # Build phobos and dump its API surface:
-zig build -Dwith_lmdb=false
+zig build
 zig-out/bin/phobos --dump-api > /tmp/phobos-dump.json
 
 # Run coverage:

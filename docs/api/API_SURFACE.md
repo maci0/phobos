@@ -281,7 +281,7 @@ lives in those docs; this section captures the load-bearing parameters per metho
   `key`, `value` (post). Read/write/delete a DB entry.
 - `server.database.post_backup` / `delete_backup` — Params: `filename`. Backup mgmt.
 - `server.database.restore` — POST. Params: `filename`. Restore from backup.
-- `server.database.compact` — POST. Compacts the LMDB database.
+- `server.database.compact` — POST. Compacts the SQLite database.
 - Debug (only when `--debug` enabled): `debug.database.list`, `debug.database.get_item`,
   `debug.database.post_item`, `debug.database.delete_item`, `debug.database.table`
   (allows access to protected/forbidden namespaces).

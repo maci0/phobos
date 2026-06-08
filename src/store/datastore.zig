@@ -2,7 +2,7 @@
 //! database component semantics (see
 //! `vendor/moonraker/moonraker/components/database.py`).
 //!
-//! Moonraker stores data as a set of *namespaces*. In the LMDB backend each
+//! Moonraker stores data as a set of *namespaces*. In the SQLite backend each
 //! namespace is a named sub-database (dbi). A namespace maps top-level record
 //! keys to *encoded records*. A record's logical value is a JSON value
 //! (object, array, string, number, bool, or null).
@@ -313,7 +313,7 @@ pub const DataStore = struct {
 const testing = std.testing;
 
 /// Minimal in-memory DataStore impl used to exercise the vtable dispatch
-/// without LMDB. Stores a single namespace's single key.
+/// without a real backend. Stores a single namespace's single key.
 const MemStore = struct {
     last_key: []const u8 = "",
     last_value: json.Value = .null,
