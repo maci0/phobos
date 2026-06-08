@@ -293,6 +293,11 @@ lives in those docs; this section captures the load-bearing parameters per metho
 - `server.history.totals` — GET. Returns aggregate job totals.
 - `server.history.reset_totals` — POST. Resets totals; returns previous totals.
 
+> **phobos:** the SQLite backend reads an existing Moonraker DB's dedicated
+> `job_history` / `job_totals` tables (rows mapped into the history component's
+> JSON shape) when its own KV namespaces are empty — so an imported
+> `moonraker-sql.db` surfaces the user's real job history and totals.
+
 ### 3.5 job_queue (job_queue.py)
 
 - `server.job_queue.post_job` / `delete_job` — Params: `filenames[]` (post),
@@ -497,6 +502,11 @@ Endpoints with `auth_required=False`: `/access/login`, `/access/refresh_jwt`,
 
 **CORS:** `cors_domains` config; `check_cors(origin)` matches origin against allowed
 regex domains; wildcards/trailing-slash rejected. Applied in request handlers.
+
+> **phobos:** implemented. `[authorization] cors_domains` (`*`, `*.domain`, or
+> exact origin/host); the matched `Origin` is echoed with
+> `Access-Control-Allow-Origin/-Credentials/-Methods/-Headers`, and `OPTIONS`
+> preflight is answered `204` with those headers (no auth).
 
 Users persisted in DB namespace with `UserInfo` (username, password hash, salt, source
 `moonraker`|`ldap`, jwt_secret, jwk_id, groups; default group `admin`).
