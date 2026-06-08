@@ -47,9 +47,9 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/peripherals/video` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/proc_stats` | GET | HTTP, WEBSOCKET, INTERNAL | proc_stats | ✅ Full | Matches Moonraker. |
 | `/machine/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | machine | 🚫 No-op | Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box). |
-| `/machine/services/restart` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
-| `/machine/services/start` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
-| `/machine/services/stop` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
+| `/machine/services/restart` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
+| `/machine/services/start` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), or in-memory (none). Real init-system control is VM-tested, not run on the dev host. |
+| `/machine/services/stop` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
 | `/machine/shutdown` | POST | HTTP, WEBSOCKET, INTERNAL | machine | 🚫 No-op | Deliberate no-op: returns ok but never shuts the host down. |
 | `/machine/sudo/info` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/sudo/password` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
@@ -171,9 +171,9 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `machine.peripherals.video` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.proc_stats` |  | proc_stats | ✅ Full | Matches Moonraker. |
 | `machine.reboot` |  | machine | 🚫 No-op | Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box). |
-| `machine.services.restart` |  | machine | ✅ Full | Matches Moonraker. |
-| `machine.services.start` |  | machine | ✅ Full | Matches Moonraker. |
-| `machine.services.stop` |  | machine | ✅ Full | Matches Moonraker. |
+| `machine.services.restart` |  | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
+| `machine.services.start` |  | machine | ✅ Full | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), or in-memory (none). Real init-system control is VM-tested, not run on the dev host. |
+| `machine.services.stop` |  | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
 | `machine.shutdown` |  | machine | 🚫 No-op | Deliberate no-op: returns ok but never shuts the host down. |
 | `machine.sudo.info` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.sudo.password` |  | machine | ✅ Full | Matches Moonraker. |

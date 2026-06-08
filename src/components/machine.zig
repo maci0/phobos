@@ -86,6 +86,20 @@ pub const default_allowed_services = [_][]const u8{
     "ratos-configurator",
 };
 
+/// System provider kind — which init/service manager drives machine.services.*
+/// (Moonraker's `provider` config). phobos collapses systemd_cli/systemd_dbus to
+/// one `systemd` path (both shell out to `systemctl`); `supervisord*` uses
+/// `supervisorctl`; `none` keeps service state in-memory only. reboot/shutdown
+/// stay deliberate no-ops for every provider (host safety).
+pub const Provider = enum { systemd, supervisord, none };
+
+/// Map a Moonraker `provider` config string to phobos's provider kind.
+pub fn providerKind(name: []const u8) Provider {
+    if (std.mem.startsWith(u8, name, "supervisord")) return .supervisord;
+    if (std.mem.eql(u8, name, "none")) return .none;
+    return .systemd; // systemd_dbus (default), systemd_cli, or unknown → systemd
+}
+
 /// All Moonraker-compatible service names that phobos registers or stubs.
 /// Used by buildAvailableServices, buildServiceState, and isServiceAllowed.
 pub const available_services = [_][]const u8{
@@ -150,6 +164,12 @@ pub const MachineCtx = struct {
     bus: ?*NotifyBus = null,
     /// Optional reference to the live connection registry for websocket_connections count.
     conns: ?*@import("../server/connections.zig").Connections = null,
+    /// Configured system `provider` string (Moonraker's `[machine] provider`),
+    /// reported verbatim in system_info and used to pick the service manager.
+    /// Default matches Moonraker. `provider_owned` is true once setProvider has
+    /// duped a config value (so deinit frees it; the default literal is not).
+    provider_name: []const u8 = "systemd_dbus",
+    provider_owned: bool = false,
     /// Set when a sudo password has been supplied. Owned by the ctx allocator.
     sudo_password: ?[]const u8 = null,
     /// Cached result of the last sudo validation (via sudo -S -l).
@@ -216,6 +236,15 @@ pub const MachineCtx = struct {
         };
     }
 
+    /// Set the configured system provider (from `[machine] provider`). The string
+    /// is duped + owned; reported verbatim and used to pick the service manager.
+    pub fn setProvider(self: *MachineCtx, name: []const u8) !void {
+        const dup = try self.gpa.dupe(u8, name);
+        if (self.provider_owned) self.gpa.free(self.provider_name);
+        self.provider_name = dup;
+        self.provider_owned = true;
+    }
+
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
         // Start the periodic proc_stat emission if a bus is wired.
@@ -257,6 +286,7 @@ pub const MachineCtx = struct {
             self.proc_stat_thread = null;
         }
         if (self.sudo_password) |p| self.gpa.free(p);
+        if (self.provider_owned) self.gpa.free(self.provider_name);
         self.sudo_password = null;
         // Free service entry keys (StringHashMap stores slices, not owned copies).
         var it = self.services.iterator();
@@ -1109,7 +1139,7 @@ pub fn handleSystemInfo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.A
     try sys.put(alloc, "python", try buildPython(alloc));
     try sys.put(alloc, "available_services", try buildAvailableServices(ctx, alloc));
     try sys.put(alloc, "service_state", try buildServiceState(ctx, alloc));
-    try sys.put(alloc, "provider", .{ .string = "systemd_dbus" });
+    try sys.put(alloc, "provider", .{ .string = ctx.provider_name });
 
     // instance_ids: Moonraker's unit names. Defaults match a standard install.
     var ids: std.json.ObjectMap = .empty;
@@ -1441,6 +1471,29 @@ fn prefixWithOptIndex(name: []const u8, base: []const u8) bool {
     return true;
 }
 
+/// Optimistic post-action state for a service when the manager can't be queried
+/// (the `none` provider, no io, or a failed status query).
+fn optimisticState(action: ServiceAction) struct { []const u8, []const u8 } {
+    return switch (action) {
+        .start, .restart => .{ "active", "running" },
+        .stop => .{ "inactive", "dead" },
+    };
+}
+
+/// Parse `supervisorctl status <name>` output → (active_state, sub_state). The
+/// state is the second whitespace-separated token (RUNNING/STOPPED/STARTING/…).
+fn supervisorState(out: []const u8) struct { []const u8, []const u8 } {
+    var it = std.mem.tokenizeAny(u8, out, " \t\r\n");
+    _ = it.next(); // program name
+    const st = it.next() orelse return .{ "unknown", "unknown" };
+    if (std.mem.eql(u8, st, "RUNNING")) return .{ "active", "running" };
+    if (std.mem.eql(u8, st, "STOPPED")) return .{ "inactive", "dead" };
+    if (std.mem.eql(u8, st, "STARTING")) return .{ "activating", "start" };
+    if (std.mem.eql(u8, st, "STOPPING")) return .{ "deactivating", "stop" };
+    if (std.mem.eql(u8, st, "FATAL") or std.mem.eql(u8, st, "BACKOFF")) return .{ "failed", "failed" };
+    return .{ "unknown", "unknown" };
+}
+
 /// Shared helper for the three service action endpoints. Validates the `service`
 /// param against the allow-list, runs `systemctl <action> <service>`, reads the
 /// resulting state via `systemctl show`, and emits
@@ -1450,26 +1503,50 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
     const name = try getStr(params, "service");
     if (!isServiceAllowed(name)) return error.Forbidden;
 
-    if (ctx.io != null or ctx.run_cmd_fn != null) {
-        // Run systemctl <start|stop|restart> --no-block <service>.
+    const kind = providerKind(ctx.provider_name);
+    // `none` keeps state in-memory only; otherwise run the manager when wired.
+    if (kind != .none and (ctx.io != null or ctx.run_cmd_fn != null)) {
         const action_str = @tagName(action);
-        var argv: [4][]const u8 = .{ "systemctl", action_str, "--no-block", name };
-        _ = ctx.runCmd(alloc, &argv) catch {};
-
-        // Read the actual service state from systemd.
-        var show_argv: [6][]const u8 = .{ "systemctl", "show", "-p", "ActiveState,SubState", "--value", name };
-        const show_result = ctx.runCmd(alloc, &show_argv) catch {
-            return .{ .string = "ok" };
-        };
-        defer alloc.free(show_result.stdout);
-        defer alloc.free(show_result.stderr);
-
-        var lines = std.mem.splitScalar(u8, show_result.stdout, '\n');
-        const active_line = lines.next() orelse "";
-        const sub_line = lines.next() orelse "";
-
-        const new_active = if (active_line.len > 0) MachineCtx.internState(active_line) else "unknown";
-        const new_sub = if (sub_line.len > 0) MachineCtx.internState(sub_line) else "unknown";
+        var new_active: []const u8 = "unknown";
+        var new_sub: []const u8 = "unknown";
+        switch (kind) {
+            .systemd => {
+                // systemctl <start|stop|restart> --no-block <service>.
+                var argv: [4][]const u8 = .{ "systemctl", action_str, "--no-block", name };
+                if (ctx.runCmd(alloc, &argv)) |ar| {
+                    alloc.free(ar.stdout);
+                    alloc.free(ar.stderr);
+                } else |_| {}
+                var show_argv: [6][]const u8 = .{ "systemctl", "show", "-p", "ActiveState,SubState", "--value", name };
+                const show_result = ctx.runCmd(alloc, &show_argv) catch return .{ .string = "ok" };
+                defer alloc.free(show_result.stdout);
+                defer alloc.free(show_result.stderr);
+                var lines = std.mem.splitScalar(u8, show_result.stdout, '\n');
+                const active_line = lines.next() orelse "";
+                const sub_line = lines.next() orelse "";
+                if (active_line.len > 0) new_active = MachineCtx.internState(active_line);
+                if (sub_line.len > 0) new_sub = MachineCtx.internState(sub_line);
+            },
+            .supervisord => {
+                // supervisorctl <start|stop|restart> <service>; state from
+                // `supervisorctl status <service>` (RUNNING/STOPPED/…).
+                var argv: [3][]const u8 = .{ "supervisorctl", action_str, name };
+                if (ctx.runCmd(alloc, &argv)) |ar| {
+                    alloc.free(ar.stdout);
+                    alloc.free(ar.stderr);
+                } else |_| {}
+                var st_argv: [3][]const u8 = .{ "supervisorctl", "status", name };
+                if (ctx.runCmd(alloc, &st_argv)) |st| {
+                    defer alloc.free(st.stdout);
+                    defer alloc.free(st.stderr);
+                    new_active, new_sub = supervisorState(st.stdout);
+                } else |_| {
+                    // Optimistic fallback if the query fails.
+                    new_active, new_sub = optimisticState(action);
+                }
+            },
+            .none => unreachable,
+        }
 
         const entry = MachineCtx.ServiceEntry.active(new_active, new_sub);
         if (ctx.services.getPtr(name)) |existing| {
@@ -1490,11 +1567,8 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
         return .{ .string = "ok" };
     }
 
-    // No io: optimistic in-memory fallback (unit test path).
-    const new_active: []const u8, const new_sub: []const u8 = switch (action) {
-        .start, .restart => .{ "active", "running" },
-        .stop => .{ "inactive", "dead" },
-    };
+    // `none` provider, or no runner: optimistic in-memory state.
+    const new_active: []const u8, const new_sub: []const u8 = optimisticState(action);
 
     const entry = MachineCtx.ServiceEntry.active(new_active, new_sub);
     if (ctx.services.getPtr(name)) |existing| {
@@ -2633,6 +2707,82 @@ test "runCmd: delegates to mock when set, returns empty when no io" {
         try testing.expect(mock.captured_argv != null);
         try testing.expectEqual(@as(usize, 6), mock.captured_argv.?.len);
         try testing.expectEqualStrings("systemctl", mock.captured_argv.?[0]);
+    }
+}
+
+test "providerKind + supervisorState parsing" {
+    try testing.expectEqual(Provider.systemd, providerKind("systemd_dbus"));
+    try testing.expectEqual(Provider.systemd, providerKind("systemd_cli"));
+    try testing.expectEqual(Provider.systemd, providerKind("anything_else"));
+    try testing.expectEqual(Provider.supervisord, providerKind("supervisord_cli"));
+    try testing.expectEqual(Provider.none, providerKind("none"));
+    const run = supervisorState("klipper                          RUNNING   pid 1, uptime 0:00:05");
+    try testing.expectEqualStrings("active", run[0]);
+    try testing.expectEqualStrings("running", run[1]);
+    const stop = supervisorState("klipper STOPPED");
+    try testing.expectEqualStrings("inactive", stop[0]);
+    const unk = supervisorState("");
+    try testing.expectEqualStrings("unknown", unk[0]);
+}
+
+test "fuzz supervisorState: arbitrary output never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = supervisorState(&buf);
+            _ = providerKind(&buf);
+        }
+    }.run, .{});
+}
+
+test "provider abstraction: service action dispatches to the right manager" {
+    const Mock = struct {
+        first_cmd: ?[]const u8 = null,
+        calls: usize = 0,
+        fn run(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.first_cmd == null and argv.len > 0) self.first_cmd = argv[0];
+            self.calls += 1;
+            const is_status = argv.len >= 2 and (std.mem.eql(u8, argv[1], "status") or std.mem.eql(u8, argv[1], "show"));
+            const out = try gpa.dupe(u8, if (is_status) "klipper RUNNING pid 1\n" else "");
+            return .{ .stdout = out, .stderr = &.{} };
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Default provider → systemctl.
+    {
+        var mock = Mock{};
+        var c = MachineCtx.init(a, null, null);
+        defer c.deinit();
+        c.setRunCmdFn(Mock.run, @ptrCast(&mock));
+        _ = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+        try testing.expectEqualStrings("systemctl", mock.first_cmd.?);
+    }
+    // supervisord → supervisorctl, RUNNING → active/running.
+    {
+        var mock = Mock{};
+        var c = MachineCtx.init(a, null, null);
+        defer c.deinit();
+        try c.setProvider("supervisord_cli");
+        c.setRunCmdFn(Mock.run, @ptrCast(&mock));
+        _ = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+        try testing.expectEqualStrings("supervisorctl", mock.first_cmd.?);
+        try testing.expectEqualStrings("active", c.services.get("klipper").?.active_state);
+    }
+    // none → no real command is ever run; state is in-memory only.
+    {
+        var mock = Mock{};
+        var c = MachineCtx.init(a, null, null);
+        defer c.deinit();
+        try c.setProvider("none");
+        c.setRunCmdFn(Mock.run, @ptrCast(&mock));
+        _ = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+        try testing.expectEqual(@as(usize, 0), mock.calls);
+        try testing.expectEqualStrings("active", c.services.get("klipper").?.active_state);
     }
 }
 

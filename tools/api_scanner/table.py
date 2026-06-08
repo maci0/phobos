@@ -40,6 +40,10 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     "component:authorization": (S_FULL, "JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity."),
     # --- Spoolman -----------------------------------------------------------
     "server.spoolman.proxy": (S_FULL, "Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted."),
+    # --- Machine services / init providers ---------------------------------
+    "machine.services.start": (S_FULL, "Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), or in-memory (none). Real init-system control is VM-tested, not run on the dev host."),
+    "machine.services.stop": (S_FULL, "See machine.services.start — provider-dispatched (systemctl/supervisorctl/none)."),
+    "machine.services.restart": (S_FULL, "See machine.services.start — provider-dispatched (systemctl/supervisorctl/none)."),
     # --- Power --------------------------------------------------------------
     "component:power": (S_FULL, "http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented)."),
     # --- Sensors ------------------------------------------------------------

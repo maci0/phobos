@@ -468,6 +468,14 @@ pub const App = struct {
             self.spoolman_ctx.setServerUrl(url);
         }
 
+        // System provider for machine.services.* ([machine] provider): selects
+        // systemctl vs supervisorctl vs in-memory. Default stays systemd_dbus.
+        if (cfg.get("machine", "provider")) |p| {
+            self.machine_ctx.setProvider(p) catch |err| {
+                std.debug.print("phobos: warning: failed to set machine provider '{s}': {}\n", .{ p, err });
+            };
+        }
+
         // Wire job_queue transition gcode/delay from [job_queue] section.
         if (cfg.hasSection("job_queue")) {
             const tg = cfg.get("job_queue", "job_transition_gcode");
