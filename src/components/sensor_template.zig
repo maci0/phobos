@@ -510,7 +510,9 @@ const Parser = struct {
         }
         if (c == '[') return self.parseListLiteral();
         if (c == '"' or c == '\'') return self.parseString();
-        if (std.ascii.isDigit(c)) return self.parseNumber();
+        // `-` only reaches here as the start of a negative number literal
+        // (parseUnary handles unary minus on non-literals); parseNumber consumes it.
+        if (c == '-' or std.ascii.isDigit(c)) return self.parseNumber();
         const name = try self.parseIdent();
         if (self.peek() == '(') return self.parseCall(name);
         if (std.mem.eql(u8, name, "payload")) {
@@ -627,7 +629,9 @@ const Parser = struct {
             lo = toInt(args[0]) orelse return error.EvalError;
             hi = toInt(args[1]) orelse return error.EvalError;
         } else return error.EvalError;
-        if (hi - lo > 100_000) return error.EvalError; // bound
+        // Bound the count in i128 so a hostile lo/hi (e.g. i64.min) can't
+        // overflow the subtraction.
+        if (@as(i128, hi) - @as(i128, lo) > 100_000) return error.EvalError;
         var arr: std.json.Array = .init(self.ctx.arena);
         var k = lo;
         while (k < hi) : (k += 1) try arr.append(.{ .integer = k });
@@ -752,8 +756,9 @@ fn arith(op: u8, l: Value, r: Value) RenderError!Value {
             '+' => .{ .integer = a +% b },
             '-' => .{ .integer = a -% b },
             '*' => .{ .integer = a *% b },
-            'F' => if (b == 0) error.EvalError else .{ .integer = @divFloor(a, b) },
-            '%' => if (b == 0) error.EvalError else .{ .integer = @mod(a, b) },
+            // b==0 → error; a==minInt and b==-1 would overflow @divFloor/@mod.
+            'F' => if (b == 0 or (a == std.math.minInt(i64) and b == -1)) error.EvalError else .{ .integer = @divFloor(a, b) },
+            '%' => if (b == 0 or (a == std.math.minInt(i64) and b == -1)) error.EvalError else .{ .integer = @mod(a, b) },
             else => error.EvalError,
         };
     }
@@ -895,7 +900,8 @@ fn toInt(v: Value) ?i64 {
 
 fn absValue(v: Value) Value {
     return switch (v) {
-        .integer => |i| .{ .integer = if (i < 0) -i else i },
+        // -i64.min overflows; promote that one case to float.
+        .integer => |i| if (i == std.math.minInt(i64)) .{ .float = -@as(f64, @floatFromInt(i)) } else .{ .integer = if (i < 0) -i else i },
         .float => |f| .{ .float = @abs(f) },
         else => v,
     };
@@ -1056,6 +1062,22 @@ test "malformed templates error, never crash" {
     try testing.expectError(error.EvalError, render(a, "{ undefined_var.attr }", "{}", &out));
     // ...but a bare undefined name renders empty (Jinja undefined), not an error.
     try testing.expectEqualStrings("", try renderText(a, "{ undefined_var }", &.{}, null));
+}
+
+test "i64.min edge cases don't overflow (abs, range, // -1, % -1)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const min = std.math.minInt(i64);
+    // abs(i64.min) promotes to float instead of overflowing.
+    const s = try renderText(a, "{ x|abs }", &.{.{ "x", .{ .integer = min } }}, null);
+    try testing.expect(s.len > 0);
+    // range with i64.min lower bound is rejected by the bound check, not a crash.
+    var out: std.json.ObjectMap = .empty;
+    try testing.expectError(error.EvalError, render(a, "{ set_result(\"r\", range(-9223372036854775808, 1)|length) }", "{}", &out));
+    // minInt // -1 and minInt % -1 error rather than overflow.
+    try testing.expectError(error.EvalError, renderText(a, "{ x // -1 }", &.{.{ "x", .{ .integer = min } }}, null));
+    try testing.expectError(error.EvalError, renderText(a, "{ x % -1 }", &.{.{ "x", .{ .integer = min } }}, null));
 }
 
 test "deeply nested expression errors instead of overflowing the stack" {
