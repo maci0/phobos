@@ -698,26 +698,21 @@ pub fn registerWebcam(reg: *Registry, ctx: *WebcamCtx) !void {
         handleWebcamList,
     );
 
-    // /server/webcams/item — Moonraker uses RequestType.all() but the baseline
-    // scanner classifies it as multi_verb=False with a single JSON-RPC method
-    // "server.webcams.item" (same as /server/database/item pattern).
-    //
-    // Strategy (mirrors database.zig):
-    //   - GET: normal transports → derives "server.webcams.item" JSON-RPC method.
-    //   - POST: HTTP-only → no JSON-RPC method; HTTP route still present.
-    //   - DELETE: HTTP-only → no JSON-RPC method; HTTP route still present.
+    // /server/webcams/item — Moonraker verb-prefixes the trio:
+    // server.webcams.get_item / post_item / delete_item (Mainsail/Fluidd call
+    // post_item + delete_item over WS to save/remove webcams). multi_verb on each.
     try reg.registerEndpoint(
-        .{ .path = "/server/webcams/item", .methods = &.{.GET} },
+        .{ .path = "/server/webcams/item", .methods = &.{.GET}, .multi_verb = true },
         c,
         handleWebcamGet,
     );
     try reg.registerEndpoint(
-        .{ .path = "/server/webcams/item", .methods = &.{.POST}, .transports = &.{.HTTP} },
+        .{ .path = "/server/webcams/item", .methods = &.{.POST}, .multi_verb = true },
         c,
         handleWebcamPost,
     );
     try reg.registerEndpoint(
-        .{ .path = "/server/webcams/item", .methods = &.{.DELETE}, .transports = &.{.HTTP} },
+        .{ .path = "/server/webcams/item", .methods = &.{.DELETE}, .multi_verb = true },
         c,
         handleWebcamDelete,
     );
@@ -977,13 +972,14 @@ test "registerWebcam: wires routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.DELETE, "/server/webcams/item") != null);
     try testing.expect(reg.lookup(.POST, "/server/webcams/test") != null);
 
-    // JSON-RPC methods: single method name for item (multi_verb=false, baseline)
+    // JSON-RPC methods: item is verb-prefixed (get_item/post_item/delete_item)
     try testing.expect(d.methods.get("server.webcams.list") != null);
-    try testing.expect(d.methods.get("server.webcams.item") != null);  // GET derives this
+    try testing.expect(d.methods.get("server.webcams.get_item") != null);
+    try testing.expect(d.methods.get("server.webcams.post_item") != null);
+    try testing.expect(d.methods.get("server.webcams.delete_item") != null);
+    try testing.expect(d.methods.get("server.webcams.item") == null); // renamed
     try testing.expect(d.methods.get("server.webcams.test") != null);
     // POST and DELETE are HTTP-only, no JSON-RPC methods
-    try testing.expect(d.methods.get("server.webcams.post_item") == null);
-    try testing.expect(d.methods.get("server.webcams.delete_item") == null);
 }
 
 // --- Fuzz tests ---

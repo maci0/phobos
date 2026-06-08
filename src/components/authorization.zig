@@ -1346,22 +1346,20 @@ pub fn registerAuthorization(reg: *Registry, ctx: *AuthCtx) !void {
         handleRefreshJwt,
     );
 
-    // /access/user — RequestType.all() in Moonraker derives a SINGLE jsonrpc
-    // name "access.user". Register GET with normal transports (derives the
-    // single name) and POST/DELETE HTTP-only (no extra names), mirroring the
-    // database.item strategy.
+    // /access/user — Moonraker verb-prefixes the trio: access.get_user /
+    // post_user / delete_user (Fluidd calls these over WS). multi_verb on each.
     try reg.registerEndpoint(
-        .{ .path = "/access/user", .methods = &.{.GET} },
+        .{ .path = "/access/user", .methods = &.{.GET}, .multi_verb = true },
         c,
         handleUserGet,
     );
     try reg.registerEndpoint(
-        .{ .path = "/access/user", .methods = &.{.POST}, .transports = &.{.HTTP} },
+        .{ .path = "/access/user", .methods = &.{.POST}, .multi_verb = true },
         c,
         handleUserPost,
     );
     try reg.registerEndpoint(
-        .{ .path = "/access/user", .methods = &.{.DELETE}, .transports = &.{.HTTP} },
+        .{ .path = "/access/user", .methods = &.{.DELETE}, .multi_verb = true },
         c,
         handleUserDelete,
     );
@@ -1962,7 +1960,10 @@ test "registerAuthorization wires routes + jsonrpc methods" {
     try testing.expect(d.methods.get("access.login") != null);
     try testing.expect(d.methods.get("access.logout") != null);
     try testing.expect(d.methods.get("access.refresh_jwt") != null);
-    try testing.expect(d.methods.get("access.user") != null);
+    try testing.expect(d.methods.get("access.get_user") != null);
+    try testing.expect(d.methods.get("access.post_user") != null);
+    try testing.expect(d.methods.get("access.delete_user") != null);
+    try testing.expect(d.methods.get("access.user") == null); // renamed
     try testing.expect(d.methods.get("access.users.list") != null);
     try testing.expect(d.methods.get("access.user.password") != null);
     try testing.expect(d.methods.get("access.get_api_key") != null);

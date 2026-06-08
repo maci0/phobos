@@ -1183,9 +1183,11 @@ test "App.init: dispatcher has exactly the expected methods" {
         // Notifier
         "server.notifiers.list",
         "debug.notifiers.test",
-        // Webcam (item endpoint follows single-method pattern like database.item)
+        // Webcam (item endpoint is verb-prefixed)
         "server.webcams.list",
-        "server.webcams.item",
+        "server.webcams.get_item",
+        "server.webcams.post_item",
+        "server.webcams.delete_item",
         "server.webcams.test",
         // Sensor
         "server.sensors.list",
@@ -1195,7 +1197,9 @@ test "App.init: dispatcher has exactly the expected methods" {
         "access.login",
         "access.logout",
         "access.refresh_jwt",
-        "access.user",
+        "access.get_user",
+        "access.post_user",
+        "access.delete_user",
         "access.users.list",
         "access.user.password",
         "access.get_api_key",
