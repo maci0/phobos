@@ -88,6 +88,10 @@ pub const Server = struct {
     /// Klippy Unix-socket bridge context. When set, /klippysocket WebSocket
     /// connections relay frames to/from the live Klippy process.
     klippy_ctx: ?*klippy_connection.KlippyCtx = null,
+    /// Allowed CORS origins from `[authorization] cors_domains`. An entry of `*`
+    /// matches any origin; `*.example.com` matches subdomains; otherwise an exact
+    /// match. Empty = no CORS (same-origin only, like Moonraker's default).
+    cors_domains: []const []const u8 = &.{},
 };
 
 /// Credentials carried by an HTTP request, extracted from headers and query.
@@ -96,6 +100,8 @@ pub const HttpCreds = struct {
     oneshot: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     remote_ip: ?[]const u8 = null,
+    /// Request `Origin` header (for CORS), duped into the arena.
+    origin: ?[]const u8 = null,
 };
 
 /// Comptime-known trampoline so a runtime handler pointer can be invoked inside
@@ -523,14 +529,22 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
 
         const body: []const u8 = readBody(&req, alloc) catch &.{};
 
+        // CORS preflight: answer OPTIONS directly with the allow headers, no auth.
+        if (req.head.method == .OPTIONS) {
+            req.respond("", .{
+                .status = .no_content,
+                .extra_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin),
+            }) catch return;
+            if (!req.head.keep_alive) return;
+            continue;
+        }
+
         const resp = handleParsedAuth(srv, .HTTP, verb, target, body, creds, alloc) catch
             Response{ .status = .internal_server_error, .body = "{\"error\":{\"code\":500,\"message\":\"Internal Server Error\"}}" };
 
         req.respond(resp.body, .{
             .status = resp.status,
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "application/json" },
-            },
+            .extra_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin),
         }) catch return;
 
         if (!req.head.keep_alive) return;
@@ -542,6 +556,36 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
 ///   * Oneshot: "?token="
 ///   * API key: "X-Api-Key"
 /// All returned slices are duped into `alloc` so they survive the body read.
+/// True if `origin` is permitted by `cors_domains` (Moonraker rules): `*` allows
+/// any; `*.example.com` matches subdomains; otherwise an exact origin or host match.
+fn corsOriginAllowed(cors_domains: []const []const u8, origin: []const u8) bool {
+    if (origin.len == 0) return false;
+    const host = if (std.mem.indexOf(u8, origin, "://")) |i| origin[i + 3 ..] else origin;
+    for (cors_domains) |d| {
+        if (std.mem.eql(u8, d, "*")) return true;
+        if (std.mem.eql(u8, d, origin)) return true;
+        if (std.mem.eql(u8, d, host)) return true;
+        if (std.mem.startsWith(u8, d, "*.") and std.mem.endsWith(u8, host, d[1..])) return true;
+    }
+    return false;
+}
+
+/// Build the response header list: always content-type; plus the CORS allow
+/// headers (echoing `origin`) when it is permitted. Arena-allocated.
+fn buildResponseHeaders(alloc: std.mem.Allocator, cors_domains: []const []const u8, origin: ?[]const u8) []const std.http.Header {
+    var list: std.ArrayList(std.http.Header) = .empty;
+    list.append(alloc, .{ .name = "content-type", .value = "application/json" }) catch return &.{};
+    if (origin) |o| {
+        if (corsOriginAllowed(cors_domains, o)) {
+            list.append(alloc, .{ .name = "Access-Control-Allow-Origin", .value = o }) catch {};
+            list.append(alloc, .{ .name = "Access-Control-Allow-Credentials", .value = "true" }) catch {};
+            list.append(alloc, .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, PUT, DELETE, OPTIONS" }) catch {};
+            list.append(alloc, .{ .name = "Access-Control-Allow-Headers", .value = "Origin, Accept, Content-Type, X-Requested-With, X-CRSF-Token, Authorization, X-Access-Token, X-Api-Key" }) catch {};
+        }
+    }
+    return list.items;
+}
+
 fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.mem.Allocator) HttpCreds {
     var creds = HttpCreds{};
 
@@ -553,6 +597,8 @@ fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.me
             if (creds.jwt == null) creds.jwt = alloc.dupe(u8, h.value) catch null;
         } else if (std.ascii.eqlIgnoreCase(h.name, "x-api-key")) {
             creds.api_key = alloc.dupe(u8, h.value) catch null;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "origin")) {
+            creds.origin = alloc.dupe(u8, h.value) catch null;
         }
     }
 
@@ -996,6 +1042,39 @@ test "authorize: INTERNAL transport bypasses default hook" {
     };
     // Default hook always allows INTERNAL even when auth is required.
     try std.testing.expect(authorize(defaultAuthHook, .INTERNAL, &route));
+}
+
+test "corsOriginAllowed: wildcard, exact, subdomain, host" {
+    const star = [_][]const u8{"*"};
+    try std.testing.expect(corsOriginAllowed(&star, "http://anything.com"));
+    const exact = [_][]const u8{"http://app.example.com"};
+    try std.testing.expect(corsOriginAllowed(&exact, "http://app.example.com"));
+    try std.testing.expect(!corsOriginAllowed(&exact, "http://evil.com"));
+    const sub = [_][]const u8{"*.local"};
+    try std.testing.expect(corsOriginAllowed(&sub, "http://printer.local"));
+    try std.testing.expect(!corsOriginAllowed(&sub, "http://printer.remote"));
+    const host = [_][]const u8{"192.168.0.150:7199"};
+    try std.testing.expect(corsOriginAllowed(&host, "http://192.168.0.150:7199"));
+    // Empty origin / empty list never allowed.
+    try std.testing.expect(!corsOriginAllowed(&star, ""));
+    try std.testing.expect(!corsOriginAllowed(&.{}, "http://x"));
+}
+
+test "buildResponseHeaders: CORS headers only when origin allowed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const allow = [_][]const u8{"*"};
+    const h1 = buildResponseHeaders(a, &allow, "http://ui.example");
+    var has_acao = false;
+    for (h1) |h| if (std.ascii.eqlIgnoreCase(h.name, "Access-Control-Allow-Origin")) {
+        has_acao = true;
+        try std.testing.expectEqualStrings("http://ui.example", h.value);
+    };
+    try std.testing.expect(has_acao);
+    // No origin / no cors config → just content-type, no ACAO.
+    const h2 = buildResponseHeaders(a, &.{}, "http://ui.example");
+    for (h2) |h| try std.testing.expect(!std.ascii.eqlIgnoreCase(h.name, "Access-Control-Allow-Origin"));
 }
 
 test "fuzz_http_transport: random request bytes never crash, always a well-formed response" {

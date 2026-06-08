@@ -168,6 +168,9 @@ pub const App = struct {
     /// Parsed config, populated by setConfig(). Null when no config file was
     /// loaded (dump-api, tests). Owned; freed in deinit.
     cfg: ?*config_helper.ConfigParser = null,
+    /// Allowed CORS origins from `[authorization] cors_domains`. Each slice + the
+    /// outer array are gpa-owned; freed in deinit. Passed to the HTTP server.
+    cors_domains: [][]const u8 = &.{},
 
     /// Default entry point: SQLite backend, no io needed at init time.
     pub fn init(alloc: std.mem.Allocator) !App {
@@ -523,6 +526,19 @@ pub const App = struct {
             };
         }
 
+        // CORS allow-list ([authorization] cors_domains): a whitespace/newline
+        // separated list of origins (`*`, `*.dom`, or exact). Enables a
+        // cross-origin web UI to talk to phobos.
+        if (cfg.get("authorization", "cors_domains")) |raw| {
+            var list: std.ArrayList([]const u8) = .empty;
+            var it = std.mem.tokenizeAny(u8, raw, " \t\r\n");
+            while (it.next()) |dom| {
+                const d = self.alloc.dupe(u8, dom) catch continue;
+                list.append(self.alloc, d) catch self.alloc.free(d);
+            }
+            self.cors_domains = list.toOwnedSlice(self.alloc) catch &.{};
+        }
+
         // Wire job_queue transition gcode/delay from [job_queue] section.
         if (cfg.hasSection("job_queue")) {
             const tg = cfg.get("job_queue", "job_transition_gcode");
@@ -754,6 +770,8 @@ pub const App = struct {
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
         self.db_store.deinit(self.alloc);
+        for (self.cors_domains) |d| self.alloc.free(d);
+        if (self.cors_domains.len > 0) self.alloc.free(self.cors_domains);
         self.sensor_ctx.deinit();
         self.alloc.destroy(self.sensor_ctx);
         self.webcam_ctx.deinit();
@@ -962,6 +980,7 @@ pub const App = struct {
             .file_ctx = self.file_ctx,
             .datadir = self.datadir,
             .klippy_ctx = self.klippy_ctx,
+            .cors_domains = self.cors_domains,
         };
     }
 };
