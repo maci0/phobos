@@ -1,0 +1,48 @@
+//! Minimal hand-declared bindings for the vendored SQLite amalgamation
+//! (vendor/sqlite/sqlite3.c, 3.47.0). Only the symbols the DataStore backend
+//! needs — hand-declared rather than `@cImport` to match the codebase's lmdb_c
+//! style and keep cross-compilation simple. Built with SQLITE_OMIT_AUTOINIT, so
+//! `sqlite3_initialize` must be called once before use.
+
+pub const sqlite3 = opaque {};
+pub const sqlite3_stmt = opaque {};
+
+// Result codes.
+pub const SQLITE_OK: c_int = 0;
+pub const SQLITE_ROW: c_int = 100;
+pub const SQLITE_DONE: c_int = 101;
+
+// open flags.
+pub const SQLITE_OPEN_READWRITE: c_int = 0x00000002;
+pub const SQLITE_OPEN_CREATE: c_int = 0x00000004;
+pub const SQLITE_OPEN_FULLMUTEX: c_int = 0x00010000;
+
+// Column types.
+pub const SQLITE_INTEGER: c_int = 1;
+pub const SQLITE_FLOAT: c_int = 2;
+pub const SQLITE_TEXT: c_int = 3;
+pub const SQLITE_BLOB: c_int = 4;
+pub const SQLITE_NULL: c_int = 5;
+
+// Special destructor sentinels for bind_* (value must be copied).
+pub const SQLITE_TRANSIENT: ?*const fn (?*anyopaque) callconv(.c) void = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+
+pub extern "c" fn sqlite3_initialize() c_int;
+pub extern "c" fn sqlite3_open_v2(filename: [*:0]const u8, ppDb: *?*sqlite3, flags: c_int, zVfs: ?[*:0]const u8) c_int;
+pub extern "c" fn sqlite3_close(db: ?*sqlite3) c_int;
+pub extern "c" fn sqlite3_exec(db: ?*sqlite3, sql: [*:0]const u8, cb: ?*const anyopaque, arg: ?*anyopaque, errmsg: ?*?[*:0]u8) c_int;
+pub extern "c" fn sqlite3_errmsg(db: ?*sqlite3) [*:0]const u8;
+pub extern "c" fn sqlite3_free(p: ?*anyopaque) void;
+
+pub extern "c" fn sqlite3_prepare_v2(db: ?*sqlite3, zSql: [*]const u8, nByte: c_int, ppStmt: *?*sqlite3_stmt, pzTail: ?*?[*:0]const u8) c_int;
+pub extern "c" fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_reset(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
+
+pub extern "c" fn sqlite3_bind_text(stmt: ?*sqlite3_stmt, idx: c_int, text: [*]const u8, n: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) c_int;
+pub extern "c" fn sqlite3_bind_blob(stmt: ?*sqlite3_stmt, idx: c_int, blob: ?*const anyopaque, n: c_int, destructor: ?*const fn (?*anyopaque) callconv(.c) void) c_int;
+
+pub extern "c" fn sqlite3_column_type(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
+pub extern "c" fn sqlite3_column_bytes(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
+pub extern "c" fn sqlite3_column_blob(stmt: ?*sqlite3_stmt, iCol: c_int) ?*const anyopaque;
+pub extern "c" fn sqlite3_column_text(stmt: ?*sqlite3_stmt, iCol: c_int) ?[*:0]const u8;

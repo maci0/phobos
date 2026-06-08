@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
                 .strip = strip,
             });
             addVendoredLmdb(bb, m);
+            addVendoredSqlite(bb, m);
             m.addOptions("build_options", opts);
             return m;
         }
@@ -53,6 +54,32 @@ pub fn build(b: *std.Build) void {
 /// Compile the vendored liblmdb C sources into `module` and expose its headers.
 /// We vendor `vendor/lmdb/{mdb.c,midl.c}` rather than linking a system
 /// liblmdb so the on-disk format is pinned and the build is fully static.
+/// Compile the vendored SQLite amalgamation into `module`. Built with
+/// size/feature-reducing defines (no extension loading, no deprecated APIs, no
+/// shared cache) to keep the static binary small — SQLite is the heaviest part
+/// of the binary, so trim what phobos doesn't use.
+fn addVendoredSqlite(b: *std.Build, module: *std.Build.Module) void {
+    module.addIncludePath(b.path("vendor/sqlite"));
+    module.addCSourceFiles(.{
+        .root = b.path("vendor/sqlite"),
+        .files = &.{"sqlite3.c"},
+        .flags = &.{
+            "-O2",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_DEFAULT_MEMSTATUS=0",
+            "-DSQLITE_DQS=0",
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_OMIT_DEPRECATED",
+            "-DSQLITE_OMIT_SHARED_CACHE",
+            "-DSQLITE_OMIT_PROGRESS_CALLBACK",
+            "-DSQLITE_OMIT_AUTOINIT",
+            "-DSQLITE_USE_ALLOCA",
+            "-DSQLITE_ENABLE_API_ARMOR",
+            "-Wno-unused-parameter",
+        },
+    });
+}
+
 fn addVendoredLmdb(b: *std.Build, module: *std.Build.Module) void {
     module.addIncludePath(b.path("vendor/lmdb"));
     module.addCSourceFiles(.{
