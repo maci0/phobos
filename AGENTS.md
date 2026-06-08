@@ -6,8 +6,11 @@ Phobos is a memory-efficient Zig 0.16 reimplementation of Moonraker. See
 ## Project goals (weigh every change against these)
 
 - **Low memory usage is an EXPLICIT, primary goal.** Target is a static musl
-  binary on 32-bit ARM (Cortex-A7); daemon idle RSS is ~1.4 MB vs stock
-  Moonraker's ~80–150 MB, and it must stay tiny. Concretely:
+  binary on 32-bit ARM (Cortex-A7). Measured: ~1.2 MB binary, idle RSS ~2.2 MB on
+  a real armv7 printer (of which only ~0.7 MB is unreclaimable private-dirty heap)
+  vs that same printer's own Moonraker at ~10 MB and desktop Moonraker at
+  50–80 MB. Must stay tiny — reproduce with `scripts/measure-memory.sh`, see
+  `docs/MEMORY.md`. Concretely:
     - prefer fixed/stack buffers and caller-provided buffers over heap; reach for
       `std.heap` allocators only when a fixed buffer genuinely can't bound the size
     - per-request work uses an arena that is freed on return — keep long-lived
@@ -128,6 +131,19 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
       ctx state and join it before freeing that state (a fire-and-forget
       `io.async`/`std.Thread.spawn` racing `deinit` is a UAF). Use an atomic stop
       flag; `shutdown(.recv)` to unblock a blocked read before joining.
+    - NEVER block on a network round-trip (e.g. a Klippy proxy request) while
+      holding the `Core` lock. A handler runs under `Core`; if it then blocks
+      reading a socket whose reader thread needs `Core` to dispatch, you deadlock
+      and wedge the whole server. The Klippy bridge (`klippy_connection.zig`)
+      solves this: ONE persistent reader continuously drains the socket (so Klippy
+      never backpressures on its status flood — a stalled drain was a real wedge),
+      routes responses to per-id waiters, and `request()` RELEASES `Core` for the
+      round-trip and blocks on its waiter. Reuse that pattern for any
+      request/response over a shared, continuously-pushed socket; cap stack
+      reservations on background threads (`.{ .stack_size = 1 << 20 }`).
+    - background thread stacks default to 16 MiB reserved each — pass
+      `.{ .stack_size = 1 << 20 }` to `std.Thread.spawn` (ample for bounded
+      JSON/TLS/HTTP work) to keep VmSize small.
 
 - For process spawning:
     - use `std.process` only where Zig 0.16 environment handling is safe
@@ -143,6 +159,16 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
     - tests run under `std.testing.allocator` — it detects leaks/double-free, so
       exercise allocation paths with it (arenas mask these bugs)
     - keep fuzz harnesses deterministic and bounded
+    - the Klippy sim (`testutil/klippy_sim.zig`) does NOT reproduce a real
+      Klippy's continuous status flood or backpressure, so it MASKS bridge
+      concurrency/protocol bugs (a proxy deadlock + a wrong `objects/subscribe`
+      shape both passed the sim and only showed against a real Klippy). For
+      bridge/transport changes, cross-compile and validate against a real printer:
+      `cat binary | ssh root@<printer> 'cat >/tmp/p; chmod +x /tmp/p'`, symlink
+      `/tmp/klippy_uds -> /tmp/uds`, run on a NON-7125 port, hit it READ-ONLY
+      (no gcode/move/heat), then kill + remove the symlink. Diagnose hangs with
+      `/proc/<pid>/task/*/wchan` (e.g. `unix_stream_read_generic` = blocked read,
+      `futex_wait_queue_me` = lock contention).
     - standalone-testable files (no `../` imports) run via
       `zig test -target x86_64-linux-musl src/<f>.zig`; files under
       `src/components` use `../` imports and build only via `zig build test`
