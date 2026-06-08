@@ -55,9 +55,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Select the DataStore backend from `[database] backend` (sqlite | file).
     const db_backend = resolveDbBackend(alloc, aio, config_path);
-    std.debug.print("phobos: datastore backend = {s}\n", .{@tagName(db_backend)});
+    const db_path = resolveDbPath(alloc, init.arena.allocator(), aio, config_path);
+    std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(db_backend), if (db_path) |p| p else "" });
 
-    var server_app = try app.App.initWithStore(alloc, db_backend, aio);
+    var server_app = try app.App.initWithStore(alloc, db_backend, aio, db_path);
     defer server_app.deinit(aio);
 
     if (config_path) |path| {
@@ -87,6 +88,18 @@ pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]con
     const v = cfg.get("database", "backend") orelse return .sqlite;
     if (std.mem.eql(u8, v, "file")) return .file;
     return .sqlite;
+}
+
+/// Read `[database] path` — an explicit DataStore path (a SQLite file, or a
+/// directory for the file backend). Null = use the default ephemeral location.
+/// Lets phobos open an existing Moonraker `moonraker-sql.db`.
+pub fn resolveDbPath(gpa: std.mem.Allocator, arena_alloc: std.mem.Allocator, aio: std.Io, config_path: ?[]const u8) ?[]const u8 {
+    const path = config_path orelse return null;
+    var cfg = config.ConfigParser.init(gpa);
+    defer cfg.deinit();
+    cfg.parseFile(aio, path) catch return null;
+    const v = cfg.get("database", "path") orelse return null;
+    return arena_alloc.dupe(u8, v) catch null;
 }
 
 /// Resolve the bind address from a config file (or defaults).

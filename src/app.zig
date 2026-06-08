@@ -171,12 +171,12 @@ pub const App = struct {
 
     /// Default entry point: SQLite backend, no io needed at init time.
     pub fn init(alloc: std.mem.Allocator) !App {
-        return initWithStore(alloc, .sqlite, null);
+        return initWithStore(alloc, .sqlite, null, null);
     }
 
     /// Assemble the App with an explicit DataStore backend. The `file` backend
     /// needs a live `io` handle (filesystem); `sqlite` ignores it.
-    pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, db_io: ?std.Io) !App {
+    pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, db_io: ?std.Io, db_path: ?[]const u8) !App {
         const core = try alloc.create(Core);
         errdefer alloc.destroy(core);
         core.* = Core.init();
@@ -214,8 +214,11 @@ pub const App = struct {
                     const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
                     const store_ptr = try alloc.create(SqliteStore);
                     errdefer alloc.destroy(store_ptr);
-                    const db_path = try std.fmt.bufPrintZ(&path_buf, "/tmp/phobos-db-{x}.db", .{@intFromPtr(db_ctx)});
-                    store_ptr.* = try SqliteStore.open(alloc, db_path);
+                    const path_z = if (db_path) |p|
+                        try std.fmt.bufPrintZ(&path_buf, "{s}", .{p})
+                    else
+                        try std.fmt.bufPrintZ(&path_buf, "/tmp/phobos-db-{x}.db", .{@intFromPtr(db_ctx)});
+                    store_ptr.* = try SqliteStore.open(alloc, path_z);
                     break :blk .{ .sqlite = store_ptr };
                 },
                 .file => {
@@ -223,7 +226,10 @@ pub const App = struct {
                     const FileStore = @import("store/file_store.zig").FileStore;
                     const store_ptr = try alloc.create(FileStore);
                     errdefer alloc.destroy(store_ptr);
-                    const dir_path = try std.fmt.bufPrint(&path_buf, "/tmp/phobos-db-{x}", .{@intFromPtr(db_ctx)});
+                    const dir_path = if (db_path) |p|
+                        try std.fmt.bufPrint(&path_buf, "{s}", .{p})
+                    else
+                        try std.fmt.bufPrint(&path_buf, "/tmp/phobos-db-{x}", .{@intFromPtr(db_ctx)});
                     store_ptr.* = FileStore.open(alloc, io, dir_path) catch return error.BackendOpenFailed;
                     break :blk .{ .file = store_ptr };
                 },
@@ -1074,7 +1080,7 @@ test "initWithStore: file backend builds + database round-trips" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.initWithStore(alloc, .file, io);
+    var app = try App.initWithStore(alloc, .file, io, null);
     defer app.deinit(io);
     try std.testing.expect(app.db_store == .file);
 
