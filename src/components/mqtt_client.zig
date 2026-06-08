@@ -468,7 +468,7 @@ pub const TestBroker = struct {
             switch (ptype) {
                 .subscribe => {
                     self.saw_subscribe = true;
-                    const pid = (@as(u16, raw.body[0]) << 8) | raw.body[1];
+                    const pid = std.mem.readInt(u16, raw.body[0..2], .big);
                     // SUBACK: packet id + granted qos 0.
                     self.writeAll(stream, &.{ 0x90, 0x03, @intCast(pid >> 8), @intCast(pid & 0xFF), 0x00 }) catch return;
                 },

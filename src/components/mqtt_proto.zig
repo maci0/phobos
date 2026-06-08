@@ -84,8 +84,9 @@ pub fn decodeVarInt(data: []const u8) !?VarIntResult {
 // ===========================================================================
 
 fn appendU16(list: *std.ArrayList(u8), alloc: std.mem.Allocator, v: u16) !void {
-    try list.append(alloc, @intCast(v >> 8));
-    try list.append(alloc, @intCast(v & 0xFF));
+    var be: [2]u8 = undefined;
+    std.mem.writeInt(u16, &be, v, .big);
+    try list.appendSlice(alloc, &be);
 }
 
 fn appendStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) !void {
@@ -98,7 +99,7 @@ fn appendStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) 
 /// the offset past it.
 fn readStr(data: []const u8, off: usize) !struct { s: []const u8, next: usize } {
     if (off + 2 > data.len) return error.Truncated;
-    const len = (@as(usize, data[off]) << 8) | data[off + 1];
+    const len: usize = std.mem.readInt(u16, data[off..][0..2], .big);
     const start = off + 2;
     if (start + len > data.len) return error.Truncated;
     return .{ .s = data[start .. start + len], .next = start + len };
@@ -208,7 +209,8 @@ pub fn encodeSubscribe(
 
 /// Encode a PUBACK packet (QoS 1 acknowledgement).
 pub fn encodePuback(alloc: std.mem.Allocator, packet_id: u16) ![]u8 {
-    var body: [2]u8 = .{ @intCast(packet_id >> 8), @intCast(packet_id & 0xFF) };
+    var body: [2]u8 = undefined;
+    std.mem.writeInt(u16, &body, packet_id, .big);
     return frame(alloc, .puback, 0, &body);
 }
 
@@ -272,7 +274,7 @@ pub fn parsePublish(pkt: Packet) !PublishView {
     var packet_id: u16 = 0;
     if (qos > 0) {
         if (off + 2 > pkt.body.len) return error.Truncated;
-        packet_id = (@as(u16, pkt.body[off]) << 8) | pkt.body[off + 1];
+        packet_id = std.mem.readInt(u16, pkt.body[off..][0..2], .big);
         off += 2;
     }
     return .{
@@ -294,7 +296,7 @@ pub fn parseConnack(pkt: Packet) !ConnackCode {
 /// Extract the packet id from a PUBACK / SUBACK packet (first two body bytes).
 pub fn parsePacketId(pkt: Packet) !u16 {
     if (pkt.body.len < 2) return error.Truncated;
-    return (@as(u16, pkt.body[0]) << 8) | pkt.body[1];
+    return std.mem.readInt(u16, pkt.body[0..2], .big);
 }
 
 // ===========================================================================
