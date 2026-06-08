@@ -830,9 +830,13 @@ pub const KlippyCtx = struct {
     /// Uses `emit` (acquires Core lock) since the background task does not
     /// hold the Core lock.
     fn dispatchNotification(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
-        if (std.mem.eql(u8, method, "notify_status_update")) {
+        // Klippy pushes status/gcode via the response_template method names
+        // (process_status_update / process_gcode_response) — usually WITHOUT an
+        // id, so they arrive here as notifications. Handle those too (not just the
+        // notify_* aliases), else live status pushes are silently dropped.
+        if (std.mem.eql(u8, method, "process_status_update") or std.mem.eql(u8, method, "notify_status_update")) {
             try self.processStatusUpdate(io, frame);
-        } else if (std.mem.eql(u8, method, "notify_gcode_response")) {
+        } else if (std.mem.eql(u8, method, "process_gcode_response") or std.mem.eql(u8, method, "notify_gcode_response")) {
             try self.processGcodeResponse(io, frame);
         }
     }
@@ -868,12 +872,11 @@ pub const KlippyCtx = struct {
     /// Core status-update processing: parse params, check webhooks, fan out
     /// per-object. `locked` selects emit vs emitLocked.
     fn processStatusUpdateInner(self: *KlippyCtx, io: std.Io, params: std.json.Value, locked: bool) !void {
-        // Params is a JSON-RPC array: [eventtime, status_dict].
-        if (params != .array) return;
-        const arr = params.array;
-        if (arr.items.len < 2) return;
-
-        const status_dict = arr.items[1];
+        // Klippy sends params as an OBJECT: {"eventtime": t, "status": {obj:{..}}}.
+        // (Clients then receive the array shape [status, eventtime] — built below.)
+        if (params != .object) return;
+        const eventtime: std.json.Value = params.object.get("eventtime") orelse .{ .float = 0 };
+        const status_dict = params.object.get("status") orelse return;
         if (status_dict != .object) return;
 
         // Check webhooks for state transitions.
@@ -915,14 +918,14 @@ pub const KlippyCtx = struct {
         var it = status_dict.object.iterator();
         while (it.next()) |entry| {
             const obj_name = entry.key_ptr.*;
-            // Build per-object status params: [eventtime, {obj_name: obj_data}].
+            // Build client status params: [{obj_name: obj_data}, eventtime].
             per_obj_map.clearRetainingCapacity();
             try per_obj_map.put(scratch, obj_name, entry.value_ptr.*);
             const per_obj_val = std.json.Value{ .object = per_obj_map };
 
             params_arr.clearRetainingCapacity();
-            try params_arr.append(arr.items[0]);
             try params_arr.append(per_obj_val);
+            try params_arr.append(eventtime);
             const params_array = std.json.Value{ .array = params_arr };
 
             if (locked) {
@@ -1098,6 +1101,55 @@ pub const KlippyCtx = struct {
         waiter.sem.waitUncancelable(io);
         core.lock(io);
 
+        if (waiter.failed) return error.KlippyDisconnected;
+        const payload = waiter.payload orelse return error.KlippyDisconnected;
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
+        if (parsed.value.object.get("error")) |_| return error.KlippyRequestFailed;
+        const result = parsed.value.object.get("result") orelse .null;
+        return deepCopyValue(alloc, result);
+    }
+
+    /// Resubscribe Klippy to the current aggregate object set (base + everything
+    /// added via `addSubscriptionObject`) WITH the `response_template`, and return
+    /// the subscribe result (`{"eventtime":..,"status":{..}}`). A WS client's
+    /// `printer.objects.subscribe` calls this after registering its objects, so
+    /// one template-bearing subscription stays live (a bare `objects/subscribe`
+    /// proxy would drop the template and stop status pushes). Called OFF the Core
+    /// lock (from the WS transport), so unlike `requestConcurrent` it does not
+    /// release Core. Requires the concurrent reader (Core wired); errors if not
+    /// connected.
+    pub fn subscribeAggregate(self: *KlippyCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        if (!self.isConnected() or self.core == null) return error.KlippyDisconnected;
+        const io = self.io.?;
+
+        self.next_id += 1;
+        const id_num = self.next_id;
+        var rid_buf: [32]u8 = undefined;
+        const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
+
+        var waiter = Waiter{};
+        self.pending_mutex.lockUncancelable(io);
+        self.pending.put(self.gpa, id_num, &waiter) catch {
+            self.pending_mutex.unlock(io);
+            return error.OutOfMemory;
+        };
+        self.pending_mutex.unlock(io);
+        defer {
+            self.pending_mutex.lockUncancelable(io);
+            _ = self.pending.remove(id_num);
+            self.pending_mutex.unlock(io);
+            if (waiter.payload) |p| self.gpa.free(p);
+        }
+
+        const objs = try self.buildSubObjectsJson(alloc);
+        defer alloc.free(objs);
+        // Envelope incl. the response_template field is ~140 bytes; pad generously.
+        const fbuf = try alloc.alloc(u8, objs.len + rid.len + 256);
+        defer alloc.free(fbuf);
+        const frame = try buildSubscribeRequest(objs, rid, fbuf);
+        try self.writeFrame(io, frame);
+
+        waiter.sem.waitUncancelable(io);
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
@@ -1748,10 +1800,10 @@ test "processStatusUpdateInner: shutdown webhook sets state and emits" {
     var wh: std.json.ObjectMap = .empty;
     try wh.put(a, "state", .{ .string = "shutdown" });
     try sd.put(a, "webhooks", .{ .object = wh });
-    var arr = std.json.Array.init(a);
-    try arr.append(.{ .float = 0.0 });
-    try arr.append(.{ .object = sd });
-    const params = std.json.Value{ .array = arr };
+    var pobj: std.json.ObjectMap = .empty;
+    try pobj.put(a, "eventtime", .{ .float = 0.0 });
+    try pobj.put(a, "status", .{ .object = sd });
+    const params = std.json.Value{ .object = pobj };
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -1774,10 +1826,10 @@ test "processStatusUpdateInner: ready webhook sets state" {
     var wh: std.json.ObjectMap = .empty;
     try wh.put(a, "state", .{ .string = "ready" });
     try sd.put(a, "webhooks", .{ .object = wh });
-    var arr = std.json.Array.init(a);
-    try arr.append(.{ .float = 0.0 });
-    try arr.append(.{ .object = sd });
-    const params = std.json.Value{ .array = arr };
+    var pobj: std.json.ObjectMap = .empty;
+    try pobj.put(a, "eventtime", .{ .float = 0.0 });
+    try pobj.put(a, "status", .{ .object = sd });
+    const params = std.json.Value{ .object = pobj };
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -1798,10 +1850,10 @@ test "processStatusUpdateInner: no webhooks — no crash" {
 
     var sd: std.json.ObjectMap = .empty;
     try sd.put(a, "toolhead", .{ .object = .empty });
-    var arr = std.json.Array.init(a);
-    try arr.append(.{ .float = 0.0 });
-    try arr.append(.{ .object = sd });
-    const params = std.json.Value{ .array = arr };
+    var pobj: std.json.ObjectMap = .empty;
+    try pobj.put(a, "eventtime", .{ .float = 0.0 });
+    try pobj.put(a, "status", .{ .object = sd });
+    const params = std.json.Value{ .object = pobj };
 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();

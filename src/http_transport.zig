@@ -493,6 +493,7 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
                     .core = srv.core,
                     .dispatcher = srv.dispatcher,
                     .conns = conns,
+                    .klippy = srv.klippy_ctx,
                 };
                 ws.serveWebSocket(&ws_srv, &web_socket);
                 return; // connection consumed by the WS session

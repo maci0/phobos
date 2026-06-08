@@ -72,6 +72,7 @@ pub fn dispatchMessage(
     conns: *Connections,
     conn: *Connection,
     dispatcher: *jsonrpc.Dispatcher,
+    klippy: ?*klippy_connection.KlippyCtx,
     request_json: []const u8,
     alloc: std.mem.Allocator,
 ) error{OutOfMemory}![]u8 {
@@ -115,11 +116,64 @@ pub fn dispatchMessage(
                 .null;
             return handleIdentify(io, conns, conn, params, p.id, p.is_notification, alloc);
         }
+        // printer.objects.subscribe is connection-scoped: register this
+        // connection's object subscriptions so status pushes are fanned out to
+        // it, add the objects to Klippy's aggregate subscription (re-subscribing
+        // WITH the response_template so pushes keep flowing), and return the
+        // current status. Handled here — NOT via the raw proxy, which would drop
+        // the template and never register the connection.
+        if (klippy != null and std.mem.eql(u8, p.method, "printer.objects.subscribe")) {
+            return handleObjectsSubscribe(io, conns, conn, klippy.?, request_json, p.id, p.is_notification, alloc);
+        }
     }
 
     // Everything else: the shared dispatcher under the serialized core. This is
     // the convergence point — identical to the HTTP JSON-RPC bridge.
     return core.run(io, jsonrpc.Dispatcher.handle, .{ dispatcher, request_json, alloc });
+}
+
+/// Service a connection-scoped `printer.objects.subscribe`: register the
+/// requested objects on `conn` (fan-out gating), add them to Klippy's aggregate
+/// subscription + resubscribe with the template, and return the live status.
+fn handleObjectsSubscribe(
+    io: Io,
+    conns: *Connections,
+    conn: *Connection,
+    klippy: *klippy_connection.KlippyCtx,
+    request_json: []const u8,
+    id: std.json.Value,
+    is_notification: bool,
+    alloc: std.mem.Allocator,
+) error{OutOfMemory}![]u8 {
+    // Collect the requested object names from params.objects and register them.
+    {
+        var parsed = std.json.parseFromSlice(std.json.Value, alloc, request_json, .{}) catch null;
+        defer if (parsed) |*pp| pp.deinit();
+        if (parsed) |pp| {
+            const params: std.json.Value = if (pp.value == .object) (pp.value.object.get("params") orelse .null) else .null;
+            const objects: std.json.Value = if (params == .object) (params.object.get("objects") orelse .null) else .null;
+            if (objects == .object) {
+                var names: std.ArrayList([]const u8) = .empty;
+                defer names.deinit(alloc);
+                var it = objects.object.iterator();
+                while (it.next()) |e| {
+                    klippy.addSubscriptionObject(e.key_ptr.*) catch {};
+                    names.append(alloc, e.key_ptr.*) catch {};
+                }
+                // Register on the connection (conns.subscribe dupes the topics).
+                conns.subscribe(io, conn, names.items) catch {};
+            }
+        }
+    }
+
+    // Resubscribe Klippy to the aggregate set (with template) + get live status.
+    const result = klippy.subscribeAggregate(alloc) catch |err| {
+        if (is_notification) return alloc.dupe(u8, &.{});
+        const msg = std.fmt.allocPrint(alloc, "objects.subscribe failed: {s}", .{@errorName(err)}) catch "subscribe failed";
+        return jv.errorResponse(alloc, id, -32603, msg) catch error.OutOfMemory;
+    };
+    if (is_notification) return alloc.dupe(u8, &.{});
+    return jv.successResponse(alloc, id, result);
 }
 
 /// Deep-copy a JSON id value (.integer/.string/.null) into `alloc`.
@@ -157,6 +211,9 @@ pub const WsServer = struct {
     core: *Core,
     dispatcher: *jsonrpc.Dispatcher,
     conns: *Connections,
+    /// Klippy bridge, so connection-scoped `printer.objects.subscribe` can
+    /// register the connection + resubscribe Klippy. Null in bare unit tests.
+    klippy: ?*klippy_connection.KlippyCtx = null,
 };
 
 /// Serve a single upgraded WebSocket connection to completion: register the
@@ -300,6 +357,7 @@ fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) 
                     srv.conns,
                     conn,
                     srv.dispatcher,
+                    srv.klippy,
                     msg.data,
                     alloc,
                 ) catch return;
@@ -362,7 +420,7 @@ test "server.websocket.id returns the connection's id" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher,
+    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.websocket.id","id":7}
     , arena.allocator());
 
@@ -383,7 +441,7 @@ test "server.connection.identify returns connection_id and stores client data" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher,
+    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.connection.identify","params":{"client_name":"mainsail","version":"1.2","type":"web","url":"http://h"},"id":3}
     , arena.allocator());
 
@@ -411,8 +469,8 @@ test "two connections get distinct monotonic ids via identify" {
     const req =
         \\{"jsonrpc":"2.0","method":"server.connection.identify","params":{"client_name":"a","version":"1","type":"web","url":"u"},"id":1}
     ;
-    const r1 = try dispatchMessage(io, &f.core, &f.conns, c1, &f.dispatcher, req, arena.allocator());
-    const r2 = try dispatchMessage(io, &f.core, &f.conns, c2, &f.dispatcher, req, arena.allocator());
+    const r1 = try dispatchMessage(io, &f.core, &f.conns, c1, &f.dispatcher, null, req, arena.allocator());
+    const r2 = try dispatchMessage(io, &f.core, &f.conns, c2, &f.dispatcher, null, req, arena.allocator());
 
     const p1 = try std.json.parseFromSlice(std.json.Value, arena.allocator(), r1, .{});
     const p2 = try std.json.parseFromSlice(std.json.Value, arena.allocator(), r2, .{});
@@ -433,7 +491,7 @@ test "server.info over WS dispatch equals HTTP result payload" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const ws_resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher,
+    const ws_resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.info","id":1}
     , a);
 
@@ -462,7 +520,7 @@ test "unknown method over WS returns -32601" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher,
+    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"does.not.exist","id":9}
     , arena.allocator());
 
@@ -484,7 +542,7 @@ test "notification (no id) over WS produces no response bytes" {
     defer arena.deinit();
 
     // server.websocket.id as a notification: ran, but no bytes.
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher,
+    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.websocket.id"}
     , arena.allocator());
     try std.testing.expectEqual(@as(usize, 0), resp.len);
@@ -512,7 +570,7 @@ test "fuzz_ws: random bytes through dispatchMessage never crash, valid JSON or e
             defer arena.deinit();
             const a = arena.allocator();
 
-            const resp = try dispatchMessage(c.io, &c.f.core, &c.f.conns, c.conn, &c.f.dispatcher, input, a);
+            const resp = try dispatchMessage(c.io, &c.f.core, &c.f.conns, c.conn, &c.f.dispatcher, null, input, a);
             if (resp.len == 0) return;
 
             const parsed = std.json.parseFromSlice(std.json.Value, a, resp, .{}) catch {
