@@ -6,7 +6,7 @@ Phobos is a memory-efficient Zig 0.16 reimplementation of Moonraker. See
 ## Project goals (weigh every change against these)
 
 - **Low memory usage is an EXPLICIT, primary goal.** Target is a static musl
-  binary on 32-bit ARM (Cortex-A7). Measured: ~1.2 MB binary, idle RSS ~2.2 MB on
+  binary on 32-bit ARM (Cortex-A7). Measured (pre-SQLite-switch): ~1.2 MB binary, idle RSS ~2.2 MB on
   a real armv7 printer (of which only ~0.7 MB is unreclaimable private-dirty heap)
   vs that same printer's own Moonraker at ~10 MB and desktop Moonraker at
   50–80 MB. Must stay tiny — reproduce with `scripts/measure-memory.sh`, see

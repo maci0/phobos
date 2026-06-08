@@ -27,15 +27,15 @@ Measured on this host (`ReleaseSmall` + LTO + stripped), reproducible with
 
 | | phobos | bare Python 3 (stdlib only) | Moonraker (typical) |
 |---|---|---|---|
-| On-disk | **1.2 MB** static binary | interpreter + site-packages | + interpreter + deps |
+| On-disk | **2.1 MB** static binary | interpreter + site-packages | + interpreter + deps |
 | Idle RSS | **~3.7 MB** | ~25 MB | ~50–80 MB |
 | Runtime deps | **none** | CPython | CPython + tornado + lmdb + jinja2 + … |
 
 phobos idles in **less RAM than an empty Python interpreter that has only imported
 `json`/`asyncio`/`sqlite3`** — i.e. below the floor Moonraker starts from, before
 its ~30 components load. That is a **~15–20× reduction** versus a full Moonraker,
-in a single dependency-free binary. (Its large `VmSize`/`VmData` is lmdb's
-reserved-but-uncommitted 200 MiB mmap, not resident RAM.) Details + methodology:
+in a single dependency-free binary. (The binary grew ~0.9 MB when the store
+moved from lmdb to a vendored SQLite for moonraker-sql.db compatibility.) Details:
 [`docs/MEMORY.md`](docs/MEMORY.md).
 
 ## Status
@@ -74,7 +74,7 @@ available on 32-bit ARM). A listener accepts connections and spawns a per-connec
 HTTP and WebSocket are handled by `std.http` over those streams. All transports converge on
 one JSON-RPC dispatcher backed by a runtime method table. A **serialized core** (a single
 mutex + monotonic sequence) runs every handler and notification fan-out so the observable
-ordering matches Moonraker's single asyncio loop. Persistence uses a vendored LMDB with
+ordering matches Moonraker's single asyncio loop. Persistence uses a vendored SQLite database (Moonraker moonraker-sql.db-compatible) with
 Moonraker's exact on-disk format. See [`DEVELOPMENT.md`](DEVELOPMENT.md) and
 [`docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md`](docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md)
 for detail.
@@ -92,11 +92,11 @@ src/
   transport/ws.zig        WebSocket transport over std.http
   server/                 core (serialized mutex), connections, notify bus, registry
   config/                 confighelper-compatible parser
-  store/                  DataStore interface + vendored-lmdb backend
+  store/                  DataStore interface + SQLite + atomic-rename file backends
   core/methods.zig        server.info / server.config
   components/*.zig        one module per Moonraker component
   testutil/               TestServer + HTTP/WS test clients
-vendor/lmdb/         vendored LMDB 0.9.31 C sources
+vendor/sqlite/       vendored SQLite 3.47.0 amalgamation
 tools/api_scanner/        Moonraker API extractor + drift + coverage tooling
 api/api_surface.json      authoritative API baseline (generated)
 docs/                     specs, plans, API surface, test findings, coverage map

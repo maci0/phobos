@@ -1,9 +1,19 @@
 # Memory footprint
 
+> **Note (post-SQLite switch):** the binary/RSS figures below were measured when
+> the DataStore was lmdb. The store has since moved to a vendored SQLite (for
+> Moonraker `moonraker-sql.db` compatibility), which grew the binary to **~2.1 MB**
+> and replaces lmdb's reserved 200 MiB mmap with SQLite's (small, resident) page
+> cache. The orders of magnitude vs Moonraker still hold; the detailed lmdb-mmap
+> discussion is retained as background but the exact RSS needs re-measuring on the
+> SQLite build (`scripts/measure-memory.sh`). The pure-Zig atomic-rename file
+> backend (`store/file_store.zig`) is the leaner, no-SQLite alternative.
+
 phobos is a from-scratch Zig reimplementation of Moonraker (a Python/asyncio
 service). The headline reason to care is resource use on small printer hosts:
-phobos ships as a **single ~1.2 MB static binary** with **no runtime, no
-interpreter, and no virtualenv**, and idles in a few megabytes of RAM.
+phobos ships as a **single static binary** (~2.1 MB with SQLite, ~1.2 MB with the
+file backend) with **no runtime, no interpreter, and no virtualenv**, and idles in
+a few megabytes of RAM.
 
 Reproduce the numbers below with [`scripts/measure-memory.sh`](../scripts/measure-memory.sh)
 (builds the release binary, starts an idle server, samples `/proc/<pid>/status`).
