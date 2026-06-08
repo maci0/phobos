@@ -1,0 +1,189 @@
+{
+  "ui": "mainsail",
+  "version": "v2.13.2",
+  "method_count": 65,
+  "methods": [
+    "machine.device_power.devices",
+    "machine.device_power.post_device",
+    "machine.proc_stats",
+    "machine.reboot",
+    "machine.services.restart",
+    "machine.services.start",
+    "machine.services.stop",
+    "machine.shutdown",
+    "machine.system_info",
+    "machine.timelapse.get_settings",
+    "machine.timelapse.lastframeinfo",
+    "machine.timelapse.post_settings",
+    "machine.timelapse.render",
+    "machine.timelapse.saveframes",
+    "machine.update.client",
+    "machine.update.full",
+    "machine.update.recover",
+    "machine.update.status",
+    "machine.update.system",
+    "printer.emergency_stop",
+    "printer.firmware_restart",
+    "printer.gcode.script",
+    "printer.info",
+    "printer.print.cancel",
+    "printer.print.pause",
+    "printer.print.resume",
+    "printer.print.start",
+    "printer.query_endstops.status",
+    "printer.restart",
+    "server.announcements.dismiss",
+    "server.announcements.list",
+    "server.config",
+    "server.database.delete_item",
+    "server.database.get_item",
+    "server.database.list",
+    "server.database.post_item",
+    "server.files.copy",
+    "server.files.delete_directory",
+    "server.files.delete_file",
+    "server.files.get_directory",
+    "server.files.metadata",
+    "server.files.metascan",
+    "server.files.move",
+    "server.files.post_directory",
+    "server.files.zip",
+    "server.gcode_store",
+    "server.history.delete_job",
+    "server.history.list",
+    "server.history.totals",
+    "server.info",
+    "server.job_queue.delete_job",
+    "server.job_queue.pause",
+    "server.job_queue.post_job",
+    "server.job_queue.start",
+    "server.job_queue.status",
+    "server.logs.rollover",
+    "server.restart",
+    "server.sensors.list",
+    "server.spoolman.get_spool_id",
+    "server.spoolman.post_spool_id",
+    "server.spoolman.proxy",
+    "server.temperature_store",
+    "server.webcams.delete_item",
+    "server.webcams.list",
+    "server.webcams.post_item"
+  ],
+  "actions": {
+    "machine.device_power.devices": [
+      "server/power/getDevices"
+    ],
+    "machine.device_power.post_device": [
+      "on"
+    ],
+    "machine.proc_stats": [
+      "server/initProcStats"
+    ],
+    "machine.system_info": [
+      "server/initSystemInfo"
+    ],
+    "machine.timelapse.get_settings": [
+      "server/timelapse/initSettings"
+    ],
+    "machine.timelapse.lastframeinfo": [
+      "server/timelapse/initLastFrameinfo"
+    ],
+    "machine.timelapse.post_settings": [
+      "server/timelapse/initSettings"
+    ],
+    "machine.update.status": [
+      "server/updateManager/onUpdateStatus"
+    ],
+    "printer.info": [
+      "printer/getInfo",
+      "server/checkKlippyState"
+    ],
+    "printer.print.start": [
+      "switchToDashboard"
+    ],
+    "printer.query_endstops.status": [
+      "printer/getEndstopStatus"
+    ],
+    "server.announcements.list": [
+      "server/announcements/getList"
+    ],
+    "server.config": [
+      "server/initServerConfig"
+    ],
+    "server.database.get_item": [
+      "gui/initStore",
+      "gui/maintenance/initStore",
+      "gui/reminders/initStore",
+      "server/history/initHistoryNotes"
+    ],
+    "server.database.list": [
+      "server/checkDatabases"
+    ],
+    "server.files.delete_directory": [
+      "files/getDeleteDir"
+    ],
+    "server.files.delete_file": [
+      "files/getDeleteFile"
+    ],
+    "server.files.get_directory": [
+      "files/getDirectory"
+    ],
+    "server.files.metadata": [
+      "files/getMetadata",
+      "files/getMetadataCurrentFile"
+    ],
+    "server.files.metascan": [
+      "files/getScanMetadata"
+    ],
+    "server.files.move": [
+      "files/getMove"
+    ],
+    "server.files.post_directory": [
+      "files/getCreateDir"
+    ],
+    "server.files.zip": [
+      "files/downloadZip"
+    ],
+    "server.gcode_store": [
+      "server/getGcodeStore"
+    ],
+    "server.history.delete_job": [
+      "server/history/getDeletedJobs"
+    ],
+    "server.history.list": [
+      "server/history/getHistory"
+    ],
+    "server.history.totals": [
+      "server/history/getTotals"
+    ],
+    "server.info": [
+      "server/checkKlippyConnected",
+      "server/initServerInfo"
+    ],
+    "server.job_queue.status": [
+      "server/jobQueue/getStatus"
+    ],
+    "server.logs.rollover": [
+      "files/rolloverLog"
+    ],
+    "server.sensors.list": [
+      "server/sensor/getSensors"
+    ],
+    "server.spoolman.get_spool_id": [
+      "server/spoolman/getActiveSpoolId"
+    ],
+    "server.spoolman.proxy": [
+      "server/spoolman/getActiveSpool",
+      "server/spoolman/getHealth",
+      "server/spoolman/getInfo",
+      "server/spoolman/getSpools",
+      "server/spoolman/getVendors"
+    ],
+    "server.temperature_store": [
+      "printer/tempHistory/init"
+    ],
+    "server.webcams.list": [
+      "gui/webcams/initStore"
+    ]
+  }
+}

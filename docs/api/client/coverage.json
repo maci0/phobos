@@ -1,0 +1,1095 @@
+{
+  "counts": {
+    "moonraker": 120,
+    "phobos": 144,
+    "fluidd": 98,
+    "mainsail": 65
+  },
+  "ui_gaps": [
+    "machine.timelapse.get_settings",
+    "machine.timelapse.lastframeinfo",
+    "machine.timelapse.post_settings",
+    "machine.timelapse.render",
+    "machine.timelapse.saveframes"
+  ],
+  "matrix": [
+    {
+      "method": "access.delete_user",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.get_api_key",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.get_user",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.info",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.login",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.logout",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.oneshot_token",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.post_api_key",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.post_user",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.refresh_jwt",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.user",
+      "moonraker": true,
+      "phobos": false,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "access.user.password",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "access.users.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "connection.register_remote_method",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "connection.send_event",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.database.delete_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.database.get_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.database.item",
+      "moonraker": true,
+      "phobos": false,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.database.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.database.post_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.database.table",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "debug.notifiers.test",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.device_power.devices",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.device_power.get_device",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.device_power.off",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.device_power.on",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.device_power.post_device",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.device_power.status",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.peripherals.canbus",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.peripherals.serial",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.peripherals.usb",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.peripherals.video",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.proc_stats",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.reboot",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.services.restart",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.services.start",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.services.stop",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.shutdown",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.sudo.info",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.sudo.password",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.system_info",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.td1.data",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.td1.reboot",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.timelapse.get_settings",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.timelapse.lastframeinfo",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.timelapse.post_settings",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.timelapse.render",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.timelapse.saveframes",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.update.client",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.update.full",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.update.klipper",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.update.moonraker",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.update.recover",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.update.refresh",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "machine.update.rollback",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.update.status",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.update.system",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "machine.update.upgrade",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.get_strip",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.off",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.on",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.post_strip",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.status",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.strips",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "machine.wled.toggle",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "pause_job_queue",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "printer.emergency_stop",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.firmware_restart",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.gcode.help",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "printer.gcode.script",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.info",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.objects.list",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "printer.objects.query",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "printer.objects.subscribe",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "printer.print.cancel",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.print.pause",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.print.resume",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.print.start",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.query_endstops.status",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "printer.restart",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.analysis.dump_config",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.analysis.estimate",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.analysis.process",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.analysis.status",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.announcements.delete_feed",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.announcements.dismiss",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.announcements.feeds",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.announcements.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.announcements.post_feed",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.announcements.update",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.config",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.connection.identify",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.database.compact",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.database.delete_backup",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.database.delete_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.database.get_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.database.item",
+      "moonraker": true,
+      "phobos": false,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.database.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.database.post_backup",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.database.post_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.database.restore",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.extensions.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.extensions.request",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.files.copy",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.delete_directory",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.delete_file",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.directory",
+      "moonraker": true,
+      "phobos": false,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.files.get_directory",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.files.metadata",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.metascan",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.move",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.post_directory",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.files.roots",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.files.thumbnails",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.files.zip",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.gcode_store",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.history.delete_job",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.history.get_job",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.history.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.history.reset_totals",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": false
+    },
+    {
+      "method": "server.history.totals",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.info",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.job_queue.delete_job",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.job_queue.jump",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.job_queue.pause",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.job_queue.post_job",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.job_queue.start",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.job_queue.status",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.logs.rollover",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.mqtt.publish",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.mqtt.publish_mqtt_topic",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.mqtt.subscribe",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.notifiers.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.restart",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.sensors.info",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.sensors.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.sensors.measurements",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.spoolman.get_spool_id",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.spoolman.post_spool_id",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.spoolman.proxy",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.spoolman.status",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.temperature_store",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.webcams.delete_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.webcams.get_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.webcams.item",
+      "moonraker": true,
+      "phobos": false,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.webcams.list",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.webcams.post_item",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": true,
+      "mainsail": true
+    },
+    {
+      "method": "server.webcams.test",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.websocket.id",
+      "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "set_wled",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "set_wled_state",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "spoolman_set_active_spool",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    },
+    {
+      "method": "start_job_queue",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "mainsail": false
+    }
+  ]
+}
