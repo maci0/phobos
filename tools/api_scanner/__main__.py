@@ -13,7 +13,7 @@ import os
 import sys
 from typing import Any, Dict
 
-from . import coverage as cov_module, differ, scanner
+from . import coverage as cov_module, differ, scanner, table as table_module
 
 DEFAULT_SOURCE = "vendor/moonraker/moonraker"
 DEFAULT_BASELINE = "api/api_surface.json"
@@ -71,6 +71,17 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 0 if report["covered"] == report["total"] else 1
 
 
+def cmd_table(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.baseline):
+        sys.stderr.write(f"baseline not found: {args.baseline}\n")
+        return 2
+    if not os.path.isfile(args.phobos):
+        sys.stderr.write(f"phobos dump not found: {args.phobos}\n")
+        return 2
+    sys.stdout.write(table_module.generate(_load(args.baseline), _load(args.phobos)))
+    return 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.baseline):
         sys.stderr.write(f"baseline not found: {args.baseline}\n")
@@ -111,6 +122,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to phobos --dump-api JSON output",
     )
     cov.set_defaults(func=cmd_coverage)
+
+    tbl = sub.add_parser(
+        "table",
+        help="Generate the per-call API coverage table (Markdown) to stdout.",
+    )
+    tbl.add_argument("--baseline", default=DEFAULT_BASELINE,
+                     help="Moonraker baseline JSON (default: %(default)s)")
+    tbl.add_argument("--phobos", required=True,
+                     help="Path to phobos --dump-api JSON output")
+    tbl.set_defaults(func=cmd_table)
 
     return p
 

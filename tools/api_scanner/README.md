@@ -60,6 +60,27 @@ PYTHONPATH=tools python3 -m api_scanner <mode> [--source DIR] [--baseline FILE]
       --baseline api/api_surface.json
   ```
 
+- **`coverage`** — compares phobos's own API (its `--dump-api` JSON) against the
+  Moonraker baseline and reports the counts + anything phobos is missing.
+  **Exit 0 when phobos covers the whole baseline, 1 otherwise** — the CI coverage
+  gate.
+  ```sh
+  zig-out/bin/phobos --dump-api > /tmp/phobos.json
+  PYTHONPATH=tools python3 -m api_scanner coverage --phobos /tmp/phobos.json
+  ```
+- **`table`** — the full per-call comparison of phobos *against our own API*:
+  emits `docs/api/API_COVERAGE.md`, a Markdown table of every endpoint / JSON-RPC
+  method / notification / remote method with phobos's implementation status
+  (✅ full / ⚠️ partial / 🚫 no-op / ❌ missing) and the behavioural difference
+  from Moonraker, plus a reverse section listing phobos calls beyond the static
+  baseline (classified: Klipper remote method, is_remote-proxied, or genuine
+  phobos shim). Per-call notes come from the curated `DELTAS` map in `table.py`.
+  ```sh
+  zig-out/bin/phobos --dump-api > /tmp/phobos.json
+  PYTHONPATH=tools python3 -m api_scanner table --phobos /tmp/phobos.json \
+      > docs/api/API_COVERAGE.md
+  ```
+
 Defaults: `--source vendor/moonraker/moonraker`, `--baseline api/api_surface.json`.
 
 ## Re-syncing when Moonraker updates
