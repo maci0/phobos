@@ -47,6 +47,16 @@ DELTAS: Dict[str, Tuple[str, str]] = {
 }
 
 
+def classify_extra(name: str, remote_names: Set[str]) -> str:
+    """Classify a phobos JSON-RPC method that isn't in the static baseline list."""
+    last = name.rsplit(".", 1)[-1]
+    if name in remote_names or last in remote_names:
+        return "Klipper remote method (also exposed as JSON-RPC)"
+    if name.startswith("printer."):
+        return "Klipper-proxied (is_remote) endpoint"
+    return "phobos-internal shim"
+
+
 def _status_for(keys: List[str], implemented: bool) -> Tuple[str, str]:
     if not implemented:
         return (S_MISSING, "Not yet implemented in phobos.")
@@ -172,14 +182,6 @@ def generate(baseline: Dict[str, Any], phobos: Dict[str, Any]) -> str:
     base_notifs: Set[str] = {n["name"] for n in baseline.get("notifications", [])}
     remote_names: Set[str] = {r.get("name", "") for r in baseline.get("remote_methods", [])}
 
-    def classify(name: str) -> str:
-        last = name.rsplit(".", 1)[-1]
-        if name in remote_names or last in remote_names:
-            return "Klipper remote method (also exposed as JSON-RPC)"
-        if name.startswith("printer."):
-            return "Klipper-proxied (is_remote) endpoint"
-        return "phobos-internal shim"
-
     extra_methods = sorted(m for m in ph_methods if m and m not in base_methods)
     extra_notifs = sorted(n for n in ph_notifs if n and n not in base_notifs)
     if extra_methods or extra_notifs:
@@ -192,7 +194,7 @@ def generate(baseline: Dict[str, Any], phobos: Dict[str, Any]) -> str:
         lines.append("")
         if extra_methods:
             lines.append(_table(["JSON-RPC method", "Classification"],
-                                [[f"`{m}`", classify(m)] for m in extra_methods]))
+                                [[f"`{m}`", classify_extra(m, remote_names)] for m in extra_methods]))
             lines.append("")
         if extra_notifs:
             lines.append(_table(["Notification", "Classification"],
