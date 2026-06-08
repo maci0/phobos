@@ -76,7 +76,7 @@ pub const AnnouncementsCtx = struct {
     pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
         self.io = io;
         // Start the periodic RSS refresh timer (30 minute interval).
-        self.refresh_thread = std.Thread.spawn(.{}, announcementsRefreshTimerThread, .{self}) catch null;
+        self.refresh_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, announcementsRefreshTimerThread, .{self}) catch null;
     }
 
     /// Built-in feeds (always present, cannot be deleted).
@@ -1488,7 +1488,7 @@ test "deinit: sets refresh_stop and nulls io" {
     ctx.io = io;
 
     // Spawn the timer thread.
-    ctx.refresh_thread = std.Thread.spawn(.{}, announcementsRefreshTimerThread, .{&ctx}) catch null;
+    ctx.refresh_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, announcementsRefreshTimerThread, .{&ctx}) catch null;
 
     // deinit must set the stop flag, null io, and join the thread.
     ctx.deinit();

@@ -235,7 +235,7 @@ pub const Td1Ctx = struct {
         if (self.poll_thread != null) return;
         if (self.io == null or self.core == null) return;
         self.poll_stop.store(false, .release);
-        self.poll_thread = std.Thread.spawn(.{}, pollLoop, .{self}) catch null;
+        self.poll_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, pollLoop, .{self}) catch null;
     }
 
     pub fn stopPolling(self: *Td1Ctx) void {

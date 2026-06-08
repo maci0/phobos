@@ -249,7 +249,7 @@ pub const MachineCtx = struct {
         self.io = io;
         // Start the periodic proc_stat emission if a bus is wired.
         if (self.bus != null and !self.no_proc_stat_timer) {
-            self.proc_stat_thread = std.Thread.spawn(.{}, procStatTimerThread, .{self}) catch null;
+            self.proc_stat_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, procStatTimerThread, .{self}) catch null;
         }
     }
 

@@ -900,7 +900,7 @@ pub const App = struct {
             // Tracked std.Thread (not a discarded io.async future) so
             // disconnectBroker can join it before teardown — closes the
             // deinit-vs-in-flight-connect UAF window.
-            self.mqtt_ctx.connect_thread = std.Thread.spawn(.{}, MqttCtx.connectBrokerBg, .{self.mqtt_ctx}) catch null;
+            self.mqtt_ctx.connect_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, MqttCtx.connectBrokerBg, .{self.mqtt_ctx}) catch null;
         }
         // Wire connections and io into ServerInfo so server.info reports live
         // websocket_count.

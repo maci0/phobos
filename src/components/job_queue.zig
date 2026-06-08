@@ -229,7 +229,7 @@ pub const JobQueueCtx = struct {
             self.cancelDelayTimer();
             self.delay_cancel.store(false, .release);
             self.queue_state = "loading";
-            self.delay_thread = std.Thread.spawn(.{}, transitionDelayCallback, .{self}) catch |e| {
+            self.delay_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, transitionDelayCallback, .{self}) catch |e| {
                 self.delay_thread = null;
                 return e;
             };

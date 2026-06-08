@@ -133,7 +133,7 @@ pub const ButtonCtx = struct {
         if (self.io == null) return;
         if (self.buttons.count() == 0) return;
         self.poll_stop.store(false, .release);
-        self.poll_thread = std.Thread.spawn(.{}, pollLoop, .{self}) catch null;
+        self.poll_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, pollLoop, .{self}) catch null;
     }
 
     /// Stop and join the poll thread.

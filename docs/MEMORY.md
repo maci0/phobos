@@ -25,19 +25,38 @@ Reproduce the numbers below with [`scripts/measure-memory.sh`](../scripts/measur
   (its deps aren't installed), so its number is the well-known production range,
   not a local measurement.
 
-## Why `VmSize`/`VmData` looks large (and why it doesn't matter)
+## What the ~3.7 MB RSS is actually made of
 
-`VmData` is ~75 MB and `VmSize` ~9–80 MB depending on the moment. That is almost
-entirely **reserved-but-uncommitted** address space, not resident RAM:
+Sampling `/proc/<pid>/smaps_rollup`, the resident set breaks down as:
 
-- **lmdb** maps its database file with a 200 MiB `map_size`. The mapping is lazy —
-  pages become resident only as data is actually touched. An empty/idle store
-  commits almost none of it.
-- Zig's `smp_allocator` reserves per-CPU arenas up front; thread stacks reserve
-  address space too. Again, reserved ≠ resident.
+- **`Private_Dirty` ≈ 0.7 MB** — the only pages that are genuinely phobos's own
+  committed RAM (heap: registry + dispatch tables, component state, lmdb internal
+  structures). This is the real floor, and it is already sub-megabyte.
+- **The rest (~3 MB)** is `Private_Clean` / file-backed code+rodata: the binary's
+  own pages and lmdb's, mapped from disk. These are **reclaimable** — under memory
+  pressure the kernel drops them and re-reads from disk, so they don't pin RAM the
+  way dirty pages do.
 
-`VmRSS` (resident set) is the number that reflects real RAM pressure, and that is
-the ~3.7 MB above.
+So there is very little resident memory left to cut: phobos already idles at its
+floor. Steady-state RSS stays flat because request scratch lives in per-request
+arenas freed at the end of each request.
+
+## Why `VmSize`/`VmData` *looks* large (and why it isn't resident)
+
+`VmSize`/`VmData` can read tens of MB once the background workers are up. That is
+**reserved-but-uncommitted** address space, not resident RAM:
+
+- **Thread stacks.** phobos runs a handful of background threads (klippy bridge,
+  proc-stat timer, MQTT reader/flush, announcements/spoolman/job-queue timers).
+  Each is now spawned with a **1 MiB stack reservation** instead of std's default
+  **16 MiB** — so the worst-case reserved stack space drops ~16× (e.g. ~80 MB →
+  ~5 MB at 5 threads). Only the few touched pages are ever resident, so this is a
+  `VmSize` win, not an RSS one, but it stops the footprint *looking* huge.
+- **lmdb** maps its database with a 200 MiB `map_size`; the mapping is lazy, so an
+  empty/idle store commits almost none of it.
+
+`VmRSS` is the number that reflects real RAM pressure, and that is the ~3.7 MB
+above (of which only ~0.7 MB is unreclaimable).
 
 ## What drives phobos's small footprint
 

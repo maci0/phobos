@@ -155,7 +155,7 @@ pub const SpoolmanCtx = struct {
         if (self.io == null) return;
         self.parseWsTarget(url) catch return;
         self.ws_stop.store(false, .release);
-        self.ws_thread = std.Thread.spawn(.{}, wsSupervisor, .{self}) catch null;
+        self.ws_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, wsSupervisor, .{self}) catch null;
     }
 
     pub fn stopWs(self: *SpoolmanCtx) void {

@@ -295,7 +295,7 @@ pub const MqttCtx = struct {
         // cannot be spawned, tear the connection down rather than leaving a
         // connected-but-unserviced client (no PINGRESP/keepalive → broker would
         // silently drop it); the caller can retry.
-        self.reader_thread = std.Thread.spawn(.{}, runReader, .{self}) catch |e| {
+        self.reader_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, runReader, .{self}) catch |e| {
             client.disconnect();
             client.deinit();
             self.lockClient();
@@ -772,7 +772,7 @@ pub const MqttCtx = struct {
         if (interval <= 0.0) return;
 
         self.status_flush_stop.store(false, .release);
-        self.status_flush_thread = std.Thread.spawn(.{}, statusFlushWorker, .{self}) catch {
+        self.status_flush_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, statusFlushWorker, .{self}) catch {
             self.status_flush_stop.store(true, .release);
             return;
         };
@@ -3654,7 +3654,7 @@ test "connectBrokerBg supervisor: connects via the reconnect loop and shuts down
     ctx.setIo(io);
 
     // Launch the reconnect supervisor (as App does).
-    ctx.connect_thread = std.Thread.spawn(.{}, MqttCtx.connectBrokerBg, .{&ctx}) catch unreachable;
+    ctx.connect_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, MqttCtx.connectBrokerBg, .{&ctx}) catch unreachable;
 
     // Wait (bounded) until the supervisor establishes the connection.
     var tries: usize = 0;
