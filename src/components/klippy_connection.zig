@@ -151,6 +151,25 @@ pub fn buildSubscribeRequest(objects: []const u8, id: []const u8, buf: []u8) ![]
     );
 }
 
+/// A JSON number (int or float) as f64; null for absent/non-numeric.
+fn numField(obj: std.json.ObjectMap, key: []const u8) ?f64 {
+    const v = obj.get(key) orelse return null;
+    return switch (v) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => null,
+    };
+}
+
+/// Coerce a JSON value to f64 (0 for non-numeric).
+fn asF64(v: std.json.Value) f64 {
+    return switch (v) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => 0,
+    };
+}
+
 /// Build a `gcode/subscribe_output` request. Carries the `response_template`
 /// naming `process_gcode_response` (klippy_apis.subscribe_gcode_output).
 pub fn buildSubscribeGcodeRequest(id: []const u8, buf: []u8) ![]const u8 {
@@ -429,6 +448,9 @@ pub const KlippyCtx = struct {
     /// OctoPrint compat component (set by App after init). Called on status
     /// updates and Klippy state changes for /api/ state reporting.
     octoprint: ?*@import("octoprint_compat.zig").OctoPrintCtx = null,
+    /// Temperature store (set by App after init). Fed a sample per temperature
+    /// object on each status update, for server.temperature_store.
+    temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
 
     /// Set by stop() to signal the background klippyTask to exit.
     stopping: bool = false,
@@ -932,6 +954,18 @@ pub const KlippyCtx = struct {
                 _ = self.bus.emitStatusLocked(io, notify.names.status_update, params_array, obj_name) catch {};
             } else {
                 _ = self.bus.emitStatus(io, notify.names.status_update, params_array, obj_name) catch {};
+            }
+
+            // Feed the temperature store: any status object carrying a numeric
+            // `temperature` is a heater/sensor/fan. Heaters add target+power,
+            // fans add target+speed.
+            if (self.temp_store) |ts| {
+                if (entry.value_ptr.* == .object) {
+                    const od = entry.value_ptr.object;
+                    if (numField(od, "temperature")) |temp| {
+                        ts.pushTemp(io, obj_name, asF64(eventtime), temp, numField(od, "target"), numField(od, "power"), numField(od, "speed"));
+                    }
+                }
             }
         }
 

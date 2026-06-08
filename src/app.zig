@@ -448,6 +448,7 @@ pub const App = struct {
         errdefer alloc.destroy(octoprint_ctx);
         octoprint_ctx.* = OctoPrintCtx.init();
         klippy_ctx.octoprint = octoprint_ctx;
+        klippy_ctx.temp_store = data_store_ctx;
 
         // --- Zeroconf/SSDP context (/server/zeroconf/ssdp) ---
         const zeroconf_ctx = try alloc.create(ZeroconfCtx);
@@ -911,6 +912,8 @@ pub const App = struct {
     /// The caller must supply a live `io` (from a threaded event loop). The
     /// returned Server borrows all App-owned pointers; the App must outlive it.
     pub fn httpServer(self: *App, io: std.Io) http_transport.Server {
+        // Temperature store needs io to lock its buffer from the RPC handler.
+        self.data_store_ctx.setIo(io);
         // Wire the live io into the spoolman component so it can emit
         // notify_active_spool_set to connected WebSocket clients.
         self.spoolman_ctx.setIo(io);

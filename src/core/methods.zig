@@ -283,8 +283,11 @@ fn buildConfigDefaults(alloc: std.mem.Allocator) !std.json.ObjectMap {
     }
     {
         var sec: std.json.ObjectMap = .empty;
-        try sec.put(alloc, "gcode_store_size", .{ .integer = 0 });
-        try sec.put(alloc, "temperature_store_size", .{ .integer = 0 });
+        // Moonraker's data_store.py defaults — UIs read these as the history
+        // window length. Reporting 0 makes Mainsail's tempHistory size 0, which
+        // empties its chart series and crashes its init (Object.keys on it).
+        try sec.put(alloc, "gcode_store_size", .{ .integer = 1000 });
+        try sec.put(alloc, "temperature_store_size", .{ .integer = 1200 });
         try obj.put(alloc, "data_store", .{ .object = sec });
     }
     {

@@ -119,18 +119,108 @@ pub const GcodeRingBuffer = struct {
 // Context
 // ---------------------------------------------------------------------------
 
+/// Capacity of each per-field temperature ring (Moonraker default 1200 ≈ 20 min
+/// at 1 Hz).
+pub const temp_store_size = 1200;
+
+/// Fixed ring buffer of f64 samples keeping the most recent `temp_store_size`.
+pub const FieldRing = struct {
+    buf: [temp_store_size]f64 = undefined,
+    head: usize = 0,
+    count: usize = 0,
+
+    pub fn push(self: *FieldRing, v: f64) void {
+        const slot = (self.head + self.count) % temp_store_size;
+        self.buf[slot] = v;
+        if (self.count == temp_store_size) {
+            self.head = (self.head + 1) % temp_store_size;
+        } else {
+            self.count += 1;
+        }
+    }
+
+    /// Append samples in chronological order into `out` (len ≥ count). Returns count.
+    pub fn snapshot(self: *const FieldRing, out: []f64) usize {
+        var i: usize = 0;
+        while (i < self.count) : (i += 1) out[i] = self.buf[(self.head + i) % temp_store_size];
+        return self.count;
+    }
+};
+
+/// One tracked sensor/heater. Heaters report target+power, fans report
+/// target+speed, plain sensors report only temperature.
+pub const SensorStore = struct {
+    temperatures: FieldRing = .{},
+    targets: FieldRing = .{},
+    powers: FieldRing = .{},
+    speeds: FieldRing = .{},
+    has_target: bool = false,
+    has_power: bool = false,
+    has_speed: bool = false,
+    last_time: f64 = -1,
+};
+
 pub const DataStoreCtx = struct {
     gcode_ring: GcodeRingBuffer,
-    // Temperature store: always empty (no Klippy). Registered for correct shape.
+    /// Per-sensor temperature history, fed from the Klippy status stream and
+    /// returned by server.temperature_store. Keys are owned (duped on insert).
+    sensors: std.StringHashMapUnmanaged(SensorStore) = .empty,
+    temp_mutex: std.Io.Mutex = .init,
+    /// Live io handle (set via setIo); the temperature-store handler needs it to
+    /// lock `temp_mutex`, since JSON-RPC handlers are not passed an io.
+    io: ?std.Io = null,
+    gpa: std.mem.Allocator,
+
+    pub fn setIo(self: *DataStoreCtx, io: std.Io) void {
+        self.io = io;
+    }
 
     pub fn init(alloc: std.mem.Allocator) !DataStoreCtx {
         return .{
             .gcode_ring = try GcodeRingBuffer.init(alloc, 1000),
+            .gpa = alloc,
         };
     }
 
     pub fn deinit(self: *DataStoreCtx) void {
         self.gcode_ring.deinit();
+        var it = self.sensors.keyIterator();
+        while (it.next()) |k| self.gpa.free(k.*);
+        self.sensors.deinit(self.gpa);
+    }
+
+    /// Append a ~1 Hz-throttled sample for a temperature object. `eventtime` is
+    /// Klippy's clock; samples closer than ~1 s for the same sensor are dropped
+    /// so the series matches Moonraker's once-per-second cadence. Thread-safe
+    /// (called from the Klippy reader; read under the Core lock by the handler).
+    pub fn pushTemp(self: *DataStoreCtx, io: std.Io, name: []const u8, eventtime: f64, temperature: f64, target: ?f64, power: ?f64, speed: ?f64) void {
+        self.temp_mutex.lockUncancelable(io);
+        defer self.temp_mutex.unlock(io);
+        const gop = self.sensors.getOrPut(self.gpa, name) catch return;
+        if (!gop.found_existing) {
+            const key = self.gpa.dupe(u8, name) catch {
+                _ = self.sensors.remove(name);
+                return;
+            };
+            gop.key_ptr.* = key;
+            gop.value_ptr.* = .{};
+        }
+        const s = gop.value_ptr;
+        if (s.last_time >= 0 and (eventtime - s.last_time) < 0.95) return;
+        s.last_time = eventtime;
+        s.temperatures.push(temperature);
+        if (target) |t| {
+            s.targets.push(t);
+            s.has_target = true;
+        }
+        if (power) |p| {
+            s.powers.push(p);
+            s.has_power = true;
+        }
+        if (speed) |sp| {
+            s.speeds.push(sp);
+            s.has_speed = true;
+        }
     }
 
     /// Push a gcode response entry (type="response"). Called when Klippy sends
@@ -216,11 +306,37 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 }
 
 /// GET /server/temperature_store → {"<sensor>": {"temperatures": [...], ...}}
-/// Without Klippy there are no sensors; always returns an empty object.
-pub fn handleTempStore(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = alloc;
+/// Snapshots the per-sensor ring buffers fed from the Klippy status stream.
+/// Heaters include targets+powers; fans include targets+speeds; plain sensors
+/// only temperatures — matching Moonraker's data_store.
+pub fn handleTempStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const c: *DataStoreCtx = @ptrCast(@alignCast(ctx));
     _ = getOptBool(params, "include_monitors", false); // parameter accepted, no-op
-    return .{ .object = .empty };
+
+    const io = c.io orelse return .{ .object = .empty };
+    var scratch: [temp_store_size]f64 = undefined;
+    var result: std.json.ObjectMap = .empty;
+
+    c.temp_mutex.lockUncancelable(io);
+    defer c.temp_mutex.unlock(io);
+    var it = c.sensors.iterator();
+    while (it.next()) |entry| {
+        const s = entry.value_ptr;
+        var obj: std.json.ObjectMap = .empty;
+        try putRing(alloc, &obj, "temperatures", &s.temperatures, &scratch);
+        if (s.has_target) try putRing(alloc, &obj, "targets", &s.targets, &scratch);
+        if (s.has_power) try putRing(alloc, &obj, "powers", &s.powers, &scratch);
+        if (s.has_speed) try putRing(alloc, &obj, "speeds", &s.speeds, &scratch);
+        try result.put(alloc, try alloc.dupe(u8, entry.key_ptr.*), .{ .object = obj });
+    }
+    return .{ .object = result };
+}
+
+fn putRing(alloc: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, ring: *const FieldRing, scratch: []f64) !void {
+    const n = ring.snapshot(scratch);
+    var arr: std.json.Array = .init(alloc);
+    for (scratch[0..n]) |v| try arr.append(.{ .float = v });
+    try obj.put(alloc, key, .{ .array = arr });
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +658,39 @@ test "fuzz handleGcodeStore: arbitrary params never crash" {
             _ = handleGcodeStore(@ptrCast(&ctx), p.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "temperature store: buffers heater + sensor, 1Hz throttle, correct shape" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var ctx = try DataStoreCtx.init(a);
+    defer ctx.deinit();
+    ctx.setIo(io);
+
+    // Heater: temperature + target + power. Two samples 1s apart + one too soon.
+    ctx.pushTemp(io, "heater_bed", 100.0, 30.0, 60.0, 0.5, null);
+    ctx.pushTemp(io, "heater_bed", 100.3, 31.0, 60.0, 0.6, null); // throttled (<0.95s)
+    ctx.pushTemp(io, "heater_bed", 101.1, 32.0, 60.0, 0.7, null);
+    // Plain sensor: temperature only.
+    ctx.pushTemp(io, "temperature_sensor chamber", 100.0, 25.0, null, null, null);
+
+    const r = try handleTempStore(@ptrCast(&ctx), .null, a);
+    const obj = r.object;
+    const bed = obj.get("heater_bed").?.object;
+    try testing.expectEqual(@as(usize, 2), bed.get("temperatures").?.array.items.len); // 3rd throttled out
+    try testing.expectEqual(@as(f64, 30.0), bed.get("temperatures").?.array.items[0].float);
+    try testing.expectEqual(@as(f64, 32.0), bed.get("temperatures").?.array.items[1].float);
+    try testing.expect(bed.get("targets") != null);
+    try testing.expect(bed.get("powers") != null);
+    try testing.expect(bed.get("speeds") == null); // heater has no speed
+    const cham = obj.get("temperature_sensor chamber").?.object;
+    try testing.expectEqual(@as(usize, 1), cham.get("temperatures").?.array.items.len);
+    try testing.expect(cham.get("targets") == null); // plain sensor: temperature only
 }
 
 test "fuzz handleTempStore: arbitrary params never crash" {
