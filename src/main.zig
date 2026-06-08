@@ -21,6 +21,7 @@ pub const ws_transport = @import("transport/ws.zig");
 pub const database_component = @import("components/database.zig");
 pub const klippy_connection = @import("components/klippy_connection.zig");
 pub const ws_client = @import("components/ws_client.zig");
+pub const sensor_template = @import("components/sensor_template.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub const testutil_klippy_sim = @import("testutil/klippy_sim.zig");

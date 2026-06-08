@@ -30,6 +30,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
+const sensor_template = @import("sensor_template.zig");
 
 const Registry = registry.Registry;
 const NotifyBus = notify.NotifyBus;
@@ -101,6 +102,10 @@ pub const Sensor = struct {
     /// MQTT state topic (Moonraker `[sensor] type: mqtt`, `state_topic:`). When
     /// set, inbound MQTT messages on this topic feed measurements.
     state_topic: ?[]const u8 = null,
+    /// Optional `state_response_template` (Jinja subset). When set, the payload is
+    /// rendered through it (set_result calls record measurements) instead of the
+    /// direct JSON-field mapping. gpa-owned.
+    state_response_template: ?[]const u8 = null,
 
     /// Ring capacity per parameter. Constant (Moonraker's sensor_store_size
     /// default) — a comptime const, not a per-sensor field.
@@ -126,6 +131,7 @@ pub const Sensor = struct {
         alloc.free(self.name);
         if (self.error_state) |e| alloc.free(e);
         if (self.state_topic) |t| alloc.free(t);
+        if (self.state_response_template) |t| alloc.free(t);
         {
             var it = self.last_measurements.iterator();
             while (it.next()) |entry| {
@@ -317,6 +323,14 @@ pub const SensorCtx = struct {
         s.state_topic = dup;
     }
 
+    /// Configure a sensor's state_response_template (gpa-owned; replaces previous).
+    pub fn setSensorTemplate(self: *SensorCtx, sensor_id: []const u8, tmpl: []const u8) !void {
+        const s = self.findSensor(sensor_id) orelse return error.NotFound;
+        const dup = try self.gpa.dupe(u8, tmpl);
+        if (s.state_response_template) |old| self.gpa.free(old);
+        s.state_response_template = dup;
+    }
+
     /// Feed an inbound MQTT message to every sensor subscribed to `topic`.
     ///
     /// phobos models the payload as a JSON object: each numeric field becomes a
@@ -335,6 +349,30 @@ pub const SensorCtx = struct {
             const st = s.state_topic orelse continue;
             if (!std.mem.eql(u8, st, topic)) continue;
             matched = true;
+
+            // Template path: render set_result(...) calls into measurements.
+            if (s.state_response_template) |tmpl| {
+                var rendered: std.json.ObjectMap = .empty;
+                sensor_template.render(a, tmpl, payload, &rendered) catch {
+                    self.setSensorError(s, "sensor: template render error");
+                    continue;
+                };
+                if (s.error_state) |e| {
+                    self.gpa.free(e);
+                    s.error_state = null;
+                }
+                var mit = rendered.iterator();
+                while (mit.next()) |m| {
+                    const v: f64 = switch (m.value_ptr.*) {
+                        .float => |x| x,
+                        .integer => |x| @floatFromInt(x),
+                        else => continue,
+                    };
+                    s.setMeasurement(self.gpa, m.key_ptr.*, v) catch {};
+                    if (self.history_ctx) |h| h.recordAuxValue(s.id, m.key_ptr.*, v);
+                }
+                continue;
+            }
 
             const parsed = std.json.parseFromSlice(std.json.Value, a, payload, .{}) catch {
                 self.setSensorError(s, "sensor: invalid JSON payload");
@@ -840,6 +878,45 @@ test "ingestMqttMessage: JSON numeric fields become measurements" {
     try std.testing.expect(s.error_state == null);
     // History ring captured the value too.
     try std.testing.expectEqual(@as(usize, 1), s.history.get("temperature").?.len);
+}
+
+test "ingestMqttMessage: state_response_template renders measurements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(std.testing.allocator);
+    defer ctx.deinit();
+    _ = try ctx.addSensor("env", "mqtt");
+    try ctx.setSensorTopic("env", "tele/env");
+    try ctx.setSensorTemplate("env",
+        \\{% set d = payload|fromjson %}
+        \\{% set _ = set_result("temperature", d.DHT.Temperature|float) %}
+        \\{% set _ = set_result("humidity", d.DHT.Humidity|int) %}
+    );
+
+    ctx.ingestMqttMessage("tele/env", "{\"DHT\":{\"Temperature\":23.4,\"Humidity\":51}}", a);
+
+    const s = ctx.findSensor("env").?;
+    try std.testing.expectEqual(@as(f64, 23.4), s.last_measurements.get("temperature").?);
+    try std.testing.expectEqual(@as(f64, 51.0), s.last_measurements.get("humidity").?);
+    try std.testing.expect(s.error_state == null);
+}
+
+test "ingestMqttMessage: template render error sets error_state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = testCtx(std.testing.allocator);
+    defer ctx.deinit();
+    _ = try ctx.addSensor("env", "mqtt");
+    try ctx.setSensorTopic("env", "t");
+    try ctx.setSensorTemplate("env", "{% set d = payload|fromjson %}{% set _ = set_result(\"x\", d.missing.deep) %}");
+
+    ctx.ingestMqttMessage("t", "{}", a); // d.missing → null, .deep on null → EvalError
+    const s = ctx.findSensor("env").?;
+    try std.testing.expect(s.error_state != null);
 }
 
 test "ingestMqttMessage: non-matching topic is ignored" {

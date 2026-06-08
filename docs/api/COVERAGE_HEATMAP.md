@@ -22,7 +22,7 @@
 | 🟢 octoprint_compat | 10/10 | 0/0 | 0/0 | 100% | 95% | 95% |
 | 🟢 power | 5/5 | 6/6 | 1/1 | 100% | 90% | 90% |
 | 🟢 proc_stats | 1/1 | 1/1 | 2/2 | 100% | 95% | 95% |
-| 🟢 sensor | 3/3 | 3/3 | 1/1 | 100% | 85% | 85% |
+| 🟢 sensor | 3/3 | 3/3 | 1/1 | 100% | 95% | 95% |
 | 🟢 server | 3/3 | 3/3 | 4/4 | 100% | 95% | 95% |
 | 🟢 spoolman | 3/3 | 4/4 | 2/2 | 100% | 95% | 95% |
 | 🟢 td1 | 2/2 | 2/2 | 0/0 | 100% | 95% | 95% |
@@ -76,8 +76,9 @@
 >   measurements (Moonraker's only built-in sensor type is MQTT). Live path:
 >   MqttClient reader → MqttCtx.on_message → app bridge → core.run → sensor
 >   ingest (under the Core lock); topics subscribed on connect. Hook firing
->   validated over a real socket. (Direct JSON-field mapping, not Jinja
->   state_response_template.)
+>   validated over a real socket. state_response_template is supported via an
+>   in-tree Jinja-subset evaluator (sensor_template.zig): payload|fromjson, member/
+>   index access, float/int/round/abs/default/string filters, and set_result.
 > - mqtt: DONE — real MQTT 3.1.1 TCP client (mqtt_proto codec + mqtt_client),
 >   CONNECT/CONNACK/PUBLISH/SUBSCRIBE/PUBACK/PING, LWT, live publish wired into
 >   MqttCtx (connectBroker + background reader), connects at startup when a

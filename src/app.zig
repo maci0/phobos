@@ -621,16 +621,29 @@ pub const App = struct {
         if (cfg.sectionNames(self.alloc)) |names| {
             defer self.alloc.free(names);
             for (names) |sect| {
-                if (!std.mem.startsWith(u8, sect, "history_field ")) continue;
-                const field_name = sect["history_field ".len..];
-                if (field_name.len == 0) continue;
-                const provider = cfg.get(sect, "provider") orelse continue;
-                const parameter = cfg.get(sect, "parameter") orelse continue;
-                const units = cfg.get(sect, "units");
-                const strategy = history_component.AuxStrategy.fromString(cfg.get(sect, "strategy") orelse "basic");
-                self.history_ctx.registerAuxField(provider, field_name, parameter, units, strategy) catch |err| {
-                    std.debug.print("phobos: warning: failed to add history_field '{s}': {}\n", .{ field_name, err });
-                };
+                if (std.mem.startsWith(u8, sect, "history_field ")) {
+                    const field_name = sect["history_field ".len..];
+                    if (field_name.len == 0) continue;
+                    const provider = cfg.get(sect, "provider") orelse continue;
+                    const parameter = cfg.get(sect, "parameter") orelse continue;
+                    const units = cfg.get(sect, "units");
+                    const strategy = history_component.AuxStrategy.fromString(cfg.get(sect, "strategy") orelse "basic");
+                    self.history_ctx.registerAuxField(provider, field_name, parameter, units, strategy) catch |err| {
+                        std.debug.print("phobos: warning: failed to add history_field '{s}': {}\n", .{ field_name, err });
+                    };
+                } else if (std.mem.startsWith(u8, sect, "sensor ")) {
+                    // [sensor <name>]: register the sensor + its MQTT topic and
+                    // optional state_response_template. Subscribed on MQTT connect.
+                    const sname = sect["sensor ".len..];
+                    if (sname.len == 0) continue;
+                    const stype = cfg.get(sect, "type") orelse "mqtt";
+                    _ = self.sensor_ctx.addSensor(sname, stype) catch |err| {
+                        std.debug.print("phobos: warning: failed to add sensor '{s}': {}\n", .{ sname, err });
+                        continue;
+                    };
+                    if (cfg.get(sect, "state_topic")) |t| self.sensor_ctx.setSensorTopic(sname, t) catch {};
+                    if (cfg.get(sect, "state_response_template")) |tm| self.sensor_ctx.setSensorTemplate(sname, tm) catch {};
+                }
             }
         } else |_| {}
     }
