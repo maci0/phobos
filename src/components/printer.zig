@@ -74,6 +74,34 @@ pub const ProxyEndpoint = struct {
         const k = self.parent.klippy orelse return error.KlippyDisconnected;
         if (!k.isConnected()) return error.KlippyDisconnected;
 
+        // objects/query and objects/subscribe take a Klippy `{"objects":{...}}`
+        // map. An HTTP GET arrives as flat query keys (?heater_bed&toolhead=pos),
+        // which queryParams turns into {"heater_bed":"","toolhead":"pos"} — wrong
+        // shape for Klippy. Translate to {"objects":{name: null | [subfields]}}
+        // (Moonraker PrinterObjects behaviour), unless already wrapped.
+        const wraps_objects = std.mem.eql(u8, self.endpoint, "objects/query") or
+            std.mem.eql(u8, self.endpoint, "objects/subscribe");
+        if (wraps_objects and params == .object and params.object.get("objects") == null) {
+            var objects = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+            var it = params.object.iterator();
+            while (it.next()) |e| {
+                const key = e.key_ptr.*;
+                if (std.mem.eql(u8, key, "_method")) continue;
+                const v = e.value_ptr.*;
+                if (v == .string and v.string.len > 0) {
+                    var arr: std.json.Array = .init(alloc);
+                    var parts = std.mem.splitScalar(u8, v.string, ',');
+                    while (parts.next()) |p| try arr.append(.{ .string = p });
+                    try objects.put(alloc, key, .{ .array = arr });
+                } else {
+                    try objects.put(alloc, key, .null);
+                }
+            }
+            var wrapped = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+            try wrapped.put(alloc, "objects", .{ .object = objects });
+            return k.request(self.endpoint, .{ .object = wrapped }, alloc);
+        }
+
         // Forward params as-is. Strip the transport-injected `_method` marker so
         // it never reaches Klippy. Non-object params become an empty object
         // (Klippy endpoints expect a params object).

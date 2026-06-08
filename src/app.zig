@@ -379,6 +379,9 @@ pub const App = struct {
         klippy_ctx.server_info = info;
         klippy_ctx.job_state = job_state_ctx;
         klippy_ctx.history = history_ctx;
+        // Wire the Core lock so the Klippy bridge uses the concurrent reader path
+        // (persistent socket drain + response correlation) instead of inline drain.
+        klippy_ctx.core = core;
 
         // Wire the Klippy connection into the printer context so handlers
         // (print.start, pause, resume, cancel, restart, firmware_restart)

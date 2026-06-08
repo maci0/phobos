@@ -17,6 +17,17 @@ const std = @import("std");
 const net = std.Io.net;
 const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
+const server_core = @import("../server/core.zig");
+
+/// One in-flight `request()` awaiting its response. The persistent reader routes
+/// a matching response frame here and posts the semaphore. Static-init only.
+const Waiter = struct {
+    sem: std.Io.Semaphore = .{},
+    /// gpa-owned response frame, set by the reader before posting; null = not yet.
+    payload: ?[]u8 = null,
+    /// Set when the connection drops while waiting, so request() returns an error.
+    failed: bool = false,
+};
 
 // ---------------------------------------------------------------------------
 // Framing: \x03-delimited JSON-RPC over a Unix stream
@@ -366,6 +377,21 @@ pub const KlippyCtx = struct {
     /// Monotonic request id counter.
     next_id: u64 = 0,
 
+    /// Core serialization lock. When wired (production / App), request() runs the
+    /// concurrent path: a persistent reader continuously drains the socket (so
+    /// Klippy never backpressures on its status pushes) and routes responses to
+    /// waiters, while request() releases the Core lock during the round-trip so
+    /// the reader can dispatch notifications without deadlocking. When null (bare
+    /// unit tests with no reader), request() uses the legacy inline-drain path.
+    core: ?*server_core.Core = null,
+    /// In-flight request waiters keyed by request id; the reader routes responses.
+    pending: std.AutoHashMapUnmanaged(u64, *Waiter) = .empty,
+    /// Guards `pending`.
+    pending_mutex: std.Io.Mutex = std.Io.Mutex.init,
+    /// Serializes socket WRITES (request sends + reader acks) in the concurrent
+    /// path. Reads happen only in the persistent reader, so they need no lock.
+    write_mutex: std.Io.Mutex = std.Io.Mutex.init,
+
     /// Read buffer for accumulating incoming stream data.
     read_buf: ReadBuf,
 
@@ -461,6 +487,7 @@ pub const KlippyCtx = struct {
         var sit = self.extra_sub_objects.keyIterator();
         while (sit.next()) |k| self.gpa.free(k.*);
         self.extra_sub_objects.deinit(self.gpa);
+        self.pending.deinit(self.gpa);
         self.state = .disconnected;
         self.klippy_info = null;
         // Null out cross-component pointers so any late emitDisconnected
@@ -562,12 +589,25 @@ pub const KlippyCtx = struct {
                 continue;
             };
             // Handshake succeeded — the connection is ready for request().
-            // We deliberately do NOT run a persistent readLoop here: holding
-            // stream_mutex across a blocking readFrame would deadlock with
-            // request(), which also needs stream_mutex to send requests and
-            // read responses. Spontaneous Klippy notifications (status
-            // updates, gcode responses) are drained inline by request().
-            return;
+            if (self.core == null) {
+                // Legacy path (bare unit tests, no Core wired): no persistent
+                // reader; request() drains spontaneous notifications inline.
+                return;
+            }
+            // Concurrent path: run the persistent reader. It continuously drains
+            // the socket — so Klippy never backpressures on its status pushes,
+            // the bug that wedged request() against a real (sparsely-pushing)
+            // Klippy — and routes responses to request() waiters. Returns when
+            // the connection drops; fail in-flight waiters, then reconnect.
+            self.readerLoop() catch {};
+            self.failAllWaiters(io);
+            _ = self.setState(.disconnected);
+            self.emitDisconnected(io);
+            self.closeStream(io);
+            if (self.stopping) break;
+            std.Io.sleep(io, std.Io.Duration.fromSeconds(1), .awake) catch {};
+            if (self.stopping) break;
+            continue;
         }
     }
 
@@ -693,27 +733,7 @@ pub const KlippyCtx = struct {
     // Read loop
     // -----------------------------------------------------------------------
 
-    /// Continuously read frames from Klippy and dispatch them.
-    /// Holds `stream_mutex` only during the socket read; releases it before
-    /// dispatching to avoid deadlock with the Core lock.
-    fn readLoop(self: *KlippyCtx) !void {
-        const io = self.io.?;
-        while (!self.stopping) {
-            const payload = blk: {
-                try self.stream_mutex.lock(io);
-                defer {
-                    self.stream_mutex.unlock(io);
-                }
-                break :blk try self.readFrame(io);
-            };
-            defer self.gpa.free(payload);
-            // Dispatch outside stream_mutex so notification emission can
-            // acquire the Core lock without risk of deadlock.
-            try self.dispatchFrame(io, payload);
-        }
-    }
-
-    /// Dispatch a received JSON-RPC frame from the background readLoop.
+    /// Dispatch a received JSON-RPC frame from the persistent reader.
     /// Handles three kinds of frames:
     /// 1. Notifications (method, no id) — Klippy pushes spontaneous data.
     /// 2. Remote-method calls (method + id) — Klippy calls a Moonraker handler
@@ -744,12 +764,51 @@ pub const KlippyCtx = struct {
             return;
         }
 
-        // Response frame (result/error + id, no method) — consumed by request().
+        // Response frame (result/error + id, no method): route to the waiting
+        // request() by id. The reader owns this payload; hand the waiter a copy.
+        if (frame.object.get("id")) |id_val| {
+            if (id_val == .string) {
+                if (std.fmt.parseInt(u64, id_val.string, 10)) |id_num| {
+                    self.pending_mutex.lockUncancelable(io);
+                    if (self.pending.get(id_num)) |waiter| {
+                        waiter.payload = self.gpa.dupe(u8, payload) catch null;
+                        waiter.sem.post(io);
+                    }
+                    self.pending_mutex.unlock(io);
+                } else |_| {}
+            }
+        }
         self.forwardToBridges(payload);
     }
 
+    /// The persistent reader (concurrent path): the SOLE socket reader. Drains
+    /// frames continuously so Klippy never backpressures, dispatching
+    /// notifications + acking remote-method calls and routing responses to
+    /// waiters. Returns on connection drop (readFrame error).
+    fn readerLoop(self: *KlippyCtx) !void {
+        const io = self.io.?;
+        while (!self.stopping) {
+            const payload = try self.readFrame(io);
+            defer self.gpa.free(payload);
+            // Tolerate a single malformed/oversized frame without dropping the
+            // connection (matches Moonraker resilience).
+            self.dispatchFrame(io, payload) catch {};
+        }
+    }
+
+    /// Fail every in-flight waiter (connection dropped). Wakes blocked request()
+    /// calls so they return an error instead of hanging forever.
+    fn failAllWaiters(self: *KlippyCtx, io: std.Io) void {
+        self.pending_mutex.lockUncancelable(io);
+        defer self.pending_mutex.unlock(io);
+        var it = self.pending.valueIterator();
+        while (it.next()) |wp| {
+            wp.*.failed = true;
+            wp.*.sem.post(io);
+        }
+    }
+
     /// Send an empty acknowledgment response for a remote-method call.
-    /// Caller MUST hold stream_mutex.
     fn sendAck(self: *KlippyCtx, io: std.Io, id: std.json.Value) !void {
         var ack_buf: [128]u8 = undefined;
         const id_str = if (id == .string) id.string else "0";
@@ -925,6 +984,12 @@ pub const KlippyCtx = struct {
         };
         defer if (frame.ptr != &frame_buf) self.gpa.free(frame);
 
+        // Serialize writes: in the concurrent path the reader (acks) and handler
+        // threads (request sends) both write; without this their frames interleave.
+        self.write_mutex.lockUncancelable(io);
+        defer self.write_mutex.unlock(io);
+        if (self.stream == null) return error.KlippyDisconnected;
+
         var wbuf: [4096]u8 = undefined;
         var w = self.stream.?.writer(io, &wbuf);
         try w.interface.writeAll(frame);
@@ -966,7 +1031,82 @@ pub const KlippyCtx = struct {
     /// duration so the background read-loop cannot interleave. Notifications
     /// that arrive while waiting for the response are dispatched inline via
     /// `dispatchNotificationLocked` (assumes the caller holds the Core lock).
+    /// Send a JSON-RPC request to Klippy and return the result. Picks the path:
+    /// the concurrent reader-correlated path when a Core lock is wired
+    /// (production), else the legacy inline-drain path (bare unit tests).
     pub fn request(
+        self: *KlippyCtx,
+        method: []const u8,
+        params: std.json.Value,
+        alloc: std.mem.Allocator,
+    ) anyerror!std.json.Value {
+        if (self.core != null) return self.requestConcurrent(method, params, alloc);
+        return self.requestInline(method, params, alloc);
+    }
+
+    /// Concurrent path: register a waiter, send the frame, then release the Core
+    /// lock and block on the waiter while the persistent reader drains the socket
+    /// and routes our response back. Releasing Core lets the reader dispatch the
+    /// intervening status flood (its emits take Core) without deadlock.
+    fn requestConcurrent(
+        self: *KlippyCtx,
+        method: []const u8,
+        params: std.json.Value,
+        alloc: std.mem.Allocator,
+    ) anyerror!std.json.Value {
+        if (!self.isConnected()) return error.KlippyDisconnected;
+        const io = self.io.?;
+        const core = self.core.?;
+
+        self.next_id += 1;
+        const id_num = self.next_id;
+        var rid_buf: [32]u8 = undefined;
+        const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
+
+        var waiter = Waiter{};
+        self.pending_mutex.lockUncancelable(io);
+        self.pending.put(self.gpa, id_num, &waiter) catch {
+            self.pending_mutex.unlock(io);
+            return error.OutOfMemory;
+        };
+        self.pending_mutex.unlock(io);
+        defer {
+            self.pending_mutex.lockUncancelable(io);
+            _ = self.pending.remove(id_num);
+            self.pending_mutex.unlock(io);
+            if (waiter.payload) |p| self.gpa.free(p);
+        }
+
+        // Serialize + send the request frame.
+        var params_json: []const u8 = "";
+        if (params != .null) {
+            var aw: std.Io.Writer.Allocating = .init(alloc);
+            defer aw.deinit();
+            var jw: std.json.Stringify = .{ .writer = &aw.writer };
+            try jw.write(params);
+            params_json = try aw.toOwnedSlice();
+        }
+        const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
+        defer alloc.free(req_buf);
+        const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
+        try self.writeFrame(io, req_frame);
+
+        // Release Core for the round-trip so the reader can dispatch; re-acquire
+        // after. The handler that called us runs under Core (core.run), so the
+        // balance is preserved (core.run's final unlock matches its initial lock).
+        core.unlock(io);
+        waiter.sem.waitUncancelable(io);
+        core.lock(io);
+
+        if (waiter.failed) return error.KlippyDisconnected;
+        const payload = waiter.payload orelse return error.KlippyDisconnected;
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
+        if (parsed.value.object.get("error")) |_| return error.KlippyRequestFailed;
+        const result = parsed.value.object.get("result") orelse .null;
+        return deepCopyValue(alloc, result);
+    }
+
+    fn requestInline(
         self: *KlippyCtx,
         method: []const u8,
         params: std.json.Value,
