@@ -49,3 +49,5 @@ pub extern "c" fn sqlite3_column_type(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
 pub extern "c" fn sqlite3_column_bytes(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
 pub extern "c" fn sqlite3_column_blob(stmt: ?*sqlite3_stmt, iCol: c_int) ?*const anyopaque;
 pub extern "c" fn sqlite3_column_text(stmt: ?*sqlite3_stmt, iCol: c_int) ?[*:0]const u8;
+pub extern "c" fn sqlite3_column_int64(stmt: ?*sqlite3_stmt, iCol: c_int) i64;
+pub extern "c" fn sqlite3_column_double(stmt: ?*sqlite3_stmt, iCol: c_int) f64;
