@@ -1,57 +1,49 @@
 #!/usr/bin/env sh
-# On-CPU hotpath profile of phobos under load (Linux perf or eBPF).
+# On-CPU flamegraph of phobos under load. Builds an unstripped, frame-pointer
+# release binary (`-Dprofile`), drives a vegeta load through the Klippy stub, and
+# renders an SVG flamegraph via perf + Brendan Gregg's FlameGraph.
 #
-# ReleaseSmall/ReleaseFast omit frame pointers and strip symbols, so stacks are
-# unreadable. This builds a profiling variant WITH frame pointers + symbols, runs
-# it under a vegeta load against the no-auth /access/info endpoint, captures a
-# perf profile, and folds it for a flamegraph.
+# perf (perf_events) profiles your own process at kernel.perf_event_paranoid<=2,
+# no root needed. For a true eBPF capture set USE_BPFTRACE=1 (needs root /
+# CAP_BPF + CAP_DAC_READ_SEARCH); the perf path produces an equivalent on-CPU
+# flamegraph everywhere.
 #
-# perf needs kernel.perf_event_paranoid <= 1 for call-graphs (sudo sysctl to set),
-# or run the whole script under sudo. On hosts without perf, set USE_BPFTRACE=1 to
-# fall back to an eBPF on-CPU sampler (bpftrace, needs root).
-#
-# Usage: tools/perf_harness/profile.sh [port] [rate] [seconds]
-set -e
-PORT="${1:-7140}"; RATE="${2:-4000}"; SECS="${3:-12}"
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$ROOT"
+# Usage: tools/perf_harness/profile.sh [endpoint] [rate] [seconds] [out.svg]
+#   endpoint default: /printer/objects/query?heater_bed&toolhead&print_stats
+set +e
+EP="${1:-/printer/objects/query?heater_bed&toolhead&print_stats}"
+RATE="${2:-4000}"; SECS="${3:-10}"; OUT="${4:-docs/perf/flamegraph.svg}"
+PORT=7141; SOCK=/tmp/klippy_stub.sock
+FG="${FLAMEGRAPH_DIR:-$HOME/FlameGraph}"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"; cd "$ROOT"
 
-echo ">> building profiling binary (ReleaseFast + frame pointers + unstripped)"
-zig build -Doptimize=ReleaseFast -Dstrip=false 2>/dev/null || \
-  zig build -Doptimize=ReleaseFast 2>/dev/null
-BIN=./zig-out/bin/phobos
+[ -x "$FG/flamegraph.pl" ] || { echo "FlameGraph not at $FG (git clone https://github.com/brendangregg/FlameGraph)"; exit 1; }
 
-CFG="$(mktemp)"
-printf '[server]\nhost: 127.0.0.1\nport: %s\n[database]\nbackend: file\npath: %s\n[authorization]\ntrusted_clients:\n 127.0.0.1\n' \
-  "$PORT" "$(mktemp -d)" > "$CFG"
+echo ">> building -Dprofile (unstripped + frame pointers)"
+zig build -Doptimize=ReleaseFast -Dprofile >/dev/null 2>&1
 
-"$BIN" -c "$CFG" >/tmp/phobos-profile.log 2>&1 &
-PID=$!
-sleep 3
-echo ">> phobos pid=$PID on :$PORT"
+CFG="$(mktemp)"; DB="$(mktemp -u)"
+printf '[server]\nhost: 127.0.0.1\nport: %s\n[database]\nbackend: sqlite\npath: %s\n[authorization]\ntrusted_clients:\n 127.0.0.1\n' "$PORT" "$DB" > "$CFG"
+rm -f "$SOCK"; ln -sf "$SOCK" /tmp/klippy_uds
+python3 tools/perf_harness/klippy_stub.py /tmp/klippy_uds >/tmp/stub.log 2>&1 & STUB=$!
+sleep 1.5
+./zig-out/bin/phobos -c "$CFG" >/tmp/phobos-profile.log 2>&1 & PH=$!
+sleep 4
 
-# drive load in the background
-( yes "GET http://127.0.0.1:$PORT/access/info" | head -1000000 \
-    | vegeta attack -rate="$RATE" -duration="${SECS}s" -keepalive=true >/dev/null 2>&1 ) &
-LOAD=$!
+( echo "GET http://127.0.0.1:$PORT$EP" | vegeta attack -rate="$RATE" -duration="$((SECS+4))s" -keepalive=true >/dev/null 2>&1 ) &
+sleep 1
 
+mkdir -p "$(dirname "$OUT")"
 if [ "${USE_BPFTRACE:-0}" = "1" ]; then
-  echo ">> eBPF on-CPU sampler (bpftrace, 99 Hz)"
-  bpftrace -e "profile:hz:99 /pid == $PID/ { @[ustack] = count(); } interval:s:$SECS { exit(); }" \
-    > /tmp/phobos-bpf-stacks.txt 2>/dev/null || echo "bpftrace failed (needs root)"
-  echo ">> top stacks -> /tmp/phobos-bpf-stacks.txt"
-  tail -40 /tmp/phobos-bpf-stacks.txt
+  echo ">> eBPF capture (bpftrace, 99 Hz)"
+  bpftrace -e "profile:hz:99 /pid == $PH/ { @[ustack] = count(); }" -o /tmp/bpf.out 2>/dev/null
+  "$FG"/stackcollapse-bpftrace.pl /tmp/bpf.out | "$FG"/flamegraph.pl --title "phobos $EP" --colors java > "$OUT"
 else
-  echo ">> perf record (call-graph, dwarf)"
-  perf record -g --call-graph=dwarf -F 999 -o /tmp/phobos.perf -p "$PID" -- sleep "$SECS" 2>/dev/null \
-    || perf record -g -o /tmp/phobos.perf -p "$PID" -- sleep "$SECS"
-  echo ">> top self-time functions:"
-  perf report -i /tmp/phobos.perf --stdio --no-children 2>/dev/null | grep -vE '^#|^$' | head -25
-  # folded stacks for a flamegraph (github.com/brendangregg/FlameGraph)
-  perf script -i /tmp/phobos.perf 2>/dev/null \
-    | stackcollapse-perf.pl > /tmp/phobos.folded 2>/dev/null \
-    && echo ">> folded stacks -> /tmp/phobos.folded (pipe to flamegraph.pl)" || true
+  echo ">> perf capture (frame-pointer call graph, 1999 Hz)"
+  perf record -g --call-graph=fp -F 1999 -o /tmp/phobos.perf -p "$PH" -- sleep "$SECS" 2>/dev/null
+  perf script -i /tmp/phobos.perf 2>/dev/null | "$FG"/stackcollapse-perf.pl 2>/dev/null \
+    | "$FG"/flamegraph.pl --title "phobos $EP" --width 1500 --colors java > "$OUT"
 fi
 
-kill "$LOAD" "$PID" 2>/dev/null || true
-rm -f "$CFG"
+kill -9 "$PH" "$STUB" 2>/dev/null; rm -f "$CFG"
+echo ">> wrote $OUT"

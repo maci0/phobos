@@ -15,7 +15,10 @@ pub fn build(b: *std.Build) void {
 
     // Strip debug info from the shipped binary in any release mode (smaller
     // on-disk binary; tests keep symbols for readable failure traces).
-    const release = optimize != .Debug;
+    // `-Dprofile` keeps symbols in a release build so perf/flamegraphs resolve
+    // function names (see tools/perf_harness).
+    const profile = b.option(bool, "profile", "Keep symbols in release builds for profiling") orelse false;
+    const release = optimize != .Debug and !profile;
 
     // phobos's DataStore is backed by the vendored SQLite amalgamation
     // (Moonraker `moonraker-sql.db`-compatible), compiled in + linked against
@@ -29,6 +32,9 @@ pub fn build(b: *std.Build) void {
                 .optimize = o,
                 .link_libc = true,
                 .strip = strip,
+                // Keep frame pointers when unstripped (profiling/tests) so perf's
+                // frame-pointer call-graph unwinds cleanly for flamegraphs.
+                .omit_frame_pointer = strip,
             });
             addVendoredSqlite(bb, m);
             m.addOptions("build_options", opts);

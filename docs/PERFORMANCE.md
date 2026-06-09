@@ -95,6 +95,32 @@ proxy requests.
 Fix ([`src/main.zig`](../src/main.zig)): use the lock-sharded
 `std.heap.smp_allocator` in release; keep the checked allocator only for `Debug`.
 
+### Flamegraphs
+
+Generated with [`tools/perf_harness/profile.sh`](../tools/perf_harness/profile.sh)
+— a frame-pointer release build (`zig build -Doptimize=ReleaseFast -Dprofile`)
+under a vegeta flood through the Klippy stub, captured with perf and rendered via
+[FlameGraph](https://github.com/brendangregg/FlameGraph). (`USE_BPFTRACE=1` swaps
+perf for an eBPF/bpftrace capture where root is available; the perf path needs no
+privileges and produces the same on-CPU flamegraph.)
+
+**`objects.query`** ([SVG](perf/query_flamegraph.svg)) — two towers:
+
+![objects.query flamegraph](perf/query_flamegraph.svg)
+
+- the **Klippy reader** thread (`readerLoop` → `readFrame` → `json.Scanner` /
+  `parseFromTokenSource` → arena allocs) decoding the status frame, and
+- the **request** thread (`handleParsedAuth` → `requestConcurrent` →
+  `json.parse` + `mem.copyForwards`) translating it to the client response.
+
+On-CPU time is dominated by **JSON parse/encode + allocation + `memcpy`** of the
+status payload — the status object is decoded then deep-copied into the client
+response more than once. The off-CPU serialisation (the `requestConcurrent`
+unlock/wait/lock visible mid-stack) is what caps throughput.
+
+**`server.info`** ([SVG](perf/info_flamegraph.svg)) — almost flat: a little arena
+alloc + the response write, then idle. The fast path has nothing to optimise.
+
 Before → after:
 
 | path | before | after |
@@ -119,16 +145,24 @@ idles at 1 %. That is **off-CPU serialisation**, not compute:
 - All Klippy traffic flows through **one socket** with a write mutex; round-trips
   pipeline via per-id waiters but still serialise on that lock.
 
-Recommended next steps (not yet done — they touch the ordering model, so they need
-care):
+Next steps:
 
-1. **Run pure read handlers off the `Core` lock.** `server.info`, `server.config`,
-   `server.database.get_item`, `machine.system_info` don't mutate shared state and
-   don't need single-loop ordering; letting them run lock-free would lift the read
-   ceiling well past today's already-good numbers.
-2. **Reduce copies on the proxy path** — the status payload is deep-copied more than
-   once between Klippy frame → client response; a borrow/move path would cut the
-   `memcpy` cost.
+1. **Run pure read handlers off the `Core` lock** (`objects.query`, `server.info`,
+   `server.config`, `database.get_item` — none mutate shared state). *Attempted and
+   reverted*: it's only safe if the off-`Core` decision is consistent across **both**
+   request paths. The HTTP-REST path resolves the route before locking, so it can
+   skip `Core` easily; but the JSON-RPC path wraps the whole `Dispatcher.handle` in
+   `core.run`, so a proxy invoked over JSON-RPC would run the no-`Core` Klippy
+   request *under* `Core` and deadlock (the reader can't dispatch the response).
+   Doing this cleanly requires **moving the `Core` acquisition out of the transports
+   into `Dispatcher.handle`** (per-method, keyed off a `read_only` flag) so REST and
+   JSON-RPC agree. Worthwhile but a focused refactor of the locking model — left for
+   a dedicated change. (The latent `next_id` race it surfaced is already fixed.)
+2. **Reduce copies on the proxy path** — the flamegraph shows the status payload
+   JSON-decoded then `memcpy`'d/deep-copied more than once (Klippy frame → parsed
+   value → client response). A borrow/move path (or streaming the Klippy result
+   straight into the response writer) would cut the dominant on-CPU cost without
+   touching the locking model — lower risk than (1).
 3. **Bounded connection concurrency is already in place** (`io.zig`,
    `max_concurrent_conns = 128`) so a Klippy stall can't explode the worker pool.
 
