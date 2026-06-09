@@ -6,18 +6,46 @@ the optimisations.
 
 ## TL;DR
 
-| | phobos | Moonraker | ratio |
-|---|---|---|---|
-| Idle RSS (settled) | **3.5 MB** | 57 MB | **16× less** |
-| `server.info` p50 latency | **0.05 ms** | 0.24–0.38 ms | **5–7× lower** |
-| `server.info` sustained | **9 000 req/s** (p99 0.34 ms) | 5 000 req/s (p99 2 ms) | ~1.8× |
-| `server.config` sustained | **3 000 req/s** (p99 0.18 ms) | 3 000 req/s (p99 0.92 ms) | similar throughput, ~5× lower latency |
-| Binary / runtime | 2.1 MB static, no runtime | CPython + ~20 deps | — |
+phobos is **dramatically lighter and lower-latency than Moonraker on every read
+path**, and after the optimisation work below the once-serialised Klippy-proxy
+path scales too.
 
-phobos is **dramatically lighter and lower-latency** on every local read path. The
-**Klippy-proxied** path (`printer.objects.query`) used to serialise on the single
-`Core` lock and cap ~1 k req/s; after the off-`Core` read-proxy work below it does
-**~4.6 k req/s** and scales with load — see [profiling](#hot-path-profiling).
+| | phobos | Moonraker |
+|---|---|---|
+| Idle RSS (settled) | **3.4 MB** | 57 MB (**16× more**) |
+| Binary / runtime | 2.2 MB static, no runtime | CPython + ~20 deps |
+
+Throughput / latency, Klippy stubbed, same host (vegeta, p50 latency):
+
+| Endpoint | phobos | Moonraker |
+|---|---|---|
+| `server.info` @9k | **9 000/s · 0.05 ms** | 9 000/s · 0.43 ms |
+| `server.config` @5k | **5 000/s · 0.06 ms** | 5 000/s · 0.48 ms |
+| `machine.system_info` @9k | **9 000/s · 0.06 ms** | 2 000/s · 0.22 ms |
+| `server.database.get_item` @5k | **5 000/s · 0.08 ms** | (n/a — Moonraker query path needs a fuller Klippy handshake) |
+| `printer.objects.query` (Klippy-proxied) | **~4 000/s, scales with load** | — |
+
+Local reads run **~5–8× lower latency** than Moonraker's asyncio path with a
+tighter tail; `system_info` is both faster *and* ~4–5× higher throughput
+(Moonraker recomputes less but phobos now caches it). The Klippy-proxy path
+(`objects.query`) used to serialise on the single `Core` lock and cap ~1 k req/s;
+after the off-`Core` work below it does **~4 k req/s** and scales. See the
+[optimisation journey](#optimisation-journey).
+
+## Optimisation journey
+
+Each fix, measured on the `objects.query` flood (the heaviest path) plus the
+endpoint it most affected. All driven by the profiling below.
+
+| Change | what | impact |
+|---|---|---|
+| `smp_allocator` in release | `init.gpa` (DebugAllocator) captured a dwarf stack trace per allocation | `server.info` p99 4.57 ms → **0.34 ms**; `config` un-saturated (2 k→3 k/s); `query` p50 64 ms → ~5 ms |
+| Bound connection concurrency | `std.Io.Threaded` pool grew unbounded under a Klippy stall (28 k threads observed) | fd/thread blow-up gone; stable under load |
+| `Core` lock → dispatcher (per-method) | move the lock out of the transports so REST + JSON-RPC agree on which methods skip it | enables the off-Core reads below without the JSON-RPC deadlock the REST-only attempt hit |
+| off-Core read proxies | `objects.query`/`list`, `printer.info`, `query_endstops`, `gcode.help` run lock-free | `query` ~1 070/s (5 s p99, saturating) → **~4 000/s, p99 ≤230 ms, scales** |
+| drop status deep-copy | parse Klippy response straight into the request arena (`parseFromSliceLeaky`) | fewer copies of the status payload on every `query` |
+| off-Core local reads | `server.info`/`config`/`system_info`/`database.get_item` lock-free (store is thread-safe; `server.info` gets a leaf mutex) | reads run in parallel instead of serialising |
+| cache `machine.system_info` | it rebuilt the payload + spawned `ip` (subprocess) per call | **165/s → 9 000/s** (p50 5 s → 0.06 ms) |
 
 ## Methodology
 
@@ -104,19 +132,20 @@ under a vegeta flood through the Klippy stub, captured with perf and rendered vi
 perf for an eBPF/bpftrace capture where root is available; the perf path needs no
 privileges and produces the same on-CPU flamegraph.)
 
-**`objects.query`** ([SVG](perf/query_flamegraph.svg)) — two towers:
+**`objects.query`** ([SVG](perf/query_flamegraph.svg), post-optimisation) — two towers:
 
 ![objects.query flamegraph](perf/query_flamegraph.svg)
 
 - the **Klippy reader** thread (`readerLoop` → `readFrame` → `json.Scanner` /
   `parseFromTokenSource` → arena allocs) decoding the status frame, and
-- the **request** thread (`handleParsedAuth` → `requestConcurrent` →
-  `json.parse` + `mem.copyForwards`) translating it to the client response.
+- the **request** thread (`handleParsedAuth` → `proxyReq` → **`requestOffCore`** →
+  **`parseFromSliceLeaky`**) translating it to the client response.
 
-On-CPU time is dominated by **JSON parse/encode + allocation + `memcpy`** of the
-status payload — the status object is decoded then deep-copied into the client
-response more than once. The off-CPU serialisation (the `requestConcurrent`
-unlock/wait/lock visible mid-stack) is what caps throughput.
+On-CPU time is JSON parse/encode + arena allocation of the status payload. The
+request thread now shows `requestOffCore` (lock-free) and `parseFromSliceLeaky`
+(no second deep-copy) — the two optimisations. What's left is intrinsic JSON
+work; the throughput is bounded by the single Klippy socket + reader, not by the
+`Core` lock any more.
 
 **`server.info`** ([SVG](perf/info_flamegraph.svg)) — almost flat: a little arena
 alloc + the response write, then idle. The fast path has nothing to optimise.
@@ -167,10 +196,19 @@ p99 5 s (saturating)** to **~4 640 req/s, p50 17 ms, p99 ≤ 230 ms** and it now
 *scales* with offered load. `server.info` is unchanged (9 k req/s, 50 µs). 1239
 tests pass, including the real-Klippy-proxy path.
 
-Still open: bounded connection concurrency is already in place (`io.zig`,
-`max_concurrent_conns = 128`); marking the local reads (`server.info`,
-`server.config`, `database.get_item`, `machine.system_info`) `off_core` too is a
-cheap follow-up now that the mechanism exists.
+3. **Local reads off-Core too.** `server.info`, `server.config`,
+   `machine.system_info`, `server.database.get_item` are now `off_core` (the store
+   is internally synchronised; `server.info` gets a small leaf `state_mutex` for the
+   Klippy-mutated fields) — they run in parallel instead of serialising.
+4. **`machine.system_info` cached.** It rebuilt the payload and spawned `ip` (a
+   subprocess) on every call — ~165 req/s under load. The data is static, so it's
+   built once into an arena and reused: **165 → 9 000 req/s** (p50 5 s → 0.06 ms),
+   matching Moonraker's collect-once behaviour.
+
+Bounded connection concurrency was already in place (`io.zig`,
+`max_concurrent_conns = 128`). All of the above land with **1239 tests passing**
+and both Mainsail + Fluidd validated against phobos on real hardware (WS
+`objects.query` over the off-Core path returns correct results, no deadlock).
 
 ## Reproduce
 
