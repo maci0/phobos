@@ -121,6 +121,22 @@ share it, so the top end measures the *host*, not just phobos):
 - **Local reads sustain ~80 000 req/s at 100 %** with p50 still 50 µs — and the
   break at ~120 k is the test box (three processes contending on 32 cores), not a
   phobos limit. For context the device itself only ever sees single-digit req/s.
+
+  **vs Moonraker** on the same `server.info` sweep — Moonraker's single asyncio
+  loop saturates an order of magnitude sooner:
+
+  | offered | phobos p50 | Moonraker p50 |
+  |---|---|---|
+  | 5 k | 0.05 ms | 0.37 ms |
+  | 10 k | **0.05 ms** | **263 ms** (loop backs up) |
+  | 20 k | 0.07 ms | 271 ms |
+  | 80 k | **0.05 ms** | 226 ms |
+
+  Moonraker stays good to ~5 k req/s, then its p50 jumps from 0.37 ms to **~260 ms**
+  at ~7–10 k and throughput stops rising (~6 k/s ceiling) — CPU plateaus ~55 %
+  because one event-loop thread can't use the other 31 cores. phobos holds 0.05 ms
+  p50 to 80 k (off-Core reads run across the pool). Read ceiling **~12× higher**,
+  and at any rate Moonraker can serve, phobos answers ~5 000× faster under load.
 - **`objects.query` plateaus ~3 000–3 500 req/s.** The stub idles at **3 % CPU** and
   phobos at **30 %**, so neither compute nor the mock is the wall — it is the
   **single Klippy socket**: every query multiplexes over one connection with serial
