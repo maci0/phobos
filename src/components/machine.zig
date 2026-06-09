@@ -183,6 +183,14 @@ pub const MachineCtx = struct {
     moonraker_stats_head: usize = 0,
     moonraker_stats_count: usize = 0,
     moonraker_stats_mutex: std.Io.Mutex = .init,
+    /// Cached `system_info` payload. It is (nearly) static — cpu/distribution/sd
+    /// info never change — and building it spawns `ip` (a subprocess), so it is
+    /// computed once and reused. Matches Moonraker, which collects system info
+    /// once at startup. Built into `system_info_arena` (freed in deinit); guarded
+    /// by `system_info_mutex` since the handler runs off-Core.
+    system_info_cache: ?std.json.Value = null,
+    system_info_arena: ?std.heap.ArenaAllocator = null,
+    system_info_mutex: std.Io.Mutex = .init,
     /// In-memory service state: allowed_service → { active_state, sub_state }.
     /// Populated on first access; tracks starts/stops/restarts requested via
     /// the service action handlers. The smp_allocator default lets a
@@ -284,6 +292,11 @@ pub const MachineCtx = struct {
         if (self.proc_stat_thread) |th| {
             th.join();
             self.proc_stat_thread = null;
+        }
+        if (self.system_info_arena) |*ar| {
+            ar.deinit();
+            self.system_info_arena = null;
+            self.system_info_cache = null;
         }
         if (self.sudo_password) |p| self.gpa.free(p);
         if (self.provider_owned) self.gpa.free(self.provider_name);
@@ -1125,7 +1138,21 @@ fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
 /// fields.
 pub fn handleSystemInfo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
+    // Build once into the long-lived gpa and cache; subsequent (parallel)
+    // requests return the immutable cached value. No io (tests) → build per call.
+    if (ctx.io) |io| {
+        ctx.system_info_mutex.lockUncancelable(io);
+        defer ctx.system_info_mutex.unlock(io);
+        if (ctx.system_info_cache) |c| return c;
+        ctx.system_info_arena = std.heap.ArenaAllocator.init(ctx.gpa);
+        const built = try buildSystemInfoValue(ctx, ctx.system_info_arena.?.allocator());
+        ctx.system_info_cache = built;
+        return built;
+    }
+    return buildSystemInfoValue(ctx, alloc);
+}
 
+fn buildSystemInfoValue(ctx: *MachineCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
     var sys: std.json.ObjectMap = .empty;
 
     try sys.put(alloc, "cpu_info", try buildCpuInfo(ctx, alloc));
