@@ -1,0 +1,6 @@
+GET http://TARGET/server/info
+GET http://TARGET/server/config
+GET http://TARGET/machine/system_info
+GET http://TARGET/server/database/item?namespace=mainsail
+GET http://TARGET/access/info
+GET http://TARGET/server/history/list?limit=20
