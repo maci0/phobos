@@ -18,6 +18,72 @@ pub fn serializeAlloc(alloc: std.mem.Allocator, v: anytype) error{OutOfMemory}![
     return std.json.Stringify.valueAlloc(alloc, v, .{});
 }
 
+/// Maximum JSON nesting depth phobos accepts for stored/echoed values. Real
+/// Moonraker data (config, gcode metadata, UI settings) is shallow (< 10). The
+/// cap exists because `std.json.Stringify` serializes with a fixed 256-level
+/// nesting stack: a value nested deeper than that panics (and corrupts memory in
+/// release, where the bounds check is off). Reject over-deep values on ingest so
+/// they can never reach the serializer.
+pub const max_value_depth = 100;
+
+/// True if `v` nests deeper than `max` levels. Recurses at most `max + 1` frames
+/// (early-out on the first over-deep branch), so the check itself can't overflow
+/// the stack on adversarial input — unlike serialization, which would.
+pub fn exceedsDepth(v: std.json.Value, max: usize) bool {
+    switch (v) {
+        .array => |a| {
+            if (max == 0) return true;
+            for (a.items) |item| if (exceedsDepth(item, max - 1)) return true;
+        },
+        .object => |o| {
+            if (max == 0) return true;
+            var it = o.iterator();
+            while (it.next()) |e| if (exceedsDepth(e.value_ptr.*, max - 1)) return true;
+        },
+        else => {},
+    }
+    return false;
+}
+
+test "exceedsDepth: flat values are never too deep" {
+    try std.testing.expect(!exceedsDepth(.{ .integer = 1 }, 0));
+    try std.testing.expect(!exceedsDepth(.{ .string = "x" }, 0));
+}
+
+test "exceedsDepth: nesting at and beyond the limit" {
+    const a = std.testing.allocator;
+    // Build n-deep arrays and check the boundary.
+    for ([_]usize{ 5, 50, 150 }) |depth| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const al = arena.allocator();
+        var v: std.json.Value = .{ .integer = 1 };
+        for (0..depth) |_| {
+            var arr: std.json.Array = .init(al);
+            try arr.append(v);
+            v = .{ .array = arr };
+        }
+        // depth `d` of arrays => exceedsDepth(v, d-1) is true, exceedsDepth(v, d) is false.
+        try std.testing.expect(exceedsDepth(v, depth - 1));
+        try std.testing.expect(!exceedsDepth(v, depth));
+    }
+}
+
+test "fuzz exceedsDepth: never crashes on arbitrary nesting up to a large depth" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    // 5000-deep — far past max_value_depth; the early-out keeps recursion bounded.
+    var v: std.json.Value = .{ .integer = 1 };
+    for (0..5000) |_| {
+        var arr: std.json.Array = .init(al);
+        try arr.append(v);
+        v = .{ .array = arr };
+    }
+    try std.testing.expect(exceedsDepth(v, max_value_depth));
+}
+
 /// Build a JSON-RPC 2.0 success response object as an owned []u8.
 /// `id` should be a std.json.Value (.integer, .string, or .null).
 /// `result` is any serializable value.

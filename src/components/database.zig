@@ -36,6 +36,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
+const jv = @import("../json/value.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -252,6 +253,10 @@ fn handleItemPost(
 
     const key = try getStr(params, "key");
     const value = try getValue(params);
+    // Reject pathologically-nested values: storing one would let a later GET
+    // serialize it through std.json.Stringify's fixed 256-level nesting stack,
+    // which panics / corrupts memory past its limit. Real data is shallow.
+    if (jv.exceedsDepth(value, jv.max_value_depth)) return error.InvalidParams;
     const ns_z = try alloc.dupeZ(u8, namespace);
 
     try c.store.insertItem(alloc, ns_z, key, value);
@@ -641,6 +646,34 @@ test "handlePostItem + handleGetItem: value round-trips" {
     try testing.expectEqualStrings("testns", get_result.object.get("namespace").?.string);
     try testing.expectEqualStrings("mykey", get_result.object.get("key").?.string);
     try testing.expectEqual(@as(i64, 42), get_result.object.get("value").?.integer);
+}
+
+test "handlePostItem: rejects a pathologically deep value (guards the serializer)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = makeCtx(a, &mem);
+
+    // value = 400-deep nested array — past max_value_depth (100). Storing it would
+    // let a later GET serialize it through Stringify's fixed 256-level stack → crash.
+    const depth = 400;
+    var vbuf: std.ArrayList(u8) = .empty;
+    defer vbuf.deinit(a);
+    try vbuf.appendSlice(a, "{\"namespace\":\"testns\",\"key\":\"deep\",\"value\":");
+    for (0..depth) |_| try vbuf.append(a, '[');
+    try vbuf.append(a, '1');
+    for (0..depth) |_| try vbuf.append(a, ']');
+    try vbuf.append(a, '}');
+
+    const params = try mkParams(a, vbuf.items);
+    try testing.expectError(error.InvalidParams, handlePostItem(@ptrCast(&ctx), params, a));
+
+    // A shallow value in the same namespace still works (guard is not over-broad).
+    const ok_params = try mkParams(a, "{\"namespace\":\"testns\",\"key\":\"shallow\",\"value\":{\"a\":[1,2,3]}}");
+    _ = try handlePostItem(@ptrCast(&ctx), ok_params, a);
 }
 
 test "handleDeleteItem: removes key and returns removed value" {
