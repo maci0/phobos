@@ -50,7 +50,7 @@ DEPTH_SCORES: Dict[str, float] = {
     "spoolman": 0.25,       # stored data; HTTP fetch stubbed
     # Not configured / deferred
     "mqtt": 0.15,           # returns "not configured"
-    "sensor": 0.05,         # SensorCtx empty struct; deferred
+    "sensor": 0.95,         # live MQTT source + in-tree Jinja subset (sensor_template.zig)
     # Notification-only components (no endpoints, just emit notifications)
     "button": 0.30,
     "common": 0.95,

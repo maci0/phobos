@@ -189,7 +189,7 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 - Full suite: `timeout 220 zig build test --summary all`
 - Coverage gate (must stay 100%):
   `zig build && zig-out/bin/phobos --dump-api > /tmp/d.json &&
-   PYTHONPATH=tools python3 -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json`
+   PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json`
 - Release (LTO + stripped): add `-Doptimize=ReleaseSmall`.
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
 - Conformance oracle (normalized equality vs vendored Moonraker): see

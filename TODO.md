@@ -75,14 +75,14 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   peripherals), update_manager (update_moonraker/klipper/system/full), wled (strips),
   webcam (delete/test/validate), announcements (list_feeds/delete_feed/update/
   feed_dispatch_multi), power (devices), rss (parser).
-- **API surface coverage: 100%** — methods 120/120, static endpoints 123/123,
+- **API surface coverage: 100%** — methods 130/130, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - **Conformance oracle: 54/54 events pass normalized equality** (conformance/replay.py
   against golden capture from vendored Moonraker 9008485). Tools: `conformance/capture.py`
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1240 pass / 2 skip / 0 fail** (~230 fuzz). The 2 skips are
+- Tests: **1239 pass / 2 skip / 0 fail** (~225 fuzz). The 2 skips are
   update_manager git tests (need a real repo). Note: `zig build test` uses `--listen=-` which may hang on this
   machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
 - All register functions now have unit tests verifying all expected routes are wired
@@ -166,10 +166,14 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   `vendor/moonraker/moonraker/components/*.py` for exact shapes.
 
 ### Tooling
-- `tools/api_scanner/` — ast-based scanner of the vendored Moonraker source. Modes:
+- `tools/api_scanner/` — tree-sitter-based scanner of the vendored Moonraker source. Modes:
   `scan`, `baseline` (writes `api/api_surface.json`), `diff` (drift gate, exit 1 on
-  change when `vendor/moonraker` is bumped), `coverage` (phobos vs baseline). 67 pytest
-  tests (`uv run --with pytest python -m pytest tools/api_scanner/tests -q`).
+  change when `vendor/moonraker` is bumped), `coverage` (phobos vs baseline). 72 pytest
+  tests (`uv run --with pytest --with tree-sitter --with tree-sitter-python python -m pytest tools/api_scanner/tests -q`).
+- `tools/client_api_scanner/` — multi-language (tree-sitter TS/Python/C++) scanner of every
+  Moonraker RPC call Mainsail/Fluidd/KlipperScreen/GuppyScreen/HelixScreen make; builds the
+  `docs/api/CLIENT_API_COVERAGE.md` matrix.
+- `tools/perf_harness/` — vegeta load tests (phobos vs Moonraker) + perf/eBPF hotpath profiling.
 - `vendor/moonraker` is gitignored (reproduce: `git clone --depth 50
   https://github.com/Arksine/moonraker vendor/moonraker`, commit pinned `9008485`).
 

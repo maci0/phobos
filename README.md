@@ -43,10 +43,10 @@ uses a vendored SQLite for moonraker-sql.db compatibility.) Details:
 - **~99% overall implementation progress** (API surface 100%, implementation depth weighted
   by component — see [coverage heatmap](docs/api/COVERAGE_HEATMAP.md) and the per-call
   [API coverage table](docs/api/API_COVERAGE.md)).
-- **100% of Moonraker's API surface is covered**: 120/120 JSON-RPC methods, 123/123 static
+- **100% of Moonraker's API surface is covered**: 130/130 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
-- ~1240 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
+- ~1239 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
 - This is **surface + shape parity**, plus a live Klippy path validated by a gated real-Klippy
   integration test. Byte-identical *behavioral* parity (verified against a running stock
   Moonraker) is still being hardened — see [`TODO.md`](TODO.md).
@@ -98,6 +98,8 @@ src/
   testutil/               TestServer + HTTP/WS test clients
 vendor/sqlite/       vendored SQLite 3.47.0 amalgamation
 tools/api_scanner/        Moonraker API extractor + drift + coverage tooling
+tools/client_api_scanner/ multi-language client-call scanner (Mainsail/Fluidd/KlipperScreen/GuppyScreen/HelixScreen)
+tools/perf_harness/       phobos-vs-Moonraker load tests + perf/eBPF profiling
 api/api_surface.json      authoritative API baseline (generated)
 docs/                     specs, plans, API surface, test findings, coverage map
 TODO.md                   status + remaining work (read this for what's next)
