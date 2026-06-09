@@ -36,14 +36,19 @@ pub fn main(init: std.process.Init) !void {
     // long-running release daemon, so use the lock-sharded `smp_allocator` in
     // release and keep the checked allocator only for Debug builds.
     const alloc = if (@import("builtin").mode == .Debug) init.gpa else std.heap.smp_allocator;
-    // Own the IO backend so connection-handler threads get a bounded stack. The
-    // runtime default (`init.io`) uses 16 MB stacks, so the ~128-thread handler
-    // peak reserves ~2 GB of VSZ — enough to exhaust the 32-bit address space on
-    // the armv7 target. Handlers need ~120 KB (the 64 KB file buffer + bounded
-    // JSON depth); 1 MB is generous headroom at 1/16th the virtual footprint.
-    var threaded = std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 });
-    defer threaded.deinit();
-    const aio = threaded.io();
+    // On 32-bit targets (armv7) the runtime-default IO backend's 16 MB handler
+    // stacks reserve ~2 GB of VSZ at the ~128-thread peak — enough to exhaust the
+    // 3 GB user address space. Own the backend there with a 1 MB stack (handlers
+    // need ~120 KB: the 64 KB file buffer + bounded JSON depth). On 64-bit the
+    // address space is effectively unlimited, so the default backend is fine and
+    // we skip the override entirely — the whole thing compiles out.
+    const bounded_stack = @import("builtin").target.ptrBitWidth() <= 32;
+    var threaded: std.Io.Threaded = if (bounded_stack)
+        std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 })
+    else
+        undefined;
+    defer if (bounded_stack) threaded.deinit();
+    const aio = if (bounded_stack) threaded.io() else init.io;
 
     // Parse CLI args.
     const args = try init.minimal.args.toSlice(init.arena.allocator());

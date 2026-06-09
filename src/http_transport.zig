@@ -60,6 +60,11 @@ pub fn authorize(hook: AuthHook, transport: TransportType, route: *const Route) 
 pub const Response = struct {
     status: std.http.Status,
     body: []const u8,
+    /// When set, the transport streams this file from disk in fixed-size chunks
+    /// instead of sending `body` — so large gcode downloads use constant memory
+    /// rather than buffering the whole file in the request arena. `body` is
+    /// ignored when this is non-null.
+    file_path: ?[]const u8 = null,
 };
 
 /// Context bundling the shared state a connection needs.
@@ -547,13 +552,52 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         const resp = handleParsedAuth(srv, .HTTP, verb, target, body, creds, alloc) catch
             Response{ .status = .internal_server_error, .body = "{\"error\":{\"code\":500,\"message\":\"Internal Server Error\"}}" };
 
-        req.respond(resp.body, .{
-            .status = resp.status,
-            .extra_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin),
-        }) catch return;
+        const headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
+        if (resp.file_path) |fpath| {
+            // Stream the file from disk in 64 KB chunks — constant memory
+            // regardless of file size. Falls back to a 404 on open failure.
+            sendFileStreaming(io, &req, fpath, headers) catch return;
+        } else {
+            req.respond(resp.body, .{
+                .status = resp.status,
+                .extra_headers = headers,
+            }) catch return;
+        }
 
         if (!req.head.keep_alive) return;
     }
+}
+
+/// Stream a file from disk to the HTTP response in 64 KB chunks, with
+/// content-length set from the file size, so a download uses constant memory
+/// regardless of file size (large gcode would otherwise buffer whole-file in the
+/// request arena). Replies 404 if the file can't be opened.
+fn sendFileStreaming(io: Io, req: *std.http.Server.Request, abs: []const u8, headers: []const std.http.Header) !void {
+    const f = std.Io.Dir.cwd().openFile(io, abs, .{}) catch {
+        return req.respond("{\"error\":{\"code\":404,\"message\":\"File not found\"}}", .{
+            .status = .not_found,
+            .extra_headers = headers,
+        });
+    };
+    defer f.close(io);
+    const st = f.stat(io) catch {
+        return req.respond("{\"error\":{\"code\":500,\"message\":\"Read error\"}}", .{
+            .status = .internal_server_error,
+            .extra_headers = headers,
+        });
+    };
+
+    var rbuf: [64 * 1024]u8 = undefined;
+    var fr = f.reader(io, &rbuf);
+    var send_buf: [16 * 1024]u8 = undefined;
+    var bw = try req.respondStreaming(&send_buf, .{
+        .content_length = st.size,
+        .respond_options = .{ .status = .ok, .extra_headers = headers },
+    });
+    // Copy file -> response body. On client disconnect / read error the stream
+    // ends early; `end` still flushes what framing it can.
+    _ = std.Io.Reader.streamRemaining(&fr.interface, &bw.writer) catch {};
+    bw.end() catch {};
 }
 
 /// Extract the auth credentials Moonraker recognizes from the request:
@@ -683,23 +727,14 @@ fn handleFileServe(
         return .{ .status = .ok, .body = b };
     }
 
-    // GET: resolve + stream the file bytes back.
-    const io = srv.io;
+    // GET: resolve the path and hand it to the transport to stream from disk in
+    // fixed-size chunks (constant memory), rather than buffering the whole file
+    // in the request arena — large gcode files would otherwise spike RSS by their
+    // full size. Existence/IO errors are surfaced when the transport opens it.
     const resolved = file_manager.resolveRequestPath(fctx, alloc, request_path) catch |err| {
         return fileErrResponse(alloc, mapResolveErr(err));
     };
-    const f = std.Io.Dir.cwd().openFile(io, resolved.abs, .{}) catch {
-        const b = try errorBody(alloc, 404, "File not found");
-        return .{ .status = .not_found, .body = b };
-    };
-    defer f.close(io);
-    var rbuf: [64 * 1024]u8 = undefined;
-    var fr = f.reader(io, &rbuf);
-    const data = fr.interface.allocRemaining(alloc, .unlimited) catch {
-        const b = try errorBody(alloc, 500, "Read error");
-        return .{ .status = .internal_server_error, .body = b };
-    };
-    return .{ .status = .ok, .body = data };
+    return .{ .status = .ok, .body = "", .file_path = resolved.abs };
 }
 
 fn mapResolveErr(err: file_manager.ResolveError) anyerror {
