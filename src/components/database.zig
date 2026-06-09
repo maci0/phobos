@@ -380,7 +380,7 @@ pub fn registerDatabase(reg: *Registry, ctx: *DbCtx) !void {
     // delete_item (Mainsail/Fluidd call these over WS on init). One HTTP path,
     // three handlers → multi_verb on each.
     try reg.registerEndpoint(
-        .{ .path = "/server/database/item", .methods = &.{.GET}, .multi_verb = true },
+        .{ .path = "/server/database/item", .methods = &.{.GET}, .multi_verb = true, .off_core = true },
         c,
         handleGetItem,
     );

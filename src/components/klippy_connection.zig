@@ -1358,8 +1358,13 @@ pub const KlippyCtx = struct {
             self.klippy_identified = false;
             self.klippy_started = false;
         }
-        // Push to server.info so it reflects live Klippy state.
+        // Push to server.info so it reflects live Klippy state. Guard with the
+        // leaf state_mutex so the off-Core server.info handler reads a consistent
+        // (klippy_connected, klippy_state) pair.
         if (self.server_info) |info| {
+            const mio = self.io;
+            if (mio) |io| info.state_mutex.lockUncancelable(io);
+            defer if (mio) |io| info.state_mutex.unlock(io);
             info.klippy_connected = self.isConnected();
             info.klippy_state = @tagName(self.state);
         }

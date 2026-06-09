@@ -2097,7 +2097,7 @@ pub fn handleCanbus(_: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
 pub fn registerMachine(reg: *Registry, ctx: *MachineCtx) !void {
     const c: *anyopaque = @ptrCast(ctx);
 
-    try reg.registerEndpoint(.{ .path = "/machine/system_info", .methods = &.{.GET} }, c, handleSystemInfo);
+    try reg.registerEndpoint(.{ .path = "/machine/system_info", .methods = &.{.GET}, .off_core = true }, c, handleSystemInfo);
     try reg.registerEndpoint(.{ .path = "/machine/proc_stats", .methods = &.{.GET} }, c, handleProcStats);
 
     try reg.registerEndpoint(.{ .path = "/machine/reboot", .methods = &.{.POST} }, c, handleReboot);

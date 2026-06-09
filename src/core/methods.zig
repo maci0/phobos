@@ -70,6 +70,10 @@ pub const ServerInfo = struct {
     /// Live io handle (set by App.httpServer). Needed to lock the
     /// Connections mutex for count queries.
     io: ?std.Io = null,
+    /// Guards the runtime-mutated fields (klippy_connected, klippy_state) so the
+    /// off-Core `server.info` handler reads a consistent snapshot while the Klippy
+    /// reader updates them. A small leaf lock — not the global Core lock.
+    state_mutex: std.Io.Mutex = .init,
 
     pub fn ctx(self: *ServerInfo) *anyopaque {
         return @ptrCast(self);
@@ -486,13 +490,27 @@ fn deepCopyValue(alloc: std.mem.Allocator, src: std.json.Value) std.mem.Allocato
 
 pub fn serverInfoHandler(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const info: *ServerInfo = @ptrCast(@alignCast(ctx));
-    // Snapshot live websocket count when connections are wired.
-    if (info.conns) |c| {
-        if (info.io) |io| {
-            info.websocket_count = @intCast(c.count(io));
-        }
+    // server.info is off_core (runs lock-free, in parallel). Build a local
+    // snapshot: the immutable fields by reference, the Klippy-mutated fields read
+    // under the leaf `state_mutex`, and the websocket count into the local (never
+    // mutate the shared `info` from a concurrent read handler).
+    var snap = ServerInfo{
+        .warnings = info.warnings,
+        .cfg = info.cfg,
+        .config_file_path = info.config_file_path,
+    };
+    if (info.io) |io| {
+        info.state_mutex.lockUncancelable(io);
+        snap.klippy_connected = info.klippy_connected;
+        snap.klippy_state = info.klippy_state;
+        info.state_mutex.unlock(io);
+        if (info.conns) |c| snap.websocket_count = @intCast(c.count(io));
+    } else {
+        snap.klippy_connected = info.klippy_connected;
+        snap.klippy_state = info.klippy_state;
+        snap.websocket_count = info.websocket_count;
     }
-    return buildServerInfo(info, getRawParam(params), alloc);
+    return buildServerInfo(&snap, getRawParam(params), alloc);
 }
 
 pub fn serverConfigHandler(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
@@ -503,12 +521,12 @@ pub fn serverConfigHandler(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Al
 /// Register the core endpoints into a `Registry`.
 pub fn registerCore(reg: *registry.Registry, info: *ServerInfo) !void {
     try reg.registerEndpoint(
-        .{ .path = "/server/info", .methods = &.{.GET}, .wrap_result = true },
+        .{ .path = "/server/info", .methods = &.{.GET}, .wrap_result = true, .off_core = true },
         info.ctx(),
         serverInfoHandler,
     );
     try reg.registerEndpoint(
-        .{ .path = "/server/config", .methods = &.{.GET}, .wrap_result = true },
+        .{ .path = "/server/config", .methods = &.{.GET}, .wrap_result = true, .off_core = true },
         info.ctx(),
         serverConfigHandler,
     );
