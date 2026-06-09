@@ -98,19 +98,38 @@ pub const Listener = struct {
         handler(ctx, io, stream);
     }
 
+    /// Upper bound on connection handlers running at once. `std.Io.Threaded`
+    /// grows its worker pool to the peak number of concurrent `concurrent` tasks
+    /// and never shrinks it, so an unbounded accept loop lets a burst of slow
+    /// (e.g. Klippy-blocked) connections balloon the thread + fd count without
+    /// limit. Capping concurrent handlers turns that into backpressure: excess
+    /// connections wait in the listen backlog instead of spawning a worker.
+    pub const max_concurrent_conns = 128;
+
+    fn connTaskCtxBounded(ctx: *anyopaque, io: Io, stream: net.Stream, handler: CtxHandler, sem: *Io.Semaphore) void {
+        defer sem.post(io);
+        defer stream.close(io);
+        handler(ctx, io, stream);
+    }
+
     /// Accept loop variant that threads an opaque context to each connection
     /// handler. This is how the HTTP transport's `serveConn` is wired in: the
-    /// context is the shared `http_transport.Server`.
+    /// context is the shared `http_transport.Server`. Concurrency is capped at
+    /// `max_concurrent_conns` (see above).
     pub fn serveWith(self: *Listener, io: Io, ctx: *anyopaque, handler: CtxHandler) !void {
         var group: Io.Group = .init;
         defer group.await(io) catch {};
+        var sem: Io.Semaphore = .{ .permits = max_concurrent_conns };
         while (true) {
             const stream = self.server.accept(io) catch |err| switch (err) {
                 error.SocketNotListening, error.Canceled => return,
                 else => return err,
             };
-            group.concurrent(io, connTaskCtx, .{ ctx, io, stream, handler }) catch
-                group.async(io, connTaskCtx, .{ ctx, io, stream, handler });
+            // Acquire a slot before spawning; blocks once `max_concurrent_conns`
+            // handlers are in flight, so the worker pool can't grow past the cap.
+            sem.waitUncancelable(io);
+            group.concurrent(io, connTaskCtxBounded, .{ ctx, io, stream, handler, &sem }) catch
+                group.async(io, connTaskCtxBounded, .{ ctx, io, stream, handler, &sem });
         }
     }
 
