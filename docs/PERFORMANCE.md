@@ -32,6 +32,28 @@ tighter tail; `system_info` is both faster *and* ~4–5× higher throughput
 after the off-`Core` work below it does **~4 k req/s** and scales. See the
 [optimisation journey](#optimisation-journey).
 
+## Graphs
+
+![throughput vs load](perf/throughput_vs_load.png)
+![latency vs load](perf/latency_vs_load.png)
+![query optimisation journey](perf/query_journey.png)
+![memory and latency](perf/memory_and_latency.png)
+
+phobos tracks the ideal throughput line to ~80 k req/s while Moonraker's single
+event loop flatlines near 6 k; Moonraker's p50 jumps from 0.37 ms to ~260 ms once
+that loop backs up (~10 k req/s), where phobos is still at 50 µs. Regenerate with
+[`tools/perf_harness/plot_perf.py`](../tools/perf_harness/plot_perf.py).
+
+## Virtual memory (VSZ) on 32-bit targets
+
+The connection-handler pool peaks ~128 threads. With the runtime-default 16 MB
+thread stack that reserved **~2.1 GB of VSZ** — fine on 64-bit, but enough to
+exhaust the 3 GB user address space on the **armv7** target under load. Handlers
+need ~120 KB of stack (the 64 KB file buffer + bounded JSON depth), so phobos
+owns its `std.Io.Threaded` with a **1 MB** stack: VSZ drops to **~180 MB** (≈12×)
+with no change in RSS or throughput. (RSS is dominated by touched pages, not the
+stack reservation, so it is unaffected — ~9 MB after a load spike either way.)
+
 ## Optimisation journey
 
 Each fix, measured on the `objects.query` flood (the heaviest path) plus the

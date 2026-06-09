@@ -36,7 +36,14 @@ pub fn main(init: std.process.Init) !void {
     // long-running release daemon, so use the lock-sharded `smp_allocator` in
     // release and keep the checked allocator only for Debug builds.
     const alloc = if (@import("builtin").mode == .Debug) init.gpa else std.heap.smp_allocator;
-    const aio = init.io;
+    // Own the IO backend so connection-handler threads get a bounded stack. The
+    // runtime default (`init.io`) uses 16 MB stacks, so the ~128-thread handler
+    // peak reserves ~2 GB of VSZ — enough to exhaust the 32-bit address space on
+    // the armv7 target. Handlers need ~120 KB (the 64 KB file buffer + bounded
+    // JSON depth); 1 MB is generous headroom at 1/16th the virtual footprint.
+    var threaded = std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const aio = threaded.io();
 
     // Parse CLI args.
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -305,7 +312,7 @@ const EndpointEntry = struct {
 
 test "dumpApi: output contains server.info and server.config" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -318,7 +325,7 @@ test "dumpApi: output contains server.info and server.config" {
 
 test "dumpApi: output contains WS-only methods" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -331,7 +338,7 @@ test "dumpApi: output contains WS-only methods" {
 
 test "dumpApi: output contains 27 notifications" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -347,7 +354,7 @@ test "dumpApi: output contains 27 notifications" {
 
 test "dumpApi: output contains all four router routes" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -367,7 +374,7 @@ test "dumpApi: output contains all four router routes" {
 
 test "dumpApi: output is valid JSON with all required top-level keys" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -392,7 +399,7 @@ test "fuzz_dumpApi: output is always valid JSON" {
             const _unused = b[0];
             _ = _unused;
 
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
             defer threaded.deinit();
             const io2 = threaded.io();
 
