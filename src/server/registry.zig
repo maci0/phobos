@@ -73,6 +73,10 @@ pub const ApiDef = struct {
     /// (different handlers) but Moonraker treats it as multi-verb — e.g.
     /// `/server/files/directory` → `server.files.get_directory`/`post_`/`delete_`.
     multi_verb: bool = false,
+    /// Read-only handler that touches no Core-protected state: both transports run
+    /// it WITHOUT the Core lock so concurrent reads execute in parallel. Only set
+    /// for handlers proven not to mutate shared state or emit notifications.
+    off_core: bool = false,
 };
 
 /// A registered HTTP route: matched by (path, method).
@@ -84,6 +88,8 @@ pub const Route = struct {
     transports: []const TransportType,
     ctx: *anyopaque,
     handler: HandlerFn,
+    /// Run without the Core lock (see ApiDef.off_core).
+    off_core: bool = false,
 };
 
 /// Maximum dotted method name length we derive without allocation.
@@ -223,6 +229,7 @@ pub const Registry = struct {
                 .transports = def.transports,
                 .ctx = ctx,
                 .handler = handler,
+                .off_core = def.off_core,
             });
             try self.indexRoute(def.path, verb, idx);
         }
@@ -232,10 +239,10 @@ pub const Registry = struct {
         if (comptime hasNonHttpTransport(def.transports)) {
             if (comptime def.is_remote) {
                 // Klipper-proxied: one plain dotted method regardless of verbs.
-                try self.dispatcher.register(comptime deriveNameConst(def.path, def.methods[0], false), ctx, handler);
+                try self.dispatcher.registerEx(comptime deriveNameConst(def.path, def.methods[0], false), ctx, handler, def.off_core);
             } else {
                 inline for (def.methods) |verb| {
-                    try self.dispatcher.register(comptime deriveNameConst(def.path, verb, multi), ctx, handler);
+                    try self.dispatcher.registerEx(comptime deriveNameConst(def.path, verb, multi), ctx, handler, def.off_core);
                 }
             }
         }

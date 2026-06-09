@@ -913,6 +913,10 @@ pub const App = struct {
     /// returned Server borrows all App-owned pointers; the App must outlive it.
     pub fn httpServer(self: *App, io: std.Io) http_transport.Server {
         // Temperature store needs io to lock its buffer from the RPC handler.
+        // Wire Core+io into the dispatcher so it takes the Core lock per-method
+        // (read-only `off_core` methods skip it). Without this every JSON-RPC
+        // method would run unlocked.
+        self.dispatcher.setRuntime(self.core, io);
         self.data_store_ctx.setIo(io);
         // Wire the live io into the spoolman component so it can emit
         // notify_active_spool_set to connected WebSocket clients.

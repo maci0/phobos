@@ -244,9 +244,10 @@ pub fn handleParsedAuth(
 ) !Response {
     const path = pathOf(target);
 
-    // JSON-RPC bridge: POST /server/jsonrpc.
+    // JSON-RPC bridge: POST /server/jsonrpc. `Dispatcher.handle` now takes the
+    // Core lock itself, per-method (skipping it for off_core read methods).
     if (method == .POST and std.mem.eql(u8, path, jsonrpc_path)) {
-        const bytes = try srv.core.run(srv.io, jsonrpc.Dispatcher.handle, .{ srv.dispatcher, body, alloc });
+        const bytes = try srv.dispatcher.handle(body, alloc);
         // A JSON-RPC notification yields empty bytes; reply with the literal `{}`
         // (a []const u8, no allocation) so the body stays valid JSON.
         const out: []const u8 = if (bytes.len == 0) "{}" else bytes;
@@ -364,8 +365,12 @@ pub fn handleParsedAuth(
 
     // Run the handler under the serialized core. `Core.run` needs a
     // comptime-known function, so dispatch the runtime handler pointer through a
-    // fixed trampoline.
-    const result = srv.core.run(srv.io, callHandler, .{ route.handler, route.ctx, params, alloc }) catch |err| {
+    // fixed trampoline. `off_core` read routes skip the lock and run in parallel
+    // (same decision the JSON-RPC dispatcher makes, so both transports agree).
+    const result = (if (route.off_core)
+        callHandler(route.handler, route.ctx, params, alloc)
+    else
+        srv.core.run(srv.io, callHandler, .{ route.handler, route.ctx, params, alloc })) catch |err| {
         // `error.KlippyDisconnected` mirrors Moonraker's
         // ServerError("Klippy Host not connected", 503): a 503 whose body carries
         // both the 503 code and the exact message (AuthorizedRequestHandler

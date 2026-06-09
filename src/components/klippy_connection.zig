@@ -1142,10 +1142,14 @@ pub const KlippyCtx = struct {
 
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
-        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
-        if (parsed.value.object.get("error")) |_| return error.KlippyRequestFailed;
-        const result = parsed.value.object.get("result") orelse .null;
-        return deepCopyValue(alloc, result);
+        // Parse straight into the caller's request arena (leaky): the result
+        // value already lives in `alloc`, so it can be returned without the extra
+        // full deep-copy of the (often large) Klippy status payload. `alloc` is a
+        // per-request arena freed wholesale, so the parse allocations are reclaimed.
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
+        if (root != .object) return error.KlippyRequestFailed;
+        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
+        return root.object.get("result") orelse .null;
     }
 
 
@@ -1194,10 +1198,69 @@ pub const KlippyCtx = struct {
         waiter.sem.waitUncancelable(io);
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
-        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
-        if (parsed.value.object.get("error")) |_| return error.KlippyRequestFailed;
-        const result = parsed.value.object.get("result") orelse .null;
-        return deepCopyValue(alloc, result);
+        // Parse straight into the caller's request arena (leaky): the result
+        // value already lives in `alloc`, so it can be returned without the extra
+        // full deep-copy of the (often large) Klippy status payload. `alloc` is a
+        // per-request arena freed wholesale, so the parse allocations are reclaimed.
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
+        if (root != .object) return error.KlippyRequestFailed;
+        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
+        return root.object.get("result") orelse .null;
+    }
+
+    /// Like `requestConcurrent`, but for callers that do NOT hold the Core lock
+    /// (read-only Klippy proxies, dispatched off-Core on both transports). No Core
+    /// release/re-acquire — the reader runs freely since no Core lock is held.
+    pub fn requestOffCore(
+        self: *KlippyCtx,
+        method: []const u8,
+        params: std.json.Value,
+        alloc: std.mem.Allocator,
+    ) anyerror!std.json.Value {
+        if (!self.isConnected()) return error.KlippyDisconnected;
+        const io = self.io.?;
+
+        self.next_id_mutex.lockUncancelable(io);
+        self.next_id += 1;
+        const id_num = self.next_id;
+        self.next_id_mutex.unlock(io);
+        var rid_buf: [32]u8 = undefined;
+        const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
+
+        var waiter = Waiter{};
+        self.pending_mutex.lockUncancelable(io);
+        self.pending.put(self.gpa, id_num, &waiter) catch {
+            self.pending_mutex.unlock(io);
+            return error.OutOfMemory;
+        };
+        self.pending_mutex.unlock(io);
+        defer {
+            self.pending_mutex.lockUncancelable(io);
+            _ = self.pending.remove(id_num);
+            self.pending_mutex.unlock(io);
+            if (waiter.payload) |p| self.gpa.free(p);
+        }
+
+        var params_json: []const u8 = "";
+        if (params != .null) {
+            var aw: std.Io.Writer.Allocating = .init(alloc);
+            defer aw.deinit();
+            var jw: std.json.Stringify = .{ .writer = &aw.writer };
+            try jw.write(params);
+            params_json = try aw.toOwnedSlice();
+        }
+        const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
+        defer alloc.free(req_buf);
+        const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
+        try self.writeFrame(io, req_frame);
+
+        waiter.sem.waitUncancelable(io); // no Core held → reader runs freely
+        if (waiter.failed) return error.KlippyDisconnected;
+        const payload = waiter.payload orelse return error.KlippyDisconnected;
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
+        if (root != .object) return error.KlippyRequestFailed;
+        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
+        return root.object.get("result") orelse .null;
     }
 
     fn requestInline(

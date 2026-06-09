@@ -127,9 +127,11 @@ pub fn dispatchMessage(
         }
     }
 
-    // Everything else: the shared dispatcher under the serialized core. This is
-    // the convergence point — identical to the HTTP JSON-RPC bridge.
-    return core.run(io, jsonrpc.Dispatcher.handle, .{ dispatcher, request_json, alloc });
+    // Everything else: the shared dispatcher, which takes the Core lock itself
+    // per-method (skipping it for off_core read methods). Convergence point —
+    // identical to the HTTP JSON-RPC bridge.
+    _ = core;
+    return dispatcher.handle(request_json, alloc);
 }
 
 /// Service a connection-scoped `printer.objects.subscribe`: register the
@@ -496,9 +498,9 @@ test "server.info over WS dispatch equals HTTP result payload" {
     , a);
 
     // Direct dispatcher call models the HTTP JSON-RPC bridge.
-    const http_resp = try f.core.run(io, jsonrpc.Dispatcher.handle, .{ &f.dispatcher,
+    const http_resp = try f.dispatcher.handle(
         \\{"jsonrpc":"2.0","method":"server.info","id":1}
-    , a });
+    , a);
 
     const ws_parsed = try std.json.parseFromSlice(std.json.Value, a, ws_resp, .{});
     const http_parsed = try std.json.parseFromSlice(std.json.Value, a, http_resp, .{});

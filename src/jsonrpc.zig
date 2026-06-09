@@ -9,6 +9,7 @@
 /// Notifications (requests without "id") execute the handler but produce no response bytes.
 const std = @import("std");
 const jv = @import("json/value.zig");
+const Core = @import("server/core.zig").Core;
 
 pub const Error = error{
     InvalidParams,
@@ -20,11 +21,24 @@ const HandlerFn = *const fn (ctx: *anyopaque, params: std.json.Value, alloc: std
 const Entry = struct {
     ctx: *anyopaque,
     handler: HandlerFn,
+    /// Run without the Core lock (read-only handler — see ApiDef.off_core).
+    off_core: bool = false,
 };
+
+/// Trampoline so a runtime handler pointer can run inside `Core.run` (which
+/// needs a comptime-known function).
+fn callHandlerTramp(handler: HandlerFn, ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    return handler(ctx, params, alloc);
+}
 
 pub const Dispatcher = struct {
     alloc: std.mem.Allocator,
     methods: std.StringHashMap(Entry),
+    /// Serialized-core handle. Set by App after init so `handle` can acquire Core
+    /// per-method (read-only methods skip it). Null in bare unit tests → handlers
+    /// run unlocked (single-threaded, no concurrency to serialize).
+    core: ?*Core = null,
+    io: ?std.Io = null,
 
     pub fn init(alloc: std.mem.Allocator) Dispatcher {
         return .{
@@ -37,6 +51,12 @@ pub const Dispatcher = struct {
         self.methods.deinit();
     }
 
+    /// Wire the runtime Core + io so `handle` serializes non-read-only methods.
+    pub fn setRuntime(self: *Dispatcher, core: *Core, io: std.Io) void {
+        self.core = core;
+        self.io = io;
+    }
+
     /// Register a method.  `name` must outlive the Dispatcher (caller-owned string).
     /// `ctx` is passed back to `handler` on each call.
     pub fn register(
@@ -45,7 +65,18 @@ pub const Dispatcher = struct {
         ctx: *anyopaque,
         handler: HandlerFn,
     ) error{OutOfMemory}!void {
-        try self.methods.put(name, .{ .ctx = ctx, .handler = handler });
+        try self.registerEx(name, ctx, handler, false);
+    }
+
+    /// Register a method, choosing whether it runs off the Core lock.
+    pub fn registerEx(
+        self: *Dispatcher,
+        name: []const u8,
+        ctx: *anyopaque,
+        handler: HandlerFn,
+        off_core: bool,
+    ) error{OutOfMemory}!void {
+        try self.methods.put(name, .{ .ctx = ctx, .handler = handler, .off_core = off_core });
     }
 
     /// Process a raw JSON-RPC request.  Returns owned response bytes (caller must free),
@@ -121,8 +152,14 @@ pub const Dispatcher = struct {
             try params.object.put(handler_alloc, "_method", .{ .string = verb });
         }
 
-        // Call handler
-        const result = entry.handler(entry.ctx, params, handler_alloc) catch |err| {
+        // Call handler under the serialized Core, unless it is a read-only
+        // (`off_core`) method or no Core is wired (bare tests). This is the one
+        // place the lock is taken for JSON-RPC, so REST and JSON-RPC agree: both
+        // skip Core for off_core methods and hold it for everything else.
+        const result = (if (entry.off_core or self.core == null)
+            entry.handler(entry.ctx, params, handler_alloc)
+        else
+            self.core.?.run(self.io.?, callHandlerTramp, .{ entry.handler, entry.ctx, params, handler_alloc })) catch |err| {
             if (is_notification) return try alloc.dupe(u8, &.{});
             // Moonraker's JsonRPC.execute_method maps a ServerError to its
             // status_code verbatim (except 404→-32601, 401→-32602). The

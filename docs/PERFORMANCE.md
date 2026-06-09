@@ -14,10 +14,10 @@ the optimisations.
 | `server.config` sustained | **3 000 req/s** (p99 0.18 ms) | 3 000 req/s (p99 0.92 ms) | similar throughput, ~5× lower latency |
 | Binary / runtime | 2.1 MB static, no runtime | CPython + ~20 deps | — |
 
-phobos is **dramatically lighter and lower-latency** on every local read path. Its
-one weak spot is the **Klippy-proxied** path (`printer.objects.query`), which
-serialises through the single `Core` lock + the one Klippy socket and saturates
-around 1–2 k req/s — see [Remaining bottleneck](#remaining-bottleneck).
+phobos is **dramatically lighter and lower-latency** on every local read path. The
+**Klippy-proxied** path (`printer.objects.query`) used to serialise on the single
+`Core` lock and cap ~1 k req/s; after the off-`Core` read-proxy work below it does
+**~4.6 k req/s** and scales with load — see [profiling](#hot-path-profiling).
 
 ## Methodology
 
@@ -60,7 +60,7 @@ mock.
   info   @5000:  thru=5000/s  succ=100%  p50=0.05ms  p99=0.21ms
   info   @9000:  thru=8999/s  succ=100%  p50=0.05ms  p99=0.34ms
   config @3000:  thru=3000/s  succ=100%  p50=0.06ms  p99=0.18ms
-  query  @2000:  thru=~1100/s succ=98%   p50=5–60ms  p99=high   (saturates)
+  query  @2000+: thru=~4640/s succ=94%   p50=17ms    p99<=230ms (off-Core, scales)
 
 ## moonraker (Python/asyncio)  idle_RSS=57 MB
   info   @2000:  thru=2000/s  succ=100%  p50=0.24ms  p99=0.71ms
@@ -145,26 +145,32 @@ idles at 1 %. That is **off-CPU serialisation**, not compute:
 - All Klippy traffic flows through **one socket** with a write mutex; round-trips
   pipeline via per-id waiters but still serialise on that lock.
 
-Next steps:
+### Done: off-`Core` read proxies + fewer payload copies
 
-1. **Run pure read handlers off the `Core` lock** (`objects.query`, `server.info`,
-   `server.config`, `database.get_item` — none mutate shared state). *Attempted and
-   reverted*: it's only safe if the off-`Core` decision is consistent across **both**
-   request paths. The HTTP-REST path resolves the route before locking, so it can
-   skip `Core` easily; but the JSON-RPC path wraps the whole `Dispatcher.handle` in
-   `core.run`, so a proxy invoked over JSON-RPC would run the no-`Core` Klippy
-   request *under* `Core` and deadlock (the reader can't dispatch the response).
-   Doing this cleanly requires **moving the `Core` acquisition out of the transports
-   into `Dispatcher.handle`** (per-method, keyed off a `read_only` flag) so REST and
-   JSON-RPC agree. Worthwhile but a focused refactor of the locking model — left for
-   a dedicated change. (The latent `next_id` race it surfaced is already fixed.)
-2. **Reduce copies on the proxy path** — the flamegraph shows the status payload
-   JSON-decoded then `memcpy`'d/deep-copied more than once (Klippy frame → parsed
-   value → client response). A borrow/move path (or streaming the Klippy result
-   straight into the response writer) would cut the dominant on-CPU cost without
-   touching the locking model — lower risk than (1).
-3. **Bounded connection concurrency is already in place** (`io.zig`,
-   `max_concurrent_conns = 128`) so a Klippy stall can't explode the worker pool.
+Both fixes the flamegraph pointed at, now landed:
+
+1. **`Core` acquisition moved out of the transports into `Dispatcher.handle`**
+   (per-method, keyed off a `read_only`/`off_core` flag), and the REST path makes
+   the same per-route decision — so REST and JSON-RPC **agree**: both skip `Core`
+   for read-only methods and hold it for everything else. The Klippy read proxies
+   (`objects.query`/`list`, `printer.info`, `query_endstops`, `gcode.help`) are now
+   marked `off_core` and run lock-free via a no-`Core` Klippy request, so concurrent
+   reads execute in parallel instead of serialising on the one lock. (An earlier
+   attempt that only changed the REST path deadlocked over JSON-RPC; moving the lock
+   into the dispatcher is what makes it safe.)
+2. **Dropped the redundant deep-copy** of the Klippy status payload: the proxy now
+   parses the response straight into the per-request arena (`parseFromSliceLeaky`)
+   and returns it, instead of `parseFromSlice` + a full `deepCopyValue`.
+
+Measured (Klippy stubbed): `objects.query` went from **~1 070 req/s, p50 64 ms,
+p99 5 s (saturating)** to **~4 640 req/s, p50 17 ms, p99 ≤ 230 ms** and it now
+*scales* with offered load. `server.info` is unchanged (9 k req/s, 50 µs). 1239
+tests pass, including the real-Klippy-proxy path.
+
+Still open: bounded connection concurrency is already in place (`io.zig`,
+`max_concurrent_conns = 128`); marking the local reads (`server.info`,
+`server.config`, `database.get_item`, `machine.system_info`) `off_core` too is a
+cheap follow-up now that the mechanism exists.
 
 ## Reproduce
 

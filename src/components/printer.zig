@@ -65,6 +65,16 @@ pub const PrinterCtx = struct {
 pub const ProxyEndpoint = struct {
     parent: *PrinterCtx = undefined,
     endpoint: []const u8 = "",
+    /// Read-only proxy (objects/query, objects/list, info, ...): dispatched
+    /// off-Core on BOTH transports (the dispatcher + REST path skip the lock for
+    /// the matching route/method), so the Klippy round-trip uses the no-Core path
+    /// and concurrent reads run in parallel. Writes keep Core for ordering.
+    off_core: bool = false,
+
+    fn proxyReq(self: *const ProxyEndpoint, k: *KlippyCtx, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        if (self.off_core) return k.requestOffCore(self.endpoint, params, alloc);
+        return k.request(self.endpoint, params, alloc);
+    }
 
     /// Generic proxy handler: forward the request verbatim to Klippy and return
     /// its result. Returns the disconnected error when Klippy is absent, exactly
@@ -99,7 +109,7 @@ pub const ProxyEndpoint = struct {
             }
             var wrapped = try std.json.ObjectMap.init(alloc, &.{}, &.{});
             try wrapped.put(alloc, "objects", .{ .object = objects });
-            return k.request(self.endpoint, .{ .object = wrapped }, alloc);
+            return self.proxyReq(k, .{ .object = wrapped }, alloc);
         }
 
         // Forward params as-is. Strip the transport-injected `_method` marker so
@@ -113,11 +123,11 @@ pub const ProxyEndpoint = struct {
                     if (std.mem.eql(u8, e.key_ptr.*, "_method")) continue;
                     try clone.put(alloc, e.key_ptr.*, e.value_ptr.*);
                 }
-                return k.request(self.endpoint, .{ .object = clone }, alloc);
+                return self.proxyReq(k, .{ .object = clone }, alloc);
             }
-            return k.request(self.endpoint, params, alloc);
+            return self.proxyReq(k, params, alloc);
         }
-        return k.request(self.endpoint, .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+        return self.proxyReq(k, .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
     }
 };
 
@@ -126,15 +136,15 @@ pub const ProxyEndpoint = struct {
 /// documented `docs/external_api/printer.md` surface and the set a real Klippy
 /// reports. Each is registered with `is_remote=true`: GET|POST HTTP route, one
 /// plain dotted JSON-RPC method (`printer.<dotted endpoint>`).
-const ProxySpec = struct { path: []const u8, methods: []const RequestType, endpoint: []const u8 };
+const ProxySpec = struct { path: []const u8, methods: []const RequestType, endpoint: []const u8, off_core: bool = false };
 const proxy_specs = [_]ProxySpec{
-    .{ .path = "/printer/info", .methods = &.{ .GET, .POST }, .endpoint = "info" },
-    .{ .path = "/printer/objects/list", .methods = &.{ .GET, .POST }, .endpoint = "objects/list" },
-    .{ .path = "/printer/objects/query", .methods = &.{ .GET, .POST }, .endpoint = "objects/query" },
+    .{ .path = "/printer/info", .methods = &.{ .GET, .POST }, .endpoint = "info", .off_core = true },
+    .{ .path = "/printer/objects/list", .methods = &.{ .GET, .POST }, .endpoint = "objects/list", .off_core = true },
+    .{ .path = "/printer/objects/query", .methods = &.{ .GET, .POST }, .endpoint = "objects/query", .off_core = true },
     .{ .path = "/printer/objects/subscribe", .methods = &.{ .GET, .POST }, .endpoint = "objects/subscribe" },
-    .{ .path = "/printer/query_endstops/status", .methods = &.{ .GET, .POST }, .endpoint = "query_endstops/status" },
+    .{ .path = "/printer/query_endstops/status", .methods = &.{ .GET, .POST }, .endpoint = "query_endstops/status", .off_core = true },
     .{ .path = "/printer/gcode/script", .methods = &.{ .GET, .POST }, .endpoint = "gcode/script" },
-    .{ .path = "/printer/gcode/help", .methods = &.{ .GET, .POST }, .endpoint = "gcode/help" },
+    .{ .path = "/printer/gcode/help", .methods = &.{ .GET, .POST }, .endpoint = "gcode/help", .off_core = true },
 };
 
 // ---------------------------------------------------------------------------
@@ -293,9 +303,9 @@ pub fn registerPrinter(reg: *Registry, ctx: *PrinterCtx) !void {
     // gcode.* / query_endstops.status. Each forwards to Klippy verbatim and
     // returns the 503 disconnected shape when Klippy is absent.
     inline for (proxy_specs, 0..) |spec, i| {
-        ctx.proxies[i] = .{ .parent = ctx, .endpoint = spec.endpoint };
+        ctx.proxies[i] = .{ .parent = ctx, .endpoint = spec.endpoint, .off_core = spec.off_core };
         try reg.registerEndpoint(
-            .{ .path = spec.path, .methods = spec.methods, .is_remote = true },
+            .{ .path = spec.path, .methods = spec.methods, .is_remote = true, .off_core = spec.off_core },
             @ptrCast(&ctx.proxies[i]),
             ProxyEndpoint.handle,
         );
@@ -420,7 +430,7 @@ test "ProxyEndpoint.handle: returns KlippyDisconnected without klippy" {
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = PrinterCtx{};
-    var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/query" };
+    var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/query", .off_core = true };
     // Non-object params.
     try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), .null, a));
     // Object params with an injected _method marker.
@@ -435,7 +445,7 @@ test "fuzz ProxyEndpoint.handle: arbitrary params never crash, always KlippyDisc
             defer arena.deinit();
             const a = arena.allocator();
             var ctx = PrinterCtx{};
-            var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/query" };
+            var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/query", .off_core = true };
 
             var buf: [16]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
