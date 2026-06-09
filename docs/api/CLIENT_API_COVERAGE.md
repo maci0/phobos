@@ -1,174 +1,187 @@
 # Client API coverage matrix
 
-Every JSON-RPC method, cross-referenced across upstream Moonraker, phobos, and the two reference web UIs (Fluidd, Mainsail). Regenerate with `tools/client_api_scanner/` after bumping any source; the diff is the changelog.
+Every Moonraker JSON-RPC method, cross-referenced across upstream Moonraker, phobos, and the reference clients (web UIs + touchscreens). Regenerate with `tools/client_api_scanner/` after bumping any source — the diff is the changelog.
 
-- Moonraker: **120** · phobos: **144** · Fluidd calls: **98** · Mainsail calls: **65**
+- Moonraker: **120** · phobos: **144**
+- fluidd (v1.37.1): **98** calls
+- guppyscreen (git): **24** calls
+- helixscreen (git): **53** calls
+- klipperscreen (git): **36** calls
+- mainsail (v2.13.2): **65** calls
 
+## Client-called methods phobos does NOT register (9)
 
-## ⚠ UI-called methods phobos does NOT register (5)
+These are all **third-party Moonraker plugins or client-specific extensions**, absent from core Moonraker too — phobos returns `-32601` and the clients hide the feature, exactly as against a stock Moonraker without the plugin. Not phobos bugs.
 
-- `machine.timelapse.get_settings`
-- `machine.timelapse.lastframeinfo`
-- `machine.timelapse.post_settings`
-- `machine.timelapse.render`
-- `machine.timelapse.saveframes`
-
+- `machine.timelapse.get_settings` — wanted by fluidd, mainsail — `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.lastframeinfo` — wanted by fluidd, helixscreen, mainsail — `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.post_settings` — wanted by fluidd, mainsail — `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.render` — wanted by fluidd, helixscreen, mainsail — `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.saveframes` — wanted by fluidd, helixscreen, mainsail — `moonraker-timelapse` plugin (3rd-party)
+- `server.files.get_file` — wanted by helixscreen — non-standard (not a core Moonraker JSON-RPC method; file download is HTTP)
+- `server.helix.phase_tracking.status` — wanted by helixscreen — HelixScreen's own Moonraker plugin
+- `server.helix.print_modified` — wanted by helixscreen — HelixScreen's own Moonraker plugin
+- `server.helix.status` — wanted by helixscreen — HelixScreen's own Moonraker plugin
 
 ## Matrix
 
-| Method | Moonraker | phobos | Fluidd | Mainsail |
-|---|---|---|---|---|
-| `access.delete_user` | — | yes | yes | — |
-| `access.get_api_key` | yes | yes | yes | — |
-| `access.get_user` | — | yes | yes | — |
-| `access.info` | yes | yes | yes | — |
-| `access.login` | yes | yes | yes | — |
-| `access.logout` | yes | yes | yes | — |
-| `access.oneshot_token` | yes | yes | yes | — |
-| `access.post_api_key` | yes | yes | yes | — |
-| `access.post_user` | — | yes | yes | — |
-| `access.refresh_jwt` | yes | yes | yes | — |
-| `access.user` | yes | — | — | — |
-| `access.user.password` | yes | yes | yes | — |
-| `access.users.list` | yes | yes | yes | — |
-| `connection.register_remote_method` | yes | yes | — | — |
-| `connection.send_event` | yes | yes | — | — |
-| `debug.database.delete_item` | — | yes | — | — |
-| `debug.database.get_item` | — | yes | — | — |
-| `debug.database.item` | yes | — | — | — |
-| `debug.database.list` | yes | yes | — | — |
-| `debug.database.post_item` | — | yes | — | — |
-| `debug.database.table` | yes | yes | — | — |
-| `debug.notifiers.test` | yes | yes | — | — |
-| `machine.device_power.devices` | yes | yes | yes | yes |
-| `machine.device_power.get_device` | yes | yes | — | — |
-| `machine.device_power.off` | yes | yes | — | — |
-| `machine.device_power.on` | yes | yes | — | — |
-| `machine.device_power.post_device` | yes | yes | yes | yes |
-| `machine.device_power.status` | yes | yes | yes | — |
-| `machine.peripherals.canbus` | yes | yes | yes | — |
-| `machine.peripherals.serial` | yes | yes | yes | — |
-| `machine.peripherals.usb` | yes | yes | yes | — |
-| `machine.peripherals.video` | yes | yes | yes | — |
-| `machine.proc_stats` | yes | yes | yes | yes |
-| `machine.reboot` | yes | yes | yes | yes |
-| `machine.services.restart` | yes | yes | yes | yes |
-| `machine.services.start` | yes | yes | yes | yes |
-| `machine.services.stop` | yes | yes | yes | yes |
-| `machine.shutdown` | yes | yes | yes | yes |
-| `machine.sudo.info` | yes | yes | — | — |
-| `machine.sudo.password` | yes | yes | — | — |
-| `machine.system_info` | yes | yes | yes | yes |
-| `machine.td1.data` | yes | yes | — | — |
-| `machine.td1.reboot` | yes | yes | — | — |
-| `machine.timelapse.get_settings` | — | — | yes | yes |
-| `machine.timelapse.lastframeinfo` | — | — | yes | yes |
-| `machine.timelapse.post_settings` | — | — | yes | yes |
-| `machine.timelapse.render` | — | — | yes | yes |
-| `machine.timelapse.saveframes` | — | — | yes | yes |
-| `machine.update.client` | yes | yes | yes | yes |
-| `machine.update.full` | yes | yes | yes | yes |
-| `machine.update.klipper` | yes | yes | yes | — |
-| `machine.update.moonraker` | yes | yes | yes | — |
-| `machine.update.recover` | yes | yes | yes | yes |
-| `machine.update.refresh` | yes | yes | yes | — |
-| `machine.update.rollback` | yes | yes | — | — |
-| `machine.update.status` | yes | yes | yes | yes |
-| `machine.update.system` | yes | yes | yes | yes |
-| `machine.update.upgrade` | yes | yes | — | — |
-| `machine.wled.get_strip` | yes | yes | — | — |
-| `machine.wled.off` | yes | yes | — | — |
-| `machine.wled.on` | yes | yes | — | — |
-| `machine.wled.post_strip` | yes | yes | — | — |
-| `machine.wled.status` | yes | yes | — | — |
-| `machine.wled.strips` | yes | yes | — | — |
-| `machine.wled.toggle` | yes | yes | — | — |
-| `pause_job_queue` | — | yes | — | — |
-| `printer.emergency_stop` | — | yes | yes | yes |
-| `printer.firmware_restart` | yes | yes | yes | yes |
-| `printer.gcode.help` | — | yes | yes | — |
-| `printer.gcode.script` | — | yes | yes | yes |
-| `printer.info` | — | yes | yes | yes |
-| `printer.objects.list` | — | yes | yes | — |
-| `printer.objects.query` | — | yes | — | — |
-| `printer.objects.subscribe` | — | yes | yes | — |
-| `printer.print.cancel` | yes | yes | yes | yes |
-| `printer.print.pause` | yes | yes | yes | yes |
-| `printer.print.resume` | yes | yes | yes | yes |
-| `printer.print.start` | yes | yes | yes | yes |
-| `printer.query_endstops.status` | — | yes | yes | yes |
-| `printer.restart` | yes | yes | yes | yes |
-| `server.analysis.dump_config` | yes | yes | — | — |
-| `server.analysis.estimate` | yes | yes | yes | — |
-| `server.analysis.process` | yes | yes | yes | — |
-| `server.analysis.status` | yes | yes | yes | — |
-| `server.announcements.delete_feed` | yes | yes | — | — |
-| `server.announcements.dismiss` | yes | yes | yes | yes |
-| `server.announcements.feeds` | yes | yes | — | — |
-| `server.announcements.list` | yes | yes | yes | yes |
-| `server.announcements.post_feed` | yes | yes | — | — |
-| `server.announcements.update` | yes | yes | — | — |
-| `server.config` | yes | yes | yes | yes |
-| `server.connection.identify` | yes | yes | yes | — |
-| `server.database.compact` | yes | yes | yes | — |
-| `server.database.delete_backup` | yes | yes | yes | — |
-| `server.database.delete_item` | — | yes | yes | yes |
-| `server.database.get_item` | — | yes | yes | yes |
-| `server.database.item` | yes | — | — | — |
-| `server.database.list` | yes | yes | yes | yes |
-| `server.database.post_backup` | yes | yes | yes | — |
-| `server.database.post_item` | — | yes | yes | yes |
-| `server.database.restore` | yes | yes | yes | — |
-| `server.extensions.list` | yes | yes | — | — |
-| `server.extensions.request` | yes | yes | — | — |
-| `server.files.copy` | yes | yes | yes | yes |
-| `server.files.delete_directory` | — | yes | yes | yes |
-| `server.files.delete_file` | yes | yes | yes | yes |
-| `server.files.directory` | yes | — | — | — |
-| `server.files.get_directory` | — | yes | yes | yes |
-| `server.files.list` | yes | yes | yes | — |
-| `server.files.metadata` | yes | yes | yes | yes |
-| `server.files.metascan` | yes | yes | yes | yes |
-| `server.files.move` | yes | yes | yes | yes |
-| `server.files.post_directory` | — | yes | yes | yes |
-| `server.files.roots` | yes | yes | — | — |
-| `server.files.thumbnails` | yes | yes | — | — |
-| `server.files.zip` | yes | yes | yes | yes |
-| `server.gcode_store` | yes | yes | yes | yes |
-| `server.history.delete_job` | yes | yes | yes | yes |
-| `server.history.get_job` | yes | yes | — | — |
-| `server.history.list` | yes | yes | yes | yes |
-| `server.history.reset_totals` | yes | yes | yes | — |
-| `server.history.totals` | yes | yes | yes | yes |
-| `server.info` | yes | yes | yes | yes |
-| `server.job_queue.delete_job` | yes | yes | yes | yes |
-| `server.job_queue.jump` | yes | yes | — | — |
-| `server.job_queue.pause` | yes | yes | yes | yes |
-| `server.job_queue.post_job` | yes | yes | yes | yes |
-| `server.job_queue.start` | yes | yes | yes | yes |
-| `server.job_queue.status` | yes | yes | yes | yes |
-| `server.logs.rollover` | yes | yes | yes | yes |
-| `server.mqtt.publish` | yes | yes | — | — |
-| `server.mqtt.publish_mqtt_topic` | — | yes | — | — |
-| `server.mqtt.subscribe` | yes | yes | — | — |
-| `server.notifiers.list` | yes | yes | — | — |
-| `server.restart` | yes | yes | yes | yes |
-| `server.sensors.info` | yes | yes | — | — |
-| `server.sensors.list` | yes | yes | yes | yes |
-| `server.sensors.measurements` | yes | yes | — | — |
-| `server.spoolman.get_spool_id` | yes | yes | yes | yes |
-| `server.spoolman.post_spool_id` | yes | yes | yes | yes |
-| `server.spoolman.proxy` | yes | yes | yes | yes |
-| `server.spoolman.status` | yes | yes | — | — |
-| `server.temperature_store` | yes | yes | yes | yes |
-| `server.webcams.delete_item` | — | yes | yes | yes |
-| `server.webcams.get_item` | — | yes | — | — |
-| `server.webcams.item` | yes | — | — | — |
-| `server.webcams.list` | yes | yes | yes | yes |
-| `server.webcams.post_item` | — | yes | yes | yes |
-| `server.webcams.test` | yes | yes | — | — |
-| `server.websocket.id` | yes | yes | — | — |
-| `set_wled` | — | yes | — | — |
-| `set_wled_state` | — | yes | — | — |
-| `spoolman_set_active_spool` | — | yes | — | — |
-| `start_job_queue` | — | yes | — | — |
+| Method | Moonraker | phobos | fluidd | guppyscreen | helixscreen | klipperscreen | mainsail |
+|---|---|---|---|---|---|---|---|
+| `access.delete_user` | · | ✅ | ✅ | · | · | · | · |
+| `access.get_api_key` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.get_user` | · | ✅ | ✅ | · | · | · | · |
+| `access.info` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.login` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.logout` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.oneshot_token` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.post_api_key` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.post_user` | · | ✅ | ✅ | · | · | · | · |
+| `access.refresh_jwt` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.user` | ✅ | · | · | · | · | · | · |
+| `access.user.password` | ✅ | ✅ | ✅ | · | · | · | · |
+| `access.users.list` | ✅ | ✅ | ✅ | · | · | · | · |
+| `connection.register_remote_method` | ✅ | ✅ | · | · | · | · | · |
+| `connection.send_event` | ✅ | ✅ | · | · | · | · | · |
+| `debug.database.delete_item` | · | ✅ | · | · | · | · | · |
+| `debug.database.get_item` | · | ✅ | · | · | · | · | · |
+| `debug.database.item` | ✅ | · | · | · | · | · | · |
+| `debug.database.list` | ✅ | ✅ | · | · | · | · | · |
+| `debug.database.post_item` | · | ✅ | · | · | · | · | · |
+| `debug.database.table` | ✅ | ✅ | · | · | · | · | · |
+| `debug.notifiers.test` | ✅ | ✅ | · | · | · | · | · |
+| `machine.device_power.devices` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `machine.device_power.get_device` | ✅ | ✅ | · | · | · | · | · |
+| `machine.device_power.off` | ✅ | ✅ | · | · | · | ✅ | · |
+| `machine.device_power.on` | ✅ | ✅ | · | · | · | ✅ | · |
+| `machine.device_power.post_device` | ✅ | ✅ | ✅ | ✅ | · | · | ✅ |
+| `machine.device_power.status` | ✅ | ✅ | ✅ | ✅ | · | · | · |
+| `machine.peripherals.canbus` | ✅ | ✅ | ✅ | · | · | · | · |
+| `machine.peripherals.serial` | ✅ | ✅ | ✅ | · | · | · | · |
+| `machine.peripherals.usb` | ✅ | ✅ | ✅ | · | · | · | · |
+| `machine.peripherals.video` | ✅ | ✅ | ✅ | · | · | · | · |
+| `machine.proc_stats` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `machine.reboot` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `machine.services.restart` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `machine.services.start` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `machine.services.stop` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `machine.shutdown` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `machine.sudo.info` | ✅ | ✅ | · | · | · | · | · |
+| `machine.sudo.password` | ✅ | ✅ | · | · | · | · | · |
+| `machine.system_info` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `machine.td1.data` | ✅ | ✅ | · | · | · | · | · |
+| `machine.td1.reboot` | ✅ | ✅ | · | · | · | · | · |
+| `machine.timelapse.get_settings` | · | · | ✅ | · | · | · | ✅ |
+| `machine.timelapse.lastframeinfo` | · | · | ✅ | · | ✅ | · | ✅ |
+| `machine.timelapse.post_settings` | · | · | ✅ | · | · | · | ✅ |
+| `machine.timelapse.render` | · | · | ✅ | · | ✅ | · | ✅ |
+| `machine.timelapse.saveframes` | · | · | ✅ | · | ✅ | · | ✅ |
+| `machine.update.client` | ✅ | ✅ | ✅ | · | · | ✅ | ✅ |
+| `machine.update.full` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `machine.update.klipper` | ✅ | ✅ | ✅ | · | · | · | · |
+| `machine.update.moonraker` | ✅ | ✅ | ✅ | · | · | · | · |
+| `machine.update.recover` | ✅ | ✅ | ✅ | · | · | ✅ | ✅ |
+| `machine.update.refresh` | ✅ | ✅ | ✅ | · | · | ✅ | · |
+| `machine.update.rollback` | ✅ | ✅ | · | · | · | · | · |
+| `machine.update.status` | ✅ | ✅ | ✅ | · | · | ✅ | ✅ |
+| `machine.update.system` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `machine.update.upgrade` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.get_strip` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.off` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.on` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.post_strip` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.status` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.strips` | ✅ | ✅ | · | · | · | · | · |
+| `machine.wled.toggle` | ✅ | ✅ | · | · | · | · | · |
+| `pause_job_queue` | · | ✅ | · | · | · | · | · |
+| `printer.emergency_stop` | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.firmware_restart` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.gcode.help` | · | ✅ | ✅ | ✅ | · | ✅ | · |
+| `printer.gcode.script` | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.info` | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.objects.list` | · | ✅ | ✅ | ✅ | ✅ | ✅ | · |
+| `printer.objects.query` | · | ✅ | · | · | ✅ | ✅ | · |
+| `printer.objects.subscribe` | · | ✅ | ✅ | ✅ | ✅ | ✅ | · |
+| `printer.print.cancel` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.print.pause` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.print.resume` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.print.start` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `printer.query_endstops.status` | · | ✅ | ✅ | · | · | ✅ | ✅ |
+| `printer.restart` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `server.analysis.dump_config` | ✅ | ✅ | · | · | · | · | · |
+| `server.analysis.estimate` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.analysis.process` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.analysis.status` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.announcements.delete_feed` | ✅ | ✅ | · | · | · | · | · |
+| `server.announcements.dismiss` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `server.announcements.feeds` | ✅ | ✅ | · | · | · | · | · |
+| `server.announcements.list` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `server.announcements.post_feed` | ✅ | ✅ | · | · | · | · | · |
+| `server.announcements.update` | ✅ | ✅ | · | · | · | · | · |
+| `server.config` | ✅ | ✅ | ✅ | · | · | ✅ | ✅ |
+| `server.connection.identify` | ✅ | ✅ | ✅ | · | ✅ | ✅ | · |
+| `server.database.compact` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.database.delete_backup` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.database.delete_item` | · | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.database.get_item` | · | ✅ | ✅ | ✅ | ✅ | · | ✅ |
+| `server.database.item` | ✅ | · | · | · | · | · | · |
+| `server.database.list` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `server.database.post_backup` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.database.post_item` | · | ✅ | ✅ | ✅ | ✅ | · | ✅ |
+| `server.database.restore` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.extensions.list` | ✅ | ✅ | · | · | · | · | · |
+| `server.extensions.request` | ✅ | ✅ | · | · | · | · | · |
+| `server.files.copy` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.delete_directory` | · | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.delete_file` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.directory` | ✅ | · | · | · | · | · | · |
+| `server.files.get_directory` | · | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `server.files.get_file` | · | · | · | · | ✅ | · | · |
+| `server.files.list` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | · |
+| `server.files.metadata` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `server.files.metascan` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.move` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `server.files.post_directory` | · | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.roots` | ✅ | ✅ | · | ✅ | · | · | · |
+| `server.files.thumbnails` | ✅ | ✅ | · | · | · | · | · |
+| `server.files.zip` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `server.gcode_store` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `server.helix.phase_tracking.status` | · | · | · | · | ✅ | · | · |
+| `server.helix.print_modified` | · | · | · | · | ✅ | · | · |
+| `server.helix.status` | · | · | · | · | ✅ | · | · |
+| `server.history.delete_job` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.history.get_job` | ✅ | ✅ | · | · | · | ✅ | · |
+| `server.history.list` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.history.reset_totals` | ✅ | ✅ | ✅ | · | · | · | · |
+| `server.history.totals` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.info` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `server.job_queue.delete_job` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.job_queue.jump` | ✅ | ✅ | · | · | · | · | · |
+| `server.job_queue.pause` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.job_queue.post_job` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.job_queue.start` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.job_queue.status` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.logs.rollover` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `server.mqtt.publish` | ✅ | ✅ | · | · | · | · | · |
+| `server.mqtt.publish_mqtt_topic` | · | ✅ | · | · | · | · | · |
+| `server.mqtt.subscribe` | ✅ | ✅ | · | · | · | · | · |
+| `server.notifiers.list` | ✅ | ✅ | · | · | · | · | · |
+| `server.restart` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.sensors.info` | ✅ | ✅ | · | · | · | · | · |
+| `server.sensors.list` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.sensors.measurements` | ✅ | ✅ | · | · | · | · | · |
+| `server.spoolman.get_spool_id` | ✅ | ✅ | ✅ | ✅ | · | · | ✅ |
+| `server.spoolman.post_spool_id` | ✅ | ✅ | ✅ | ✅ | ✅ | · | ✅ |
+| `server.spoolman.proxy` | ✅ | ✅ | ✅ | ✅ | ✅ | · | ✅ |
+| `server.spoolman.status` | ✅ | ✅ | · | · | ✅ | · | · |
+| `server.temperature_store` | ✅ | ✅ | ✅ | · | · | ✅ | ✅ |
+| `server.webcams.delete_item` | · | ✅ | ✅ | · | · | · | ✅ |
+| `server.webcams.get_item` | · | ✅ | · | · | · | · | · |
+| `server.webcams.item` | ✅ | · | · | · | · | · | · |
+| `server.webcams.list` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `server.webcams.post_item` | · | ✅ | ✅ | · | · | · | ✅ |
+| `server.webcams.test` | ✅ | ✅ | · | · | · | · | · |
+| `server.websocket.id` | ✅ | ✅ | · | · | · | · | · |
+| `set_wled` | · | ✅ | · | · | · | · | · |
+| `set_wled_state` | · | ✅ | · | · | · | · | · |
+| `spoolman_set_active_spool` | · | ✅ | · | · | · | · | · |
+| `start_job_queue` | · | ✅ | · | · | · | · | · |

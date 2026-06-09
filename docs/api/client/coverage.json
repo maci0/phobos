@@ -1,16 +1,38 @@
 {
-  "counts": {
-    "moonraker": 120,
-    "phobos": 144,
-    "fluidd": 98,
-    "mainsail": 65
+  "clients": {
+    "fluidd": {
+      "version": "v1.37.1",
+      "count": 98
+    },
+    "guppyscreen": {
+      "version": "git",
+      "count": 24
+    },
+    "helixscreen": {
+      "version": "git",
+      "count": 53
+    },
+    "klipperscreen": {
+      "version": "git",
+      "count": 36
+    },
+    "mainsail": {
+      "version": "v2.13.2",
+      "count": 65
+    }
   },
-  "ui_gaps": [
+  "moonraker_count": 120,
+  "phobos_count": 144,
+  "client_gaps": [
     "machine.timelapse.get_settings",
     "machine.timelapse.lastframeinfo",
     "machine.timelapse.post_settings",
     "machine.timelapse.render",
-    "machine.timelapse.saveframes"
+    "machine.timelapse.saveframes",
+    "server.files.get_file",
+    "server.helix.phase_tracking.status",
+    "server.helix.print_modified",
+    "server.helix.status"
   ],
   "matrix": [
     {
@@ -18,6 +40,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -25,6 +50,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -32,6 +60,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -39,6 +70,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -46,6 +80,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -53,6 +90,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -60,6 +100,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -67,6 +110,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -74,6 +120,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -81,6 +130,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -88,6 +140,9 @@
       "moonraker": true,
       "phobos": false,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -95,6 +150,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -102,6 +160,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -109,6 +170,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -116,6 +180,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -123,6 +190,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -130,6 +200,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -137,6 +210,9 @@
       "moonraker": true,
       "phobos": false,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -144,6 +220,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -151,6 +230,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -158,6 +240,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -165,6 +250,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -172,6 +260,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -179,6 +270,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -186,6 +280,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -193,6 +290,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -200,6 +300,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -207,6 +310,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -214,6 +320,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -221,6 +330,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -228,6 +340,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -235,6 +350,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -242,6 +360,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -249,6 +370,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -256,6 +380,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -263,6 +390,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -270,6 +400,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -277,6 +410,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -284,6 +420,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -291,6 +430,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -298,6 +440,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -305,6 +450,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -312,6 +460,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -319,6 +470,9 @@
       "moonraker": false,
       "phobos": false,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -326,6 +480,9 @@
       "moonraker": false,
       "phobos": false,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -333,6 +490,9 @@
       "moonraker": false,
       "phobos": false,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -340,6 +500,9 @@
       "moonraker": false,
       "phobos": false,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -347,6 +510,9 @@
       "moonraker": false,
       "phobos": false,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -354,6 +520,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -361,6 +530,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -368,6 +540,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -375,6 +550,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -382,6 +560,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -389,6 +570,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -396,6 +580,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -403,6 +590,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -410,6 +600,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -417,6 +610,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -424,6 +620,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -431,6 +630,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -438,6 +640,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -445,6 +650,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -452,6 +660,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -459,6 +670,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -466,6 +680,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -473,6 +690,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -480,6 +700,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -487,6 +710,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -494,6 +720,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -501,6 +730,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -508,6 +740,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -515,6 +750,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -522,6 +760,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -529,6 +770,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -536,6 +780,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -543,6 +790,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -550,6 +800,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -557,6 +810,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -564,6 +820,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -571,6 +830,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -578,6 +840,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -585,6 +850,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -592,6 +860,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -599,6 +870,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -606,6 +880,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -613,6 +890,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -620,6 +900,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -627,6 +910,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -634,6 +920,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -641,6 +930,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -648,6 +940,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -655,6 +950,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -662,6 +960,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -669,6 +970,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -676,6 +980,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -683,6 +990,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -690,6 +1000,9 @@
       "moonraker": true,
       "phobos": false,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -697,6 +1010,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -704,6 +1020,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -711,6 +1030,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -718,6 +1040,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -725,6 +1050,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -732,6 +1060,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -739,6 +1070,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -746,6 +1080,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -753,6 +1090,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -760,6 +1100,9 @@
       "moonraker": true,
       "phobos": false,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -767,13 +1110,29 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
+    },
+    {
+      "method": "server.files.get_file",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
+      "mainsail": false
     },
     {
       "method": "server.files.list",
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -781,6 +1140,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -788,6 +1150,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -795,6 +1160,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -802,6 +1170,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -809,6 +1180,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": true,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -816,6 +1190,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -823,6 +1200,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -830,13 +1210,49 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
+    },
+    {
+      "method": "server.helix.phase_tracking.status",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.helix.print_modified",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
+      "mainsail": false
+    },
+    {
+      "method": "server.helix.status",
+      "moonraker": false,
+      "phobos": false,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
+      "mainsail": false
     },
     {
       "method": "server.history.delete_job",
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -844,6 +1260,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": false
     },
     {
@@ -851,6 +1270,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -858,6 +1280,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -865,6 +1290,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -872,6 +1300,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -879,6 +1310,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -886,6 +1320,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -893,6 +1330,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -900,6 +1340,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -907,6 +1350,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -914,6 +1360,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -921,6 +1370,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -928,6 +1380,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -935,6 +1390,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -942,6 +1400,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -949,6 +1410,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -956,6 +1420,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -963,6 +1430,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -970,6 +1440,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -977,6 +1450,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -984,6 +1460,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -991,6 +1470,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -998,6 +1480,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": true,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -1005,6 +1490,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1012,6 +1500,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -1019,6 +1510,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -1026,6 +1520,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1033,6 +1530,9 @@
       "moonraker": true,
       "phobos": false,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1040,6 +1540,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": true,
+      "klipperscreen": true,
       "mainsail": true
     },
     {
@@ -1047,6 +1550,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": true,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": true
     },
     {
@@ -1054,6 +1560,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1061,6 +1570,9 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1068,6 +1580,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1075,6 +1590,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1082,6 +1600,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     },
     {
@@ -1089,6 +1610,9 @@
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
       "mainsail": false
     }
   ]

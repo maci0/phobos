@@ -1,0 +1,31 @@
+{
+  "ui": "guppyscreen",
+  "version": "git",
+  "method_count": 24,
+  "methods": [
+    "machine.device_power.devices",
+    "machine.device_power.post_device",
+    "machine.device_power.status",
+    "printer.emergency_stop",
+    "printer.firmware_restart",
+    "printer.gcode.help",
+    "printer.gcode.script",
+    "printer.info",
+    "printer.objects.list",
+    "printer.objects.subscribe",
+    "printer.print.cancel",
+    "printer.print.pause",
+    "printer.print.resume",
+    "printer.print.start",
+    "printer.restart",
+    "server.database.get_item",
+    "server.database.post_item",
+    "server.files.list",
+    "server.files.metadata",
+    "server.files.roots",
+    "server.info",
+    "server.spoolman.get_spool_id",
+    "server.spoolman.post_spool_id",
+    "server.spoolman.proxy"
+  ]
+}

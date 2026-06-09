@@ -101,6 +101,5 @@
     "server.webcams.delete_item",
     "server.webcams.list",
     "server.webcams.post_item"
-  ],
-  "actions": {}
+  ]
 }
