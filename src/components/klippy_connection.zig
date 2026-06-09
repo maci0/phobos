@@ -393,8 +393,11 @@ pub const KlippyCtx = struct {
     /// True once Klippy has exited the startup state.
     klippy_started: bool = false,
 
-    /// Monotonic request id counter.
+    /// Monotonic request id counter. Guarded by `next_id_mutex` because off-Core
+    /// callers (requestOffCore, subscribeAggregate) increment it without the
+    /// serialization the Core lock gives the in-Core callers.
     next_id: u64 = 0,
+    next_id_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
     /// Core serialization lock. When wired (production / App), request() runs the
     /// concurrent path: a persistent reader continuously drains the socket (so
@@ -1095,8 +1098,10 @@ pub const KlippyCtx = struct {
         const io = self.io.?;
         const core = self.core.?;
 
+        self.next_id_mutex.lockUncancelable(io);
         self.next_id += 1;
         const id_num = self.next_id;
+        self.next_id_mutex.unlock(io);
         var rid_buf: [32]u8 = undefined;
         const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
 
@@ -1143,6 +1148,7 @@ pub const KlippyCtx = struct {
         return deepCopyValue(alloc, result);
     }
 
+
     /// Resubscribe Klippy to the current aggregate object set (base + everything
     /// added via `addSubscriptionObject`) WITH the `response_template`, and return
     /// the subscribe result (`{"eventtime":..,"status":{..}}`). A WS client's
@@ -1156,8 +1162,10 @@ pub const KlippyCtx = struct {
         if (!self.isConnected() or self.core == null) return error.KlippyDisconnected;
         const io = self.io.?;
 
+        self.next_id_mutex.lockUncancelable(io);
         self.next_id += 1;
         const id_num = self.next_id;
+        self.next_id_mutex.unlock(io);
         var rid_buf: [32]u8 = undefined;
         const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
 
