@@ -30,7 +30,12 @@ pub const oracle_normalize = @import("oracle/normalize.zig");
 pub const oracle_replay = @import("oracle/replay.zig");
 
 pub fn main(init: std.process.Init) !void {
-    const alloc = init.gpa;
+    // `init.gpa` is std's DebugAllocator — it captures a dwarf stack trace on
+    // every allocation for leak/UAF detection. That tracing dominates the hot
+    // path (allocation-heavy Klippy-proxy requests) and is pointless in a
+    // long-running release daemon, so use the lock-sharded `smp_allocator` in
+    // release and keep the checked allocator only for Debug builds.
+    const alloc = if (@import("builtin").mode == .Debug) init.gpa else std.heap.smp_allocator;
     const aio = init.io;
 
     // Parse CLI args.
