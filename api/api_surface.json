@@ -135,12 +135,16 @@
       "debug_only": false,
       "is_remote": false,
       "jsonrpc_methods": [
-        "access.user"
+        "access.get_user",
+        "access.post_user",
+        "access.delete_user"
       ],
-      "multi_verb": false,
+      "multi_verb": true,
       "path": "/access/user",
       "request_types": [
-        "<dynamic>"
+        "GET",
+        "POST",
+        "DELETE"
       ],
       "source": "components/authorization.py:245",
       "transports": [
@@ -418,12 +422,16 @@
       "debug_only": true,
       "is_remote": false,
       "jsonrpc_methods": [
-        "debug.database.item"
+        "debug.database.get_item",
+        "debug.database.post_item",
+        "debug.database.delete_item"
       ],
-      "multi_verb": false,
+      "multi_verb": true,
       "path": "/debug/database/item",
       "request_types": [
-        "<dynamic>"
+        "GET",
+        "POST",
+        "DELETE"
       ],
       "source": "components/database.py:263",
       "transports": [
@@ -1722,12 +1730,16 @@
       "debug_only": false,
       "is_remote": false,
       "jsonrpc_methods": [
-        "server.database.item"
+        "server.database.get_item",
+        "server.database.post_item",
+        "server.database.delete_item"
       ],
-      "multi_verb": false,
+      "multi_verb": true,
       "path": "/server/database/item",
       "request_types": [
-        "<dynamic>"
+        "GET",
+        "POST",
+        "DELETE"
       ],
       "source": "components/database.py:247",
       "transports": [
@@ -1874,12 +1886,16 @@
       "debug_only": false,
       "is_remote": false,
       "jsonrpc_methods": [
-        "server.files.directory"
+        "server.files.get_directory",
+        "server.files.post_directory",
+        "server.files.delete_directory"
       ],
-      "multi_verb": false,
+      "multi_verb": true,
       "path": "/server/files/directory",
       "request_types": [
-        "<dynamic>"
+        "GET",
+        "POST",
+        "DELETE"
       ],
       "source": "components/file_manager/file_manager.py:125",
       "transports": [
@@ -2558,12 +2574,16 @@
       "debug_only": false,
       "is_remote": false,
       "jsonrpc_methods": [
-        "server.webcams.item"
+        "server.webcams.get_item",
+        "server.webcams.post_item",
+        "server.webcams.delete_item"
       ],
-      "multi_verb": false,
+      "multi_verb": true,
       "path": "/server/webcams/item",
       "request_types": [
-        "<dynamic>"
+        "GET",
+        "POST",
+        "DELETE"
       ],
       "source": "components/webcam.py:56",
       "transports": [
@@ -2704,9 +2724,25 @@
       "component": "authorization",
       "debug_only": false,
       "is_remote": false,
+      "method": "access.delete_user",
+      "path": "/access/user",
+      "source": "components/authorization.py:245"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
       "method": "access.get_api_key",
       "path": "/access/api_key",
       "source": "components/authorization.py:257"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.get_user",
+      "path": "/access/user",
+      "source": "components/authorization.py:245"
     },
     {
       "component": "authorization",
@@ -2752,17 +2788,17 @@
       "component": "authorization",
       "debug_only": false,
       "is_remote": false,
-      "method": "access.refresh_jwt",
-      "path": "/access/refresh_jwt",
-      "source": "components/authorization.py:240"
+      "method": "access.post_user",
+      "path": "/access/user",
+      "source": "components/authorization.py:245"
     },
     {
       "component": "authorization",
       "debug_only": false,
       "is_remote": false,
-      "method": "access.user",
-      "path": "/access/user",
-      "source": "components/authorization.py:245"
+      "method": "access.refresh_jwt",
+      "path": "/access/refresh_jwt",
+      "source": "components/authorization.py:240"
     },
     {
       "component": "authorization",
@@ -2800,7 +2836,15 @@
       "component": "database",
       "debug_only": true,
       "is_remote": false,
-      "method": "debug.database.item",
+      "method": "debug.database.delete_item",
+      "path": "/debug/database/item",
+      "source": "components/database.py:263"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.get_item",
       "path": "/debug/database/item",
       "source": "components/database.py:263"
     },
@@ -2811,6 +2855,14 @@
       "method": "debug.database.list",
       "path": "/debug/database/list",
       "source": "components/database.py:260"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.post_item",
+      "path": "/debug/database/item",
+      "source": "components/database.py:263"
     },
     {
       "component": "database",
@@ -3296,7 +3348,15 @@
       "component": "database",
       "debug_only": false,
       "is_remote": false,
-      "method": "server.database.item",
+      "method": "server.database.delete_item",
+      "path": "/server/database/item",
+      "source": "components/database.py:247"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.get_item",
       "path": "/server/database/item",
       "source": "components/database.py:247"
     },
@@ -3315,6 +3375,14 @@
       "method": "server.database.post_backup",
       "path": "/server/database/backup",
       "source": "components/database.py:250"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.post_item",
+      "path": "/server/database/item",
+      "source": "components/database.py:247"
     },
     {
       "component": "database",
@@ -3352,6 +3420,14 @@
       "component": "file_manager",
       "debug_only": false,
       "is_remote": false,
+      "method": "server.files.delete_directory",
+      "path": "/server/files/directory",
+      "source": "components/file_manager/file_manager.py:125"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
       "method": "server.files.delete_file",
       "path": "/server/files/delete_file",
       "source": "components/file_manager/file_manager.py:138"
@@ -3360,7 +3436,7 @@
       "component": "file_manager",
       "debug_only": false,
       "is_remote": false,
-      "method": "server.files.directory",
+      "method": "server.files.get_directory",
       "path": "/server/files/directory",
       "source": "components/file_manager/file_manager.py:125"
     },
@@ -3395,6 +3471,14 @@
       "method": "server.files.move",
       "path": "/server/files/move",
       "source": "components/file_manager/file_manager.py:129"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.post_directory",
+      "path": "/server/files/directory",
+      "source": "components/file_manager/file_manager.py:125"
     },
     {
       "component": "file_manager",
@@ -3632,7 +3716,15 @@
       "component": "webcam",
       "debug_only": false,
       "is_remote": false,
-      "method": "server.webcams.item",
+      "method": "server.webcams.delete_item",
+      "path": "/server/webcams/item",
+      "source": "components/webcam.py:56"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.get_item",
       "path": "/server/webcams/item",
       "source": "components/webcam.py:56"
     },
@@ -3643,6 +3735,14 @@
       "method": "server.webcams.list",
       "path": "/server/webcams/list",
       "source": "components/webcam.py:53"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.post_item",
+      "path": "/server/webcams/item",
+      "source": "components/webcam.py:56"
     },
     {
       "component": "webcam",
@@ -3975,7 +4075,7 @@
   "summary": {
     "endpoint_count": 125,
     "http_endpoint_count": 117,
-    "jsonrpc_method_count": 120,
+    "jsonrpc_method_count": 130,
     "moonraker_commit": "9008485843740c93e0154ccbdac1fc2b02b03aaa",
     "moonraker_version": "0.10.1.dev20+g9008485",
     "notification_count": 27,

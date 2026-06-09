@@ -3,7 +3,7 @@
 Per-call implementation status of every Moonraker API surface element, with any behavioural difference. **Auto-generated** (`python3 -m api_scanner table`) from the Moonraker baseline (`api/api_surface.json`) × phobos `--dump-api` × curated deltas — do not hand-edit; update the deltas in `tools/api_scanner/table.py`.
 
 - Moonraker baseline: `0.10.1.dev20+g9008485` (commit `900848584374`).
-- Endpoints: 125 · JSON-RPC methods: 120 · notifications: 27 · remote methods: 14.
+- Endpoints: 125 · JSON-RPC methods: 130 · notifications: 27 · remote methods: 14.
 
 Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour differs/stubbed) · 🚫 No-op (deliberate, host-safety) · ❌ Missing.
 
@@ -17,7 +17,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/access/logout` | POST | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/oneshot_token` | GET | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/refresh_jwt` | POST | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
-| `/access/user` | <dynamic> | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
+| `/access/user` | GET, POST, DELETE | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/user/password` | POST | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/users/list` | GET | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/api/currentuser` | GET | HTTP | octoprint_compat | ✅ Full | Matches Moonraker. |
@@ -32,7 +32,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/api/version` | GET | HTTP | octoprint_compat | ✅ Full | Matches Moonraker. |
 | `/connection/register_remote_method` | POST | WEBSOCKET | extensions | ✅ Full | Matches Moonraker. |
 | `/connection/send_event` | POST | WEBSOCKET | extensions | ✅ Full | Matches Moonraker. |
-| `/debug/database/item` | <dynamic> | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
+| `/debug/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/table` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/notifiers/test` | POST | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
@@ -91,14 +91,14 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/connection/identify` | POST | WEBSOCKET | websockets | ✅ Full | Matches Moonraker. |
 | `/server/database/backup` | POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/server/database/compact` | POST | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
-| `/server/database/item` | <dynamic> | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
+| `/server/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/server/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/server/database/restore` | POST | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/server/extensions/list` | GET | HTTP, WEBSOCKET, INTERNAL | extensions | ✅ Full | Matches Moonraker. |
 | `/server/extensions/request` | POST | HTTP, WEBSOCKET, INTERNAL | extensions | ✅ Full | Matches Moonraker. |
 | `/server/files/copy` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/delete_file` | DELETE | WEBSOCKET | file_manager | ✅ Full | Matches Moonraker. |
-| `/server/files/directory` | <dynamic> | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
+| `/server/files/directory` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/list` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/metadata` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/metascan` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
@@ -129,7 +129,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/spoolman/spool_id` | GET, POST | HTTP, WEBSOCKET, INTERNAL | spoolman | ✅ Full | Matches Moonraker. |
 | `/server/spoolman/status` | GET | HTTP, WEBSOCKET, INTERNAL | spoolman | ✅ Full | Matches Moonraker. |
 | `/server/temperature_store` | GET | HTTP, WEBSOCKET, INTERNAL | data_store | ✅ Full | Matches Moonraker. |
-| `/server/webcams/item` | <dynamic> | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
+| `/server/webcams/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
 | `/server/webcams/list` | GET | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
 | `/server/webcams/test` | POST | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
 | `/server/websocket/id` | GET | WEBSOCKET | websockets | ✅ Full | Matches Moonraker. |
@@ -143,20 +143,24 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 
 | Method | Transports | Component | Status | Notes |
 |---|---|---|---|---|
+| `access.delete_user` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.get_api_key` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
+| `access.get_user` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.info` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.login` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.logout` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.oneshot_token` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.post_api_key` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
+| `access.post_user` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.refresh_jwt` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
-| `access.user` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.user.password` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.users.list` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `connection.register_remote_method` |  | extensions | ✅ Full | Matches Moonraker. |
 | `connection.send_event` |  | extensions | ✅ Full | Matches Moonraker. |
-| `debug.database.item` |  | database | ✅ Full | Matches Moonraker. |
+| `debug.database.delete_item` |  | database | ✅ Full | Matches Moonraker. |
+| `debug.database.get_item` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.list` |  | database | ✅ Full | Matches Moonraker. |
+| `debug.database.post_item` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.table` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.notifiers.test` |  | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
 | `machine.device_power.devices` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
@@ -217,19 +221,23 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `server.connection.identify` |  | websockets | ✅ Full | Matches Moonraker. |
 | `server.database.compact` |  | database | ✅ Full | Matches Moonraker. |
 | `server.database.delete_backup` |  | database | ✅ Full | Matches Moonraker. |
-| `server.database.item` |  | database | ✅ Full | Matches Moonraker. |
+| `server.database.delete_item` |  | database | ✅ Full | Matches Moonraker. |
+| `server.database.get_item` |  | database | ✅ Full | Matches Moonraker. |
 | `server.database.list` |  | database | ✅ Full | Matches Moonraker. |
 | `server.database.post_backup` |  | database | ✅ Full | Matches Moonraker. |
+| `server.database.post_item` |  | database | ✅ Full | Matches Moonraker. |
 | `server.database.restore` |  | database | ✅ Full | Matches Moonraker. |
 | `server.extensions.list` |  | extensions | ✅ Full | Matches Moonraker. |
 | `server.extensions.request` |  | extensions | ✅ Full | Matches Moonraker. |
 | `server.files.copy` |  | file_manager | ✅ Full | Matches Moonraker. |
+| `server.files.delete_directory` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.delete_file` |  | file_manager | ✅ Full | Matches Moonraker. |
-| `server.files.directory` |  | file_manager | ✅ Full | Matches Moonraker. |
+| `server.files.get_directory` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.list` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.metadata` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.metascan` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.move` |  | file_manager | ✅ Full | Matches Moonraker. |
+| `server.files.post_directory` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.roots` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.thumbnails` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.zip` |  | file_manager | ✅ Full | Matches Moonraker. |
@@ -259,8 +267,10 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `server.spoolman.proxy` |  | spoolman | ✅ Full | Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted. |
 | `server.spoolman.status` |  | spoolman | ✅ Full | Matches Moonraker. |
 | `server.temperature_store` |  | data_store | ✅ Full | Matches Moonraker. |
-| `server.webcams.item` |  | webcam | ✅ Full | Matches Moonraker. |
+| `server.webcams.delete_item` |  | webcam | ✅ Full | Matches Moonraker. |
+| `server.webcams.get_item` |  | webcam | ✅ Full | Matches Moonraker. |
 | `server.webcams.list` |  | webcam | ✅ Full | Matches Moonraker. |
+| `server.webcams.post_item` |  | webcam | ✅ Full | Matches Moonraker. |
 | `server.webcams.test` |  | webcam | ✅ Full | Matches Moonraker. |
 | `server.websocket.id` |  | websockets | ✅ Full | Matches Moonraker. |
 

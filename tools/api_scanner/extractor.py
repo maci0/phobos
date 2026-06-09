@@ -257,6 +257,16 @@ def _flag_names(node: ts.Node) -> List[str]:
                 visit(inner[0])
             else:
                 names.append(DYNAMIC)
+        elif n.type == "call":
+            # RequestType.all() expands to every HTTP verb, so the endpoint is
+            # multi-verb and its JSON-RPC names are verb-prefixed (get_/post_/
+            # delete_). Moonraker's RequestType has exactly GET|POST|DELETE.
+            fn = n.child_by_field_name("function")
+            meth = fn.child_by_field_name("attribute") if fn is not None and fn.type == "attribute" else None
+            if meth is not None and _text(meth) == "all":
+                names.extend(["GET", "POST", "DELETE"])
+            else:
+                names.append(DYNAMIC)
         else:
             names.append(DYNAMIC)
 
