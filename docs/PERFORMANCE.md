@@ -107,6 +107,28 @@ mock.
 - **Throughput**: both scale to thousands of req/s on simple reads; phobos goes
   higher (9 k vs 5 k) at a fraction of the latency.
 
+## Upper bounds — where response times degrade
+
+Pushed each path until it broke (32-core host; vegeta + phobos + the stub all
+share it, so the top end measures the *host*, not just phobos):
+
+| Path | flat & sub-ms | p99 starts climbing | breaks |
+|---|---|---|---|
+| `server.info` (in-memory) | ≤ 20 k req/s (p99 < 1 ms) | 40–80 k (p99 10–15 ms, p50 still 0.05 ms) | ~120 k (70 % success) |
+| `database.get_item` (SQLite) | ≤ 20 k req/s | 40 k (p99 11 ms) | > 40 k (not reached) |
+| `objects.query` (Klippy proxy) | — | from ~6 k offered | plateaus **~3.5 k/s** |
+
+- **Local reads sustain ~80 000 req/s at 100 %** with p50 still 50 µs — and the
+  break at ~120 k is the test box (three processes contending on 32 cores), not a
+  phobos limit. For context the device itself only ever sees single-digit req/s.
+- **`objects.query` plateaus ~3 000–3 500 req/s.** The stub idles at **3 % CPU** and
+  phobos at **30 %**, so neither compute nor the mock is the wall — it is the
+  **single Klippy socket**: every query multiplexes over one connection with serial
+  round-trips, so past ~3.5 k/s requests queue (p50 stays ~15 ms, p99 climbs to
+  seconds). Moonraker has the identical one-socket constraint, and a real Klippy is
+  slower than the instant stub. Removing the `Core` bottleneck simply moved the
+  ceiling to the Klippy connection itself — the natural limit for a proxy.
+
 ## Hot-path profiling
 
 `perf record -g --call-graph=dwarf` against phobos under an `objects.query` flood
