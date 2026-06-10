@@ -54,6 +54,54 @@ owns its `std.Io.Threaded` with a **1 MB** stack: VSZ drops to **~180 MB** (≈1
 with no change in RSS or throughput. (RSS is dominated by touched pages, not the
 stack reservation, so it is unaffected — ~9 MB after a load spike either way.)
 
+The override compiles out on 64-bit (`ptrBitWidth() > 32` → the runtime-default
+backend is used), since a 64-bit address space swallows the 2 GB VSZ trivially.
+
+## Large gcode files: streaming transfers
+
+Both directions of `/server/files/...` stream to/from disk in 64 KB chunks, so a
+large gcode transfer runs in **constant memory** instead of buffering the whole
+file in the request arena (a 200 MB gcode previously meant a 200 MB RSS spike).
+
+- **Download** (`GET /server/files/<root>/<path>`): the handler resolves the path
+  and the transport streams it via `respondStreaming` (content-length from the
+  file size), copying file → socket with `std.Io.Reader.streamRemaining`.
+- **Upload** (`POST /server/files/upload`): intercepted before the body is read;
+  a bounded multipart scanner (`streamUntilSeparator`, holds back only
+  `boundary.len-1` bytes between reads) parses the form incrementally and writes
+  the file part straight to disk, buffering only the small `root`/`path` fields.
+  The disk write runs off-`Core`; the `notify_filelist_changed` + result build
+  stay under `Core`.
+
+Measured — 150 MB transfer, peak RSS:
+
+| | phobos before | phobos now | Moonraker |
+|---|---|---|---|
+| download | +150 MB spike | **flat (+0.1 MB)** | streams (flat) |
+| upload | +150 MB spike | **flat (+0.14 MB)** | streams (flat) |
+| baseline RSS | 3.4 MB | 3.4 MB | ~57 MB |
+
+Moonraker already streams both (tornado `StaticFileHandler` for downloads,
+`@stream_request_body` + `data_received` for uploads). So this work brought phobos
+from **worse than Moonraker** on large files (it buffered) to **on par on
+technique and ~16× lighter on baseline** — a 200 MB gcode fits in ~4 MB total
+where Moonraker needs ~57 MB + overhead. Both transfers verified byte-exact.
+
+## Memory safety: JSON nesting depth
+
+`std.json` *parsing* is iterative — arbitrarily deep input parses without touching
+the stack. But `std.json.Stringify` *serializes* with a fixed 256-level nesting
+stack: a value nested deeper panics (and corrupts memory in release, where the
+bounds check is off). A client could `POST` a deeply-nested value to
+`server.database.item`, then a later `GET` serializing it would crash the server.
+
+Guarded on ingest: `jv.exceedsDepth` rejects values past `max_value_depth` (100 —
+real Moonraker data is < 10 deep) with `InvalidParams`, so over-deep values never
+reach the serializer. `src/test_stress.zig` exercises the adversarial paths
+(20 k-deep arrays/objects, 1 M-wide arrays, depth at the limit) each on a freshly
+spawned **1 MB-stack thread**, so a regression that overflowed the real 32-bit
+handler stack would crash the test rather than slip through.
+
 ## Optimisation journey
 
 Each fix, measured on the `objects.query` flood (the heaviest path) plus the
@@ -68,6 +116,10 @@ endpoint it most affected. All driven by the profiling below.
 | drop status deep-copy | parse Klippy response straight into the request arena (`parseFromSliceLeaky`) | fewer copies of the status payload on every `query` |
 | off-Core local reads | `server.info`/`config`/`system_info`/`database.get_item` lock-free (store is thread-safe; `server.info` gets a leaf mutex) | reads run in parallel instead of serialising |
 | cache `machine.system_info` | it rebuilt the payload + spawned `ip` (subprocess) per call | **165/s → 9 000/s** (p50 5 s → 0.06 ms) |
+| bound handler stack (32-bit) | own `std.Io.Threaded` with a 1 MB stack vs the 16 MB default | VSZ **2.1 GB → 180 MB**; RSS/throughput unchanged |
+| stream file downloads | `respondStreaming` instead of `allocRemaining(.unlimited)` | 150 MB download: **+150 MB spike → flat (+0.1 MB)** |
+| stream file uploads | incremental multipart scan straight to disk | 150 MB upload: **+150 MB spike → flat (+0.14 MB)** |
+| cap stored value depth | `exceedsDepth` on DB insert (Stringify's 256-level stack would crash) | closes a deep-value `POST`→`GET` crash/DoS |
 
 ## Methodology
 
