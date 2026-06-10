@@ -537,6 +537,18 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
             creds.remote_ip = alloc.dupe(u8, ip) catch null;
         }
 
+        // Streaming upload: handle POST /server/files/upload before reading the
+        // body, so a large gcode streams to disk in constant memory instead of
+        // buffering the whole multipart blob in the request arena.
+        if (req.head.method == .POST and std.mem.eql(u8, pathOf(target), "/server/files/upload")) {
+            if (srv.file_ctx) |fctx| {
+                const up_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
+                handleUploadStreaming(srv, fctx, &req, alloc, up_headers) catch return;
+                if (!req.head.keep_alive) return;
+                continue;
+            }
+        }
+
         const body: []const u8 = readBody(&req, alloc) catch &.{};
 
         // CORS preflight: answer OPTIONS directly with the allow headers, no auth.
@@ -806,6 +818,116 @@ fn handleUpload(
     return .{ .status = .ok, .body = b };
 }
 
+/// Read from `r` into `out` (or discard, when null) until `sep` is found,
+/// consuming `sep`. Holds back at most `sep.len - 1` bytes between reads, so it
+/// works in bounded memory regardless of the part size (the whole point — a
+/// gcode upload streams to disk instead of buffering). Errors if the stream ends
+/// before `sep` (a malformed body).
+fn streamUntilSeparator(r: *std.Io.Reader, out: ?*std.Io.Writer, sep: []const u8) !void {
+    while (true) {
+        const win = r.peekGreedy(sep.len) catch return error.MalformedUpload;
+        if (std.mem.indexOf(u8, win, sep)) |idx| {
+            if (out) |w| try w.writeAll(win[0..idx]);
+            r.toss(idx + sep.len);
+            return;
+        }
+        // No full match in the window; the tail might be a partial `sep`, so keep
+        // the last sep.len-1 bytes and flush the rest, then pull more.
+        const flush = win.len - (sep.len - 1);
+        if (out) |w| try w.writeAll(win[0..flush]);
+        r.toss(flush);
+        r.fillMore() catch return error.MalformedUpload;
+    }
+}
+
+/// Stream a multipart/form-data upload straight from the socket to disk, so a
+/// large gcode upload runs in constant memory instead of buffering the whole body
+/// in the request arena. Relies on the small form fields (root/path) preceding
+/// the file part — true for every Moonraker client (Mainsail, Fluidd, curl -F).
+/// Responds to `req` directly. Auth matches the non-streaming path (unchanged).
+fn handleUploadStreaming(
+    srv: *Server,
+    fctx: *file_manager.FileCtx,
+    req: *std.http.Server.Request,
+    alloc: std.mem.Allocator,
+    headers: []const std.http.Header,
+) !void {
+    const io = srv.io;
+    var rbuf: [64 * 1024]u8 = undefined;
+    const r = req.readerExpectNone(&rbuf);
+    const bad = struct {
+        fn f(rq: *std.http.Server.Request, a: std.mem.Allocator, h: []const std.http.Header, msg: []const u8) !void {
+            const b = try errorBody(a, 400, msg);
+            try rq.respond(b, .{ .status = .bad_request, .extra_headers = h });
+        }
+    }.f;
+
+    // First line is "--<boundary>\r\n"; the inter-part separator is "\r\n--<boundary>".
+    const first = r.takeDelimiterInclusive('\n') catch return bad(req, alloc, headers, "Invalid upload form");
+    const boundary_line = std.mem.trimEnd(u8, first, "\r\n");
+    if (!std.mem.startsWith(u8, boundary_line, "--")) return bad(req, alloc, headers, "Invalid upload form");
+    const part_sep = try std.fmt.allocPrint(alloc, "\r\n{s}", .{boundary_line});
+
+    var root_field: ?[]const u8 = null;
+    var path_field: ?[]const u8 = null;
+    var resolved: ?file_manager.Resolved = null;
+
+    parts: while (true) {
+        // Part headers: lines until a blank line.
+        var disp: ?[]const u8 = null;
+        while (true) {
+            const line = r.takeDelimiterInclusive('\n') catch return bad(req, alloc, headers, "Invalid upload form");
+            const l = std.mem.trimEnd(u8, line, "\r\n");
+            if (l.len == 0) break;
+            if (std.ascii.startsWithIgnoreCase(l, "content-disposition:")) disp = try alloc.dupe(u8, l);
+        }
+        const cd = disp orelse return bad(req, alloc, headers, "Invalid upload form");
+
+        if (extractDispositionField(cd, "filename")) |filename| {
+            // File part: resolve the destination from the fields seen so far and
+            // stream its content straight to disk.
+            const root_name = root_field orelse "gcodes";
+            const req_path = if (path_field) |p|
+                try std.fmt.allocPrint(alloc, "{s}/{s}/{s}", .{ root_name, std.mem.trim(u8, p, "/"), filename })
+            else
+                try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_name, filename });
+            const res = file_manager.resolveRequestPath(fctx, alloc, req_path) catch
+                return bad(req, alloc, headers, "Invalid upload path");
+            if (!res.root.full_access or res.rel.len == 0) return bad(req, alloc, headers, "Invalid upload path");
+            const dir = std.Io.Dir.cwd();
+            if (std.fs.path.dirname(res.abs)) |d| dir.createDirPath(io, d) catch {};
+            const file = dir.createFile(io, res.abs, .{}) catch return bad(req, alloc, headers, "Write error");
+            {
+                defer file.close(io);
+                var wbuf2: [32 * 1024]u8 = undefined;
+                var fw = file.writer(io, &wbuf2);
+                streamUntilSeparator(r, &fw.interface, part_sep) catch return bad(req, alloc, headers, "Invalid upload form");
+                fw.interface.flush() catch return bad(req, alloc, headers, "Write error");
+            }
+            resolved = res;
+        } else if (extractDispositionField(cd, "name")) |n| {
+            // Small field value — buffer it (root / path).
+            var vb: std.Io.Writer.Allocating = .init(alloc);
+            streamUntilSeparator(r, &vb.writer, part_sep) catch return bad(req, alloc, headers, "Invalid upload form");
+            if (std.mem.eql(u8, n, "root")) root_field = vb.written() else if (std.mem.eql(u8, n, "path")) path_field = vb.written();
+        } else {
+            streamUntilSeparator(r, null, part_sep) catch return bad(req, alloc, headers, "Invalid upload form");
+        }
+
+        // After the separator: "--" terminates the body; otherwise "\r\n" then the next part.
+        const lead = r.peek(2) catch break :parts;
+        if (lead[0] == '-' and lead[1] == '-') break :parts;
+        r.toss(2);
+    }
+
+    const res = resolved orelse return bad(req, alloc, headers, "No file name specified in upload form");
+    // notify_filelist_changed + result build run under Core (emitLocked assumes it).
+    const result = srv.core.run(io, file_manager.buildUploadResult, .{ fctx, alloc, res }) catch
+        return bad(req, alloc, headers, "Write error");
+    const b = try wrapResult(alloc, result);
+    try req.respond(b, .{ .status = .ok, .extra_headers = headers });
+}
+
 /// Perform the upload write + notify. Separated so it runs inside Core.run with
 /// a comptime-known function. Returns the upload response object.
 fn uploadWrite(
@@ -914,6 +1036,55 @@ fn extractDispositionField(headers: []const u8, key: []const u8) ?[]const u8 {
 // --- tests ---------------------------------------------------------------
 
 const methods = @import("core/methods.zig");
+
+test "streamUntilSeparator: extracts content before the separator and consumes it" {
+    const a = std.testing.allocator;
+    const sep = "\r\n--BOUNDARY";
+    var rdr = std.Io.Reader.fixed("FILEDATA" ++ sep ++ "TRAILING");
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try streamUntilSeparator(&rdr, &out.writer, sep);
+    try std.testing.expectEqualStrings("FILEDATA", out.written());
+    // The separator is consumed; the trailing bytes remain.
+    const rest = try rdr.peekGreedy(1);
+    try std.testing.expectEqualStrings("TRAILING", rest);
+}
+
+test "streamUntilSeparator: binary content with near-boundary bytes is not split early" {
+    const a = std.testing.allocator;
+    const sep = "\r\n--BOUNDARY";
+    // Content contains a *partial* boundary ("\r\n--X") and a stray CRLF that must
+    // NOT be mistaken for the real separator.
+    const content = "line1\r\n--X\r\nstill data";
+    var rdr = std.Io.Reader.fixed(content ++ sep);
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try streamUntilSeparator(&rdr, &out.writer, sep);
+    try std.testing.expectEqualStrings(content, out.written());
+}
+
+test "streamUntilSeparator: empty content (separator at start)" {
+    const a = std.testing.allocator;
+    const sep = "\r\n--BOUNDARY";
+    var rdr = std.Io.Reader.fixed(sep ++ "rest");
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try streamUntilSeparator(&rdr, &out.writer, sep);
+    try std.testing.expectEqualStrings("", out.written());
+}
+
+test "streamUntilSeparator: missing separator errors (malformed body)" {
+    var rdr = std.Io.Reader.fixed("data with no boundary at all");
+    try std.testing.expectError(error.MalformedUpload, streamUntilSeparator(&rdr, null, "\r\n--BOUNDARY"));
+}
+
+test "streamUntilSeparator: discards body when out is null and still consumes the separator" {
+    const sep = "\r\n--B";
+    var rdr = std.Io.Reader.fixed("ignored field value" ++ sep ++ "next");
+    try streamUntilSeparator(&rdr, null, sep);
+    const rest = try rdr.peekGreedy(1);
+    try std.testing.expectEqualStrings("next", rest);
+}
 
 fn buildTestServer(alloc: std.mem.Allocator, io: Io, core: *Core, d: *jsonrpc.Dispatcher, reg: *Registry, info: *methods.ServerInfo) !Server {
     d.* = jsonrpc.Dispatcher.init(alloc);
