@@ -174,12 +174,15 @@ pub const App = struct {
 
     /// Default entry point: SQLite backend, no io needed at init time.
     pub fn init(alloc: std.mem.Allocator) !App {
-        return initWithStore(alloc, .sqlite, null, null);
+        return initWithStore(alloc, .sqlite, null, null, null);
     }
 
     /// Assemble the App with an explicit DataStore backend. The `file` backend
-    /// needs a live `io` handle (filesystem); `sqlite` ignores it.
-    pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, db_io: ?std.Io, db_path: ?[]const u8) !App {
+    /// needs a live `io` handle (filesystem); `sqlite` ignores it. `data_path` is
+    /// the file_manager datadir (Moonraker's `-d`); when null a per-instance temp
+    /// dir is used (tests / --dump-api only — never write real data under /tmp,
+    /// which is tmpfs on embedded targets).
+    pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, db_io: ?std.Io, db_path: ?[]const u8, data_path: ?[]const u8) !App {
         const core = try alloc.create(Core);
         errdefer alloc.destroy(core);
         core.* = Core.init();
@@ -340,9 +343,18 @@ pub const App = struct {
         // with the raw mkdir syscall because App.init has no live io yet (io is
         // wired later via httpServer/setIo).
         var dd_buf: [256]u8 = undefined;
-        const dd_tmp = try std.fmt.bufPrintZ(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(analysis_ctx)});
-        mkdirRaw(dd_tmp);
-        const datadir = try alloc.dupe(u8, dd_tmp);
+        const datadir = if (data_path) |dp| dd: {
+            // Configured datadir (Moonraker's `-d`): create it + reuse it.
+            const dz = try alloc.dupeZ(u8, dp);
+            defer alloc.free(dz);
+            mkdirRaw(dz);
+            break :dd try alloc.dupe(u8, dp);
+        } else dd: {
+            // No datadir given (tests / --dump-api): per-instance temp dir.
+            const dd_tmp = try std.fmt.bufPrintZ(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(analysis_ctx)});
+            mkdirRaw(dd_tmp);
+            break :dd try alloc.dupe(u8, dd_tmp);
+        };
         errdefer alloc.free(datadir);
 
         const root_specs = [_]struct { name: []const u8, full: bool }{
@@ -1106,7 +1118,7 @@ test "initWithStore: file backend builds + database round-trips" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.initWithStore(alloc, .file, io, null);
+    var app = try App.initWithStore(alloc, .file, io, null, null);
     defer app.deinit(io);
     try std.testing.expect(app.db_store == .file);
 
@@ -1116,6 +1128,24 @@ test "initWithStore: file backend builds + database round-trips" {
     try app.db_ctx.store.insertItem(a, "moonraker", "file_manager.version", .{ .integer = 7 });
     const got = (try app.db_ctx.store.getItem(a, "moonraker", "file_manager.version")).?;
     try std.testing.expectEqual(@as(i64, 7), got.integer);
+}
+
+test "initWithStore: data_path sets the datadir (Moonraker -d); null uses a temp dir" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dp = "/tmp/phobos-datadir-test-xyz";
+    var app1 = try App.initWithStore(alloc, .sqlite, null, null, dp);
+    defer app1.deinit(io);
+    try std.testing.expectEqualStrings(dp, app1.datadir);
+
+    var app2 = try App.initWithStore(alloc, .sqlite, null, null, null);
+    defer app2.deinit(io);
+    // No data_path → a per-instance /tmp dir, never the configured one.
+    try std.testing.expect(std.mem.startsWith(u8, app2.datadir, "/tmp/phobos-data-"));
+    try std.testing.expect(!std.mem.eql(u8, app2.datadir, dp));
 }
 
 test "App.init registers WS-only methods in the dispatcher" {

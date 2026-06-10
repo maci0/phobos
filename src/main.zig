@@ -54,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     // Parse CLI args.
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var config_path: ?[]const u8 = null;
+    var data_path: ?[]const u8 = null;
     var dump_api = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -62,6 +63,12 @@ pub fn main(init: std.process.Init) !void {
         } else if ((std.mem.eql(u8, args[i], "-c") or std.mem.eql(u8, args[i], "--config")) and i + 1 < args.len) {
             i += 1;
             config_path = args[i];
+        } else if ((std.mem.eql(u8, args[i], "-d") or std.mem.eql(u8, args[i], "--data-path")) and i + 1 < args.len) {
+            // Moonraker-compatible datadir flag. Backs the file_manager roots
+            // (gcodes/config/logs). Without it phobos uses a temp dir under /tmp,
+            // which is tmpfs on embedded targets — never for real data.
+            i += 1;
+            data_path = args[i];
         }
     }
 
@@ -76,7 +83,8 @@ pub fn main(init: std.process.Init) !void {
     const db_path = resolveDbPath(alloc, init.arena.allocator(), aio, config_path);
     std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(db_backend), if (db_path) |p| p else "" });
 
-    var server_app = try app.App.initWithStore(alloc, db_backend, aio, db_path);
+    if (data_path) |dp| std.debug.print("phobos: data path = {s}\n", .{dp});
+    var server_app = try app.App.initWithStore(alloc, db_backend, aio, db_path, data_path);
     defer server_app.deinit(aio);
 
     if (config_path) |path| {
