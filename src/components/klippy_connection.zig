@@ -276,6 +276,12 @@ pub fn isNotification(frame: std.json.Value) bool {
 pub const ReadBuf = struct {
     gpa: std.mem.Allocator,
     buf: []u8,
+    /// Valid (unconsumed) data is `buf[start..len]`. `consume` advances `start`
+    /// in O(1); the buffer is compacted (one memmove) only when `append` needs
+    /// room at the end. The old design memmove'd on every `consume`, which is
+    /// O(n²) when several status frames batch into one socket read — it was ~half
+    /// the reader's CPU under load.
+    start: usize,
     len: usize,
     /// Hard upper bound; the buffer grows on demand up to this and never beyond.
     max: usize,
@@ -286,11 +292,12 @@ pub const ReadBuf = struct {
     pub fn init(alloc: std.mem.Allocator, max_size: usize) !ReadBuf {
         const initial = @min(max_size, 16 * 1024);
         const buf = try alloc.alloc(u8, initial);
-        return .{ .gpa = alloc, .buf = buf, .len = 0, .max = max_size };
+        return .{ .gpa = alloc, .buf = buf, .start = 0, .len = 0, .max = max_size };
     }
 
     pub fn deinit(self: *ReadBuf, alloc: std.mem.Allocator) void {
         alloc.free(self.buf);
+        self.start = 0;
         self.len = 0;
         self.buf = &.{};
     }
@@ -304,29 +311,39 @@ pub const ReadBuf = struct {
         self.buf = try self.gpa.realloc(self.buf, new_cap);
     }
 
+    /// Slide the unconsumed bytes back to offset 0 (only when needed for room).
+    fn compact(self: *ReadBuf) void {
+        if (self.start == 0) return;
+        const remaining = self.len - self.start;
+        if (remaining > 0) std.mem.copyForwards(u8, self.buf[0..remaining], self.buf[self.start..self.len]);
+        self.start = 0;
+        self.len = remaining;
+    }
+
     /// Append bytes from a stream read. Returns the payload of the next complete
     /// frame (without \x03) if one is available. Call `consume` after processing.
     pub fn append(self: *ReadBuf, data: []const u8) ![]const u8 {
-        try self.ensureCapacity(self.len + data.len);
+        if (self.len + data.len > self.buf.len) {
+            self.compact(); // reclaim consumed prefix before growing
+            try self.ensureCapacity(self.len + data.len);
+        }
         @memcpy(self.buf[self.len..][0..data.len], data);
         self.len += data.len;
-        if (std.mem.indexOfScalar(u8, self.buf[0..self.len], FrameEnd)) |pos| {
-            return self.buf[0..pos];
+        if (std.mem.indexOfScalarPos(u8, self.buf[0..self.len], self.start, FrameEnd)) |pos| {
+            return self.buf[self.start..pos];
         }
         return error.NeedMoreData;
     }
 
-    /// Remove `consumed` bytes from the front of the buffer.
+    /// Mark `consumed` bytes (from `start`) as processed — O(1), no copy.
     pub fn consume(self: *ReadBuf, consumed: usize) void {
-        std.debug.assert(consumed <= self.len);
-        const remaining = self.len - consumed;
-        if (remaining > 0) {
-            std.mem.copyForwards(u8, self.buf[0..remaining], self.buf[consumed..self.len]);
-        }
-        self.len = remaining;
+        std.debug.assert(self.start + consumed <= self.len);
+        self.start += consumed;
+        if (self.start >= self.len) self.reset(); // fully drained → cheap rewind
     }
 
     pub fn reset(self: *ReadBuf) void {
+        self.start = 0;
         self.len = 0;
     }
 };
@@ -1756,7 +1773,8 @@ test "ReadBuf: consume advances buffer" {
     _ = try rb.append("hello\x03world\x03");
     try std.testing.expectEqual(@as(usize, 12), rb.len);
     rb.consume(6); // "hello" + \x03
-    try std.testing.expectEqual(@as(usize, 6), rb.len); // "world\x03" remains
+    // Cursor advances; valid data is buf[start..len] = "world\x03" (6 bytes).
+    try std.testing.expectEqual(@as(usize, 6), rb.len - rb.start);
     const payload = try rb.append("");
     try std.testing.expectEqualStrings("world", payload);
 }
