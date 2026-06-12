@@ -68,7 +68,6 @@ pub const Dispatch = struct {
 /// `alloc` should be a per-request arena; the returned slice lives in it.
 pub fn dispatchMessage(
     io: Io,
-    core: *Core,
     conns: *Connections,
     conn: *Connection,
     dispatcher: *jsonrpc.Dispatcher,
@@ -130,7 +129,6 @@ pub fn dispatchMessage(
     // Everything else: the shared dispatcher, which takes the Core lock itself
     // per-method (skipping it for off_core read methods). Convergence point —
     // identical to the HTTP JSON-RPC bridge.
-    _ = core;
     return dispatcher.handle(request_json, alloc);
 }
 
@@ -355,7 +353,6 @@ fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) 
 
                 const resp = dispatchMessage(
                     srv.io,
-                    srv.core,
                     srv.conns,
                     conn,
                     srv.dispatcher,
@@ -422,7 +419,7 @@ test "server.websocket.id returns the connection's id" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
+    const resp = try dispatchMessage(io, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.websocket.id","id":7}
     , arena.allocator());
 
@@ -443,7 +440,7 @@ test "server.connection.identify returns connection_id and stores client data" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
+    const resp = try dispatchMessage(io, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.connection.identify","params":{"client_name":"mainsail","version":"1.2","type":"web","url":"http://h"},"id":3}
     , arena.allocator());
 
@@ -471,8 +468,8 @@ test "two connections get distinct monotonic ids via identify" {
     const req =
         \\{"jsonrpc":"2.0","method":"server.connection.identify","params":{"client_name":"a","version":"1","type":"web","url":"u"},"id":1}
     ;
-    const r1 = try dispatchMessage(io, &f.core, &f.conns, c1, &f.dispatcher, null, req, arena.allocator());
-    const r2 = try dispatchMessage(io, &f.core, &f.conns, c2, &f.dispatcher, null, req, arena.allocator());
+    const r1 = try dispatchMessage(io, &f.conns, c1, &f.dispatcher, null, req, arena.allocator());
+    const r2 = try dispatchMessage(io, &f.conns, c2, &f.dispatcher, null, req, arena.allocator());
 
     const p1 = try std.json.parseFromSlice(std.json.Value, arena.allocator(), r1, .{});
     const p2 = try std.json.parseFromSlice(std.json.Value, arena.allocator(), r2, .{});
@@ -493,7 +490,7 @@ test "server.info over WS dispatch equals HTTP result payload" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const ws_resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
+    const ws_resp = try dispatchMessage(io, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.info","id":1}
     , a);
 
@@ -522,7 +519,7 @@ test "unknown method over WS returns -32601" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
+    const resp = try dispatchMessage(io, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"does.not.exist","id":9}
     , arena.allocator());
 
@@ -544,7 +541,7 @@ test "notification (no id) over WS produces no response bytes" {
     defer arena.deinit();
 
     // server.websocket.id as a notification: ran, but no bytes.
-    const resp = try dispatchMessage(io, &f.core, &f.conns, conn, &f.dispatcher, null,
+    const resp = try dispatchMessage(io, &f.conns, conn, &f.dispatcher, null,
         \\{"jsonrpc":"2.0","method":"server.websocket.id"}
     , arena.allocator());
     try std.testing.expectEqual(@as(usize, 0), resp.len);
@@ -572,7 +569,7 @@ test "fuzz_ws: random bytes through dispatchMessage never crash, valid JSON or e
             defer arena.deinit();
             const a = arena.allocator();
 
-            const resp = try dispatchMessage(c.io, &c.f.core, &c.f.conns, c.conn, &c.f.dispatcher, null, input, a);
+            const resp = try dispatchMessage(c.io, &c.f.conns, c.conn, &c.f.dispatcher, null, input, a);
             if (resp.len == 0) return;
 
             const parsed = std.json.parseFromSlice(std.json.Value, a, resp, .{}) catch {

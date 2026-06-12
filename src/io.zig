@@ -106,6 +106,14 @@ pub const Listener = struct {
     /// connections wait in the listen backlog instead of spawning a worker.
     pub const max_concurrent_conns = 128;
 
+    /// Per-handler thread stack size used on 32-bit targets (see main.zig — the
+    /// 16 MB default would reserve ~2 GB of VSZ at the handler-pool peak). The
+    /// deepest handler path (streaming upload: 64 KB read + 32 KB write buffers
+    /// nested under the connection's 24 KB) peaks ~120 KB; 1 MB is ~8× headroom.
+    /// Referenced by the production gate AND the stack-stress tests so they can't
+    /// validate a size production no longer uses.
+    pub const handler_stack_size: usize = 1 << 20;
+
     fn connTaskCtxBounded(ctx: *anyopaque, io: Io, stream: net.Stream, handler: CtxHandler, sem: *Io.Semaphore) void {
         defer sem.post(io);
         defer stream.close(io);

@@ -45,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
     // we skip the override entirely — the whole thing compiles out.
     const bounded_stack = @import("builtin").target.ptrBitWidth() <= 32;
     var threaded: std.Io.Threaded = if (bounded_stack)
-        std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 })
+        std.Io.Threaded.init(alloc, .{ .stack_size = io.Listener.handler_stack_size })
     else
         undefined;
     defer if (bounded_stack) threaded.deinit();
@@ -326,7 +326,7 @@ const EndpointEntry = struct {
 
 test "dumpApi: output contains server.info and server.config" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -339,7 +339,7 @@ test "dumpApi: output contains server.info and server.config" {
 
 test "dumpApi: output contains WS-only methods" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -352,7 +352,7 @@ test "dumpApi: output contains WS-only methods" {
 
 test "dumpApi: output contains 27 notifications" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -368,7 +368,7 @@ test "dumpApi: output contains 27 notifications" {
 
 test "dumpApi: output contains all four router routes" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -388,7 +388,7 @@ test "dumpApi: output contains all four router routes" {
 
 test "dumpApi: output is valid JSON with all required top-level keys" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
     defer threaded.deinit();
     const aio = threaded.io();
 
@@ -413,7 +413,7 @@ test "fuzz_dumpApi: output is always valid JSON" {
             const _unused = b[0];
             _ = _unused;
 
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
             defer threaded.deinit();
             const io2 = threaded.io();
 

@@ -27,7 +27,10 @@ const Entry = struct {
 
 /// Trampoline so a runtime handler pointer can run inside `Core.run` (which
 /// needs a comptime-known function).
-fn callHandlerTramp(handler: HandlerFn, ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+/// Comptime-known trampoline so a runtime handler pointer can run inside
+/// `Core.run` (which requires a comptime-known function). Shared by both
+/// transports (HTTP REST + JSON-RPC) so the dispatch shim is defined once.
+pub fn callHandlerTramp(handler: HandlerFn, ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     return handler(ctx, params, alloc);
 }
 

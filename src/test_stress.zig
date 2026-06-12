@@ -11,7 +11,7 @@
 const std = @import("std");
 const jv = @import("json/value.zig");
 
-const handler_stack = 1 << 20; // mirrors the 32-bit handler stack in main.zig
+const handler_stack = @import("io.zig").Listener.handler_stack_size; // single source of truth (io.zig)
 
 /// Build an `n`-deep nested-array JSON text ("[[[...1...]]]").
 fn nestedArrayText(alloc: std.mem.Allocator, n: usize) ![]u8 {

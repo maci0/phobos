@@ -1019,8 +1019,11 @@ fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerro
 /// response bytes. Wired into MqttCtx.api_dispatch.
 fn mqttApiDispatch(ctx: *anyopaque, payload: []const u8, alloc: std.mem.Allocator) anyerror![]u8 {
     const app: *App = @ptrCast(@alignCast(ctx));
-    const io = app.mqtt_ctx.io orelse return error.NotReady;
-    return app.core.run(io, Dispatcher.handle, .{ app.dispatcher, payload, alloc });
+    _ = app.mqtt_ctx.io orelse return error.NotReady;
+    // Dispatcher.handle takes the Core lock itself, per-method (skipping it for
+    // off_core reads). Wrapping it in core.run here would double-lock the
+    // non-reentrant Core mutex and freeze the server.
+    return app.dispatcher.handle(payload, alloc);
 }
 
 /// Spoolman WS spool-deletion hook: clear the active spool (if it was the

@@ -21,13 +21,13 @@ Throughput / latency, Klippy stubbed, same host (vegeta, p50 latency):
 |---|---|---|
 | `server.info` @9k | **9 000/s · 0.05 ms** | 9 000/s · 0.43 ms |
 | `server.config` @5k | **5 000/s · 0.06 ms** | 5 000/s · 0.48 ms |
-| `machine.system_info` @9k | **9 000/s · 0.06 ms** | 2 000/s · 0.22 ms |
 | `server.database.get_item` @5k | **5 000/s · 0.08 ms** | (n/a — Moonraker query path needs a fuller Klippy handshake) |
 | `printer.objects.query` (Klippy-proxied) | **~4 000/s, scales with load** | — |
 
 Local reads run **~5–8× lower latency** than Moonraker's asyncio path with a
-tighter tail; `system_info` is both faster *and* ~4–5× higher throughput
-(Moonraker recomputes less but phobos now caches it). The Klippy-proxy path
+tighter tail. (`machine.system_info` is rebuilt per request — it carries live
+service/network state — so it is not in this table; it is called once per UI
+connect, not a hot path.) The Klippy-proxy path
 (`objects.query`) used to serialise on the single `Core` lock and cap ~1 k req/s;
 after the off-`Core` work below it does **~4 k req/s** and scales. See the
 [optimisation journey](#optimisation-journey).
@@ -93,11 +93,13 @@ where Moonraker needs ~57 MB + overhead. Both transfers verified byte-exact.
 the stack. But `std.json.Stringify` *serializes* with a fixed 256-level nesting
 stack: a value nested deeper panics (and corrupts memory in release, where the
 bounds check is off). A client could `POST` a deeply-nested value to
-`server.database.item`, then a later `GET` serializing it would crash the server.
+`server.database.item` (then a later `GET` serializes it), or send deep `params`
+to a Klippy proxy (forwarded to `Stringify`), to crash the server.
 
-Guarded on ingest: `jv.exceedsDepth` rejects values past `max_value_depth` (100 —
-real Moonraker data is < 10 deep) with `InvalidParams`, so over-deep values never
-reach the serializer. `src/test_stress.zig` exercises the adversarial paths
+Guarded at every untrusted-serialize boundary: `jv.exceedsDepth` rejects values
+past `max_value_depth` (100 — real Moonraker data is < 10 deep) with
+`InvalidParams` — on database insert AND on the Klippy request param serialize —
+so over-deep values never reach `Stringify`. `src/test_stress.zig` exercises the adversarial paths
 (20 k-deep arrays/objects, 1 M-wide arrays, depth at the limit) each on a freshly
 spawned **1 MB-stack thread**, so a regression that overflowed the real 32-bit
 handler stack would crash the test rather than slip through.
@@ -113,9 +115,8 @@ endpoint it most affected. All driven by the profiling below.
 | Bound connection concurrency | `std.Io.Threaded` pool grew unbounded under a Klippy stall (28 k threads observed) | fd/thread blow-up gone; stable under load |
 | `Core` lock → dispatcher (per-method) | move the lock out of the transports so REST + JSON-RPC agree on which methods skip it | enables the off-Core reads below without the JSON-RPC deadlock the REST-only attempt hit |
 | off-Core read proxies | `objects.query`/`list`, `printer.info`, `query_endstops`, `gcode.help` run lock-free | `query` ~1 070/s (5 s p99, saturating) → **~4 000/s, p99 ≤230 ms, scales** |
-| drop status deep-copy | parse Klippy response straight into the request arena (`parseFromSliceLeaky`) | fewer copies of the status payload on every `query` |
-| off-Core local reads | `server.info`/`config`/`system_info`/`database.get_item` lock-free (store is thread-safe; `server.info` gets a leaf mutex) | reads run in parallel instead of serialising |
-| cache `machine.system_info` | it rebuilt the payload + spawned `ip` (subprocess) per call | **165/s → 9 000/s** (p50 5 s → 0.06 ms) |
+| drop status deep-copy | parse Klippy response into the request arena with `parseFromSliceLeaky(.alloc_always)` (copies strings, no full-tree deep-copy) | fewer copies per `query` |
+| off-Core local reads | `server.info`/`config`/`database.get_item` lock-free (store is thread-safe; `server.info` gets a leaf mutex) | reads run in parallel instead of serialising |
 | bound handler stack (32-bit) | own `std.Io.Threaded` with a 1 MB stack vs the 16 MB default | VSZ **2.1 GB → 180 MB**; RSS/throughput unchanged |
 | stream file downloads | `respondStreaming` instead of `allocRemaining(.unlimited)` | 150 MB download: **+150 MB spike → flat (+0.1 MB)** |
 | stream file uploads | incremental multipart scan straight to disk | 150 MB upload: **+150 MB spike → flat (+0.14 MB)** |
@@ -309,13 +310,13 @@ p99 5 s (saturating)** to **~4 640 req/s, p50 17 ms, p99 ≤ 230 ms** and it now
 tests pass, including the real-Klippy-proxy path.
 
 3. **Local reads off-Core too.** `server.info`, `server.config`,
-   `machine.system_info`, `server.database.get_item` are now `off_core` (the store
+   `server.database.get_item` are now `off_core` (the store
    is internally synchronised; `server.info` gets a small leaf `state_mutex` for the
    Klippy-mutated fields) — they run in parallel instead of serialising.
-4. **`machine.system_info` cached.** It rebuilt the payload and spawned `ip` (a
-   subprocess) on every call — ~165 req/s under load. The data is static, so it's
-   built once into an arena and reused: **165 → 9 000 req/s** (p50 5 s → 0.06 ms),
-   matching Moonraker's collect-once behaviour.
+4. **`machine.system_info` stays on-Core, rebuilt per request.** A cache was
+   tried but it froze the live `service_state`/network fields and raced the
+   `ctx.services` map against the `/machine/services/*` handlers; the endpoint is
+   called once per UI connect, so per-request rebuild is the correct trade-off.
 
 Bounded connection concurrency was already in place (`io.zig`,
 `max_concurrent_conns = 128`). All of the above land with **1239 tests passing**

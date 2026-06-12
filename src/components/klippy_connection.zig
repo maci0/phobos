@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const net = std.Io.net;
+const jv = @import("../json/value.zig");
 const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
@@ -1088,6 +1089,31 @@ pub const KlippyCtx = struct {
     /// lock and block on the waiter while the persistent reader drains the socket
     /// and routes our response back. Releasing Core lets the reader dispatch the
     /// intervening status flood (its emits take Core) without deadlock.
+    /// Serialize client `params` to a JSON string in `alloc`, rejecting
+    /// pathologically-nested values first: they would otherwise hit
+    /// std.json.Stringify's fixed 256-level nesting stack here (jw.write) and
+    /// panic / corrupt memory in release. Real RPC params are shallow.
+    fn serializeParams(alloc: std.mem.Allocator, params: std.json.Value) ![]const u8 {
+        if (params == .null) return "";
+        if (jv.exceedsDepth(params, jv.max_value_depth)) return error.InvalidParams;
+        var aw: std.Io.Writer.Allocating = .init(alloc);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer };
+        try jw.write(params);
+        return aw.toOwnedSlice();
+    }
+
+    /// Parse a Klippy response payload and extract `result`. Uses `.alloc_always`
+    /// so every string is COPIED into `alloc` (the request arena) — the default
+    /// `.alloc_if_needed` would alias the `payload` buffer, which the caller frees
+    /// on return (use-after-free, corrupting concurrent off-Core responses).
+    fn parseKlippyResult(alloc: std.mem.Allocator, payload: []const u8) !std.json.Value {
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .allocate = .alloc_always });
+        if (root != .object) return error.KlippyRequestFailed;
+        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
+        return root.object.get("result") orelse .null;
+    }
+
     fn requestConcurrent(
         self: *KlippyCtx,
         method: []const u8,
@@ -1120,14 +1146,7 @@ pub const KlippyCtx = struct {
         }
 
         // Serialize + send the request frame.
-        var params_json: []const u8 = "";
-        if (params != .null) {
-            var aw: std.Io.Writer.Allocating = .init(alloc);
-            defer aw.deinit();
-            var jw: std.json.Stringify = .{ .writer = &aw.writer };
-            try jw.write(params);
-            params_json = try aw.toOwnedSlice();
-        }
+        const params_json = try serializeParams(alloc, params);
         const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
         defer alloc.free(req_buf);
         const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
@@ -1142,14 +1161,7 @@ pub const KlippyCtx = struct {
 
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
-        // Parse straight into the caller's request arena (leaky): the result
-        // value already lives in `alloc`, so it can be returned without the extra
-        // full deep-copy of the (often large) Klippy status payload. `alloc` is a
-        // per-request arena freed wholesale, so the parse allocations are reclaimed.
-        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
-        if (root != .object) return error.KlippyRequestFailed;
-        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
-        return root.object.get("result") orelse .null;
+        return parseKlippyResult(alloc, payload);
     }
 
 
@@ -1198,14 +1210,7 @@ pub const KlippyCtx = struct {
         waiter.sem.waitUncancelable(io);
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
-        // Parse straight into the caller's request arena (leaky): the result
-        // value already lives in `alloc`, so it can be returned without the extra
-        // full deep-copy of the (often large) Klippy status payload. `alloc` is a
-        // per-request arena freed wholesale, so the parse allocations are reclaimed.
-        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
-        if (root != .object) return error.KlippyRequestFailed;
-        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
-        return root.object.get("result") orelse .null;
+        return parseKlippyResult(alloc, payload);
     }
 
     /// Like `requestConcurrent`, but for callers that do NOT hold the Core lock
@@ -1217,7 +1222,9 @@ pub const KlippyCtx = struct {
         params: std.json.Value,
         alloc: std.mem.Allocator,
     ) anyerror!std.json.Value {
-        if (!self.isConnected()) return error.KlippyDisconnected;
+        // Requires the persistent reader (Core wired) to fulfil the waiter; in
+        // inline mode (no reader) the wait would never return — error instead.
+        if (!self.isConnected() or self.core == null) return error.KlippyDisconnected;
         const io = self.io.?;
 
         self.next_id_mutex.lockUncancelable(io);
@@ -1241,14 +1248,7 @@ pub const KlippyCtx = struct {
             if (waiter.payload) |p| self.gpa.free(p);
         }
 
-        var params_json: []const u8 = "";
-        if (params != .null) {
-            var aw: std.Io.Writer.Allocating = .init(alloc);
-            defer aw.deinit();
-            var jw: std.json.Stringify = .{ .writer = &aw.writer };
-            try jw.write(params);
-            params_json = try aw.toOwnedSlice();
-        }
+        const params_json = try serializeParams(alloc, params);
         const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
         defer alloc.free(req_buf);
         const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
@@ -1257,10 +1257,7 @@ pub const KlippyCtx = struct {
         waiter.sem.waitUncancelable(io); // no Core held → reader runs freely
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
-        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
-        if (root != .object) return error.KlippyRequestFailed;
-        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
-        return root.object.get("result") orelse .null;
+        return parseKlippyResult(alloc, payload);
     }
 
     fn requestInline(
@@ -2175,4 +2172,40 @@ test "fuzz ReadBuf.append: never crashes on arbitrary bytes" {
             }
         }
     }.run, .{});
+}
+
+test "parseKlippyResult copies strings (no use-after-free on the freed payload)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    // Payload buffer is owned separately and scribbled after parse to simulate
+    // the gpa free + reuse the real code does. `.alloc_always` must have copied
+    // the strings into the arena, so the result stays intact.
+    const payload = try a.dupe(u8, "{\"result\":{\"msg\":\"hello world\",\"state\":\"ready\"}}");
+    defer a.free(payload);
+    const result = try KlippyCtx.parseKlippyResult(arena.allocator(), payload);
+    @memset(payload, 'X'); // would corrupt an aliasing result
+    try std.testing.expectEqualStrings("hello world", result.object.get("msg").?.string);
+    try std.testing.expectEqualStrings("ready", result.object.get("state").?.string);
+}
+
+test "serializeParams rejects pathologically deep params (guards the Stringify nesting stack)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var v: std.json.Value = .{ .integer = 1 };
+    for (0..400) |_| {
+        var arr: std.json.Array = .init(al);
+        try arr.append(v);
+        v = .{ .array = arr };
+    }
+    try std.testing.expectError(error.InvalidParams, KlippyCtx.serializeParams(al, v));
+    // A shallow value serializes fine.
+    const ok = try KlippyCtx.serializeParams(al, .{ .object = blk: {
+        var o: std.json.ObjectMap = .empty;
+        try o.put(al, "x", .{ .integer = 1 });
+        break :blk o;
+    } });
+    try std.testing.expect(ok.len > 0);
 }

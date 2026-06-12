@@ -109,16 +109,9 @@ pub const HttpCreds = struct {
     origin: ?[]const u8 = null,
 };
 
-/// Comptime-known trampoline so a runtime handler pointer can be invoked inside
-/// `Core.run` (which requires its function argument be comptime-known).
-fn callHandler(
-    handler: registry.HandlerFn,
-    ctx: *anyopaque,
-    params: std.json.Value,
-    alloc: std.mem.Allocator,
-) anyerror!std.json.Value {
-    return handler(ctx, params, alloc);
-}
+/// Shared dispatch trampoline (see jsonrpc.callHandlerTramp) — one definition
+/// for both transports.
+const callHandler = jsonrpc.callHandlerTramp;
 
 /// Strip an optional query string and fragment from an HTTP target, returning
 /// just the path component used for route matching.
@@ -543,9 +536,14 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         if (req.head.method == .POST and std.mem.eql(u8, pathOf(target), "/server/files/upload")) {
             if (srv.file_ctx) |fctx| {
                 const up_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
-                handleUploadStreaming(srv, fctx, &req, alloc, up_headers) catch return;
-                if (!req.head.keep_alive) return;
-                continue;
+                handleUploadStreaming(srv, fctx, &req, alloc, up_headers) catch {};
+                // The streaming parser consumes the body only up to the closing
+                // boundary (and on a rejected upload, not at all), so the request
+                // body is not fully drained — the connection is no longer
+                // byte-synced for the next request. Close it rather than risk
+                // parsing leftover body bytes as the next request (desync /
+                // request smuggling). Clients reconnect for the next request.
+                return;
             }
         }
 
@@ -606,10 +604,16 @@ fn sendFileStreaming(io: Io, req: *std.http.Server.Request, abs: []const u8, hea
         .content_length = st.size,
         .respond_options = .{ .status = .ok, .extra_headers = headers },
     });
-    // Copy file -> response body. On client disconnect / read error the stream
-    // ends early; `end` still flushes what framing it can.
-    _ = std.Io.Reader.streamRemaining(&fr.interface, &bw.writer) catch {};
-    bw.end() catch {};
+    // Copy file -> response body. `bw.end()` with content-length framing asserts
+    // that exactly `st.size` bytes were written, so a file truncated/appended
+    // between stat and read (a re-upload during download) would panic. Guard it:
+    // only end() cleanly on an exact-size copy; on a short/over/aborted stream the
+    // framing is already broken, so return an error and let the caller close the
+    // connection (it won't be byte-synced for keep-alive).
+    const written = std.Io.Reader.streamRemaining(&fr.interface, &bw.writer) catch
+        return error.DownloadAborted;
+    if (written != st.size) return error.DownloadAborted;
+    try bw.end();
 }
 
 /// Extract the auth credentials Moonraker recognizes from the request:
@@ -742,10 +746,18 @@ fn handleFileServe(
     // GET: resolve the path and hand it to the transport to stream from disk in
     // fixed-size chunks (constant memory), rather than buffering the whole file
     // in the request arena — large gcode files would otherwise spike RSS by their
-    // full size. Existence/IO errors are surfaced when the transport opens it.
+    // full size. The streamed body is HTTP-only (serveConnInner); non-streaming
+    // consumers of the Response (tests / INTERNAL transport) see an empty body.
     const resolved = file_manager.resolveRequestPath(fctx, alloc, request_path) catch |err| {
         return fileErrResponse(alloc, mapResolveErr(err));
     };
+    // Verify the file exists here so the 404 is correct for ALL consumers, not
+    // only the streaming HTTP path (which opens it again — a tiny benign re-open).
+    const probe = std.Io.Dir.cwd().openFile(srv.io, resolved.abs, .{}) catch {
+        const b = try errorBody(alloc, 404, "File not found");
+        return .{ .status = .not_found, .body = b };
+    };
+    probe.close(srv.io);
     return .{ .status = .ok, .body = "", .file_path = resolved.abs };
 }
 
