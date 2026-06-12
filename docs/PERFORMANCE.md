@@ -121,6 +121,7 @@ endpoint it most affected. All driven by the profiling below.
 | stream file downloads | `respondStreaming` instead of `allocRemaining(.unlimited)` | 150 MB download: **+150 MB spike → flat (+0.1 MB)** |
 | stream file uploads | incremental multipart scan straight to disk | 150 MB upload: **+150 MB spike → flat (+0.14 MB)** |
 | cap stored value depth | `exceedsDepth` on DB insert (Stringify's 256-level stack would crash) | closes a deep-value `POST`→`GET` crash/DoS |
+| O(1) Klippy read-buffer consume | replace the per-frame `copyForwards` (memmove) with a read cursor | reader CPU **~halved** (was 53% of the `query` profile); matters on armv7 |
 
 ## Methodology
 
