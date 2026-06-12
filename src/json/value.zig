@@ -18,6 +18,31 @@ pub fn serializeAlloc(alloc: std.mem.Allocator, v: anytype) error{OutOfMemory}![
     return std.json.Stringify.valueAlloc(alloc, v, .{});
 }
 
+/// Recursively copy a JSON Value into `alloc`, owning all strings/keys, so the
+/// copy is independent of the source's lifetime. Bounded inputs only (callers
+/// that accept untrusted JSON must `exceedsDepth`-guard first — this recurses per
+/// nesting level like the serializer).
+pub fn deepCopy(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
+    return switch (val) {
+        .string => .{ .string = try alloc.dupe(u8, val.string) },
+        .integer, .float, .bool, .null => val,
+        .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
+        .object => |obj| {
+            var new_obj: std.json.ObjectMap = .empty;
+            var it = obj.iterator();
+            while (it.next()) |kv| {
+                try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopy(alloc, kv.value_ptr.*));
+            }
+            return .{ .object = new_obj };
+        },
+        .array => |arr| {
+            var new_arr: std.json.Array = .init(alloc);
+            for (arr.items) |item| try new_arr.append(try deepCopy(alloc, item));
+            return .{ .array = new_arr };
+        },
+    };
+}
+
 /// Maximum JSON nesting depth phobos accepts for stored/echoed values. Real
 /// Moonraker data (config, gcode metadata, UI settings) is shallow (< 10). The
 /// cap exists because `std.json.Stringify` serializes with a fixed 256-level

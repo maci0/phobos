@@ -334,29 +334,6 @@ pub const ReadBuf = struct {
 /// Recursively copy a JSON value into `alloc`. Used to lift a request result out
 /// of the parse buffer (which references the soon-freed `payload`) in a single
 /// pass — cheaper than the former serialize-to-text + re-parse round-trip.
-fn deepCopyValue(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
-    return switch (val) {
-        .string => .{ .string = try alloc.dupe(u8, val.string) },
-        .integer => .{ .integer = val.integer },
-        .float => .{ .float = val.float },
-        .bool => .{ .bool = val.bool },
-        .null => .null,
-        .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
-        .object => |obj| {
-            var new_obj: std.json.ObjectMap = .empty;
-            var it = obj.iterator();
-            while (it.next()) |kv| {
-                try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopyValue(alloc, kv.value_ptr.*));
-            }
-            return .{ .object = new_obj };
-        },
-        .array => |arr| {
-            var new_arr: std.json.Array = .init(alloc);
-            for (arr.items) |item| try new_arr.append(try deepCopyValue(alloc, item));
-            return .{ .array = new_arr };
-        },
-    };
-}
 
 // ---------------------------------------------------------------------------
 // Context
@@ -1316,8 +1293,8 @@ pub const KlippyCtx = struct {
                     const result = parsed.value.object.get("result") orelse .null;
                     // Copy into `alloc` (the caller's request arena): the parse
                     // references `payload`, which is freed on return. One-pass
-                    // deepCopyValue replaces the old serialize+re-parse round-trip.
-                    return deepCopyValue(alloc, result);
+                    // jv.deepCopy replaces the old serialize+re-parse round-trip.
+                    return jv.deepCopy(alloc, result);
                 }
                 // Different id — silently consume (should not happen in single-
                 // request-in-flight model, but be safe).

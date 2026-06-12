@@ -41,6 +41,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
+const jv = @import("../json/value.zig");
 const clock = @import("../util/clock.zig");
 
 const Registry = registry.Registry;
@@ -183,6 +184,29 @@ pub const MachineCtx = struct {
     moonraker_stats_head: usize = 0,
     moonraker_stats_count: usize = 0,
     moonraker_stats_mutex: std.Io.Mutex = .init,
+    /// Cached `machine.system_info` payload (built once, into `system_info_arena`).
+    ///
+    /// WHY A CACHE: building system_info spawns TWO subprocesses (`ip -json` for
+    /// network/canbus and `systemctl show` for service_state) plus several /proc
+    /// reads — ~ms each. Moonraker collects system_info ONCE at startup for the
+    /// same reason; phobos mirrors that.
+    ///
+    /// WHY IT IS STILL CORRECT (the bug a naive cache caused): service_state and
+    /// network are not truly static. So the cache is INVALIDATED on every API
+    /// service action (see `invalidateSystemInfo`, called from `doServiceAction`)
+    /// — a Mainsail/Fluidd stop/start rebuilds it with fresh state. External
+    /// (non-API) service or IP changes are not observed until the next API action
+    /// or restart; Moonraker needs systemd/netlink events for those too, which
+    /// phobos does not have.
+    ///
+    /// WHY ON-Core, NOT off_core, AND DEEP-COPIED PER REQUEST: the cache is built
+    /// AND freed (on invalidate) under the Core lock, so handleSystemInfo must run
+    /// under Core too (NOT off_core) or a concurrent invalidate could free the
+    /// cache mid-serialize. Each request returns a `jv.deepCopy` into its own
+    /// arena, so the response is serialized (outside Core) from memory the
+    /// invalidate cannot free. Do not mark this endpoint off_core.
+    system_info_cache: ?std.json.Value = null,
+    system_info_arena: ?std.heap.ArenaAllocator = null,
     /// In-memory service state: allowed_service → { active_state, sub_state }.
     /// Populated on first access; tracks starts/stops/restarts requested via
     /// the service action handlers. The smp_allocator default lets a
@@ -285,6 +309,7 @@ pub const MachineCtx = struct {
             th.join();
             self.proc_stat_thread = null;
         }
+        if (self.system_info_arena) |*ar| ar.deinit();
         if (self.sudo_password) |p| self.gpa.free(p);
         if (self.provider_owned) self.gpa.free(self.provider_name);
         self.sudo_password = null;
@@ -1125,13 +1150,28 @@ fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
 /// fields.
 pub fn handleSystemInfo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
-    // Built fresh per request: most fields are static, but service_state (live
-    // systemd state) and network/canbus (live `ip` output, IP can change) are
-    // not, so caching them froze them. system_info is called rarely (once per UI
-    // connect), so the per-call cost is fine. The endpoint runs UNDER Core (not
-    // off_core) so buildServiceState's refreshServiceStates serializes with the
-    // /machine/services/* handlers that mutate the same ctx.services map.
-    return buildSystemInfoValue(ctx, alloc);
+    // See the MachineCtx.system_info_cache doc comment for the full rationale
+    // (cache to avoid 2 subprocesses/call; invalidated on service actions; runs
+    // under Core; deep-copied per request so an invalidate can't free it mid-use).
+    if (ctx.io == null) return buildSystemInfoValue(ctx, alloc); // bare tests
+    if (ctx.system_info_cache == null) {
+        var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+        errdefer arena.deinit(); // build failure must not leak the arena
+        const built = try buildSystemInfoValue(ctx, arena.allocator());
+        ctx.system_info_arena = arena; // commit both together only on success
+        ctx.system_info_cache = built;
+    }
+    return jv.deepCopy(alloc, ctx.system_info_cache.?);
+}
+
+/// Drop the cached system_info so the next request rebuilds it with fresh
+/// service_state / network. Called under Core whenever a service action mutates
+/// ctx.services. Safe to free here because handleSystemInfo runs under Core too
+/// (it never serializes the cache directly — it returns a deep copy).
+pub fn invalidateSystemInfo(ctx: *MachineCtx) void {
+    if (ctx.system_info_arena) |*ar| ar.deinit();
+    ctx.system_info_arena = null;
+    ctx.system_info_cache = null;
 }
 
 fn buildSystemInfoValue(ctx: *MachineCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
@@ -1511,6 +1551,9 @@ fn supervisorState(out: []const u8) struct { []const u8, []const u8 } {
 fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allocator, action: ServiceAction) !std.json.Value {
     const name = try getStr(params, "service");
     if (!isServiceAllowed(name)) return error.Forbidden;
+    // This action changes service_state, so the cached system_info is now stale —
+    // drop it (covers every exit below). Runs under Core, same as handleSystemInfo.
+    defer invalidateSystemInfo(ctx);
 
     const kind = providerKind(ctx.provider_name);
     // `none` keeps state in-memory only; otherwise run the manager when wired.

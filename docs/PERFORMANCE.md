@@ -21,13 +21,12 @@ Throughput / latency, Klippy stubbed, same host (vegeta, p50 latency):
 |---|---|---|
 | `server.info` @9k | **9 000/s · 0.05 ms** | 9 000/s · 0.43 ms |
 | `server.config` @5k | **5 000/s · 0.06 ms** | 5 000/s · 0.48 ms |
+| `machine.system_info` @5k | **5 000/s · 0.04 ms** (cached) | 2 000/s · 0.22 ms |
 | `server.database.get_item` @5k | **5 000/s · 0.08 ms** | (n/a — Moonraker query path needs a fuller Klippy handshake) |
 | `printer.objects.query` (Klippy-proxied) | **~4 000/s, scales with load** | — |
 
 Local reads run **~5–8× lower latency** than Moonraker's asyncio path with a
-tighter tail. (`machine.system_info` is rebuilt per request — it carries live
-service/network state — so it is not in this table; it is called once per UI
-connect, not a hot path.) The Klippy-proxy path
+tighter tail. The Klippy-proxy path
 (`objects.query`) used to serialise on the single `Core` lock and cap ~1 k req/s;
 after the off-`Core` work below it does **~4 k req/s** and scales. See the
 [optimisation journey](#optimisation-journey).
@@ -118,6 +117,7 @@ endpoint it most affected. All driven by the profiling below.
 | drop status deep-copy | parse Klippy response into the request arena with `parseFromSliceLeaky(.alloc_always)` (copies strings, no full-tree deep-copy) | fewer copies per `query` |
 | off-Core local reads | `server.info`/`config`/`database.get_item` lock-free (store is thread-safe; `server.info` gets a leaf mutex) | reads run in parallel instead of serialising |
 | bound handler stack (32-bit) | own `std.Io.Threaded` with a 1 MB stack vs the 16 MB default | VSZ **2.1 GB → 180 MB**; RSS/throughput unchanged |
+| cache `machine.system_info` | it spawned `ip` + `systemctl` per call; cache it (like Moonraker), invalidate on service actions, deep-copy per request, keep on-Core | **165/s → 5 000/s** (p50 5 s → 0.04 ms), still reflects live service state |
 | stream file downloads | `respondStreaming` instead of `allocRemaining(.unlimited)` | 150 MB download: **+150 MB spike → flat (+0.1 MB)** |
 | stream file uploads | incremental multipart scan straight to disk | 150 MB upload: **+150 MB spike → flat (+0.14 MB)** |
 | cap stored value depth | `exceedsDepth` on DB insert (Stringify's 256-level stack would crash) | closes a deep-value `POST`→`GET` crash/DoS |
@@ -313,10 +313,14 @@ tests pass, including the real-Klippy-proxy path.
    `server.database.get_item` are now `off_core` (the store
    is internally synchronised; `server.info` gets a small leaf `state_mutex` for the
    Klippy-mutated fields) — they run in parallel instead of serialising.
-4. **`machine.system_info` stays on-Core, rebuilt per request.** A cache was
-   tried but it froze the live `service_state`/network fields and raced the
-   `ctx.services` map against the `/machine/services/*` handlers; the endpoint is
-   called once per UI connect, so per-request rebuild is the correct trade-off.
+4. **`machine.system_info` cached, correctly.** It spawned two subprocesses
+   (`ip`, `systemctl`) per call, so it is cached like Moonraker — but the cache is
+   **invalidated on every API service action** (`doServiceAction`) so a Mainsail
+   stop/start stays fresh, kept **on-Core** (the cache is built/freed under the
+   lock), and **deep-copied per request** so an invalidate can't free it
+   mid-serialize. The three bugs a naive cache caused (frozen service state, a
+   `ctx.services` race, an error-path leak) are documented at the field so it is
+   not re-broken.
 
 Bounded connection concurrency was already in place (`io.zig`,
 `max_concurrent_conns = 128`). All of the above land with **1239 tests passing**
