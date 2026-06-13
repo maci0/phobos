@@ -551,9 +551,12 @@ pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
         // Matches Moonraker: "No valid device named <x>"
         return error.NotFound;
     };
-    // Determine the action: if `action` param is present → POST semantics;
-    // otherwise → GET semantics (status query).
-    const action: []const u8 = if (getOptStr(params, "action")) |a| blk: {
+    // GET = status query; POST applies `action` (on/off/toggle). Key on the
+    // transport's injected `_method`, NOT on whether `action` is present —
+    // otherwise `GET ...?action=on` would power the device on (unsafe method).
+    const is_post = if (getOptStr(params, "_method")) |m| std.mem.eql(u8, m, "POST") else false;
+    const action: []const u8 = if (is_post) blk: {
+        const a = getOptStr(params, "action") orelse return error.InvalidParams;
         const al = std.ascii.allocLowerString(alloc, a) catch a;
         if (!std.mem.eql(u8, al, "on") and !std.mem.eql(u8, al, "off") and !std.mem.eql(u8, al, "toggle")) {
             return error.InvalidParams;
@@ -748,7 +751,7 @@ test "handleSingleDevice: POST action=on changes state" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addDevice("psu", "gpio", "off", false);
-    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\"}"), a);
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("psu").?.string);
     // State persisted.
     try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
@@ -761,9 +764,9 @@ test "handleSingleDevice: POST action=toggle flips state" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addDevice("psu", "gpio", "off", false);
-    const v1 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\"}"), a);
+    const v1 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v1.object.get("psu").?.string);
-    const v2 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\"}"), a);
+    const v2 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("off", v2.object.get("psu").?.string);
 }
 
@@ -774,7 +777,7 @@ test "handleSingleDevice: POST action=invalid returns InvalidParams" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addDevice("psu", "gpio", "off", false);
-    try testing.expectError(error.InvalidParams, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"banana\"}"), a));
+    try testing.expectError(error.InvalidParams, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"banana\",\"_method\":\"POST\"}"), a));
 }
 
 test "handleSingleDevice: locked_while_printing blocks mutating actions while printing" {
@@ -786,9 +789,9 @@ test "handleSingleDevice: locked_while_printing blocks mutating actions while pr
     try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
     ctx.setPrintingActive(true);
 
-    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\"}"), a));
-    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"off\"}"), a));
-    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\"}"), a));
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a));
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"off\",\"_method\":\"POST\"}"), a));
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}"), a));
     // status is allowed even when locked (read-only).
     const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\"}"), a);
     try testing.expectEqualStrings("off", v.object.get("psu").?.string);
@@ -804,7 +807,7 @@ test "handleSingleDevice: locked_while_printing allows operations when not print
     defer ctx.deinit();
     try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
     // printing_active defaults to false — lock not enforced.
-    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\"}"), a);
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("psu").?.string);
 }
 
@@ -816,7 +819,7 @@ test "handleSingleDevice: unlocked device unaffected by printing_active" {
     defer ctx.deinit();
     try ctx.addDevice("fan", "gpio", "off", false); // locked_while_printing=false
     ctx.setPrintingActive(true);
-    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"fan\",\"action\":\"on\"}"), a);
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"fan\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("fan").?.string);
 }
 

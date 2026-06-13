@@ -681,11 +681,16 @@ fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.me
 
 /// Read the full request body into `alloc`. Returns an empty slice when there
 /// is no body.
+/// Cap for non-upload request bodies. JSON-RPC / DB-value / form bodies are
+/// small; large gcode goes through the streaming upload path, not here. Without
+/// a cap a single large POST could drive the daemon to OOM.
+const max_request_body = 32 * 1024 * 1024;
+
 fn readBody(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const u8 {
     if (req.head.content_length == null or req.head.content_length.? == 0) return &.{};
     var rbuf: [16 * 1024]u8 = undefined;
     const reader = req.readerExpectNone(&rbuf);
-    return reader.allocRemaining(alloc, .unlimited);
+    return reader.allocRemaining(alloc, .limited(max_request_body));
 }
 
 // ---------------------------------------------------------------------------

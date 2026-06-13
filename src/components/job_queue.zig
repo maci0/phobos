@@ -247,6 +247,9 @@ pub const JobQueueCtx = struct {
     /// When transition_gcode is configured, it is sent first (between-job gcode
     /// injection, matching Moonraker's _start_next_job → _load_next_job flow).
     fn dispatchNextJob(self: *JobQueueCtx) !void {
+        // Defensive: the worker thread dereferences dispatchFn/klippy; if a
+        // concurrent teardown nulled them, bail rather than unwrap null.
+        if (self.dispatchFn == null or self.klippy == null) return;
         if (self.jobs.items.len == 0) return;
         const front = &self.jobs.items[0];
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -1443,7 +1446,11 @@ test "transition_delay: handleStart respects delay config" {
 
     const result = try handleStart(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
-    // Immediate dispatch since delay == 0
+    // Dispatch runs on a worker thread now (always-async); join before asserting.
+    if (ctx.delay_thread) |th| {
+        th.join();
+        ctx.delay_thread = null;
+    }
     try testing.expect(cap.called);
 }
 
@@ -1682,6 +1689,11 @@ test "handleStart: dispatches next job when wired and queued" {
 
     const result = try handleStart(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    // Dispatch runs on a worker thread now (always-async); join before asserting.
+    if (ctx.delay_thread) |th| {
+        th.join();
+        ctx.delay_thread = null;
+    }
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);
 }
@@ -1840,6 +1852,11 @@ test "onJobStateChanged complete: auto-advances and dispatches next" {
     ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
 
     try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len); // front job removed
+    // Auto-advance dispatch runs on a worker thread now; join before asserting.
+    if (ctx.delay_thread) |th| {
+        th.join();
+        ctx.delay_thread = null;
+    }
     try testing.expectEqualStrings("ready", ctx.queue_state);
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);

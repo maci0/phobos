@@ -371,11 +371,11 @@ pub fn handleStatus(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator
 /// POST /server/spoolman/spool_id (spool_id param) → set active spool
 pub fn handleSpoolId(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
-    // Determine if this is a POST (has spool_id in params object) or GET.
-    // The same handler is used for both - POST sets, GET returns current.
-    // When called from POST path, params will have "spool_id" key (possibly null).
+    // GET returns the active spool; POST sets it. Dispatch on the transport's
+    // injected `_method`, NOT on whether `spool_id` is present — otherwise a GET
+    // with `?spool_id=5` would mutate state (unsafe method).
     const is_post = switch (params) {
-        .object => |obj| obj.contains("spool_id"),
+        .object => |obj| if (obj.get("_method")) |m| (m == .string and std.mem.eql(u8, m.string, "POST")) else false,
         else => false,
     };
 
@@ -731,7 +731,7 @@ test "spoolman WS: deletion clears the active spool only when it matches" {
     var nb = NullBus.init(a);
     var ctx = makeCtx(a, &mem, &nb);
 
-    _ = try handleSpoolId(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 5}"), a);
+    _ = try handleSpoolId(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 5, \"_method\": \"POST\"}"), a);
     ctx.handleSpoolDeletedLocked(99);
     try testing.expectEqual(@as(i64, 5), ctx.getSpoolId().?);
     ctx.handleSpoolDeletedLocked(5);
@@ -868,7 +868,7 @@ test "handleSpoolId POST: sets active spool and persists" {
     var ctx = makeCtx(a, &mem, &nb);
 
     // POST with spool_id = 42
-    const params = try mkParams(a, "{\"spool_id\": 42}");
+    const params = try mkParams(a, "{\"spool_id\": 42, \"_method\": \"POST\"}");
     const result = try handleSpoolId(@ptrCast(&ctx), params, a);
     try testing.expectEqual(@as(i64, 42), result.object.get("spool_id").?.integer);
 
@@ -914,7 +914,7 @@ test "handleSetActiveSpool: remote method sets/clears the active spool" {
     try testing.expectEqual(@as(i64, 7), (try handleSpoolId(@ptrCast(&ctx), .null, a)).object.get("spool_id").?.integer);
 
     // Clear via the remote method (spool_id null).
-    _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": null}"), a);
+    _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": null, \"_method\": \"POST\"}"), a);
     try testing.expectEqual(std.json.Value.null, (try handleSpoolId(@ptrCast(&ctx), .null, a)).object.get("spool_id").?);
 }
 
@@ -947,11 +947,11 @@ test "handleSpoolId POST: set to null clears active spool" {
     var ctx = makeCtx(a, &mem, &nb);
 
     // Set first
-    const set_params = try mkParams(a, "{\"spool_id\": 5}");
+    const set_params = try mkParams(a, "{\"spool_id\": 5, \"_method\": \"POST\"}");
     _ = try handleSpoolId(@ptrCast(&ctx), set_params, a);
 
     // Clear (spool_id: null)
-    const clear_params = try mkParams(a, "{\"spool_id\": null}");
+    const clear_params = try mkParams(a, "{\"spool_id\": null, \"_method\": \"POST\"}");
     const result = try handleSpoolId(@ptrCast(&ctx), clear_params, a);
     try testing.expectEqual(.null, result.object.get("spool_id").?);
 }
