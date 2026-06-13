@@ -157,13 +157,20 @@ pub fn resolveBindAddr(
 /// Testable without filesystem access (pair with parseString).
 pub fn extractBindAddr(cfg: *const config.ConfigParser, default_host: []const u8, default_port: u16) !struct { []const u8, u16 } {
     const host = cfg.get("server", "host") orelse default_host;
-    const port: u16 = if (cfg.hasOption("server", "port"))
-        @intCast(cfg.getInt("server", "port") catch |err| {
+    var port: u16 = default_port;
+    if (cfg.hasOption("server", "port")) {
+        const raw = cfg.getInt("server", "port") catch |err| {
             std.debug.print("phobos: warning: invalid [server] port in config: {} — using default\n", .{err});
             return .{ host, default_port };
-        })
-    else
-        default_port;
+        };
+        // Range-check before @intCast: getInt returns i64, so an out-of-range
+        // value (e.g. 70000 or -1) parses fine and would panic the cast.
+        if (raw < 1 or raw > 65535) {
+            std.debug.print("phobos: warning: [server] port {d} out of range — using default\n", .{raw});
+            return .{ host, default_port };
+        }
+        port = @intCast(raw);
+    }
 
     return .{ host, port };
 }

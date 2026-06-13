@@ -264,13 +264,6 @@ pub fn handleParsedAuth(
         return handleRedirect(target, body, alloc);
     }
 
-    // File manager upload: POST /server/files/upload (multipart form body).
-    if (method == .POST and std.mem.eql(u8, path, "/server/files/upload")) {
-        if (srv.file_ctx) |fctx| {
-            return handleUpload(srv, fctx, target, body, alloc);
-        }
-    }
-
     // File manager download / delete: /server/files/<root>/<path...>. Matched by
     // prefix so the dynamic tail is captured. Skips the named sub-routes above
     // (list, roots, directory, ...) which the registry already owns.
@@ -499,7 +492,6 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
                 web_socket.flush() catch return;
                 var ws_srv = ws.WsServer{
                     .io = io,
-                    .core = srv.core,
                     .dispatcher = srv.dispatcher,
                     .conns = conns,
                     .klippy = srv.klippy_ctx,
@@ -792,44 +784,6 @@ fn fileErrResponse(alloc: std.mem.Allocator, err: anyerror) !Response {
     return .{ .status = status, .body = b };
 }
 
-/// Handle POST /server/files/upload with a multipart/form-data body. Extracts
-/// the file part and the `root` / `path` / `filename` form fields, writes the
-/// file, emits notify_filelist_changed, and returns Moonraker's response shape:
-///   { "item": {path, root, size, modified, permissions}, "print_started": false,
-///     "print_queued": false, "action": "create_file" }
-fn handleUpload(
-    srv: *Server,
-    fctx: *file_manager.FileCtx,
-    target: []const u8,
-    body: []const u8,
-    alloc: std.mem.Allocator,
-) !Response {
-    _ = target;
-    const form = parseMultipart(alloc, body) catch {
-        const b = try errorBody(alloc, 400, "Invalid upload form");
-        return .{ .status = .bad_request, .body = b };
-    };
-    const filename = form.filename orelse {
-        const b = try errorBody(alloc, 400, "No file name specified in upload form");
-        return .{ .status = .bad_request, .body = b };
-    };
-    const root_name = form.root orelse "gcodes";
-
-    // Build the request path: <root>/[<path>/]<filename>.
-    const req_path = if (form.path) |p|
-        try std.fmt.allocPrint(alloc, "{s}/{s}/{s}", .{ root_name, std.mem.trim(u8, p, "/"), filename })
-    else
-        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_name, filename });
-
-    // Run the actual write + notify under the serialized core.
-    const io = srv.io;
-    const result = srv.core.run(srv.io, uploadWrite, .{ fctx, io, alloc, req_path, form.content }) catch |err| {
-        return fileErrResponse(alloc, err);
-    };
-    const b = try wrapResult(alloc, result);
-    return .{ .status = .ok, .body = b };
-}
-
 /// Read from `r` into `out` (or discard, when null) until `sep` is found,
 /// consuming `sep`. Holds back at most `sep.len - 1` bytes between reads, so it
 /// works in bounded memory regardless of the part size (the whole point — a
@@ -909,13 +863,24 @@ fn handleUploadStreaming(
             const dir = std.Io.Dir.cwd();
             if (std.fs.path.dirname(res.abs)) |d| dir.createDirPath(io, d) catch {};
             const file = dir.createFile(io, res.abs, .{}) catch return bad(req, alloc, headers, "Write error");
+            // If the body is truncated or the disk fills mid-stream, unlink the
+            // partial file so a half-written gcode can't be listed/printed.
+            var upload_ok = false;
+            errdefer if (!upload_ok) dir.deleteFile(io, res.abs) catch {};
             {
                 defer file.close(io);
                 var wbuf2: [32 * 1024]u8 = undefined;
                 var fw = file.writer(io, &wbuf2);
-                streamUntilSeparator(r, &fw.interface, part_sep) catch return bad(req, alloc, headers, "Invalid upload form");
-                fw.interface.flush() catch return bad(req, alloc, headers, "Write error");
+                streamUntilSeparator(r, &fw.interface, part_sep) catch {
+                    dir.deleteFile(io, res.abs) catch {};
+                    return bad(req, alloc, headers, "Invalid upload form");
+                };
+                fw.interface.flush() catch {
+                    dir.deleteFile(io, res.abs) catch {};
+                    return bad(req, alloc, headers, "Write error");
+                };
             }
+            upload_ok = true;
             resolved = res;
         } else if (extractDispositionField(cd, "name")) |n| {
             // Small field value — buffer it (root / path).
@@ -938,100 +903,6 @@ fn handleUploadStreaming(
         return bad(req, alloc, headers, "Write error");
     const b = try wrapResult(alloc, result);
     try req.respond(b, .{ .status = .ok, .extra_headers = headers });
-}
-
-/// Perform the upload write + notify. Separated so it runs inside Core.run with
-/// a comptime-known function. Returns the upload response object.
-fn uploadWrite(
-    fctx: *file_manager.FileCtx,
-    io: Io,
-    alloc: std.mem.Allocator,
-    req_path: []const u8,
-    content: []const u8,
-) anyerror!std.json.Value {
-    const resolved = file_manager.resolveRequestPath(fctx, alloc, req_path) catch |err| return mapResolveErr(err);
-    if (!resolved.root.full_access) return error.Forbidden;
-    if (resolved.rel.len == 0) return error.InvalidParams;
-
-    const dir = std.Io.Dir.cwd();
-    // Ensure parent directories exist.
-    if (std.fs.path.dirname(resolved.abs)) |d| dir.createDirPath(io, d) catch {};
-    dir.writeFile(io, .{ .sub_path = resolved.abs, .data = content }) catch return error.InvalidParams;
-
-    return file_manager.buildUploadResult(fctx, alloc, resolved);
-}
-
-/// Parsed multipart form fields relevant to an upload.
-const MultipartForm = struct {
-    root: ?[]const u8 = null,
-    path: ?[]const u8 = null,
-    filename: ?[]const u8 = null,
-    content: []const u8 = "",
-};
-
-/// Minimal multipart/form-data parser: scans for `--<boundary>` delimited parts,
-/// reads each part's `Content-Disposition` to find the field `name` (and
-/// `filename` for the file part), and captures the bytes after the blank line.
-/// The boundary is inferred from the body (first `--` line). This is a pragmatic
-/// parser sufficient for the spine; it does not handle nested multipart.
-fn parseMultipart(alloc: std.mem.Allocator, body: []const u8) !MultipartForm {
-    var form = MultipartForm{};
-    if (body.len < 3) return error.Invalid;
-
-    // The boundary delimiter is the first line (up to CRLF or LF).
-    const first_nl = std.mem.indexOfScalar(u8, body, '\n') orelse return error.Invalid;
-    var boundary_line = body[0..first_nl];
-    boundary_line = std.mem.trimEnd(u8, boundary_line, "\r");
-    if (!std.mem.startsWith(u8, boundary_line, "--")) return error.Invalid;
-    const delim = try std.fmt.allocPrint(alloc, "\n{s}", .{boundary_line});
-
-    // Split the body on the boundary delimiter.
-    var it = std.mem.splitSequence(u8, body, delim);
-    // First chunk is the leading boundary line (already the delimiter w/o the
-    // leading newline) — skip parts that are not real form sections.
-    while (it.next()) |raw_part| {
-        var part = raw_part;
-        // Skip the opening boundary token and the trailing "--" terminator.
-        if (std.mem.startsWith(u8, part, boundary_line)) {
-            part = part[boundary_line.len..];
-        }
-        part = std.mem.trimStart(u8, part, "\r\n");
-        if (part.len == 0 or std.mem.startsWith(u8, part, "--")) continue;
-
-        // Header block ends at the first blank line (CRLFCRLF or LFLF).
-        const sep = std.mem.indexOf(u8, part, "\r\n\r\n") orelse
-            std.mem.indexOf(u8, part, "\n\n") orelse continue;
-        const sep_len: usize = if (part[sep] == '\r') 4 else 2;
-        const headers = part[0..sep];
-        var content = part[sep + sep_len ..];
-        // Strip exactly ONE trailing line terminator (the CRLF / LF / lone CR
-        // that precedes the next boundary delimiter — the split on "\n--<b>"
-        // can leave a bare CR). Trimming greedily would corrupt file content
-        // that legitimately ends with newlines.
-        if (std.mem.endsWith(u8, content, "\r\n")) {
-            content = content[0 .. content.len - 2];
-        } else if (std.mem.endsWith(u8, content, "\n") or std.mem.endsWith(u8, content, "\r")) {
-            content = content[0 .. content.len - 1];
-        }
-
-        // Find the disposition name / filename.
-        const name = extractDispositionField(headers, "name");
-        const fname = extractDispositionField(headers, "filename");
-
-        if (fname) |fn_val| {
-            form.filename = fn_val;
-            form.content = content;
-        } else if (name) |n| {
-            if (std.mem.eql(u8, n, "root")) {
-                form.root = content;
-            } else if (std.mem.eql(u8, n, "path")) {
-                form.path = content;
-            } else if (std.mem.eql(u8, n, "filename") and form.filename == null) {
-                form.filename = content;
-            }
-        }
-    }
-    return form;
 }
 
 /// Extract a `key="value"` parameter from a Content-Disposition header block.

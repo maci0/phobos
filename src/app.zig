@@ -95,6 +95,14 @@ fn mkdirRaw(path_z: [:0]const u8) void {
 /// `moonraker-sql.db`-compatible and needs no `io` handle; `file` is the pure-Zig
 /// atomic-rename JSON backend (no C dependency) and requires an `io` handle.
 /// Selected via `[database] backend` in the config.
+/// Coerce a config i64 to a smaller int, falling back to `default` when it is
+/// out of range — so a typo'd/oversized numeric config value can't panic the
+/// `@intCast`. (getInt returns i64; e.g. `port: 70000` parses but won't fit u16.)
+fn clampInt(comptime T: type, raw: i64, default: T) T {
+    if (raw < std.math.minInt(T) or raw > std.math.maxInt(T)) return default;
+    return @intCast(raw);
+}
+
 pub const StoreBackend = enum { sqlite, file };
 
 /// Owns the concrete store backend behind the DataStore vtable, so App can hold
@@ -562,7 +570,7 @@ pub const App = struct {
         // Wire MQTT broker config from [mqtt] section.
         if (cfg.hasSection("mqtt")) {
             const host = cfg.get("mqtt", "host") orelse "localhost";
-            const port: u16 = @intCast(cfg.getInt("mqtt", "port") catch @as(i64, 1883));
+            const port: u16 = clampInt(u16, cfg.getInt("mqtt", "port") catch 1883, 1883);
             const username = cfg.get("mqtt", "username");
             const password = cfg.get("mqtt", "password");
             self.mqtt_ctx.setConfig(host, port, username, password) catch {};
@@ -573,7 +581,7 @@ pub const App = struct {
                 self.mqtt_ctx.setClientId(cid) catch {};
             }
             if (cfg.get("mqtt", "default_qos")) |qos_str| {
-                const qos: u8 = @intCast(std.fmt.parseInt(i64, qos_str, 10) catch @as(i64, 0));
+                const qos: u8 = clampInt(u8, std.fmt.parseInt(i64, qos_str, 10) catch 0, 0);
                 self.mqtt_ctx.setDefaultQos(qos);
             }
             if (cfg.getBoolean("mqtt", "enable_moonraker_api")) |ena| {
@@ -686,7 +694,7 @@ pub const App = struct {
                 const initial_blue: f64 = cfg.getFloat(sect, "initial_blue") catch 0.5;
                 const initial_white: f64 = cfg.getFloat(sect, "initial_white") catch 0.5;
                 const address: ?[]const u8 = cfg.get(sect, "address");
-                const port: u16 = @intCast(cfg.getInt(sect, "port") catch @as(i64, 80));
+                const port: u16 = clampInt(u16, cfg.getInt(sect, "port") catch 80, 80);
                 const protocol: ?[]const u8 = cfg.get(sect, "protocol");
                 // Build initial_colors as JSON array [R,G,B,W].
                 const initial_colors = std.fmt.allocPrint(self.alloc, "[{d},{d},{d},{d}]", .{ initial_red, initial_green, initial_blue, initial_white }) catch continue;
@@ -1062,7 +1070,11 @@ pub const SensorMqttBridge = struct {
 /// KlippyCtx.request(). Called via JobQueueCtx.setKlippyDispatch.
 fn jobQueueKlippyDispatch(klippy_opaque: *anyopaque, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const k: *KlippyConnectionCtx = @ptrCast(@alignCast(klippy_opaque));
-    return k.request(method, params, alloc);
+    // Always off-Core: job dispatch runs on a dedicated worker thread
+    // (job_queue.scheduleNextJobDispatch), never on the Klippy reader thread
+    // (which would block on its own response) and never while holding Core
+    // (requestConcurrent's core.unlock would then be unbalanced).
+    return k.requestOffCore(method, params, alloc);
 }
 
 // --- tests ---------------------------------------------------------------

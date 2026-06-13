@@ -170,6 +170,8 @@ pub const Dispatcher = struct {
             // connected", 503), so it surfaces as code 503 with that message.
             const code: i64 = switch (err) {
                 error.InvalidParams => -32602,
+                error.Forbidden => 403,
+                error.NotFound => 404,
                 error.KlippyDisconnected => 503,
                 error.MqttNotConfigured => 503,
                 error.ServiceUnavailable => 503,
@@ -178,6 +180,8 @@ pub const Dispatcher = struct {
             };
             const msg: []const u8 = switch (err) {
                 error.InvalidParams => "Invalid params",
+                error.Forbidden => "Forbidden",
+                error.NotFound => "Not Found",
                 error.KlippyDisconnected => "Klippy Host not connected",
                 error.MqttNotConfigured => "MQTT not configured",
                 error.ServiceUnavailable => "Service Unavailable",

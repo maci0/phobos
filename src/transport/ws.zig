@@ -62,8 +62,8 @@ pub const Dispatch = struct {
 /// fuzz-testable. Parses `request_json`; if the method is one of the
 /// connection-bound WS methods it is serviced here against `conn` (updating
 /// `conns` for identify); otherwise the request is forwarded verbatim to the
-/// shared `dispatcher` under `core`. Returns owned response bytes (empty slice
-/// for notifications / no-id requests).
+/// shared `dispatcher`, which takes the Core lock itself per-method. Returns
+/// owned response bytes (empty slice for notifications / no-id requests).
 ///
 /// `alloc` should be a per-request arena; the returned slice lives in it.
 pub fn dispatchMessage(
@@ -208,7 +208,6 @@ fn handleIdentify(
 /// but adds the `Connections` registry.
 pub const WsServer = struct {
     io: Io,
-    core: *Core,
     dispatcher: *jsonrpc.Dispatcher,
     conns: *Connections,
     /// Klippy bridge, so connection-scoped `printer.objects.subscribe` can

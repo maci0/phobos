@@ -143,17 +143,18 @@ pub const JobQueueCtx = struct {
     }
 
     pub fn deinit(self: *JobQueueCtx) void {
-        // Cancel any running delay timer and join before freeing memory.
-        // Null out io / klippy state first so the timer thread can observe
-        // the early-exit guard even if it already read the cancel flag.
+        // Stop and JOIN the dispatch worker BEFORE nulling its inputs. A worker
+        // already inside dispatchNextJob reads self.klippy/dispatchFn; nulling
+        // those before the join would crash it with use-of-null. The cancel flag
+        // breaks any in-progress transition-delay sleep so the join is prompt.
         self.delay_cancel.store(true, .release);
-        self.klippy = null;
-        self.dispatchFn = null;
-        self.io = null;
         if (self.delay_thread) |th| {
             th.join();
             self.delay_thread = null;
         }
+        self.klippy = null;
+        self.dispatchFn = null;
+        self.io = null;
         for (self.jobs.items) |*j| j.deinit(self.gpa);
         self.jobs.deinit(self.gpa);
         self.jobs = .empty;
@@ -224,19 +225,22 @@ pub const JobQueueCtx = struct {
     /// emits a queue_changed notification once the dispatch is complete.
     /// The timer is cancelled by cancelDelayTimer (called on pause/abort/error).
     fn scheduleNextJobDispatch(self: *JobQueueCtx) !void {
-        if (self.transition_delay > 0) {
-            // Cancel any previously running timer.
-            self.cancelDelayTimer();
-            self.delay_cancel.store(false, .release);
-            self.queue_state = "loading";
-            self.delay_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, transitionDelayCallback, .{self}) catch |e| {
-                self.delay_thread = null;
-                return e;
-            };
-        } else {
-            // No delay — dispatch inline.
-            try self.dispatchNextJob();
-        }
+        // Always dispatch on a dedicated worker thread (even at delay 0). The
+        // dispatch makes a BLOCKING Klippy request, and the callers
+        // (handleStart under Core, onJobStateChanged on the Klippy reader thread,
+        // the timer) can none of them safely block here: the reader would block
+        // on its own response, and an on-Core caller would unbalance the Core
+        // lock. The worker holds no Core and is not the reader, so requestOffCore
+        // is safe. Tests using a non-Klippy capture dispatch can join the thread.
+        self.cancelDelayTimer(); // join + clear any previous timer
+        self.delay_cancel.store(false, .release);
+        // "loading" only means "waiting out the transition delay"; for an
+        // immediate (delay-0) dispatch leave the state as the caller set it.
+        if (self.transition_delay > 0) self.queue_state = "loading";
+        self.delay_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, transitionDelayCallback, .{self}) catch |e| {
+            self.delay_thread = null;
+            return e;
+        };
     }
 
     /// Dispatch start-gcode for the front job to Klippy.
@@ -373,37 +377,27 @@ pub const JobQueueCtx = struct {
 /// / deinit can join promptly (matching the proc_stat timer pattern).
 /// Exits early when the cancel flag is set (pause/abort/deinit).
 fn transitionDelayCallback(self: *JobQueueCtx) void {
-    if (self.transition_delay <= 0) {
-        self.delay_thread = null;
-        return;
-    }
-
-    const io = self.io orelse {
-        self.delay_thread = null;
-        return;
-    };
-    var remaining: f64 = self.transition_delay;
-    while (remaining > 0) : (remaining -= 1.0) {
-        const chunk_ns: i64 = if (remaining >= 1.0)
-            @as(i64, 1_000_000_000)
-        else
-            @intFromFloat(remaining * 1_000_000_000.0);
-        io.sleep(std.Io.Duration.fromNanoseconds(@intCast(chunk_ns)), .awake) catch {};
-
-        if (self.delay_cancel.load(.acquire)) {
-            self.delay_thread = null;
-            return;
+    // Sleep out the transition delay (0 = dispatch immediately), checking the
+    // cancel flag between 1s chunks so cancelDelayTimer/deinit can join promptly.
+    // NOTE: never null `delay_thread` from here — only the joiner
+    // (cancelDelayTimer/deinit) clears it after join(), else a concurrent joiner
+    // could read null, skip the join, and leak/UAF the still-running thread.
+    if (self.io) |io| {
+        var remaining: f64 = self.transition_delay;
+        while (remaining > 0) : (remaining -= 1.0) {
+            const chunk_ns: i64 = if (remaining >= 1.0)
+                @as(i64, 1_000_000_000)
+            else
+                @intFromFloat(remaining * 1_000_000_000.0);
+            io.sleep(std.Io.Duration.fromNanoseconds(@intCast(chunk_ns)), .awake) catch {};
+            if (self.delay_cancel.load(.acquire)) return;
         }
     }
-
-    // Guard: if deinit nulled these fields, bail out.
-    if (self.io == null or self.dispatchFn == null) {
-        self.delay_thread = null;
-        return;
-    }
-
+    // Bail if cancelled or torn down. deinit nulls dispatchFn, so that check
+    // alone detects teardown; io may be null in tests with a non-Klippy capture
+    // dispatch (delay-0 dispatch itself needs no io — only the sleep does).
+    if (self.delay_cancel.load(.acquire) or self.dispatchFn == null) return;
     _ = self.dispatchNextJob() catch {};
-    self.delay_thread = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,6 +1237,11 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
     try ctx.scheduleNextJobDispatch();
+    // Dispatch now runs on a worker thread (always-async); join it before asserting.
+    if (ctx.delay_thread) |th| {
+        th.join();
+        ctx.delay_thread = null;
+    }
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);
 }

@@ -348,10 +348,6 @@ pub const ReadBuf = struct {
     }
 };
 
-/// Recursively copy a JSON value into `alloc`. Used to lift a request result out
-/// of the parse buffer (which references the soon-freed `payload`) in a single
-/// pass — cheaper than the former serialize-to-text + re-parse round-trip.
-
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
