@@ -176,6 +176,9 @@ pub const Dispatcher = struct {
                 error.MqttNotConfigured => 503,
                 error.ServiceUnavailable => 503,
                 error.UpdateRefusedPrinting => 503,
+                error.NotReady => 503,
+                error.PrinterLocked => 503,
+                error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => 400,
                 else => -32603,
             };
             const msg: []const u8 = switch (err) {
@@ -186,6 +189,13 @@ pub const Dispatcher = struct {
                 error.MqttNotConfigured => "MQTT not configured",
                 error.ServiceUnavailable => "Service Unavailable",
                 error.UpdateRefusedPrinting => "Update Refused: Klippy is printing",
+                error.NotReady => "Service Unavailable",
+                error.PrinterLocked => "Printer is busy",
+                error.AgentNotConnected => "Agent not connected",
+                error.AgentRpcNotSupported => "Agent method not supported",
+                error.AgentAlreadyRegistered => "Agent already registered",
+                error.ReservedEvent => "Reserved event name",
+                error.EstimatorNotAvailable => "Estimator not available",
                 else => "Internal error",
             };
             return jv.errorResponse(alloc, id, code, msg);

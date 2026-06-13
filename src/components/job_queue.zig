@@ -558,6 +558,9 @@ pub fn handleStatus(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator
 /// POST /server/job_queue/job — enqueue filenames
 pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
+    // `filenames` is required (Moonraker's get_list raises when absent) — without
+    // this an empty POST silently enqueues nothing and returns 200.
+    if (params != .object or params.object.get("filenames") == null) return error.InvalidParams;
     const files = try getStrList(params, "filenames");
     const reset = getOptBool(params, "reset", false);
 
