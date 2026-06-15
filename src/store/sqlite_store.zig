@@ -32,14 +32,25 @@ pub const SqliteStore = struct {
     /// sequence below atomic, so two writers racing on sub-keys of the same
     /// record would clobber each other without this. Mirrors FileStore.
     ///
-    /// A spinlock (not std.Io.Mutex) because SqliteStore opens with no io
-    /// handle (see app.zig); the RMW sections are short and writes are rare, so
-    /// contention is negligible.
+    /// A backoff spinlock (not std.Io.Mutex) because SqliteStore opens with no io
+    /// handle (see app.zig). The RMW sections are short and writes are rare, so
+    /// the uncontended path is a single CAS. Under contention the waiter yields
+    /// the CPU rather than busy-spinning: the holder runs sqlite3_step (which can
+    /// block on disk, up to the 5s busy_timeout) and may be descheduled, so a
+    /// pure spin could burn a core for a long time on the 2-core embedded target.
     rmw_lock: std.atomic.Value(bool) = .init(false),
 
     fn lockRmw(self: *SqliteStore) void {
+        var spins: u8 = 0;
         while (self.rmw_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
+            if (spins < 64) {
+                spins += 1;
+                std.atomic.spinLoopHint();
+            } else {
+                // Holder is taking a while (descheduled or blocked in sqlite I/O)
+                // — give up the CPU instead of spinning hot.
+                std.Thread.yield() catch std.atomic.spinLoopHint();
+            }
         }
     }
     fn unlockRmw(self: *SqliteStore) void {
