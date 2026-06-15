@@ -55,6 +55,25 @@ pub fn authorize(hook: AuthHook, transport: TransportType, route: *const Route) 
     return hook(transport, route.auth_required);
 }
 
+/// Run the real auth chain for the binary file routes (upload / download /
+/// delete). These are handled outside the registry — the streaming upload in
+/// `serveConnInner` and the download/delete branch in `handleParsedAuth` both
+/// short-circuit before the auth gate — so without this they would be reachable
+/// by any unauthenticated client. Moonraker serves them via AuthorizedFileHandler
+/// (auth_required), so the same JWT → oneshot → API key → trusted-IP chain
+/// applies here. Returns true when the request must be rejected as unauthorized.
+/// When no authorization component is wired (bare-Server tests) this is a no-op.
+fn fileRouteUnauthorized(srv: *Server, transport: TransportType, creds: HttpCreds, alloc: std.mem.Allocator) bool {
+    const auth_ctx = srv.auth orelse return false;
+    if (transport == .INTERNAL) return false;
+    return authz.authenticateRequest(auth_ctx, alloc, transport, .{
+        .jwt = creds.jwt,
+        .oneshot = creds.oneshot,
+        .api_key = creds.api_key,
+        .remote_ip = creds.remote_ip,
+    }, true) == .unauthorized;
+}
+
 /// A built HTTP response: status + JSON body. The body is owned by the caller's
 /// allocator (typically a per-request arena).
 pub const Response = struct {
@@ -269,6 +288,10 @@ pub fn handleParsedAuth(
     // (list, roots, directory, ...) which the registry already owns.
     if ((method == .GET or method == .DELETE) and isFileServePath(path)) {
         if (srv.file_ctx) |fctx| {
+            if (fileRouteUnauthorized(srv, transport, creds, alloc)) {
+                const b = try errorBody(alloc, 401, "Unauthorized");
+                return .{ .status = .unauthorized, .body = b };
+            }
             return handleFileServe(srv, fctx, method.?, path, alloc);
         }
     }
@@ -377,6 +400,7 @@ pub fn handleParsedAuth(
             error.NotReady => 503,
             error.PrinterLocked => 503,
             error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => 400,
+            error.KlippyRequestFailed => 400,
             else => 500,
         };
         const msg: []const u8 = switch (err) {
@@ -394,6 +418,7 @@ pub fn handleParsedAuth(
             error.AgentAlreadyRegistered => "Agent already registered",
             error.ReservedEvent => "Reserved event name",
             error.EstimatorNotAvailable => "Estimator not available",
+            error.KlippyRequestFailed => "Klippy request failed",
             else => "Internal Server Error",
         };
         const status: std.http.Status = switch (err) {
@@ -406,6 +431,7 @@ pub fn handleParsedAuth(
             error.UpdateRefusedPrinting => .service_unavailable,
             error.NotReady, error.PrinterLocked => .service_unavailable,
             error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => .bad_request,
+            error.KlippyRequestFailed => .bad_request,
             else => .internal_server_error,
         };
         const b = try errorBody(alloc, code, msg);
@@ -537,10 +563,24 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         // Streaming upload: handle POST /server/files/upload before reading the
         // body, so a large gcode streams to disk in constant memory instead of
         // buffering the whole multipart blob in the request arena.
-        if (req.head.method == .POST and std.mem.eql(u8, pathOf(target), "/server/files/upload")) {
+        // `/api/files/local` is the OctoPrint slicer-upload alias (different
+        // response shape; same streaming multipart body).
+        const upload_path = pathOf(target);
+        const is_octo_upload = std.mem.eql(u8, upload_path, "/api/files/local");
+        if (req.head.method == .POST and (std.mem.eql(u8, upload_path, "/server/files/upload") or is_octo_upload)) {
             if (srv.file_ctx) |fctx| {
                 const up_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
-                handleUploadStreaming(srv, fctx, &req, alloc, up_headers) catch {};
+                // File upload is a write primitive and must pass the same auth
+                // chain as every other REST route (Moonraker's upload handler is
+                // auth_required). Reject before touching the multipart body; the
+                // body is left undrained, so close the connection afterward.
+                if (fileRouteUnauthorized(srv, .HTTP, creds, alloc)) {
+                    const eb = errorBody(alloc, 401, "Unauthorized") catch
+                        "{\"error\":{\"code\":401,\"message\":\"Unauthorized\"}}";
+                    req.respond(eb, .{ .status = .unauthorized, .extra_headers = up_headers }) catch {};
+                    return;
+                }
+                handleUploadStreaming(srv, fctx, &req, alloc, up_headers, is_octo_upload) catch {};
                 // The streaming parser consumes the body only up to the closing
                 // boundary (and on a rejected upload, not at all), so the request
                 // body is not fully drained — the connection is no longer
@@ -698,6 +738,14 @@ fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.me
 /// a cap a single large POST could drive the daemon to OOM.
 const max_request_body = 32 * 1024 * 1024;
 
+/// Hard upper bound on a single streamed file-upload part. Real gcode is far
+/// smaller; this only backstops an unbounded/never-terminating upload body from
+/// filling the disk. (Free-space is the practical limit; this bounds the stream.)
+const max_upload_bytes = 2 * 1024 * 1024 * 1024;
+/// Multipart form fields (root/path) are a few bytes; cap them tight so a giant
+/// field value can't balloon the request arena before the file part is reached.
+const max_field_bytes = 64 * 1024;
+
 fn readBody(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const u8 {
     if (req.head.content_length == null or req.head.content_length.? == 0) return &.{};
     var rbuf: [16 * 1024]u8 = undefined;
@@ -806,10 +854,15 @@ fn fileErrResponse(alloc: std.mem.Allocator, err: anyerror) !Response {
 /// works in bounded memory regardless of the part size (the whole point — a
 /// gcode upload streams to disk instead of buffering). Errors if the stream ends
 /// before `sep` (a malformed body).
-fn streamUntilSeparator(r: *std.Io.Reader, out: ?*std.Io.Writer, sep: []const u8) !void {
+fn streamUntilSeparator(r: *std.Io.Reader, out: ?*std.Io.Writer, sep: []const u8, max: usize) !void {
+    var consumed: usize = 0;
     while (true) {
         const win = r.peekGreedy(sep.len) catch return error.MalformedUpload;
         if (std.mem.indexOf(u8, win, sep)) |idx| {
+            // Cap is enforced on the part content (excludes the separator) so a
+            // client can neither fill the disk with a huge file part nor balloon
+            // the request arena with a huge form field (CWE-400).
+            if (consumed + idx > max) return error.UploadTooLarge;
             if (out) |w| try w.writeAll(win[0..idx]);
             r.toss(idx + sep.len);
             return;
@@ -817,6 +870,8 @@ fn streamUntilSeparator(r: *std.Io.Reader, out: ?*std.Io.Writer, sep: []const u8
         // No full match in the window; the tail might be a partial `sep`, so keep
         // the last sep.len-1 bytes and flush the rest, then pull more.
         const flush = win.len - (sep.len - 1);
+        if (consumed + flush > max) return error.UploadTooLarge;
+        consumed += flush;
         if (out) |w| try w.writeAll(win[0..flush]);
         r.toss(flush);
         r.fillMore() catch return error.MalformedUpload;
@@ -834,6 +889,10 @@ fn handleUploadStreaming(
     req: *std.http.Server.Request,
     alloc: std.mem.Allocator,
     headers: []const std.http.Header,
+    /// true for the OctoPrint `/api/files/local` slicer-upload endpoint, which
+    /// returns the OctoPrint response shape (raw, wrap_result=false) instead of
+    /// Moonraker's `{result: ...}`.
+    octoprint: bool,
 ) !void {
     const io = srv.io;
     var rbuf: [64 * 1024]u8 = undefined;
@@ -842,6 +901,12 @@ fn handleUploadStreaming(
         fn f(rq: *std.http.Server.Request, a: std.mem.Allocator, h: []const std.http.Header, msg: []const u8) !void {
             const b = try errorBody(a, 400, msg);
             try rq.respond(b, .{ .status = .bad_request, .extra_headers = h });
+        }
+    }.f;
+    const tooLarge = struct {
+        fn f(rq: *std.http.Server.Request, a: std.mem.Allocator, h: []const std.http.Header) !void {
+            const b = try errorBody(a, 413, "Upload too large");
+            try rq.respond(b, .{ .status = .payload_too_large, .extra_headers = h });
         }
     }.f;
 
@@ -888,8 +953,9 @@ fn handleUploadStreaming(
                 defer file.close(io);
                 var wbuf2: [32 * 1024]u8 = undefined;
                 var fw = file.writer(io, &wbuf2);
-                streamUntilSeparator(r, &fw.interface, part_sep) catch {
+                streamUntilSeparator(r, &fw.interface, part_sep, max_upload_bytes) catch |e| {
                     dir.deleteFile(io, res.abs) catch {};
+                    if (e == error.UploadTooLarge) return tooLarge(req, alloc, headers);
                     return bad(req, alloc, headers, "Invalid upload form");
                 };
                 fw.interface.flush() catch {
@@ -902,10 +968,17 @@ fn handleUploadStreaming(
         } else if (extractDispositionField(cd, "name")) |n| {
             // Small field value — buffer it (root / path).
             var vb: std.Io.Writer.Allocating = .init(alloc);
-            streamUntilSeparator(r, &vb.writer, part_sep) catch return bad(req, alloc, headers, "Invalid upload form");
+            streamUntilSeparator(r, &vb.writer, part_sep, max_field_bytes) catch |e| {
+                if (e == error.UploadTooLarge) return tooLarge(req, alloc, headers);
+                return bad(req, alloc, headers, "Invalid upload form");
+            };
             if (std.mem.eql(u8, n, "root")) root_field = vb.written() else if (std.mem.eql(u8, n, "path")) path_field = vb.written();
         } else {
-            streamUntilSeparator(r, null, part_sep) catch return bad(req, alloc, headers, "Invalid upload form");
+            // Unknown field: discard, but still bound it so it can't run forever.
+            streamUntilSeparator(r, null, part_sep, max_field_bytes) catch |e| {
+                if (e == error.UploadTooLarge) return tooLarge(req, alloc, headers);
+                return bad(req, alloc, headers, "Invalid upload form");
+            };
         }
 
         // After the separator: "--" terminates the body; otherwise "\r\n" then the next part.
@@ -918,6 +991,24 @@ fn handleUploadStreaming(
     // notify_filelist_changed + result build run under Core (emitLocked assumes it).
     const result = srv.core.run(io, file_manager.buildUploadResult, .{ fctx, alloc, res }) catch
         return bad(req, alloc, headers, "Write error");
+    if (octoprint) {
+        // OctoPrint upload response (wrap_result=false): slicers ("Upload to
+        // OctoPrint") expect { files: { local: { name, path, origin } }, done }.
+        const name = std.fs.path.basename(res.rel);
+        var local: std.json.ObjectMap = .empty;
+        try local.put(alloc, "name", .{ .string = name });
+        try local.put(alloc, "path", .{ .string = res.rel });
+        try local.put(alloc, "origin", .{ .string = "local" });
+        var files: std.json.ObjectMap = .empty;
+        try files.put(alloc, "local", .{ .object = local });
+        var out: std.json.ObjectMap = .empty;
+        try out.put(alloc, "files", .{ .object = files });
+        try out.put(alloc, "done", .{ .bool = true });
+        const ov: std.json.Value = .{ .object = out };
+        const ob = try jv.serializeAlloc(alloc, ov);
+        try req.respond(ob, .{ .status = .ok, .extra_headers = headers });
+        return;
+    }
     const b = try wrapResult(alloc, result);
     try req.respond(b, .{ .status = .ok, .extra_headers = headers });
 }
@@ -943,7 +1034,7 @@ test "streamUntilSeparator: extracts content before the separator and consumes i
     var rdr = std.Io.Reader.fixed("FILEDATA" ++ sep ++ "TRAILING");
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
-    try streamUntilSeparator(&rdr, &out.writer, sep);
+    try streamUntilSeparator(&rdr, &out.writer, sep, max_upload_bytes);
     try std.testing.expectEqualStrings("FILEDATA", out.written());
     // The separator is consumed; the trailing bytes remain.
     const rest = try rdr.peekGreedy(1);
@@ -959,7 +1050,7 @@ test "streamUntilSeparator: binary content with near-boundary bytes is not split
     var rdr = std.Io.Reader.fixed(content ++ sep);
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
-    try streamUntilSeparator(&rdr, &out.writer, sep);
+    try streamUntilSeparator(&rdr, &out.writer, sep, max_upload_bytes);
     try std.testing.expectEqualStrings(content, out.written());
 }
 
@@ -969,21 +1060,93 @@ test "streamUntilSeparator: empty content (separator at start)" {
     var rdr = std.Io.Reader.fixed(sep ++ "rest");
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
-    try streamUntilSeparator(&rdr, &out.writer, sep);
+    try streamUntilSeparator(&rdr, &out.writer, sep, max_upload_bytes);
     try std.testing.expectEqualStrings("", out.written());
 }
 
 test "streamUntilSeparator: missing separator errors (malformed body)" {
     var rdr = std.Io.Reader.fixed("data with no boundary at all");
-    try std.testing.expectError(error.MalformedUpload, streamUntilSeparator(&rdr, null, "\r\n--BOUNDARY"));
+    try std.testing.expectError(error.MalformedUpload, streamUntilSeparator(&rdr, null, "\r\n--BOUNDARY", max_upload_bytes));
 }
 
 test "streamUntilSeparator: discards body when out is null and still consumes the separator" {
     const sep = "\r\n--B";
     var rdr = std.Io.Reader.fixed("ignored field value" ++ sep ++ "next");
-    try streamUntilSeparator(&rdr, null, sep);
+    try streamUntilSeparator(&rdr, null, sep, max_upload_bytes);
     const rest = try rdr.peekGreedy(1);
     try std.testing.expectEqualStrings("next", rest);
+}
+
+test "streamUntilSeparator: content exceeding the cap returns UploadTooLarge" {
+    const a = std.testing.allocator;
+    const sep = "\r\n--B";
+    var rdr = std.Io.Reader.fixed("0123456789" ++ sep);
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    // Cap of 5 < 10 bytes of content before the separator.
+    try std.testing.expectError(error.UploadTooLarge, streamUntilSeparator(&rdr, &out.writer, sep, 5));
+}
+
+test "streamUntilSeparator: content exactly at the cap is allowed" {
+    const a = std.testing.allocator;
+    const sep = "\r\n--B";
+    var rdr = std.Io.Reader.fixed("01234" ++ sep);
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    try streamUntilSeparator(&rdr, &out.writer, sep, 5);
+    try std.testing.expectEqualStrings("01234", out.written());
+}
+
+test "fuzz streamUntilSeparator: arbitrary body + separator never crashes" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var body_buf: [256]u8 = undefined;
+            const blen = smith.valueRangeAtMostWithHash(u32, 0, body_buf.len, 1);
+            smith.bytesWithHash(body_buf[0..blen], 2);
+            var sep_buf: [8]u8 = undefined;
+            const slen = smith.valueRangeAtMostWithHash(u32, 1, sep_buf.len, 3);
+            smith.bytesWithHash(sep_buf[0..slen], 4);
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            var rdr = std.Io.Reader.fixed(body_buf[0..blen]);
+            var out: std.Io.Writer.Allocating = .init(arena.allocator());
+            // Must return one of the typed errors or succeed — never panic, never
+            // write past the separator, never over-read.
+            _ = streamUntilSeparator(&rdr, &out.writer, sep_buf[0..slen], max_field_bytes) catch {};
+        }
+    }.run, .{});
+}
+
+test "extractDispositionField: parses filename and name, handles missing/oversized" {
+    const cd = "Content-Disposition: form-data; name=\"file\"; filename=\"a b.gcode\"";
+    try std.testing.expectEqualStrings("a b.gcode", extractDispositionField(cd, "filename").?);
+    try std.testing.expectEqualStrings("file", extractDispositionField(cd, "name").?);
+    // Missing key → null.
+    try std.testing.expect(extractDispositionField(cd, "charset") == null);
+    // Unterminated quote → null (no closing ").
+    try std.testing.expect(extractDispositionField("name=\"unterminated", "name") == null);
+    // Key longer than the search buffer → null, no overflow.
+    try std.testing.expect(extractDispositionField(cd, "x" ** 64) == null);
+    // Empty value is valid and returns "".
+    try std.testing.expectEqualStrings("", extractDispositionField("name=\"\"", "name").?);
+}
+
+test "fuzz extractDispositionField: arbitrary header bytes never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var hdr: [256]u8 = undefined;
+            const n = smith.valueRangeAtMostWithHash(u32, 0, hdr.len, 1);
+            smith.bytesWithHash(hdr[0..n], 2);
+            // Any returned slice must lie within the input header bytes.
+            inline for (.{ "filename", "name", "charset" }) |key| {
+                if (extractDispositionField(hdr[0..n], key)) |v| {
+                    const base = @intFromPtr(hdr[0..n].ptr);
+                    const vp = @intFromPtr(v.ptr);
+                    try std.testing.expect(vp >= base and vp + v.len <= base + n);
+                }
+            }
+        }
+    }.run, .{});
 }
 
 fn buildTestServer(alloc: std.mem.Allocator, io: Io, core: *Core, d: *jsonrpc.Dispatcher, reg: *Registry, info: *methods.ServerInfo) !Server {

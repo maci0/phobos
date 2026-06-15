@@ -45,9 +45,9 @@ pub const Core = struct {
     }
 };
 
-/// A minimal FIFO notification queue, serialized through a `Core`.
-/// Task 8 grows this into the full notification bus; for now it provides
-/// just enough: enqueue under the lock, drain in FIFO order.
+/// A minimal FIFO notification queue, serialized through a `Core`: enqueue under
+/// the lock, drain in FIFO order. The production fan-out lives in `NotifyBus`
+/// (`notify.zig`); this is the precursor primitive the serialized-drain tests use.
 pub fn Fifo(comptime T: type) type {
     return struct {
         const Self = @This();

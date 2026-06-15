@@ -23,6 +23,7 @@ const serial_mod = @import("serial.zig");
 const Registry = registry.Registry;
 const Core = @import("../server/core.zig").Core;
 const clock = @import("../util/clock.zig");
+const sleep = @import("../util/sleep.zig");
 
 /// Parsed TD-1 serial line. Mirrors td1.py `_parse_line`: the device emits
 /// comma-separated lines; when there are ≥6 fields, field[4] is the TD value
@@ -249,15 +250,10 @@ pub const Td1Ctx = struct {
     fn pollLoop(self: *Td1Ctx) void {
         const io = self.io orelse return;
         const core = self.core orelse return;
-        // Sleep the interval in 100 ms chunks so stopPolling's join returns
-        // promptly (≤100 ms) instead of blocking a full interval.
-        const chunks = @max(1, self.poll_interval_ns / 100_000_000);
         while (!self.poll_stop.load(.acquire)) {
-            var i: u64 = 0;
-            while (i < chunks and !self.poll_stop.load(.acquire)) : (i += 1) {
-                io.sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
-            }
-            if (self.poll_stop.load(.acquire)) break;
+            // Chunked so stopPolling's join returns promptly instead of blocking
+            // a full interval.
+            if (sleep.chunked(io, self.poll_interval_ns / 1_000_000, &self.poll_stop)) break;
             // Run the scan under the Core lock so conns mutations are serialized
             // with handleGetData.
             core.run(io, Td1Ctx.scanOnce, .{ self, io, self.tty_root, self.dev_prefix, self.baud });

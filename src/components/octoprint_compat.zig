@@ -15,6 +15,9 @@
 //!   POST /api/printer/command                      → _post_command
 //!   GET  /api/printerprofiles                      → _get_printerprofiles
 //!   POST /api/files/moonraker/(?P<relative_path>.+) → _select_file
+//!   POST /api/files/local                          → slicer upload (streamed;
+//!        handled directly in http_transport.zig, returns the OctoPrint
+//!        `{files:{local:{…}},done:true}` shape)
 //!
 //! State tracking: `printer_state()` reports live Klippy+print_stats state.
 //! When Klippy is not connected/started → "Offline"; when Klippy is started
@@ -235,19 +238,21 @@ pub fn handleCommand(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
 /// GET /api/printerprofiles → the single _default profile.
 pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const makeAxis = struct {
-        fn f(a: std.mem.Allocator) !std.json.Value {
+        fn f(a: std.mem.Allocator, speed: f64) !std.json.Value {
             var ax = obj(a);
-            try ax.put(a, "speed", .{ .float = 6000.0 });
+            try ax.put(a, "speed", .{ .float = speed });
             try ax.put(a, "inverted", .{ .bool = false });
             return .{ .object = ax };
         }
     }.f;
 
+    // Moonraker reports 6000 for x/y/z and 300 for the extruder axis
+    // (octoprint_compat.py _default profile).
     var axes = obj(alloc);
-    try axes.put(alloc, "x", try makeAxis(alloc));
-    try axes.put(alloc, "y", try makeAxis(alloc));
-    try axes.put(alloc, "z", try makeAxis(alloc));
-    try axes.put(alloc, "e", try makeAxis(alloc));
+    try axes.put(alloc, "x", try makeAxis(alloc, 6000.0));
+    try axes.put(alloc, "y", try makeAxis(alloc, 6000.0));
+    try axes.put(alloc, "z", try makeAxis(alloc, 6000.0));
+    try axes.put(alloc, "e", try makeAxis(alloc, 300.0));
 
     var def = obj(alloc);
     try def.put(alloc, "id", .{ .string = "_default" });
@@ -452,7 +457,12 @@ test "handlePrinterProfiles returns _default profile with axes" {
     const r = try handlePrinterProfiles(@ptrCast(&ctx), .null, arena.allocator());
     const def = r.object.get("profiles").?.object.get("_default").?.object;
     try testing.expectEqualStrings("_default", def.get("id").?.string);
-    try testing.expect(def.get("axes").?.object.get("x") != null);
+    const axes = def.get("axes").?.object;
+    try testing.expect(axes.get("x") != null);
+    // x/y/z report 6000; the extruder axis reports 300 (Moonraker parity).
+    try testing.expectEqual(@as(f64, 6000.0), axes.get("x").?.object.get("speed").?.float);
+    try testing.expectEqual(@as(f64, 6000.0), axes.get("z").?.object.get("speed").?.float);
+    try testing.expectEqual(@as(f64, 300.0), axes.get("e").?.object.get("speed").?.float);
 }
 
 test "handleCommand and handleSelectFile return empty objects" {

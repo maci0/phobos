@@ -69,7 +69,7 @@ JSON-RPC responses (`JsonRPC` in `moonraker/common.py`):
 - Error: `{"jsonrpc":"2.0","error":{"code":<int>,"message":<str>},"id":<id>}`.
 - Standard JSON-RPC error codes used: `-32600` Invalid Request, `-32601` Method not
   found, `-32602` Invalid params, `-32700` parse error, plus passthrough of internal
-  status codes (e.g. 400, 401, 404, 500).
+  status codes (e.g. 400, 401, 403, 404, 503, 500).
 
 ### 1.3 Fixed (non-`register_endpoint`) HTTP routes
 
@@ -279,6 +279,9 @@ lives in those docs; this section captures the load-bearing parameters per metho
 - `server.files.delete_file` — DELETE, **WebSocket transport only**. Params: `path`.
 - File **upload**: `POST /server/files/upload` (multipart, HTTP only). Fields: `file`,
   `root`, `path`, `checksum`, `print` (auto-start). Returns item + print_started.
+  - *phobos:* streams the file part straight to disk and honors `file`, `root`
+    (default `gcodes`), `path` only; `checksum` and `print` are accepted but not
+    acted on, and the result is always `print_started: false` (no auto-start yet).
 - Static download: `GET /server/files/<root>/<path>` via `FileRequestHandler`
   (registered per-root via `register_static_file_handler`).
 

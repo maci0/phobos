@@ -92,12 +92,6 @@ pub const Listener = struct {
         }
     }
 
-    /// Per-connection task body for a context-carrying handler.
-    fn connTaskCtx(ctx: *anyopaque, io: Io, stream: net.Stream, handler: CtxHandler) void {
-        defer stream.close(io);
-        handler(ctx, io, stream);
-    }
-
     /// Upper bound on connection handlers running at once. `std.Io.Threaded`
     /// grows its worker pool to the peak number of concurrent `concurrent` tasks
     /// and never shrinks it, so an unbounded accept loop lets a burst of slow

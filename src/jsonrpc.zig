@@ -1,12 +1,16 @@
-/// JSON-RPC 2.0 dispatcher.
-///
-/// Handler signature:
-///   fn(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value
-///
-/// Handlers return either a result Value (caller owns any allocations inside) or an error.
-/// Returning `error.InvalidParams` maps to -32602; any other error maps to -32603 Internal error.
-///
-/// Notifications (requests without "id") execute the handler but produce no response bytes.
+//! JSON-RPC 2.0 dispatcher.
+//!
+//! Handler signature:
+//!   fn(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value
+//!
+//! Handlers return either a result Value (caller owns any allocations inside) or an error.
+//! Errors are mapped to JSON-RPC codes matching Moonraker's `JsonRPC.execute_method`:
+//! `error.InvalidParams` → -32602, `error.NotFound` → -32601, `error.Forbidden` → 403,
+//! the Klippy/MQTT/service-unavailable family → 503, the agent/estimator/Klippy-request
+//! family → 400, and any unmapped error → -32603 Internal error. See the `switch (err)`
+//! in `handleParsedRoot` for the full table.
+//!
+//! Notifications (requests without "id") execute the handler but produce no response bytes.
 const std = @import("std");
 const jv = @import("json/value.zig");
 const Core = @import("server/core.zig").Core;
@@ -91,9 +95,13 @@ pub const Dispatcher = struct {
             return jv.errorResponse(alloc, .null, -32700, "Parse error");
         };
         defer parsed.deinit();
+        return self.handleParsedRoot(parsed.value, alloc);
+    }
 
-        const root = parsed.value;
-
+    /// Same as `handle` but takes an already-parsed JSON-RPC root, so callers
+    /// that already parsed the request (the WS transport peeks the method) don't
+    /// pay a second parse. `root`'s backing memory must outlive this call.
+    pub fn handleParsedRoot(self: *Dispatcher, root: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
         // Must be an object
         if (root != .object) {
             return jv.errorResponse(alloc, .null, -32600, "Invalid Request");
@@ -171,7 +179,9 @@ pub const Dispatcher = struct {
             const code: i64 = switch (err) {
                 error.InvalidParams => -32602,
                 error.Forbidden => 403,
-                error.NotFound => 404,
+                // Moonraker remaps a 404 ServerError to -32601 over JSON-RPC
+                // (JsonRPC.execute_method); only HTTP keeps the literal 404.
+                error.NotFound => -32601,
                 error.KlippyDisconnected => 503,
                 error.MqttNotConfigured => 503,
                 error.ServiceUnavailable => 503,
@@ -179,6 +189,10 @@ pub const Dispatcher = struct {
                 error.NotReady => 503,
                 error.PrinterLocked => 503,
                 error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => 400,
+                // Klippy rejected the command (bad gcode, unknown mcu command, …):
+                // a client error, not a phobos internal error. Moonraker surfaces
+                // these as 400, not 500/-32603.
+                error.KlippyRequestFailed => 400,
                 else => -32603,
             };
             const msg: []const u8 = switch (err) {
@@ -196,6 +210,7 @@ pub const Dispatcher = struct {
                 error.AgentAlreadyRegistered => "Agent already registered",
                 error.ReservedEvent => "Reserved event name",
                 error.EstimatorNotAvailable => "Estimator not available",
+                error.KlippyRequestFailed => "Klippy request failed",
                 else => "Internal error",
             };
             return jv.errorResponse(alloc, id, code, msg);

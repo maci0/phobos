@@ -335,6 +335,13 @@ pub const KlippySim = struct {
                 else
                     "";
                 if (std.mem.eql(u8, script, "RESTART") or std.mem.eql(u8, script, "FIRMWARE_RESTART")) {
+                    // Real Klippy keeps running for a moment after sending the
+                    // gcode response before the restart tears down the socket.
+                    // Settle briefly so the client reliably drains the buffered
+                    // `result:"ok"` frame above before it observes EOF from the
+                    // `defer stream.close()` in runThread — otherwise the close
+                    // races the response and the pending request fails flakily.
+                    std.Io.sleep(io, .{ .nanoseconds = 50_000_000 }, .real) catch {};
                     self.stop_flag.store(true, .release);
                     return;
                 }

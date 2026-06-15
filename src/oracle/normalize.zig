@@ -10,6 +10,7 @@
 //! and the whole normalizer is fuzzed.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 
 // ---------------------------------------------------------------------------
 // Rule set
@@ -405,13 +406,13 @@ fn normalizeFiles(alloc: std.mem.Allocator, arr: std.json.Array) error{OutOfMemo
                     if (val == .string) {
                         try new_obj.put(alloc, key, .{ .string = relativizePath(alloc, val.string) });
                     } else {
-                        try new_obj.put(alloc, key, try deepCopyValue(alloc, val));
+                        try new_obj.put(alloc, key, try jv.deepCopy(alloc, val));
                     }
                 } else if (val == .array) {
                     // Sort sections array.
                     var sec_arr: std.json.Array = .init(alloc);
                     for (val.array.items) |s| {
-                        try sec_arr.append(try deepCopyValue(alloc, s));
+                        try sec_arr.append(try jv.deepCopy(alloc, s));
                     }
                     sortJsonArray(sec_arr);
                     try new_obj.put(alloc, key, .{ .array = sec_arr });
@@ -427,31 +428,6 @@ fn normalizeFiles(alloc: std.mem.Allocator, arr: std.json.Array) error{OutOfMemo
     return .{ .array = new_arr };
 }
 
-fn deepCopyValue(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
-    return switch (val) {
-        .string => .{ .string = try alloc.dupe(u8, val.string) },
-        .integer => .{ .integer = val.integer },
-        .float => .{ .float = val.float },
-        .bool => .{ .bool = val.bool },
-        .null => .null,
-        .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
-        .object => |obj| {
-            var new_obj: std.json.ObjectMap = .empty;
-            var it = obj.iterator();
-            while (it.next()) |kv| {
-                try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopyValue(alloc, kv.value_ptr.*));
-            }
-            return .{ .object = new_obj };
-        },
-        .array => |arr| {
-            var new_arr: std.json.Array = .init(alloc);
-            for (arr.items) |item| {
-                try new_arr.append(try deepCopyValue(alloc, item));
-            }
-            return .{ .array = new_arr };
-        },
-    };
-}
 
 // ===========================================================================
 // Tests

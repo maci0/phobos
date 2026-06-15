@@ -300,21 +300,6 @@ pub const SensorCtx = struct {
         return self.sensors.getPtr(sensor_id).?;
     }
 
-    pub fn addParameterInfo(self: *SensorCtx, sensor_id: []const u8, param_name: []const u8, desc: []const u8, units: []const u8) !void {
-        const s = self.findSensor(sensor_id) orelse return error.NotFound;
-        const pi: ParameterInfo = .{
-            .name = try self.gpa.dupe(u8, param_name),
-            .desc = try self.gpa.dupe(u8, desc),
-            .units = try self.gpa.dupe(u8, units),
-        };
-        errdefer {
-            self.gpa.free(@constCast(pi.name));
-            self.gpa.free(@constCast(pi.desc));
-            self.gpa.free(@constCast(pi.units));
-        }
-        try s.param_info.append(self.gpa, pi);
-    }
-
     /// Configure a sensor's MQTT state topic (gpa-owned; replaces any previous).
     pub fn setSensorTopic(self: *SensorCtx, sensor_id: []const u8, topic: []const u8) !void {
         const s = self.findSensor(sensor_id) orelse return error.NotFound;
@@ -431,7 +416,11 @@ pub const SensorCtx = struct {
             changed = true;
         }
         if (!changed) return;
-        bus.emitLocked(io, notify.names.sensor_update, .{ .object = payload }) catch {};
+        // Moonraker send_event(SENSOR_EVENT_NAME, changed_data) → params is the
+        // single-element data tuple [changed_data]; emit requires a JSON array.
+        var arr: std.json.Array = .init(a);
+        arr.append(.{ .object = payload }) catch return;
+        bus.emitLocked(io, notify.names.sensor_update, .{ .array = arr }) catch {};
     }
 };
 
@@ -501,7 +490,11 @@ pub fn handleSensorMeasurements(ctx_ptr: *anyopaque, params: std.json.Value, all
     const sensor_name = getOptStr(params, "sensor") orelse "";
     if (sensor_name.len > 0) {
         const s = ctx.findSensor(sensor_name) orelse return error.NotFound;
-        return s.getSensorMeasurements(alloc);
+        // Moonraker wraps the result under the sensor name (sensor.py:331).
+        const m = try s.getSensorMeasurements(alloc);
+        var out: std.json.ObjectMap = .empty;
+        try out.put(alloc, sensor_name, m);
+        return .{ .object = out };
     }
     // All sensors.
     var out: std.json.ObjectMap = .empty;
@@ -734,7 +727,9 @@ test "handleSensorMeasurements: returns measurement history" {
     try s.setMeasurement(a, "temp", 20.0);
     const params = try mkParams(a, "{\"sensor\":\"s1\"}");
     const result = try handleSensorMeasurements(@ptrCast(&ctx), params, a);
-    const arr = result.object.get("temp").?.array;
+    // Moonraker wraps the result under the sensor name (sensor.py:331).
+    const meas = result.object.get("s1").?.object;
+    const arr = meas.get("temp").?.array;
     try testing.expectEqual(@as(usize, 2), arr.items.len);
 }
 

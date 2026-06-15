@@ -156,7 +156,9 @@ pub const WebcamCtx = struct {
             .gpa = alloc,
             .cams = .{},
         };
-        ctx.loadFromStore() catch {};
+        ctx.loadFromStore() catch |err| {
+            std.debug.print("phobos: warning: failed to load webcams from store: {} — saved webcams unavailable\n", .{err});
+        };
         return ctx;
     }
 
@@ -216,7 +218,9 @@ pub const WebcamCtx = struct {
 
         const db_val = toDbValue(a, cam) catch return;
         const uid_z = a.dupeZ(u8, cam.uid) catch return;
-        self.store.insertItem(a, ns, uid_z, db_val) catch {};
+        self.store.insertItem(a, ns, uid_z, db_val) catch |err| {
+            std.debug.print("phobos: warning: failed to persist webcam '{s}': {} — change will be lost on restart\n", .{ cam.uid, err });
+        };
     }
 
     /// Delete a webcam from the DataStore.
@@ -225,7 +229,10 @@ pub const WebcamCtx = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const uid_z = a.dupeZ(u8, uid) catch return;
-        _ = self.store.deleteItem(a, ns, uid_z) catch {};
+        _ = self.store.deleteItem(a, ns, uid_z) catch |err| switch (err) {
+            error.KeyNotFound => {}, // idempotent delete — nothing persisted
+            else => std.debug.print("phobos: warning: failed to delete webcam '{s}' from store: {} — may reappear on restart\n", .{ uid, err }),
+        };
     }
 
     /// Find cam by name (caller must hold mutex).

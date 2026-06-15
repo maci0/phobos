@@ -38,6 +38,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const clock = @import("../util/clock.zig");
+const sleep = @import("../util/sleep.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 const rss = @import("rss.zig");
@@ -176,7 +177,8 @@ pub const AnnouncementsCtx = struct {
         for (self.feeds.items) |f| {
             arr.append(.{ .string = f }) catch {};
         }
-        self.store.insertItem(arena, ns_feeds, feeds_key, .{ .array = arr }) catch {};
+        self.store.insertItem(arena, ns_feeds, feeds_key, .{ .array = arr }) catch |err|
+            std.debug.print("phobos: warning: failed to persist announcement feeds: {} — feed list lost on restart\n", .{err});
     }
 
     fn nextKeyStr(self: *AnnouncementsCtx, buf: []u8) ![]u8 {
@@ -407,7 +409,9 @@ pub const AnnouncementsCtx = struct {
                         }
                     }
                     if (!still_valid) {
-                        _ = self.store.deleteItem(alloc, ns_entries, kv.key_ptr.*) catch {};
+                        _ = self.store.deleteItem(alloc, ns_entries, kv.key_ptr.*) catch |err| {
+                            std.debug.print("phobos: warning: failed to remove stale announcement '{s}': {}\n", .{ kv.key_ptr.*, err });
+                        };
                         changed = true;
                     }
                 }
@@ -490,7 +494,9 @@ fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
         ne.put(alloc, "date_dismissed", .null) catch {};
         ne.put(alloc, "dismiss_wake", .null) catch {};
         const key_z = alloc.dupeZ(u8, kv.key_ptr.*) catch continue;
-        self.store.insertItem(alloc, ns_entries, key_z, .{ .object = ne }) catch {};
+        self.store.insertItem(alloc, ns_entries, key_z, .{ .object = ne }) catch |err| {
+            std.debug.print("phobos: warning: failed to persist announcement '{s}': {} — dismiss state lost on restart\n", .{ kv.key_ptr.*, err });
+        };
 
         // Emit notify_announcement_wake (lock-taking variant on the timer thread).
         var inner: std.json.ObjectMap = .empty;
@@ -505,8 +511,13 @@ fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
     const io = self.io orelse return;
     var elapsed: u64 = 0;
     while (!self.refresh_stop.load(.acquire)) {
-        io.sleep(std.Io.Duration.fromSeconds(1), .awake) catch {};
-        if (self.refresh_stop.load(.acquire)) break;
+        // Sleep the 1-second tick in 100 ms chunks, polling the stop flag between
+        // each, so deinit→join returns within ~100 ms instead of up to a full
+        // second. Across the e2e suite's hundreds of server start/stop cycles the
+        // old 1 s granularity compounded into minutes and tripped the test-runner
+        // timeout. (std.Thread sync primitives are gone in 0.16; this mirrors the
+        // chunked-sleep pattern already used by button.zig / td1.zig.)
+        if (sleep.chunked(io, 1000, &self.refresh_stop)) break;
 
         // Each second: re-surface any dismissed entries past their wake time.
         {
@@ -581,6 +592,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default: ?i64) ?i64 {
             return switch (v) {
                 .integer => |i| i,
                 .float => |f| @intFromFloat(f),
+                .string => |s| std.fmt.parseInt(i64, s, 10) catch default,
                 .null => null,
                 else => default,
             };
@@ -723,7 +735,9 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     }
 
     const key_z = try alloc.dupeZ(u8, key);
-    c.store.insertItem(alloc, ns_entries, key_z, .{ .object = new_entry }) catch {};
+    c.store.insertItem(alloc, ns_entries, key_z, .{ .object = new_entry }) catch |err| {
+        std.debug.print("phobos: warning: failed to persist dismissed announcement '{s}': {} — dismiss state lost on restart\n", .{ key, err });
+    };
 
     // Emit notify_announcement_dismissed (uses emitLocked — handler runs under Core lock).
     emitAnnouncementDismissed(c, alloc, entry_id);
@@ -737,19 +751,6 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
 // Notification emission
 // ---------------------------------------------------------------------------
 
-/// Emit `notify_announcement_update` with the current entries list.
-/// Only call when entries actually changed (e.g. after real RSS fetch).
-fn emitAnnouncementUpdate(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
-    const io = ctx.io orelse return;
-    const entries = ctx.listEntries(alloc, false) catch return;
-    if (entries.items.len == 0) return;
-    var inner: std.json.ObjectMap = .empty;
-    inner.put(alloc, "entries", .{ .array = entries }) catch return;
-    var params: std.json.Array = .init(alloc);
-    params.append(.{ .object = inner }) catch return;
-    ctx.bus.emitLocked(io, notify.names.announcement_update, .{ .array = params }) catch {};
-}
-
 /// Emit `notify_announcement_dismissed` for a single entry.
 fn emitAnnouncementDismissed(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator, entry_id: []const u8) void {
     const io = ctx.io orelse return;
@@ -758,18 +759,6 @@ fn emitAnnouncementDismissed(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator, e
     var params: std.json.Array = .init(alloc);
     params.append(.{ .object = inner }) catch return;
     ctx.bus.emitLocked(io, notify.names.announcement_dismissed, .{ .array = params }) catch {};
-}
-
-/// Emit `notify_announcement_wake` for a single entry.
-/// Only call when a dismissed entry's wake_time has been reached (requires
-/// a background timer / event loop, not yet implemented).
-fn emitAnnouncementWake(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator, entry_id: []const u8) void {
-    const io = ctx.io orelse return;
-    var inner: std.json.ObjectMap = .empty;
-    inner.put(alloc, "entry_id", .{ .string = entry_id }) catch return;
-    var params: std.json.Array = .init(alloc);
-    params.append(.{ .object = inner }) catch return;
-    ctx.bus.emitLocked(io, notify.names.announcement_wake, .{ .array = params }) catch {};
 }
 
 /// GET /server/announcements/feeds
@@ -841,23 +830,6 @@ pub fn handleDeleteFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     try obj.put(alloc, "feed", .{ .string = name_lower });
     try obj.put(alloc, "action", .{ .string = "removed" });
     return .{ .object = obj };
-}
-
-/// Dispatch for multi-verb /server/announcements/feed (POST=add, DELETE=remove).
-pub fn handleFeedDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    // This handler is registered for both verbs via multi-verb registration.
-    // The caller uses the correct JSON-RPC method name to disambiguate.
-    // For HTTP: POST routes call postFeed; DELETE routes call deleteFeed.
-    // For JSON-RPC: the method name already disambiguates.
-    // Since we can't tell verb from params alone, use heuristic: this
-    // handler is only called from the multi-verb JSON-RPC path where the
-    // method name selects the handler. Register separate per-verb handlers
-    // via HTTP-only strategy and use the dispatch only for the single shared
-    // entry point. See registration comments below.
-    _ = ctx;
-    _ = params;
-    _ = alloc;
-    return error.WrongDispatch; // should never be reached
 }
 
 /// Remove all entries belonging to a feed from the store.

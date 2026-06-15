@@ -144,16 +144,6 @@ pub const Strip = struct {
         }
     }
 
-    /// Moonraker: _wled_pixel(index) — read a single pixel's RGBW values
-    /// from chain_data as a slice of 4 u8s.
-    pub fn wledPixel(self: *const Strip, index: usize) []const u8 {
-        if (index < 1 or index > @as(usize, @intCast(self.chain_count))) return &.{};
-        const start = (index - 1) * color_size;
-        const end = index * color_size;
-        if (end > self.chain_data.len) return &.{};
-        return self.chain_data[start..end];
-    }
-
     /// Moonraker: set_wled(red, green, blue, white, index, transmit).
     /// Updates color data and conditionally builds the WLED JSON state
     /// (stub: in-memory only; real transmission is deferred to caller).
@@ -172,15 +162,6 @@ pub const Strip = struct {
         if (self.brightness == -1) self.brightness = 255;
     }
 
-    /// Moonraker: _set_initial_state() — restore strip to configured
-    /// initial preset/colors (called when WLED_ON with no preset args).
-    pub fn setInitialState(self: *Strip) void {
-        self.send_full_chain_data = true;
-        self.preset = self.initial_preset;
-        self.brightness = 255;
-        self.intensity = -1;
-        self.speed = -1;
-    }
 };
 
 // ---------------------------------------------------------------------------
@@ -382,7 +363,7 @@ pub const WledCtx = struct {
             var has_control = false;
             if (brightness > 0 or intensity >= 0 or speed >= 0) has_control = true;
             if (has_control) {
-                const tt: i64 = if (s.preset != -1) 0 else 0;
+                const tt: i64 = 0; // transition time: instant (matches Moonraker default)
                 // Simple: just send brightness/seg if preset is active.
                 if (s.preset != -1) {
                     body = std.fmt.bufPrint(&body_buf,
@@ -427,6 +408,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
             return switch (v) {
                 .integer => |i| i,
                 .float => |f| @intFromFloat(f),
+                .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
                 else => default_val,
             };
         },
@@ -541,7 +523,12 @@ pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
         // Matches Moonraker: "No valid strip named <x>"
         return error.NotFound;
     };
-    const action: []const u8 = if (getOptStr(params, "action")) |a| blk: {
+    // GET is read-only: ignore any `action` and report status. Only POST may
+    // mutate the strip (matches Moonraker _handle_single_wled_request, which
+    // reads `action` only on POST). Without this guard a GET with ?action=on
+    // would drive the hardware — an unsafe side-effecting GET.
+    const is_post = if (getOptStr(params, "_method")) |m| std.mem.eql(u8, m, "POST") else false;
+    const action: []const u8 = if (is_post) (if (getOptStr(params, "action")) |a| blk: {
         const al = std.ascii.allocLowerString(alloc, a) catch a;
         if (!std.mem.eql(u8, al, "on") and
             !std.mem.eql(u8, al, "off") and
@@ -551,7 +538,7 @@ pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
             return error.InvalidParams;
         }
         break :blk al;
-    } else "status";
+    } else "status") else "status";
 
     if (std.mem.eql(u8, action, "control")) {
         const brightness = getOptInt(params, "brightness", -1);
@@ -882,6 +869,19 @@ test "handleSingleStrip: GET returns strip info" {
     try testing.expectEqualStrings("off", s.get("status").?.string);
 }
 
+test "handleSingleStrip: GET ignores action (no side effect)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
+    // No _method → treated as GET; the `action=on` must be ignored.
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
+    try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
+    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
+}
+
 // ---- handleSingleStrip POST ----
 
 test "handleSingleStrip: POST action=on turns strip on" {
@@ -891,7 +891,7 @@ test "handleSingleStrip: POST action=on turns strip on" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"on\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
 }
 
@@ -903,10 +903,10 @@ test "handleSingleStrip: POST action=toggle flips status" {
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
     // off → on
-    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
     try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
     // on → off
-    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
     try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
 }
 
@@ -918,8 +918,8 @@ test "handleSingleStrip: POST action=off turns strip off" {
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
     // Turn on first, then off.
-    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"off\"}"), a);
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"on\"}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"off\"}"), a);
     try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
 }
 
@@ -930,7 +930,7 @@ test "handleSingleStrip: POST invalid action returns InvalidParams" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"dance\"}"), a));
+    try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"dance\"}"), a));
 }
 
 test "handleSingleStrip: POST action=control applies brightness and turns on" {
@@ -940,7 +940,7 @@ test "handleSingleStrip: POST action=control applies brightness and turns on" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"brightness\":128}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\",\"brightness\":128}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
     try testing.expectEqual(@as(i64, 128), s.get("brightness").?.integer);
@@ -957,7 +957,7 @@ test "handleSingleStrip: POST action=control with preset and intensity" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"preset\":3,\"intensity\":200}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\",\"preset\":3,\"intensity\":200}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
     try testing.expectEqual(@as(i64, 3), s.get("preset").?.integer);
@@ -971,7 +971,7 @@ test "handleSingleStrip: POST action=control with all params" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\",\"brightness\":200,\"preset\":5,\"intensity\":180,\"speed\":50}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\",\"brightness\":200,\"preset\":5,\"intensity\":180,\"speed\":50}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
     try testing.expectEqual(@as(i64, 200), s.get("brightness").?.integer);
@@ -987,7 +987,7 @@ test "handleSingleStrip: POST action=control with no params still turns on" {
     var ctx = testCtx(a);
     defer ctx.deinit();
     try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"control\"}"), a);
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\"}"), a);
     const s = v.object.get("leds").?.object;
     try testing.expectEqualStrings("on", s.get("status").?.string);
     // Default values preserved (no params applied).

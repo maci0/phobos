@@ -1,8 +1,8 @@
-/// ConfigBackend — vtable interface for config providers.
-///
-/// The default implementation is `ConfigParser` from confighelper.zig.
-/// A leaner or mock backend can be swapped in by providing a different
-/// implementation of the vtable.
+//! ConfigBackend — vtable interface for config providers.
+//!
+//! The default implementation is `ConfigParser` from confighelper.zig.
+//! A leaner or mock backend can be swapped in by providing a different
+//! implementation of the vtable.
 const std = @import("std");
 
 pub const Error = error{

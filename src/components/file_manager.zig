@@ -52,6 +52,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
+const jv = @import("../json/value.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const gcode_metadata = @import("gcode_metadata.zig");
 
@@ -94,6 +95,21 @@ fn isGcodeExt(name: []const u8) bool {
 // Context
 // ---------------------------------------------------------------------------
 
+/// Cached parsed gcode metadata, validated by (size, mtime). Each entry owns an
+/// arena holding its deep-copied value, so eviction is a single arena.deinit().
+const MetaEntry = struct {
+    size: u64,
+    mtime: f64,
+    arena: std.heap.ArenaAllocator,
+    value: std.json.Value,
+};
+
+/// Metadata cache cap. `server.files.metadata` re-reads up to 256 KiB + re-parses
+/// the gcode header on every call; Mainsail/Fluidd request it for every file in a
+/// listing, so on slow eMMC this is a real, repeated stall. Bounded; cleared
+/// wholesale on overflow (simple, and the working set is small in practice).
+const metadata_cache_cap = 256;
+
 pub const FileCtx = struct {
     gpa: std.mem.Allocator,
     /// Configured roots. Borrowed; owned by the App.
@@ -102,9 +118,79 @@ pub const FileCtx = struct {
     /// Live io for filesystem operations + notification emission. Set after the
     /// event loop starts (via setIo). Handlers error with NotReady if absent.
     io: ?std.Io = null,
+    /// Parsed-metadata cache keyed by absolute path (key owned by gpa).
+    metadata_cache: std.StringHashMapUnmanaged(MetaEntry) = .empty,
+    /// Guards metadata_cache. metadata runs under Core today, but lock anyway so
+    /// the cache stays correct if it ever moves off-Core. No-op when io unset.
+    metadata_cache_mutex: std.Io.Mutex = .init,
 
     pub fn setIo(self: *FileCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    pub fn deinit(self: *FileCtx) void {
+        var it = self.metadata_cache.iterator();
+        while (it.next()) |e| {
+            e.value_ptr.arena.deinit();
+            self.gpa.free(e.key_ptr.*);
+        }
+        self.metadata_cache.deinit(self.gpa);
+    }
+
+    fn lockMeta(self: *FileCtx) void {
+        if (self.io) |io| self.metadata_cache_mutex.lockUncancelable(io);
+    }
+    fn unlockMeta(self: *FileCtx) void {
+        if (self.io) |io| self.metadata_cache_mutex.unlock(io);
+    }
+
+    /// Return a request-arena copy of the cached metadata for `abs` if present
+    /// and still valid for (size, mtime); else null.
+    fn cachedMetadata(self: *FileCtx, alloc: std.mem.Allocator, abs: []const u8, size: u64, mtime: f64) ?std.json.Value {
+        self.lockMeta();
+        defer self.unlockMeta();
+        const e = self.metadata_cache.getPtr(abs) orelse return null;
+        if (e.size != size or e.mtime != mtime) return null;
+        return jv.deepCopy(alloc, e.value) catch null;
+    }
+
+    /// Store a cache copy of freshly-built metadata (deep-copied into a private
+    /// arena). Replaces any prior entry for the path; clears the cache wholesale
+    /// if it has grown past the cap.
+    fn cacheMetadata(self: *FileCtx, abs: []const u8, size: u64, mtime: f64, value: std.json.Value) void {
+        self.lockMeta();
+        defer self.unlockMeta();
+        // Build the new copy FIRST. Freeing the old entry's arena before the copy
+        // succeeded would, on a deep-copy OOM, leave a stale map entry pointing at
+        // freed memory → use-after-free on the next hit and a double-free at evict
+        // /deinit. So everything below only frees the old arena once `copy` exists.
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        const copy = jv.deepCopy(arena.allocator(), value) catch {
+            arena.deinit();
+            return;
+        };
+        if (self.metadata_cache.getPtr(abs)) |slot| {
+            // Replace: free the old arena only now that the new copy is in hand.
+            slot.arena.deinit();
+            slot.* = .{ .size = size, .mtime = mtime, .arena = arena, .value = copy };
+            return;
+        }
+        if (self.metadata_cache.count() >= metadata_cache_cap) {
+            var it = self.metadata_cache.iterator();
+            while (it.next()) |e| {
+                e.value_ptr.arena.deinit();
+                self.gpa.free(e.key_ptr.*);
+            }
+            self.metadata_cache.clearRetainingCapacity();
+        }
+        const key = self.gpa.dupe(u8, abs) catch {
+            arena.deinit();
+            return;
+        };
+        self.metadata_cache.put(self.gpa, key, .{ .size = size, .mtime = mtime, .arena = arena, .value = copy }) catch {
+            self.gpa.free(key);
+            arena.deinit();
+        };
     }
 
     pub fn findRoot(self: *const FileCtx, name: []const u8) ?Root {
@@ -555,13 +641,31 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     const src_kind = statKind(io, src.abs);
     if (src_kind == .missing) return error.NotFound;
 
+    // If the destination is an existing directory, place the source INSIDE it
+    // (dst/basename(src)) — matching shutil.move/shutil.copy. Without this, a
+    // move/copy onto an existing folder (a common UI drag-into-folder) failed or
+    // landed at the wrong path.
+    var dst_abs = dst.abs;
+    var dst_rel = dst.rel;
+    if (statKind(io, dst.abs) == .dir) {
+        const base = std.fs.path.basename(src.abs);
+        dst_abs = try std.fs.path.join(alloc, &.{ dst.abs, base });
+        dst_rel = try std.fs.path.join(alloc, &.{ dst.rel, base });
+    }
+
+    // Reject source == destination. A move is a no-op, but a COPY would open the
+    // source then `createFile` (truncating) the same path → a 0-byte file (data
+    // loss). Reachable as `copy a.gcode -> gcodes/` (dir-dest resolves to a.gcode)
+    // or directly with dest == source. Moonraker raises on same-path move/copy.
+    if (std.mem.eql(u8, src.abs, dst_abs)) return error.InvalidParams;
+
     var action: []const u8 = undefined;
     if (is_move) {
         if (!src.root.full_access) return error.Forbidden;
-        Dir.cwd().rename(src.abs, Dir.cwd(), dst.abs, io) catch return error.InvalidParams;
+        Dir.cwd().rename(src.abs, Dir.cwd(), dst_abs, io) catch return error.InvalidParams;
         action = if (src_kind == .dir) "move_dir" else "move_file";
         const src_info: SourceItem = .{ .root = src.root, .rel = src.rel };
-        const info = try buildNotifyInfo(io, alloc, action, dst.root, dst.rel, dst.abs, src_info);
+        const info = try buildNotifyInfo(io, alloc, action, dst.root, dst_rel, dst_abs, src_info);
         emitFilelistChanged(ctx, io, alloc, info);
         return info;
     }
@@ -569,13 +673,13 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     // copy
     if (src_kind == .dir) {
         action = "create_dir";
-        try copyTree(io, alloc, src.abs, dst.abs);
+        try copyTree(io, alloc, src.abs, dst_abs);
     } else {
         // If the destination already exists as a file, this is a modify.
-        action = if (statKind(io, dst.abs) == .file) "modify_file" else "create_file";
-        copyFileSimple(io, alloc, src.abs, dst.abs) catch return error.InvalidParams;
+        action = if (statKind(io, dst_abs) == .file) "modify_file" else "create_file";
+        copyFileSimple(io, alloc, src.abs, dst_abs) catch return error.InvalidParams;
     }
-    const info = try buildNotifyInfo(io, alloc, action, dst.root, dst.rel, dst.abs, null);
+    const info = try buildNotifyInfo(io, alloc, action, dst.root, dst_rel, dst_abs, null);
     emitFilelistChanged(ctx, io, alloc, info);
     return info;
 }
@@ -663,9 +767,18 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
-    if (statKind(io, resolved.abs) != .file) return error.NotFound;
+    const st = Dir.cwd().statFile(io, resolved.abs, .{}) catch return error.NotFound;
+    if (st.kind != .file) return error.NotFound;
+    const size: u64 = @intCast(st.size);
+    const mtime = mtimeSecs(st);
 
-    return buildMetadata(io, alloc, resolved.abs, filename);
+    // Return the cached record if the file is unchanged (size + mtime). Avoids
+    // re-reading 256 KiB + re-parsing the gcode header on every request.
+    if (ctx.cachedMetadata(alloc, resolved.abs, size, mtime)) |cached| return cached;
+
+    const value = try buildMetadata(io, alloc, resolved.abs, filename);
+    ctx.cacheMetadata(resolved.abs, size, mtime, value);
+    return value;
 }
 
 /// Build the metadata record with stat-derived fields plus deep gcode-parsed
@@ -1206,6 +1319,47 @@ test "handleCopy: copies file with create_file then modify_file" {
     try testing.expectEqualStrings("modify_file", r2.object.get("action").?.string);
 }
 
+test "handleCopy/Move: destination directory receives the source inside it" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/orig.gcode", "G28\n");
+    // Create gcodes/sub as a directory by placing a file under it.
+    try tr.writeFile("gcodes/sub/keep.txt", "x");
+    var c = tr.ctx();
+
+    // Copy onto the directory → lands at gcodes/sub/orig.gcode.
+    const rc = try handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/orig.gcode\",\"dest\":\"gcodes/sub\"}"), a);
+    try testing.expectEqualStrings("create_file", rc.object.get("action").?.string);
+    try testing.expectEqual(StatKind.file, tr.exists("gcodes/sub/orig.gcode"));
+    try testing.expectEqual(StatKind.file, tr.exists("gcodes/orig.gcode")); // copy left source
+
+    // Move onto the directory → lands at gcodes/sub/orig.gcode, source gone.
+    const rm = try handleMove(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/orig.gcode\",\"dest\":\"gcodes/sub\"}"), a);
+    try testing.expectEqualStrings("move_file", rm.object.get("action").?.string);
+    try testing.expectEqual(StatKind.missing, tr.exists("gcodes/orig.gcode"));
+}
+
+test "handleCopy: source == destination is rejected (no self-truncation)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    const contents = "G28\nG1 X10\n";
+    try tr.writeFile("gcodes/a.gcode", contents);
+    var c = tr.ctx();
+
+    // Both forms resolve dst == src; a copy must NOT open-then-truncate the file.
+    try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/a.gcode\",\"dest\":\"gcodes/a.gcode\"}"), a));
+    try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/a.gcode\",\"dest\":\"gcodes\"}"), a));
+    // The source file is untouched (still its original size, not truncated to 0).
+    const md = try buildMetadata(tr.io, a, try std.fs.path.join(a, &.{ tr.roots[0].path, "a.gcode" }), "a.gcode");
+    try testing.expectEqual(@as(i64, @intCast(contents.len)), md.object.get("size").?.integer);
+}
+
 test "handleCopy: read-only destination root → Forbidden" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1259,6 +1413,32 @@ test "handleMetadata: stat-based record shape" {
     try testing.expect(o.get("thumbnails").? == .array);
     try testing.expect(o.get("print_start_time").? == .null);
     try testing.expect(o.get("job_id").? == .null);
+}
+
+test "handleMetadata: cache hit returns same record; file change invalidates" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/c.gcode", "G28\n");
+    var c = tr.ctx();
+    defer c.deinit();
+
+    const p = try objParams(a, "{\"filename\":\"c.gcode\"}");
+    const r1 = try handleMetadata(@ptrCast(&c), p, a);
+    const size1 = r1.object.get("size").?.integer;
+    try testing.expectEqual(@as(usize, 1), c.metadata_cache.count()); // populated
+
+    // Second call hits the cache and yields the same size.
+    const r2 = try handleMetadata(@ptrCast(&c), p, a);
+    try testing.expectEqual(size1, r2.object.get("size").?.integer);
+
+    // Rewriting the file changes its size → the (size,mtime) stamp no longer
+    // matches, so the cache must rebuild and report the new size.
+    try tr.writeFile("gcodes/c.gcode", "G28\nG1 X10\nG1 Y10\nG1 Z5\n");
+    const r3 = try handleMetadata(@ptrCast(&c), p, a);
+    try testing.expect(r3.object.get("size").?.integer != size1);
 }
 
 test "handleMetadata: missing file → NotFound" {

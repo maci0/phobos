@@ -351,19 +351,11 @@ pub fn handleRestore(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
 //
 // JSON-RPC naming strategy for /server/database/item:
 //
-//   The Moonraker baseline expects the single method name "server.database.item"
-//   (not the multi-verb prefixed names get_item/post_item/delete_item), because
-//   Moonraker uses RequestType.all() which baseline scanner classifies as
-//   multi_verb=False with a single JSON-RPC name.
-//
-//   In phobos, `deriveMethodName` produces a non-prefixed name when multi=false
-//   (single-verb registration). Strategy:
-//     • Register GET with default transports → creates "server.database.item"
-//       JSON-RPC method (GET semantics over RPC).
-//     • Register POST and DELETE as HTTP-only (transports = &.{.HTTP}) →
-//       no JSON-RPC methods created; per-verb HTTP routes still exist.
-//
-//   Same logic for /debug/database/item → "debug.database.item".
+//   Moonraker's RequestType.all() registration verb-prefixes the three methods:
+//   server.database.get_item / post_item / delete_item (Mainsail/Fluidd call
+//   these over WS on init). phobos matches this by registering each verb with
+//   `multi_verb = true` below, so `deriveMethodName` emits the prefixed names.
+//   Same for /debug/database/item → debug.database.get_item / … .
 //
 //   For /server/database/backup (POST + DELETE), the baseline has two separate
 //   JSON-RPC names: server.database.post_backup and server.database.delete_backup.

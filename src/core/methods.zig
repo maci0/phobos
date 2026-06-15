@@ -1,15 +1,17 @@
 //! Core server API method handlers: `server.info` and `server.config`.
 //!
 //! Shapes mirror Moonraker exactly (vendor/moonraker/moonraker/server.py
-//! `_handle_info_request` / `_handle_config_request`). For the spine there is no
-//! Klippy connection, so the DISCONNECTED state is reported with empty dynamic
-//! collections and a small known component set.
+//! `_handle_info_request` / `_handle_config_request`). `klippy_connected` /
+//! `klippy_state` are live fields the KlippyCtx updates on connection-state
+//! transitions; they default to the disconnected shape until Klippy connects. The
+//! reported component set is the full static list phobos registers (see `components`).
 
 const std = @import("std");
 const build_options = @import("build_options");
 const registry = @import("../server/registry.zig");
 const config_mod = @import("../config/confighelper.zig");
 const Connections = @import("../server/connections.zig").Connections;
+const jv = @import("../json/value.zig");
 
 /// `(major, minor, patch)` returned both as the `api_version` array and the
 /// `api_version_string`. Matches Moonraker `API_VERSION = (1, 5, 0)`.
@@ -202,14 +204,14 @@ pub fn buildServerConfig(alloc: std.mem.Allocator, cfg: ?*const config_mod.Confi
                         const final_val = try coerceStringToValue(alloc, override_val.?.string, default_val);
                         try merged.put(alloc, try alloc.dupe(u8, default_key), final_val);
                     } else {
-                        try merged.put(alloc, try alloc.dupe(u8, default_key), try deepCopyValue(alloc, default_val));
+                        try merged.put(alloc, try alloc.dupe(u8, default_key), try jv.deepCopy(alloc, default_val));
                     }
                 }
                 // Add any parsed keys not present in defaults.
                 var oit = sec_obj.iterator();
                 while (oit.next()) |entry| {
                     if (!merged.contains(entry.key_ptr.*)) {
-                        try merged.put(alloc, try alloc.dupe(u8, entry.key_ptr.*), try deepCopyValue(alloc, entry.value_ptr.*));
+                        try merged.put(alloc, try alloc.dupe(u8, entry.key_ptr.*), try jv.deepCopy(alloc, entry.value_ptr.*));
                     }
                 }
                 try config_obj.put(alloc, try alloc.dupe(u8, sec_name), .{ .object = merged });
@@ -453,36 +455,6 @@ fn coerceStringToValue(alloc: std.mem.Allocator, s: []const u8, default_val: std
         },
         .object => |obj| if (obj.count() == 0) .{ .object = .empty } else .{ .string = try alloc.dupe(u8, s) },
         .number_string => .{ .string = try alloc.dupe(u8, s) },
-    };
-}
-
-fn deepCopyObject(alloc: std.mem.Allocator, src: std.json.ObjectMap) std.mem.Allocator.Error!std.json.ObjectMap {
-    var dst: std.json.ObjectMap = .empty;
-    var it = src.iterator();
-    while (it.next()) |entry| {
-        const key = try alloc.dupe(u8, entry.key_ptr.*);
-        const val = try deepCopyValue(alloc, entry.value_ptr.*);
-        try dst.put(alloc, key, val);
-    }
-    return dst;
-}
-
-fn deepCopyValue(alloc: std.mem.Allocator, src: std.json.Value) std.mem.Allocator.Error!std.json.Value {
-    return switch (src) {
-        .null => .null,
-        .bool => |b| .{ .bool = b },
-        .integer => |i| .{ .integer = i },
-        .float => |f| .{ .float = f },
-        .number_string => |s| .{ .number_string = try alloc.dupe(u8, s) },
-        .string => |s| .{ .string = try alloc.dupe(u8, s) },
-        .array => |arr| {
-            var new_arr: std.json.Array = .init(alloc);
-            for (arr.items) |item| {
-                try new_arr.append(try deepCopyValue(alloc, item));
-            }
-            return .{ .array = new_arr };
-        },
-        .object => |o| .{ .object = try deepCopyObject(alloc, o) },
     };
 }
 

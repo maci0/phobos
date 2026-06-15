@@ -26,6 +26,7 @@
 //!                   timeout (float, optional)
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const mqtt_client = @import("mqtt_client.zig");
 const mqtt_proto = @import("mqtt_proto.zig");
@@ -71,7 +72,7 @@ pub const MqttConfig = struct {
 };
 
 /// MQTT broker connection state.
-pub const ConnectionState = enum {
+pub const ConnectionState = enum(u8) {
     disconnected,
     connecting,
     connected,
@@ -103,13 +104,22 @@ pub const MqttCtx = struct {
     /// operate on the in-memory store rather than returning errors.
     config: ?MqttConfig = null,
     /// Connection state tracking (replaces flat isConfigured() boolean).
-    state: ConnectionState = .disconnected,
+    /// Atomic: written by the connect supervisor thread (setState) and read by
+    /// event-loop handlers (isConnected/getState) concurrently.
+    state: std.atomic.Value(ConnectionState) = std.atomic.Value(ConnectionState).init(.disconnected),
     /// Current Klipper state string ("ready", "error", "startup", etc.)
     klipper_state: []const u8 = "",
     /// Message accompanying the Klipper state change.
     klipper_message: []const u8 = "",
     /// Last published message per topic. Owned by ctx; freed in deinit.
     messages: std.StringHashMap(StoredMessage),
+    /// Guards `messages` against concurrent mutation. Live writers are the
+    /// event-loop handlers (handlePublish), the reconnect supervisor thread
+    /// (setState → publishMoonrakerStatus → publishTopic) and the reader thread
+    /// (processApiRequest → publishTopic). Without this lock a concurrent `put`
+    /// rehash races a reader's lookup → heap corruption (io-guarded; null io =
+    /// single-threaded test path, no background threads).
+    messages_mutex: std.Io.Mutex = std.Io.Mutex.init,
     /// HTTP-endpoint subscriptions: the in-memory subscribe API records topics
     /// here (for notification emission on a matching in-store publish). The live
     /// broker connection has its own subscriptions via the reader callback.
@@ -124,6 +134,11 @@ pub const MqttCtx = struct {
     deinitialized: bool = false,
     /// The latest eventtime passed to sendStatus (for timed flush).
     last_status_time: f64 = 0.0,
+    /// Guards `status_cache` + `last_status_time` against concurrent access by
+    /// the event-loop `sendStatus` writer and the background `statusFlushWorker`
+    /// thread which iterates and clears the cache (io-guarded; null io = no
+    /// flush thread is started, so the single-threaded test path needs no lock).
+    status_mutex: std.Io.Mutex = std.Io.Mutex.init,
     /// Atomic flag to signal the status-flush thread to stop.
     status_flush_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Background thread that periodically flushes the status cache.
@@ -257,7 +272,7 @@ pub const MqttCtx = struct {
         client.* = connect_result catch |e| {
             // client.* is uninitialized (connect failed); the errdefer above
             // frees the raw allocation. Do NOT destroy here too (double-free).
-            self.state = .disconnected;
+            self.state.store(.disconnected, .release);
             return e;
         };
         client.rebind();
@@ -301,7 +316,7 @@ pub const MqttCtx = struct {
             self.lockClient();
             self.client = null; // clear the dangling pointer before errdefer frees it
             self.unlockClient();
-            self.state = .disconnected;
+            self.state.store(.disconnected, .release);
             return e; // errdefer above does the destroy (don't double-free)
         };
         // If a stop/disconnect raced this (re)connect, self-interrupt the reader
@@ -318,6 +333,27 @@ pub const MqttCtx = struct {
     }
     fn unlockClient(self: *MqttCtx) void {
         if (self.io) |io| self.client_mutex.unlock(io);
+    }
+
+    fn lockStatus(self: *MqttCtx) void {
+        if (self.io) |io| self.status_mutex.lockUncancelable(io);
+    }
+    fn unlockStatus(self: *MqttCtx) void {
+        if (self.io) |io| self.status_mutex.unlock(io);
+    }
+
+    fn lockMessages(self: *MqttCtx) void {
+        if (self.io) |io| self.messages_mutex.lockUncancelable(io);
+    }
+    fn unlockMessages(self: *MqttCtx) void {
+        if (self.io) |io| self.messages_mutex.unlock(io);
+    }
+    // Const variants for read-only accessors (interior mutability of the mutex).
+    fn lockMessagesConst(self: *const MqttCtx) void {
+        if (self.io) |io| @constCast(&self.messages_mutex).lockUncancelable(io);
+    }
+    fn unlockMessagesConst(self: *const MqttCtx) void {
+        if (self.io) |io| @constCast(&self.messages_mutex).unlock(io);
     }
 
     /// Free the live client (disconnect + deinit + destroy) under the client lock.
@@ -354,6 +390,10 @@ pub const MqttCtx = struct {
     /// Subscribe to a topic on the live broker connection (qos 0). No-op when no
     /// broker connection exists.
     pub fn subscribeTopicLive(self: *MqttCtx, topic: []const u8) void {
+        // Under client_mutex: the reconnect supervisor may free `client`
+        // concurrently (freeClientLocked) on a broker drop.
+        self.lockClient();
+        defer self.unlockClient();
         const client = self.client orelse return;
         client.subscribe(topic, 0) catch {};
     }
@@ -366,8 +406,12 @@ pub const MqttCtx = struct {
     pub fn connectBrokerBg(self: *MqttCtx) void {
         const io = self.io orelse return; // no io → nothing the supervisor can do
         self.reader_stop.store(false, .release);
-        var backoff_ms: u64 = 500;
+        // Exponential reconnect backoff (phobos-specific; Moonraker/paho retries
+        // on a fixed 1s loop). Start at 500ms, double on each failure, cap at 30s
+        // so an unreachable broker is retried roughly twice a minute at steady state.
+        const initial_backoff_ms: u64 = 500;
         const max_backoff: u64 = 30_000;
+        var backoff_ms: u64 = initial_backoff_ms;
         while (!self.reader_stop.load(.acquire)) {
             self.connectBroker() catch {
                 if (self.reader_stop.load(.acquire)) break;
@@ -375,7 +419,7 @@ pub const MqttCtx = struct {
                 backoff_ms = @min(backoff_ms * 2, max_backoff);
                 continue;
             };
-            backoff_ms = 500; // reset after a successful connect
+            backoff_ms = initial_backoff_ms; // reset after a successful connect
             // Wait for the reader to end (broker drop or stop), then free.
             if (self.reader_thread) |t| {
                 t.join();
@@ -387,7 +431,7 @@ pub const MqttCtx = struct {
             sleepMs(io, backoff_ms);
             backoff_ms = @min(backoff_ms * 2, max_backoff);
         }
-        if (self.state == .connected or self.state == .connecting) self.state = .disconnected;
+        if (self.state.load(.acquire) == .connected or self.state.load(.acquire) == .connecting) self.state.store(.disconnected, .release);
     }
 
     /// Background reader: drain inbound packets until stopped or the socket
@@ -439,7 +483,7 @@ pub const MqttCtx = struct {
             self.gpa.free(t);
             self.api_response_topic = null;
         }
-        if (self.state == .connected or self.state == .connecting) self.state = .disconnected;
+        if (self.state.load(.acquire) == .connected or self.state.load(.acquire) == .connecting) self.state.store(.disconnected, .release);
     }
 
     /// True when a live broker connection is established.
@@ -508,12 +552,12 @@ pub const MqttCtx = struct {
 
     /// Returns true if the connection state is "connected".
     pub fn isConnected(self: *const MqttCtx) bool {
-        return self.state == .connected;
+        return self.state.load(.acquire) == .connected;
     }
 
     /// Set the connection state and publish moonraker_status when connected.
     pub fn setState(self: *MqttCtx, s: ConnectionState) void {
-        self.state = s;
+        self.state.store(s, .release);
         if (s == .connected) {
             self.publishMoonrakerStatus();
         }
@@ -526,7 +570,7 @@ pub const MqttCtx = struct {
         if (self.klipper_message.len > 0) self.gpa.free(self.klipper_message);
         self.klipper_state = self.gpa.dupe(u8, state) catch self.klipper_state;
         self.klipper_message = self.gpa.dupe(u8, message) catch self.klipper_message;
-        if (self.state == .connected) {
+        if (self.state.load(.acquire) == .connected) {
             self.publishMoonrakerStatus();
         }
     }
@@ -554,15 +598,7 @@ pub const MqttCtx = struct {
 
     /// Get the current connection state.
     pub fn getState(self: *const MqttCtx) ConnectionState {
-        return self.state;
-    }
-
-    /// Get the instance name (defaults to "moonraker").
-    pub fn getInstanceName(self: *const MqttCtx) []const u8 {
-        if (self.config) |cfg| {
-            return cfg.instance_name orelse "moonraker";
-        }
-        return "moonraker";
+        return self.state.load(.acquire);
     }
 
     /// Set the Last Will and Testament topic and payload. Takes ownership.
@@ -577,16 +613,6 @@ pub const MqttCtx = struct {
             cfg.will_topic = t;
             cfg.will_payload = p;
         }
-    }
-
-    /// Get the LWT topic and payload, if set.
-    pub fn getWill(self: *const MqttCtx) ?struct { topic: []const u8, payload: []const u8 } {
-        if (self.config) |cfg| {
-            if (cfg.will_topic != null and cfg.will_payload != null) {
-                return .{ .topic = cfg.will_topic.?, .payload = cfg.will_payload.? };
-            }
-        }
-        return null;
     }
 
     /// Set the API-specific QoS (separate from default_qos).
@@ -660,6 +686,10 @@ pub const MqttCtx = struct {
         } else {
             // Merge into cache: for each key in status, merge sub-fields
             // into the cache (Python: cache.setdefault(key,{}).update(val)).
+            // Held under status_mutex: the background flush thread iterates and
+            // clears the same map concurrently with this writer.
+            self.lockStatus();
+            defer self.unlockStatus();
             var obj_it = filtered.object.iterator();
             while (obj_it.next()) |entry| {
                 const key = entry.key_ptr.*;
@@ -672,7 +702,7 @@ pub const MqttCtx = struct {
                         var field_it = val.object.iterator();
                         while (field_it.next()) |field| {
                             const fk = self.gpa.dupe(u8, field.key_ptr.*) catch continue;
-                            const fv = deepCopyValue(self.gpa, field.value_ptr.*) catch {
+                            const fv = jv.deepCopy(self.gpa, field.value_ptr.*) catch {
                                 self.gpa.free(fk);
                                 continue;
                             };
@@ -693,7 +723,7 @@ pub const MqttCtx = struct {
                 } else {
                     // No cached entry yet: deep-copy the whole value.
                     const key_dup = self.gpa.dupe(u8, key) catch continue;
-                    const val_copy = deepCopyValue(self.gpa, val) catch {
+                    const val_copy = jv.deepCopy(self.gpa, val) catch {
                         self.gpa.free(key_dup);
                         continue;
                     };
@@ -748,7 +778,7 @@ pub const MqttCtx = struct {
         while (obj_it.next()) |entry| {
             if (allowed.contains(entry.key_ptr.*)) {
                 const k = self.gpa.dupe(u8, entry.key_ptr.*) catch continue;
-                const v = deepCopyValue(self.gpa, entry.value_ptr.*) catch {
+                const v = jv.deepCopy(self.gpa, entry.value_ptr.*) catch {
                     self.gpa.free(k);
                     continue;
                 };
@@ -790,7 +820,6 @@ pub const MqttCtx = struct {
     /// Flush the accumulated status cache (called by timer thread or
     /// explicitly). After flushing, the cache is empty.
     pub fn flushStatusCache(self: *MqttCtx) void {
-        if (self.status_cache.count() == 0) return;
         if (!self.isConfigured()) return;
 
         // Build a merged status object from the cache.
@@ -804,30 +833,39 @@ pub const MqttCtx = struct {
             merged.deinit(self.gpa);
         }
 
-        var cache_it = self.status_cache.iterator();
-        while (cache_it.next()) |entry| {
-            const k = self.gpa.dupe(u8, entry.key_ptr.*) catch continue;
-            const v = deepCopyValue(self.gpa, entry.value_ptr.*) catch {
-                self.gpa.free(k);
-                continue;
-            };
-            merged.put(self.gpa, k, v) catch {
-                self.gpa.free(k);
-                freeJsonValue(self.gpa, v);
-            };
-        }
-
-        // Clear the cache.
+        // Snapshot + clear the cache under the lock; the event-loop writer
+        // (sendStatus) mutates the same map. Release the lock before the
+        // (blocking, network) publish below.
+        var eventtime: f64 = undefined;
         {
+            self.lockStatus();
+            defer self.unlockStatus();
+            if (self.status_cache.count() == 0) return;
+
+            var cache_it = self.status_cache.iterator();
+            while (cache_it.next()) |entry| {
+                const k = self.gpa.dupe(u8, entry.key_ptr.*) catch continue;
+                const v = jv.deepCopy(self.gpa, entry.value_ptr.*) catch {
+                    self.gpa.free(k);
+                    continue;
+                };
+                merged.put(self.gpa, k, v) catch {
+                    self.gpa.free(k);
+                    freeJsonValue(self.gpa, v);
+                };
+            }
+
+            // Clear the cache.
             var sc_it = self.status_cache.iterator();
             while (sc_it.next()) |e| {
                 self.gpa.free(e.key_ptr.*);
                 freeJsonValue(self.gpa, e.value_ptr.*);
             }
             self.status_cache.clearRetainingCapacity();
+            eventtime = self.last_status_time;
         }
 
-        self.publishStatusUpdate(.{ .object = merged }, self.last_status_time);
+        self.publishStatusUpdate(.{ .object = merged }, eventtime);
     }
 
     fn statusFlushWorker(self: *MqttCtx) void {
@@ -842,11 +880,10 @@ pub const MqttCtx = struct {
             io.sleep(std.Io.Duration.fromNanoseconds(@intCast(sleep_ns)), .awake) catch {};
             if (self.status_flush_stop.load(.acquire)) break;
 
-            // Only flush when enough time has elapsed since last flush.
-            // For simplicity, we flush on every interval tick.
-            if (self.status_cache.count() > 0) {
-                self.flushStatusCache();
-            }
+            // Flush on every interval tick. flushStatusCache snapshots the
+            // cache under status_mutex and no-ops when empty, so no unlocked
+            // count() read races the event-loop writer here.
+            self.flushStatusCache();
         }
     }
 
@@ -934,25 +971,6 @@ pub const MqttCtx = struct {
         self.publishTopic(resp_topic, rparsed.value, qos, false) catch {};
     }
 
-    /// Moonraker: publish_topic_with_response — publish and wait for a
-    /// response on a correlated response_topic. The caller provides a
-    /// response_topic that will be subscribed, and the first message
-    /// received on that topic is returned. Returns null on timeout.
-    pub fn publishTopicWithResponse(
-        self: *MqttCtx,
-        topic: []const u8,
-        response_topic: []const u8,
-        payload: std.json.Value,
-        qos: i64,
-        retain: bool,
-    ) !?std.json.Value {
-        try self.publishTopic(topic, payload, qos, retain);
-        // In the absence of a real broker, we don't have a subscription
-        // callback mechanism. Return the last stored message on the
-        // response topic, or null if none.
-        return self.getMessage(response_topic);
-    }
-
     /// Derive the 5 reserved Moonraker MQTT topics from the instance name.
     /// When instance_name is null, "moonraker" is used as default (matching
     /// Python's `_instance_name` default).
@@ -994,31 +1012,6 @@ pub const MqttCtx = struct {
     }
 
     /// Deep-copy a std.json.Value, duplicating all owned string data.
-    fn deepCopyValue(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!std.json.Value {
-        return switch (val) {
-            .string => .{ .string = try alloc.dupe(u8, val.string) },
-            .integer => .{ .integer = val.integer },
-            .float => .{ .float = val.float },
-            .bool => .{ .bool = val.bool },
-            .null => .null,
-            .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
-            .object => |obj| {
-                var new_obj: std.json.ObjectMap = .empty;
-                var it = obj.iterator();
-                while (it.next()) |kv| {
-                    try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopyValue(alloc, kv.value_ptr.*));
-                }
-                return .{ .object = new_obj };
-            },
-            .array => |arr| {
-                var new_arr: std.json.Array = .init(alloc);
-                for (arr.items) |item| {
-                    try new_arr.append(try deepCopyValue(alloc, item));
-                }
-                return .{ .array = new_arr };
-            },
-        };
-    }
 
     /// Free a deep-copied std.json.Value tree.
     fn freeJsonValue(alloc: std.mem.Allocator, val: std.json.Value) void {
@@ -1046,8 +1039,10 @@ pub const MqttCtx = struct {
     /// Store a message with retain flag. Deep-copies the payload so
     /// the caller retains ownership of the original value.
     pub fn storeMessageRetain(self: *MqttCtx, topic: []const u8, payload: std.json.Value, retain: bool) !void {
-        const owned = try deepCopyValue(self.gpa, payload);
+        const owned = try jv.deepCopy(self.gpa, payload);
         errdefer freeJsonValue(self.gpa, owned);
+        self.lockMessages();
+        defer self.unlockMessages();
         if (self.messages.getPtr(topic)) |existing| {
             freeJsonValue(self.gpa, existing.payload);
             existing.payload = owned;
@@ -1061,11 +1056,15 @@ pub const MqttCtx = struct {
 
     /// Get the last stored message for a topic (null if none).
     pub fn getMessage(self: *const MqttCtx, topic: []const u8) ?std.json.Value {
+        self.lockMessagesConst();
+        defer self.unlockMessagesConst();
         return if (self.messages.get(topic)) |m| m.payload else null;
     }
 
     /// Get the stored retain flag for a topic (false if none).
     pub fn getRetain(self: *const MqttCtx, topic: []const u8) bool {
+        self.lockMessagesConst();
+        defer self.unlockMessagesConst();
         return if (self.messages.get(topic)) |m| m.retain else false;
     }
 
@@ -1124,6 +1123,10 @@ pub const MqttCtx = struct {
         if (!self.isConfigured()) return error.MqttNotConfigured;
         try self.storeMessageRetain(topic, payload, retain);
         // When a live broker connection exists, also publish over the wire.
+        // Under client_mutex: the reconnect supervisor may free `client`
+        // concurrently (freeClientLocked) on a broker drop.
+        self.lockClient();
+        defer self.unlockClient();
         if (self.client) |client| {
             var aw: std.Io.Writer.Allocating = .init(self.gpa);
             defer aw.deinit();
@@ -1163,12 +1166,16 @@ pub const MqttCtx = struct {
         }
         self.unsubscribeAll();
         // Clear all stored messages.
-        var it = self.messages.iterator();
-        while (it.next()) |entry| {
-            self.gpa.free(entry.key_ptr.*);
-            freeJsonValue(self.gpa, entry.value_ptr.payload);
+        self.lockMessages();
+        {
+            var it = self.messages.iterator();
+            while (it.next()) |entry| {
+                self.gpa.free(entry.key_ptr.*);
+                freeJsonValue(self.gpa, entry.value_ptr.payload);
+            }
+            self.messages.clearRetainingCapacity();
         }
-        self.messages.clearRetainingCapacity();
+        self.unlockMessages();
         // Reset config.
         if (self.config) |*cfg| {
             self.gpa.free(cfg.host);
@@ -1182,7 +1189,7 @@ pub const MqttCtx = struct {
             if (cfg.mqtt_protocol) |p| self.gpa.free(p);
         }
         self.config = null;
-        self.state = .disconnected;
+        self.state.store(.disconnected, .release);
         self.last_status_time = 0.0;
         self.api_timestamps.clearRetainingCapacity();
         // Clear status cache.
@@ -1196,18 +1203,6 @@ pub const MqttCtx = struct {
         self.status_cache.clearRetainingCapacity();
     }
 
-    /// Moonraker: _handle_klippy_started — called when Klippy transitions
-    /// to "ready". Subscribes to Klipper status objects and starts the
-    /// status update timer (if interval is configured).
-    /// In phobos, this is a stub; the caller is responsible for wiring
-    /// Klippy status subscriptions externally via the klippy_connection.
-    pub fn handleKlippyStarted(self: *MqttCtx) void {
-        if (!self.isConfigured()) return;
-        // If status_objects are configured, the klippy_connection component
-        // will subscribe to them. The status update timer is started here
-        // when status_interval > 0.
-    }
-
     /// Moonraker: _handle_klippy_disconnect — called when Klippy
     /// disconnects. Stops the status update timer and flushes any
     /// cached status to MQTT.
@@ -1218,15 +1213,6 @@ pub const MqttCtx = struct {
         self.flushStatusCache();
     }
 
-    /// Moonraker: _handle_timed_status_update — called on the status
-    /// interval timer. Flushes the status cache and returns the next
-    /// interval delay. Resets the cache for the next batching window.
-    pub fn handleTimedStatusUpdate(self: *MqttCtx) f64 {
-        if (!self.isConfigured()) return 0.0;
-        // flushStatusCache deep-copies + frees correctly (see handleKlippyDisconnect).
-        self.flushStatusCache();
-        return if (self.config) |cfg| cfg.status_interval else 0.0;
-    }
 };
 
 /// A handle returned by subscribeTopic. Call unsubscribe() to remove
@@ -1270,6 +1256,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
             return switch (v) {
                 .integer => |i| i,
                 .float => |f| @intFromFloat(f),
+                .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
                 else => default_val,
             };
         },
@@ -1290,6 +1277,7 @@ fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool
             const v = obj.get(field) orelse return default_val;
             return switch (v) {
                 .bool => |b| b,
+                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
                 else => default_val,
             };
         },

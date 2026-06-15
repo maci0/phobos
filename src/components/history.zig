@@ -151,8 +151,18 @@ pub const HistoryCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
     io: ?std.Io,
-    /// Current in-progress job_id (numeric), if any.
+    /// Current in-progress job_id (numeric), if any. Written by the Klippy reader
+    /// thread (addJob/finishJob, off-Core) and read by Core-locked handlers
+    /// (e.g. reset_totals); guard with cur_job_mutex to avoid a torn read.
     current_job_id: ?u64,
+    /// Guards `current_job_id`. No-op when io is unset — see getCurrentJobId.
+    cur_job_mutex: std.Io.Mutex = .init,
+    /// Guards the *values* of `aux_fields` (the list itself is registered once at
+    /// config time and stable thereafter). The per-field accumulators are mutated
+    /// both by the Core-locked MQTT sensor bridge (recordAuxValue) and by the
+    /// off-Core Klippy reader (resetAuxJob/accumulateAux via job start/finish), so
+    /// without this they race. A leaf lock — these helpers never take Core or emit.
+    aux_mutex: std.Io.Mutex = .init,
     /// Username attributed to the current job.
     job_user: []const u8,
     /// Registered auxiliary fields (sensor-provided), owned by gpa.
@@ -162,6 +172,28 @@ pub const HistoryCtx = struct {
 
     pub fn setIo(self: *HistoryCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Thread-safe access to `current_job_id`. Locks no-op when io is unset
+    /// (single-threaded init / unit tests have no concurrent mutator).
+    fn getCurrentJobId(self: *HistoryCtx) ?u64 {
+        if (self.io) |io| self.cur_job_mutex.lockUncancelable(io);
+        defer if (self.io) |io| self.cur_job_mutex.unlock(io);
+        return self.current_job_id;
+    }
+
+    fn setCurrentJobId(self: *HistoryCtx, v: ?u64) void {
+        if (self.io) |io| self.cur_job_mutex.lockUncancelable(io);
+        defer if (self.io) |io| self.cur_job_mutex.unlock(io);
+        self.current_job_id = v;
+    }
+
+    /// Serialize access to the aux-field value accumulators (no-op when io unset).
+    fn lockAux(self: *HistoryCtx) void {
+        if (self.io) |io| self.aux_mutex.lockUncancelable(io);
+    }
+    fn unlockAux(self: *HistoryCtx) void {
+        if (self.io) |io| self.aux_mutex.unlock(io);
     }
 
     pub fn deinit(self: *HistoryCtx) void {
@@ -187,17 +219,23 @@ pub const HistoryCtx = struct {
 
     /// Record a value for any aux field matching (provider, field).
     pub fn recordAuxValue(self: *HistoryCtx, provider: []const u8, field: []const u8, value: f64) void {
+        self.lockAux();
+        defer self.unlockAux();
         for (self.aux_fields.items) |*f| {
             if (std.mem.eql(u8, f.provider, provider) and std.mem.eql(u8, f.field, field)) f.record(value);
         }
     }
 
     fn resetAuxJob(self: *HistoryCtx) void {
+        self.lockAux();
+        defer self.unlockAux();
         for (self.aux_fields.items) |*f| f.resetJob();
     }
 
     /// Build the per-job `auxiliary_data` array (only fields that saw a value).
     fn buildAuxData(self: *HistoryCtx, alloc: std.mem.Allocator) std.json.Array {
+        self.lockAux();
+        defer self.unlockAux();
         var arr: std.json.Array = .init(alloc);
         for (self.aux_fields.items) |*f| {
             if (!f.has_value) continue;
@@ -212,11 +250,15 @@ pub const HistoryCtx = struct {
     }
 
     fn accumulateAux(self: *HistoryCtx) void {
+        self.lockAux();
+        defer self.unlockAux();
         for (self.aux_fields.items) |*f| f.accumulateTotal();
     }
 
     /// Build the `auxiliary_totals` array across all registered fields.
     pub fn buildAuxTotals(self: *HistoryCtx, alloc: std.mem.Allocator) std.json.Array {
+        self.lockAux();
+        defer self.unlockAux();
         var arr: std.json.Array = .init(alloc);
         for (self.aux_fields.items) |*f| {
             var o: std.json.ObjectMap = .empty;
@@ -230,6 +272,8 @@ pub const HistoryCtx = struct {
     }
 
     fn resetAuxTotals(self: *HistoryCtx) void {
+        self.lockAux();
+        defer self.unlockAux();
         for (self.aux_fields.items) |*f| f.total = 0;
     }
 
@@ -240,7 +284,7 @@ pub const HistoryCtx = struct {
         switch (event) {
             .started => {
                 // Finish any previous in-progress job.
-                if (self.current_job_id != null) {
+                if (self.getCurrentJobId() != null) {
                     self.finishJob("cancelled", prev_ps) catch {};
                 }
                 self.addJob(new_ps) catch {};
@@ -323,12 +367,15 @@ pub const HistoryCtx = struct {
         try job_obj.put(a, "user", .{ .string = self.job_user });
 
         const job_id_u64 = try self.nextJobId(a);
-        self.current_job_id = job_id_u64;
 
         var id_buf: [16]u8 = undefined;
         const job_id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_u64});
 
         try self.store.insertItem(a, ns_history, job_id_str, .{ .object = job_obj });
+        // Only track the job once it is durably stored — otherwise a failed
+        // insert would leave current_job_id pointing at a record finishJob can
+        // never load, silently dropping the subsequent finish.
+        self.setCurrentJobId(job_id_u64);
 
         // Update totals.
         self.incrementTotalJobs(a) catch {};
@@ -340,8 +387,10 @@ pub const HistoryCtx = struct {
 
     /// Finish the current in-progress job with the given status.
     fn finishJob(self: *HistoryCtx, status: []const u8, pstats: std.json.ObjectMap) !void {
-        const job_id_u64 = self.current_job_id orelse return;
-        self.current_job_id = null;
+        const job_id_u64 = self.getCurrentJobId() orelse return;
+        // NB: do NOT clear current_job_id until the record is durably updated
+        // below. Clearing it up-front meant a transient store error left the job
+        // marked "in_progress" forever (its id already discarded) — silent loss.
 
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer arena.deinit();
@@ -351,7 +400,12 @@ pub const HistoryCtx = struct {
         const job_id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_u64});
 
         const stored = try self.store.getItem(a, ns_history, job_id_str);
-        if (stored == null) return;
+        // Record vanished from the store — the id is invalid, so clear it
+        // (a retry could never find the record) and give up on this finish.
+        if (stored == null) {
+            self.setCurrentJobId(null);
+            return;
+        }
 
         // Stats guard (matches Moonraker finish_job guard):
         // discard print_stats if they belong to a different job or were reset.
@@ -409,6 +463,8 @@ pub const HistoryCtx = struct {
         try job_obj.put(a, "user", .{ .string = self.job_user });
 
         try self.store.updateItem(a, ns_history, job_id_str, .{ .object = job_obj });
+        // The finished record is now durable — safe to drop the in-progress id.
+        self.setCurrentJobId(null);
         // Fold this job's aux values into the cross-job totals.
         self.accumulateAux();
 
@@ -593,7 +649,9 @@ fn loadTotals(c: *HistoryCtx, alloc: std.mem.Allocator) !std.json.Value {
 /// Save totals to store.
 fn saveTotals(c: *HistoryCtx, alloc: std.mem.Allocator, totals: std.json.Value) !void {
     c.store.insertItem(alloc, ns_totals, totals_key, totals) catch |err| switch (err) {
-        ds.Error.BackendError => {}, // transient store failure: silently skip
+        // transient store failure: don't propagate, but surface it — otherwise
+        // cumulative print stats silently stop persisting with no signal.
+        ds.Error.BackendError => std.debug.print("phobos: warning: history totals persist failed: {} — cumulative stats may be stale\n", .{err}),
         else => return err,
     };
 }
@@ -739,6 +797,10 @@ pub fn handleTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator
 /// POST /server/history/reset_totals
 pub fn handleResetTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *HistoryCtx = @ptrCast(@alignCast(ctx));
+    // Refuse to reset while a job is running — otherwise the in-flight job's
+    // accounting is folded into a half-cleared total (Moonraker raises
+    // "Job in progress, cannot reset totals").
+    if (c.getCurrentJobId() != null) return error.InvalidParams;
     const last_totals = try loadTotals(c, alloc);
     const new_totals = try buildBaseTotals(alloc);
     try saveTotals(c, alloc, new_totals);
@@ -1362,6 +1424,27 @@ test "handleResetTotals: resets and returns last_totals" {
     const result = try handleResetTotals(@ptrCast(&ctx), .null, a);
     try testing.expect(result.object.get("last_totals") != null);
     try testing.expect(result.object.get("last_auxiliary_totals") != null);
+}
+
+test "handleResetTotals: refuses to reset while a job is in progress" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+
+    // A job is active → reset must be rejected (Moonraker parity), leaving totals
+    // untouched so the running job's accounting isn't corrupted.
+    var ctx = HistoryCtx{ .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = 7, .job_user = "" };
+    try testing.expectError(error.InvalidParams, handleResetTotals(@ptrCast(&ctx), .null, a));
 }
 
 test "registerHistory: wires expected routes and JSON-RPC methods" {

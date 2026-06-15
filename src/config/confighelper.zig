@@ -1,26 +1,26 @@
-/// confighelper.zig — configparser-compatible INI parser.
-///
-/// Matches Moonraker's `confighelper.py` / Python `configparser` semantics:
-///
-///  * Sections:   [section name]  — names may contain spaces.
-///  * Options:    key: value  OR  key = value  (both separators).
-///  * Comments:   lines whose first non-whitespace char is `#` or `;` are
-///                skipped entirely.  Moonraker's FileSourceWrapper ALSO
-///                strips inline comments preceded by at least one space
-///                (` #` / ` ;`), and un-escapes ` \#` / ` \;`.
-///                We reproduce that behaviour.
-///  * Multi-line: a value continues on subsequent lines that are MORE
-///                indented than the option key line (configparser semantics).
-///  * Includes:   [include <glob>] — resolved relative to the config-file
-///                dir; later writes override earlier ones (last-write wins).
-///                Recursive includes are detected and rejected.
-///  * Duplicate sections across files are allowed (merged); duplicate
-///                sections within the same file raise ParseError (matching
-///                Moonraker's FileSourceWrapper._parse_file).
-///
-/// Deviation from raw configparser: inline comment stripping is performed by
-/// Moonraker's FileSourceWrapper wrapper, not by configparser itself (which
-/// has inline_comment_prefixes unset).  We match the wrapper.
+//! confighelper.zig — configparser-compatible INI parser.
+//!
+//! Matches Moonraker's `confighelper.py` / Python `configparser` semantics:
+//!
+//!  * Sections:   [section name]  — names may contain spaces.
+//!  * Options:    key: value  OR  key = value  (both separators).
+//!  * Comments:   lines whose first non-whitespace char is `#` or `;` are
+//!                skipped entirely.  Moonraker's FileSourceWrapper ALSO
+//!                strips inline comments preceded by at least one space
+//!                (` #` / ` ;`), and un-escapes ` \#` / ` \;`.
+//!                We reproduce that behaviour.
+//!  * Multi-line: a value continues on subsequent lines that are MORE
+//!                indented than the option key line (configparser semantics).
+//!  * Includes:   [include <glob>] — resolved relative to the config-file
+//!                dir; later writes override earlier ones (last-write wins).
+//!                Recursive includes are detected and rejected.
+//!  * Duplicate sections across files are allowed (merged); duplicate
+//!                sections within the same file raise ParseError (matching
+//!                Moonraker's FileSourceWrapper._parse_file).
+//!
+//! Deviation from raw configparser: inline comment stripping is performed by
+//! Moonraker's FileSourceWrapper wrapper, not by configparser itself (which
+//! has inline_comment_prefixes unset).  We match the wrapper.
 const std = @import("std");
 const backend = @import("backend.zig");
 

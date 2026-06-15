@@ -26,6 +26,25 @@ const Error = ds.Error;
 pub const SqliteStore = struct {
     gpa: std.mem.Allocator,
     db: *c.sqlite3,
+    /// Serializes read-modify-write so concurrent inserts to one top-level
+    /// record can't lose updates. SQLite's FULLMUTEX only serializes individual
+    /// C-API calls — it does NOT make the load-decode-modify-encode-store
+    /// sequence below atomic, so two writers racing on sub-keys of the same
+    /// record would clobber each other without this. Mirrors FileStore.
+    ///
+    /// A spinlock (not std.Io.Mutex) because SqliteStore opens with no io
+    /// handle (see app.zig); the RMW sections are short and writes are rare, so
+    /// contention is negligible.
+    rmw_lock: std.atomic.Value(bool) = .init(false),
+
+    fn lockRmw(self: *SqliteStore) void {
+        while (self.rmw_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+    fn unlockRmw(self: *SqliteStore) void {
+        self.rmw_lock.store(false, .release);
+    }
 
     pub fn open(gpa: std.mem.Allocator, path: [:0]const u8) Error!SqliteStore {
         _ = c.sqlite3_initialize();
@@ -39,8 +58,15 @@ pub const SqliteStore = struct {
         // WAL for crash-safety + concurrency; create the namespace table to match
         // Moonraker's schema (the `record` declared type drives no behaviour here
         // — we encode/decode the blobs ourselves — but keeps the schema identical).
-        self.execSql("PRAGMA journal_mode=WAL;") catch {};
-        self.execSql("PRAGMA synchronous=NORMAL;") catch {};
+        self.execSql("PRAGMA journal_mode=WAL;") catch |err|
+            std.debug.print("phobos: warning: sqlite PRAGMA journal_mode=WAL failed: {} — reduced crash-safety\n", .{err});
+        self.execSql("PRAGMA synchronous=NORMAL;") catch |err|
+            std.debug.print("phobos: warning: sqlite PRAGMA synchronous=NORMAL failed: {}\n", .{err});
+        // Block (up to 5s) on a contended lock instead of failing a write
+        // immediately with SQLITE_BUSY → BackendError. Covers WAL checkpoints
+        // and any concurrent reader holding the DB momentarily.
+        self.execSql("PRAGMA busy_timeout=5000;") catch |err|
+            std.debug.print("phobos: warning: sqlite PRAGMA busy_timeout failed: {} — writes may fail under contention\n", .{err});
         try self.execSql(
             \\CREATE TABLE IF NOT EXISTS namespace_store (
             \\    namespace TEXT NOT NULL,
@@ -176,9 +202,18 @@ pub const SqliteStore = struct {
         const segs = pk.slice();
         const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse {
             // Drop-in fallback: history lives in the dedicated tables, not KV.
-            const ns_val: ?json.Value = if (std.mem.eql(u8, namespace, "history"))
-                try self.historyFromTable(arena)
-            else if (std.mem.eql(u8, namespace, "history_totals"))
+            // For a single job lookup, query that one row by its PRIMARY KEY
+            // (job_id) instead of scanning the whole job_history table and
+            // materialising every job just to pick one — the latter is O(rows)
+            // per get and degrades linearly as print history grows.
+            if (std.mem.eql(u8, namespace, "history")) {
+                const job = (try self.historyJobFromTable(arena, segs[0])) orelse return null;
+                return ds.getPath(job, segs[1..]) catch |e| switch (e) {
+                    ds.Error.KeyNotFound => null,
+                    else => |o| o,
+                };
+            }
+            const ns_val: ?json.Value = if (std.mem.eql(u8, namespace, "history_totals"))
                 try self.totalsFromTable(arena)
             else
                 null;
@@ -204,6 +239,8 @@ pub const SqliteStore = struct {
     pub fn insertItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
+        self.lockRmw();
+        defer self.unlockRmw();
         var record: json.Value = .null;
         if (segs.len > 1) {
             if (try self.getRecordRaw(arena, namespace, segs[0])) |raw| {
@@ -217,6 +254,8 @@ pub const SqliteStore = struct {
     pub fn updateItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
+        self.lockRmw();
+        defer self.unlockRmw();
         const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse return Error.KeyNotFound;
         const record = try decodeRecord(arena, raw);
         const new_record = try ds.updatePath(arena, record, segs[1..], value);
@@ -226,6 +265,8 @@ pub const SqliteStore = struct {
     pub fn deleteItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
+        self.lockRmw();
+        defer self.unlockRmw();
         const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse return Error.KeyNotFound;
         const record = try decodeRecord(arena, raw);
         const res = try ds.deletePath(record, segs[1..]);
@@ -284,25 +325,24 @@ pub const SqliteStore = struct {
         const stmt = self.prepare(sql) catch return .{ .object = obj }; // no table → empty
         defer _ = c.sqlite3_finalize(stmt);
         while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            var job: json.ObjectMap = .empty;
-            // job_id is a positive INTEGER; format as unsigned 6-hex (matching
-            // phobos's own key format). Signed formatting would emit a `+` sign.
-            const jid: u64 = @intCast(c.sqlite3_column_int64(stmt, 0));
-            put(arena, &job, "filename", colText(arena, stmt, 2));
-            put(arena, &job, "status", colText(arena, stmt, 3));
-            put(arena, &job, "user", colText(arena, stmt, 1));
-            putF(arena, &job, "start_time", c.sqlite3_column_double(stmt, 4));
-            putF(arena, &job, "end_time", c.sqlite3_column_double(stmt, 5));
-            putF(arena, &job, "print_duration", c.sqlite3_column_double(stmt, 6));
-            putF(arena, &job, "total_duration", c.sqlite3_column_double(stmt, 7));
-            putF(arena, &job, "filament_used", c.sqlite3_column_double(stmt, 8));
-            job.put(arena, "metadata", colJson(arena, stmt, 9, .{ .object = .empty })) catch return Error.BackendError;
-            job.put(arena, "auxiliary_data", colJson(arena, stmt, 10, .{ .array = .init(arena) })) catch return Error.BackendError;
-            job.put(arena, "job_id", .{ .string = std.fmt.allocPrint(arena, "{X:0>6}", .{jid}) catch return Error.BackendError }) catch return Error.BackendError;
-            const key = std.fmt.allocPrint(arena, "{X:0>6}", .{jid}) catch return Error.BackendError;
-            obj.put(arena, key, .{ .object = job }) catch return Error.BackendError;
+            const row = try mapJobRow(arena, stmt);
+            obj.put(arena, row.key, row.value) catch return Error.BackendError;
         }
         return .{ .object = obj };
+    }
+
+    /// Read a single job from Moonraker's `job_history` table by its hex
+    /// `job_key` (phobos's 6-hex job id), using the table's PRIMARY KEY for an
+    /// indexed lookup. Returns null if the table is absent, the key is not
+    /// valid hex, or no such job exists.
+    fn historyJobFromTable(self: *SqliteStore, arena: std.mem.Allocator, job_key: []const u8) Error!?json.Value {
+        const jid = std.fmt.parseInt(u64, job_key, 16) catch return null;
+        const sql = "SELECT job_id, user, filename, status, start_time, end_time, print_duration, total_duration, filament_used, metadata, auxiliary_data FROM job_history WHERE job_id=?1";
+        const stmt = self.prepare(sql) catch return null; // no table → not found
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int64(stmt, 1, @intCast(jid));
+        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
+        return (try mapJobRow(arena, stmt)).value;
     }
 
     /// Read Moonraker's `job_totals` table (provider `history`) into the
@@ -396,6 +436,33 @@ fn colJson(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int, default:
     const n: usize = @intCast(c.sqlite3_column_bytes(stmt, idx));
     if (n == 0) return default;
     return json.parseFromSliceLeaky(json.Value, arena, t[0..n], .{}) catch default;
+}
+
+/// A `job_history` row mapped to phobos's `{job_id: job}` shape. `key` (the
+/// 6-hex job id) is shared with the job object's `job_id` field — both borrow
+/// the same arena-owned string.
+const MappedJob = struct { key: []const u8, value: json.Value };
+
+/// Map the current `job_history` result row (column order per the SELECT in
+/// `historyFromTable`/`historyJobFromTable`) into a job object.
+fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!MappedJob {
+    var job: json.ObjectMap = .empty;
+    // job_id is a positive INTEGER; format as unsigned 6-hex (matching phobos's
+    // own key format). Signed formatting would emit a `+` sign.
+    const jid: u64 = @intCast(c.sqlite3_column_int64(stmt, 0));
+    put(arena, &job, "filename", colText(arena, stmt, 2));
+    put(arena, &job, "status", colText(arena, stmt, 3));
+    put(arena, &job, "user", colText(arena, stmt, 1));
+    putF(arena, &job, "start_time", c.sqlite3_column_double(stmt, 4));
+    putF(arena, &job, "end_time", c.sqlite3_column_double(stmt, 5));
+    putF(arena, &job, "print_duration", c.sqlite3_column_double(stmt, 6));
+    putF(arena, &job, "total_duration", c.sqlite3_column_double(stmt, 7));
+    putF(arena, &job, "filament_used", c.sqlite3_column_double(stmt, 8));
+    job.put(arena, "metadata", colJson(arena, stmt, 9, .{ .object = .empty })) catch return Error.BackendError;
+    job.put(arena, "auxiliary_data", colJson(arena, stmt, 10, .{ .array = .init(arena) })) catch return Error.BackendError;
+    const key = std.fmt.allocPrint(arena, "{X:0>6}", .{jid}) catch return Error.BackendError;
+    job.put(arena, "job_id", .{ .string = key }) catch return Error.BackendError;
+    return .{ .key = key, .value = .{ .object = job } };
 }
 
 const testing = std.testing;

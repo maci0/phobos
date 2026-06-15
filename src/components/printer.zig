@@ -155,6 +155,31 @@ const proxy_specs = [_]ProxySpec{
 // Klippy socket via `KlippyCtx.request()`.
 // ---------------------------------------------------------------------------
 
+/// Sanitize a print filename for embedding in a Klippy `SDCARD_PRINT_FILE
+/// FILENAME="..."` gcode command: strip a single leading '/', then escape any
+/// embedded double-quotes (`"` → `\"`) so the quoted argument stays well-formed.
+/// Returns a slice owned by `alloc`; when no escaping is needed it may alias the
+/// (slash-stripped) input. Pure and total — fuzzed below.
+fn sanitizePrintFilename(alloc: std.mem.Allocator, filename_in: []const u8) ![]const u8 {
+    var filename = filename_in;
+    if (filename.len > 0 and filename[0] == '/') filename = filename[1..];
+    if (std.mem.indexOfScalar(u8, filename, '"') == null) return filename;
+    // Escape embedded double-quotes: " → \"
+    var buf = try alloc.alloc(u8, filename.len + 16);
+    var i: usize = 0;
+    for (filename) |c| {
+        if (c == '"') {
+            if (i + 2 > buf.len) buf = try alloc.realloc(buf, buf.len * 2);
+            buf[i] = '\\';
+            i += 1;
+        }
+        if (i >= buf.len) buf = try alloc.realloc(buf, buf.len * 2);
+        buf[i] = c;
+        i += 1;
+    }
+    return buf[0..i];
+}
+
 /// POST /printer/print/start → printer.print.start
 /// Moonraker: klippy_apis.start_print(filename) → gcode/script SDCARD_PRINT_FILE.
 pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
@@ -163,7 +188,7 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     if (!k.isConnected()) return error.KlippyDisconnected;
 
     // Extract and sanitize filename (Moonraker: strip leading /, escape ").
-    var filename: []const u8 = if (params == .object)
+    const filename: []const u8 = if (params == .object)
         if (params.object.get("filename")) |v|
             if (v == .string) v.string else ""
         else
@@ -171,23 +196,7 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     else
         "";
     if (filename.len == 0) return error.InvalidParams;
-    if (filename[0] == '/') filename = filename[1..];
-    // Escape embedded double-quotes: " → \"
-    const escaped = if (std.mem.indexOfScalar(u8, filename, '"') != null) blk: {
-        var buf = try alloc.alloc(u8, filename.len + 16);
-        var i: usize = 0;
-        for (filename) |c| {
-            if (c == '"') {
-                if (i + 2 > buf.len) buf = try alloc.realloc(buf, buf.len * 2);
-                buf[i] = '\\';
-                i += 1;
-            }
-            if (i >= buf.len) buf = try alloc.realloc(buf, buf.len * 2);
-            buf[i] = c;
-            i += 1;
-        }
-        break :blk buf[0..i];
-    } else filename;
+    const escaped = try sanitizePrintFilename(alloc, filename);
 
     // Build on the arena (no fixed cap) — a long filename must not be truncated.
     const script = try std.fmt.allocPrint(alloc, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped});
@@ -484,6 +493,47 @@ test "fuzz printer handlers: arbitrary params never crash, always KlippyDisconne
 
             const h = all_handlers[buf[1] % all_handlers.len];
             try testing.expectError(error.KlippyDisconnected, h(@ptrCast(&ctx), p.value, a));
+        }
+    }.run, .{});
+}
+
+test "sanitizePrintFilename: strips one leading slash and escapes quotes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testing.expectEqualStrings("a.gcode", try sanitizePrintFilename(a, "a.gcode"));
+    try testing.expectEqualStrings("a.gcode", try sanitizePrintFilename(a, "/a.gcode"));
+    // Only one leading slash is stripped.
+    try testing.expectEqualStrings("/a.gcode", try sanitizePrintFilename(a, "//a.gcode"));
+    try testing.expectEqualStrings("", try sanitizePrintFilename(a, "/"));
+    try testing.expectEqualStrings("a\\\"b", try sanitizePrintFilename(a, "a\"b"));
+    try testing.expectEqualStrings("\\\"\\\"", try sanitizePrintFilename(a, "\"\""));
+}
+
+test "fuzz sanitizePrintFilename: never crashes, every quote is escaped" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            var buf: [256]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const len = @as(usize, buf[0]) % buf.len;
+            const input = buf[1..len + 1];
+
+            const out = try sanitizePrintFilename(a, input);
+
+            // Invariant: in the result every '"' is immediately preceded by a
+            // backslash, so it can never terminate the FILENAME="..." argument.
+            for (out, 0..) |c, i| {
+                if (c == '"') {
+                    if (i == 0 or out[i - 1] != '\\') return error.FuzzUnescapedQuote;
+                }
+            }
+            // Result is never longer than twice the input (worst case all quotes).
+            if (out.len > input.len * 2) return error.FuzzOversizedOutput;
         }
     }.run, .{});
 }

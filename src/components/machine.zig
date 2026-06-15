@@ -43,6 +43,7 @@ const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
 const clock = @import("../util/clock.zig");
+const sleep = @import("../util/sleep.zig");
 
 const Registry = registry.Registry;
 const NotifyBus = notify.NotifyBus;
@@ -160,6 +161,9 @@ pub const MachineCtx = struct {
     pub const RunCmdResult = struct { stdout: []u8, stderr: []u8 };
     pub const RunCmdFn = *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!RunCmdResult;
 
+    /// Length of the moonraker_stats ring buffer (Moonraker keeps 30 samples).
+    pub const moonraker_stats_len = 30;
+
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
     bus: ?*NotifyBus = null,
@@ -179,8 +183,8 @@ pub const MachineCtx = struct {
     proc_stat_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     /// Handle for the proc_stat timer thread, joined in deinit.
     proc_stat_thread: ?std.Thread = null,
-    /// Rolling 30-sample buffer for moonraker_stats (Moonraker keeps 30 samples).
-    moonraker_stats: [30]MoonrakerSample = [_]MoonrakerSample{.{}} ** 30,
+    /// Rolling sample buffer for moonraker_stats (length `moonraker_stats_len`).
+    moonraker_stats: [moonraker_stats_len]MoonrakerSample = [_]MoonrakerSample{.{}} ** moonraker_stats_len,
     moonraker_stats_head: usize = 0,
     moonraker_stats_count: usize = 0,
     moonraker_stats_mutex: std.Io.Mutex = .init,
@@ -227,6 +231,10 @@ pub const MachineCtx = struct {
     /// bandwidth (bytes/sec). Inline + fixed-size (no heap); touched only by the
     /// single proc_stat timer thread, so no lock.
     net_prev: [max_net_ifaces]NetSample = [_]NetSample{.{}} ** max_net_ifaces,
+    /// Separate baseline for the GET /machine/proc_stats handler so a GET can't
+    /// perturb the timer's `net_prev` (which would spike the pushed samples). GETs
+    /// are Core-serialised, so this needs no lock either.
+    net_prev_get: [max_net_ifaces]NetSample = [_]NetSample{.{}} ** max_net_ifaces,
 
     pub const ServiceEntry = struct {
         active_state: []const u8,
@@ -334,8 +342,9 @@ fn procStatTimerThread(self: *MachineCtx) void {
     var first: bool = true;
     while (!self.proc_stat_stop.load(.acquire)) {
         if (!first) {
-            io.sleep(std.Io.Duration.fromSeconds(1), .awake) catch {};
-            if (self.proc_stat_stop.load(.acquire)) break;
+            // Sleep the 1-second tick in 100 ms chunks so deinit→join returns
+            // within ~100 ms instead of up to a full second (see util/sleep.zig).
+            if (sleep.chunked(io, 1000, &self.proc_stat_stop)) break;
         }
         first = false;
         emitProcStatUpdate(self, io) catch {};
@@ -369,7 +378,7 @@ fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
     // against the previous tick.
     if (readFile(io, alloc, NET_DEV_PATH)) |txt| {
         network = try parseNetDev(alloc, txt);
-        applyBandwidth(self, network, nowSeconds());
+        applyBandwidth(&self.net_prev, network, nowSeconds());
     }
 
     // Read system CPU usage.
@@ -453,8 +462,8 @@ fn pushMoonrakerSample(self: *MachineCtx, io: std.Io, sample: MachineCtx.Moonrak
     defer self.moonraker_stats_mutex.unlock(io);
 
     self.moonraker_stats[self.moonraker_stats_head] = sample;
-    self.moonraker_stats_head = (self.moonraker_stats_head + 1) % 30;
-    if (self.moonraker_stats_count < 30) {
+    self.moonraker_stats_head = (self.moonraker_stats_head + 1) % MachineCtx.moonraker_stats_len;
+    if (self.moonraker_stats_count < MachineCtx.moonraker_stats_len) {
         self.moonraker_stats_count += 1;
     }
 }
@@ -485,10 +494,10 @@ fn buildMoonrakerStats(self: *MachineCtx, alloc: std.mem.Allocator, io: ?std.Io)
     // Start from the oldest entry. When the buffer hasn't wrapped, start at 0.
     // When it has wrapped, start at head (the oldest element is right after the
     // newest, which is head-1).
-    const start: usize = if (count < 30) @as(usize, 0) else self.moonraker_stats_head;
+    const start: usize = if (count < MachineCtx.moonraker_stats_len) @as(usize, 0) else self.moonraker_stats_head;
     var i: usize = 0;
     while (i < count) : (i += 1) {
-        const idx = (start + i) % 30;
+        const idx = (start + i) % MachineCtx.moonraker_stats_len;
         const s = self.moonraker_stats[idx];
         var sample: std.json.ObjectMap = .empty;
         sample.put(alloc, "time", .{ .float = s.time }) catch continue;
@@ -523,21 +532,6 @@ fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]cons
 
 fn getStrDefault(params: std.json.Value, field: []const u8, default_val: []const u8) []const u8 {
     return getOptStr(params, field) orelse default_val;
-}
-
-fn getBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -941,28 +935,43 @@ fn parseIpAddrJson(alloc: std.mem.Allocator, text: []const u8) NetInfo {
         const name = jsonStr(o, "ifname") orelse continue;
         const link_type = jsonStr(o, "link_type") orelse "";
 
+        // Moonraker gates ALL interfaces on operstate == "UP" (machine.py:677),
+        // including canbus.
+        const operstate = jsonStr(o, "operstate") orelse "";
+        if (!std.mem.eql(u8, operstate, "UP")) continue;
+
         if (std.mem.eql(u8, link_type, "can")) {
             var c: std.json.ObjectMap = .empty;
-            c.put(alloc, "tx_queue_len", .{ .integer = jsonInt(o, "txqueuelen") orelse 0 }) catch continue;
-            var bitrate: i64 = 0;
-            var driver: []const u8 = "";
+            // Real `ip -json` uses `txqlen`, not `txqueuelen` (machine.py:683).
+            c.put(alloc, "tx_queue_len", .{ .integer = jsonInt(o, "txqlen") orelse 0 }) catch continue;
+            // Moonraker reads bitrate from linkinfo.info_data.bittiming.bitrate
+            // (default -1) and driver from linkinfo.info_data.bittiming_const.name
+            // (default "unknown") — machine.py:684-689.
+            var bitrate: i64 = -1;
+            var driver: []const u8 = "unknown";
             if (o.get("linkinfo")) |li| {
                 if (li == .object) {
-                    if (jsonStr(li.object, "info_kind")) |k| driver = k;
                     if (li.object.get("info_data")) |idv| {
-                        if (idv == .object) bitrate = jsonInt(idv.object, "bitrate") orelse 0;
+                        if (idv == .object) {
+                            if (idv.object.get("bittiming")) |bt| {
+                                if (bt == .object) bitrate = jsonInt(bt.object, "bitrate") orelse -1;
+                            }
+                            if (idv.object.get("bittiming_const")) |bc| {
+                                if (bc == .object) driver = jsonStr(bc.object, "name") orelse "unknown";
+                            }
+                        }
                     }
                 }
             }
             c.put(alloc, "bitrate", .{ .integer = bitrate }) catch continue;
-            c.put(alloc, "driver", .{ .string = alloc.dupe(u8, driver) catch "" }) catch continue;
+            c.put(alloc, "driver", .{ .string = alloc.dupe(u8, driver) catch "unknown" }) catch continue;
             can.put(alloc, alloc.dupe(u8, name) catch continue, .{ .object = c }) catch continue;
             continue;
         }
 
-        // Only UP ethernet links appear in `network`.
-        const operstate = jsonStr(o, "operstate") orelse "";
-        if (!std.mem.eql(u8, operstate, "UP")) continue;
+        // Only UP ethernet links with a MAC appear in `network` (machine.py:691-693).
+        if (!std.mem.eql(u8, link_type, "ether")) continue;
+        if (o.get("address") == null) continue;
 
         var ips: std.json.Array = .init(alloc);
         if (o.get("addr_info")) |ai| {
@@ -972,7 +981,8 @@ fn parseIpAddrJson(alloc: std.mem.Allocator, text: []const u8) NetInfo {
                     const fam = jsonStr(a.object, "family") orelse continue;
                     const local = jsonStr(a.object, "local") orelse continue;
                     const famname = if (std.mem.eql(u8, fam, "inet")) "ipv4" else if (std.mem.eql(u8, fam, "inet6")) "ipv6" else fam;
-                    const is_ll = std.mem.startsWith(u8, local, "fe80") or std.mem.startsWith(u8, local, "169.254");
+                    // Moonraker uses the authoritative `scope` field (machine.py:699).
+                    const is_ll = std.mem.eql(u8, jsonStr(a.object, "scope") orelse "", "link");
                     var e: std.json.ObjectMap = .empty;
                     e.put(alloc, "family", .{ .string = famname }) catch continue;
                     e.put(alloc, "address", .{ .string = alloc.dupe(u8, local) catch continue }) catch continue;
@@ -981,6 +991,8 @@ fn parseIpAddrJson(alloc: std.mem.Allocator, text: []const u8) NetInfo {
                 }
             }
         }
+        // Moonraker drops interfaces with no usable addresses (machine.py:704).
+        if (ips.items.len == 0) continue;
         var n: std.json.ObjectMap = .empty;
         n.put(alloc, "mac_address", .{ .string = alloc.dupe(u8, jsonStr(o, "address") orelse "") catch "" }) catch continue;
         n.put(alloc, "ip_addresses", .{ .array = ips }) catch continue;
@@ -1313,7 +1325,11 @@ fn computeBandwidth(prev_total: u64, cur_total: u64, dt: f64) f64 {
 /// with the real bytes/sec delta vs the previous tick, and refresh the cache.
 /// First sighting of an interface leaves bandwidth at 0 (no baseline yet).
 /// Matches proc_stats.py's per-tick `bytes_sec` computation.
-fn applyBandwidth(self: *MachineCtx, network: std.json.Value, now: f64) void {
+/// Fill each interface's per-second `bandwidth` from the rx/tx delta vs its
+/// previous sample stored in `prev`. The caller passes which baseline to use: the
+/// timer thread its own `net_prev`, the GET handler a separate `net_prev_get`, so
+/// the two never share state and a GET can't skew the pushed timer samples.
+fn applyBandwidth(prev: *[max_net_ifaces]NetSample, network: std.json.Value, now: f64) void {
     if (network != .object) return;
     var it = network.object.iterator();
     while (it.next()) |entry| {
@@ -1326,7 +1342,7 @@ fn applyBandwidth(self: *MachineCtx, network: std.json.Value, now: f64) void {
 
         var slot: ?*NetSample = null;
         var free_slot: ?*NetSample = null;
-        for (&self.net_prev) |*s| {
+        for (prev) |*s| {
             if (s.used and std.mem.eql(u8, s.name[0..s.name_len], name)) {
                 slot = s;
                 break;
@@ -1416,6 +1432,10 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
         }
         if (readFile(io, alloc, NET_DEV_PATH)) |txt| {
             network = try parseNetDev(alloc, txt);
+            // Fill per-interface bandwidth from the rx/tx delta since the last
+            // sample (Moonraker reports this on the GET too, not just the push).
+            // Uses the GET's OWN baseline so it never perturbs the timer's samples.
+            applyBandwidth(&ctx.net_prev_get, network, nowSeconds());
         }
         if (readFile(io, alloc, CPU_STAT_PATH)) |txt| {
             sys_cpu = try parseCpuStat(alloc, txt);
@@ -2398,10 +2418,10 @@ test "parseIpAddrJson: UP ethernet + CAN interfaces" {
         \\[
         \\ {"ifname":"lo","link_type":"loopback","operstate":"UNKNOWN","address":"00:00:00:00:00:00","addr_info":[]},
         \\ {"ifname":"eth0","link_type":"ether","operstate":"UP","address":"aa:bb:cc:dd:ee:ff",
-        \\  "addr_info":[{"family":"inet","local":"192.168.1.5"},{"family":"inet6","local":"fe80::1"}]},
+        \\  "addr_info":[{"family":"inet","local":"192.168.1.5","scope":"global"},{"family":"inet6","local":"fe80::1","scope":"link"}]},
         \\ {"ifname":"wlan0","link_type":"ether","operstate":"DOWN","address":"11:22:33:44:55:66","addr_info":[]},
-        \\ {"ifname":"can0","link_type":"can","txqueuelen":10,
-        \\  "linkinfo":{"info_kind":"can","info_data":{"bitrate":500000}}}
+        \\ {"ifname":"can0","link_type":"can","operstate":"UP","txqlen":10,
+        \\  "linkinfo":{"info_kind":"can","info_data":{"bittiming":{"bitrate":500000},"bittiming_const":{"name":"mcp251xfd"}}}}
         \\]
     ;
     const r = parseIpAddrJson(a, txt);
@@ -2423,7 +2443,7 @@ test "parseIpAddrJson: UP ethernet + CAN interfaces" {
     const can0 = can.get("can0").?.object;
     try testing.expectEqual(@as(i64, 10), can0.get("tx_queue_len").?.integer);
     try testing.expectEqual(@as(i64, 500000), can0.get("bitrate").?.integer);
-    try testing.expectEqualStrings("can", can0.get("driver").?.string);
+    try testing.expectEqualStrings("mcp251xfd", can0.get("driver").?.string);
 }
 
 test "parseIpAddrJson: garbage/empty yields empty maps" {
@@ -2584,7 +2604,7 @@ test "applyBandwidth: zero on first sight, real delta on second tick" {
         \\eth0: 1000 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0
     ;
     const n1 = try parseNetDev(a, t1);
-    applyBandwidth(&c, n1, 10.0);
+    applyBandwidth(&c.net_prev, n1, 10.0);
     // First sighting: no baseline → bandwidth stays 0.
     try testing.expectEqual(@as(f64, 0.0), n1.object.get("eth0").?.object.get("bandwidth").?.float);
 
@@ -2593,7 +2613,7 @@ test "applyBandwidth: zero on first sight, real delta on second tick" {
         \\eth0: 3000 0 0 0 0 0 0 0 1500 0 0 0 0 0 0 0
     ;
     const n2 = try parseNetDev(a, t2);
-    applyBandwidth(&c, n2, 12.0);
+    applyBandwidth(&c.net_prev, n2, 12.0);
     try testing.expectEqual(@as(f64, 1500.0), n2.object.get("eth0").?.object.get("bandwidth").?.float);
 }
 
@@ -2608,8 +2628,8 @@ test "fuzz applyBandwidth: arbitrary net objects never crash" {
             var raw: [64]u8 = undefined;
             smith.bytesWithHash(&raw, 0);
             const net = parseNetDev(a, &raw) catch return;
-            applyBandwidth(&c, net, 1.0);
-            applyBandwidth(&c, net, 2.0);
+            applyBandwidth(&c.net_prev, net, 1.0);
+            applyBandwidth(&c.net_prev, net, 2.0);
         }
     }.run, .{});
 }

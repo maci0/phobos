@@ -75,27 +75,31 @@ pub fn dispatchMessage(
     request_json: []const u8,
     alloc: std.mem.Allocator,
 ) error{OutOfMemory}![]u8 {
-    // Peek at the request to see whether it targets a connection-bound method.
-    // Malformed input falls through to the shared dispatcher, which emits the
-    // proper JSON-RPC parse/invalid-request error.
+    // Parse the request ONCE. The connection-bound methods are serviced here off
+    // the parsed root; everything else is forwarded to the shared dispatcher via
+    // `handleParsedRoot`, which reuses this same parse instead of doing a second
+    // one — WS is the hot client transport (every Mainsail/Fluidd RPC), so the
+    // saved parse + arena allocations matter. `alloc` is the per-request arena, so
+    // `parsed` lives for the whole call (the arena ignores the deinit's frees).
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, request_json, .{}) catch {
+        // Malformed — let the dispatcher emit the canonical JSON-RPC parse error.
+        return dispatcher.handle(request_json, alloc);
+    };
+    defer parsed.deinit();
+    const root = parsed.value;
+
     const peek: ?struct { method: []const u8, id: std.json.Value, is_notification: bool } = blk: {
-        var parsed = std.json.parseFromSlice(std.json.Value, alloc, request_json, .{}) catch break :blk null;
-        defer parsed.deinit();
-        const root = parsed.value;
         if (root != .object) break :blk null;
         const obj = root.object;
         const method_v = obj.get("method") orelse break :blk null;
         if (method_v != .string) break :blk null;
         // jsonrpc version must be 2.0 to be a valid request; let the shared
-        // dispatcher own that validation for everything except our two methods.
+        // dispatcher own that validation for everything except our methods.
         const jrpc = obj.get("jsonrpc") orelse break :blk null;
         if (jrpc != .string or !std.mem.eql(u8, jrpc.string, "2.0")) break :blk null;
-
         const id_v = obj.get("id");
-        // Duplicate the method/id into `alloc` since `parsed` is freed on defer.
-        const m = alloc.dupe(u8, method_v.string) catch return error.OutOfMemory;
-        const id_dup: std.json.Value = if (id_v) |iv| dupValue(alloc, iv) catch return error.OutOfMemory else .null;
-        break :blk .{ .method = m, .id = id_dup, .is_notification = (id_v == null) };
+        // No dup needed: `parsed` outlives the call (lives in the request arena).
+        break :blk .{ .method = method_v.string, .id = id_v orelse .null, .is_notification = (id_v == null) };
     };
 
     if (peek) |p| {
@@ -105,12 +109,8 @@ pub fn dispatchMessage(
             return jv.successResponse(alloc, p.id, result);
         }
         if (std.mem.eql(u8, p.method, identify_method)) {
-            // Reparse params and store identify metadata on the live connection.
-            var parsed = std.json.parseFromSlice(std.json.Value, alloc, request_json, .{}) catch
-                return handleIdentify(io, conns, conn, .null, p.id, p.is_notification, alloc);
-            defer parsed.deinit();
-            const params: std.json.Value = if (parsed.value == .object)
-                (parsed.value.object.get("params") orelse .null)
+            const params: std.json.Value = if (root == .object)
+                (root.object.get("params") orelse .null)
             else
                 .null;
             return handleIdentify(io, conns, conn, params, p.id, p.is_notification, alloc);
@@ -126,10 +126,10 @@ pub fn dispatchMessage(
         }
     }
 
-    // Everything else: the shared dispatcher, which takes the Core lock itself
-    // per-method (skipping it for off_core read methods). Convergence point —
-    // identical to the HTTP JSON-RPC bridge.
-    return dispatcher.handle(request_json, alloc);
+    // Everything else: the shared dispatcher, reusing the parse above. Takes the
+    // Core lock per-method (skipping off_core reads) — identical convergence point
+    // to the HTTP JSON-RPC bridge.
+    return dispatcher.handleParsedRoot(root, alloc);
 }
 
 /// Service a connection-scoped `printer.objects.subscribe`: register the
@@ -174,14 +174,6 @@ fn handleObjectsSubscribe(
     };
     if (is_notification) return alloc.dupe(u8, &.{});
     return jv.successResponse(alloc, id, result);
-}
-
-/// Deep-copy a JSON id value (.integer/.string/.null) into `alloc`.
-fn dupValue(alloc: std.mem.Allocator, v: std.json.Value) !std.json.Value {
-    return switch (v) {
-        .string => |s| .{ .string = try alloc.dupe(u8, s) },
-        else => v, // integers/null/bool are by-value
-    };
 }
 
 fn handleIdentify(

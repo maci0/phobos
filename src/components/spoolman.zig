@@ -61,6 +61,11 @@ pub const SpoolmanCtx = struct {
     /// maintained by the WS supervisor thread.
     ws_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ws_thread: ?std.Thread = null,
+    /// Atomic mirror of "a WS supervisor is running", read by `connected()` from
+    /// request-handler / supervisor threads while `ws_thread` is written only by
+    /// the control thread (start/stop). Reading `ws_thread` cross-thread would be
+    /// a data race on a non-atomic optional, so this flag is the discriminator.
+    ws_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ws_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
     ws: ?*ws_client_mod.WsClient = null,
@@ -101,7 +106,7 @@ pub const SpoolmanCtx = struct {
     /// True if Spoolman is connected: the live WS state when a WS supervisor is
     /// running, else (HTTP-only) whether a server_url is configured.
     pub fn connected(self: *const SpoolmanCtx) bool {
-        if (self.ws_thread != null) return self.ws_connected.load(.acquire);
+        if (self.ws_running.load(.acquire)) return self.ws_connected.load(.acquire);
         return self.server_url != null;
     }
 
@@ -114,10 +119,14 @@ pub const SpoolmanCtx = struct {
         const a = arena.allocator();
         var payload: std.json.ObjectMap = .empty;
         payload.put(a, "spoolman_connected", .{ .bool = self.connected() }) catch return;
+        // Moonraker send_event("spoolman:spoolman_status_changed", {...}) → params
+        // is the single-element data tuple [{...}]; emit requires a JSON array.
+        var arr: std.json.Array = .init(a);
+        arr.append(.{ .object = payload }) catch return;
         if (locked)
-            self.bus.emitLocked(io, notify.names.spoolman_status_changed, .{ .object = payload }) catch {}
+            self.bus.emitLocked(io, notify.names.spoolman_status_changed, .{ .array = arr }) catch {}
         else
-            self.bus.emit(io, notify.names.spoolman_status_changed, .{ .object = payload }) catch {};
+            self.bus.emit(io, notify.names.spoolman_status_changed, .{ .array = arr }) catch {};
     }
 
     fn emitSpoolmanStatusChanged(self: *SpoolmanCtx) void {
@@ -156,9 +165,11 @@ pub const SpoolmanCtx = struct {
         self.parseWsTarget(url) catch return;
         self.ws_stop.store(false, .release);
         self.ws_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, wsSupervisor, .{self}) catch null;
+        if (self.ws_thread != null) self.ws_running.store(true, .release);
     }
 
     pub fn stopWs(self: *SpoolmanCtx) void {
+        self.ws_running.store(false, .release);
         self.ws_stop.store(true, .release);
         self.wsLock();
         if (self.ws) |w| w.shutdownRecv();
@@ -280,7 +291,8 @@ pub const SpoolmanCtx = struct {
         const a = arena.allocator();
 
         const val: std.json.Value = if (spool_id) |id| .{ .integer = id } else .null;
-        self.store.insertItem(a, db_namespace, active_spool_key, val) catch {};
+        self.store.insertItem(a, db_namespace, active_spool_key, val) catch |err|
+            std.debug.print("phobos: warning: failed to persist active spool: {} — selection lost on restart\n", .{err});
 
         // Emit notification only when a live event loop is available.
         const io = self.io orelse return;

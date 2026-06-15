@@ -1,5 +1,5 @@
-/// Thin helpers over std.json for building JSON-RPC responses.
-/// Provides insertion-ordered object construction and allocation-backed serialization.
+//! Thin helpers over std.json for building JSON-RPC responses.
+//! Provides insertion-ordered object construction and allocation-backed serialization.
 const std = @import("std");
 
 /// An owned JSON serialization result. Caller must free with allocator.free().
@@ -29,15 +29,19 @@ pub fn deepCopy(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory
         .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
         .object => |obj| {
             var new_obj: std.json.ObjectMap = .empty;
+            // Final size is known: size the map once instead of rehashing as it grows.
+            try new_obj.ensureTotalCapacity(alloc, obj.count());
             var it = obj.iterator();
             while (it.next()) |kv| {
-                try new_obj.put(alloc, try alloc.dupe(u8, kv.key_ptr.*), try deepCopy(alloc, kv.value_ptr.*));
+                new_obj.putAssumeCapacity(try alloc.dupe(u8, kv.key_ptr.*), try deepCopy(alloc, kv.value_ptr.*));
             }
             return .{ .object = new_obj };
         },
         .array => |arr| {
             var new_arr: std.json.Array = .init(alloc);
-            for (arr.items) |item| try new_arr.append(try deepCopy(alloc, item));
+            // Final length is known: reserve once instead of doubling-realloc per append.
+            try new_arr.ensureTotalCapacity(arr.items.len);
+            for (arr.items) |item| new_arr.appendAssumeCapacity(try deepCopy(alloc, item));
             return .{ .array = new_arr };
         },
     };

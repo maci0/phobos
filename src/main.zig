@@ -1,4 +1,9 @@
+//! Root module: process entrypoint (`main`) and the public barrel that
+//! re-exports every phobos module. Importing `@import("main.zig")` (or the
+//! package root) gives access to the whole tree via the `pub const` aliases
+//! below; `src/app.zig` is the runtime assembly point those modules wire into.
 const std = @import("std");
+const build_options = @import("build_options");
 pub const arena = @import("util/arena.zig");
 pub const clock = @import("util/clock.zig");
 
@@ -30,6 +35,37 @@ pub const app = @import("app.zig");
 pub const oracle_normalize = @import("oracle/normalize.zig");
 pub const oracle_replay = @import("oracle/replay.zig");
 
+const usage_text =
+    \\phobos — Moonraker-compatible print server
+    \\
+    \\Usage: phobos [options]
+    \\
+    \\Options:
+    \\  -c, --config <path>      Moonraker-style config file to load
+    \\  -d, --data-path <path>   Data directory (gcodes/config/logs roots)
+    \\      --dump-api           Print the API surface as JSON to stdout and exit
+    \\      --version            Print version and exit
+    \\  -h, --help               Show this help and exit
+    \\
+;
+
+/// Write to stdout with a small bounded buffer. Used for --help/--version so
+/// requested output lands on stdout (parseable), not the stderr debug channel.
+fn writeStdout(aio: std.Io, bytes: []const u8) !void {
+    const stdout = std.Io.File.stdout();
+    var wbuf: [512]u8 = undefined;
+    var sw = stdout.writer(aio, &wbuf);
+    try sw.interface.writeAll(bytes);
+    try sw.interface.flush();
+}
+
+/// Report a CLI usage error on stderr (with usage text) and exit with code 2,
+/// the conventional "command-line usage" status (distinct from 1 = runtime).
+fn usageError(arg: []const u8, detail: []const u8) noreturn {
+    std.debug.print("phobos: error: '{s}'{s}\n\n{s}", .{ arg, detail, usage_text });
+    std.process.exit(2);
+}
+
 pub fn main(init: std.process.Init) !void {
     // `init.gpa` is std's DebugAllocator — it captures a dwarf stack trace on
     // every allocation for leak/UAF detection. That tracing dominates the hot
@@ -58,17 +94,31 @@ pub fn main(init: std.process.Init) !void {
     var dump_api = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--dump-api")) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--dump-api")) {
             dump_api = true;
-        } else if ((std.mem.eql(u8, args[i], "-c") or std.mem.eql(u8, args[i], "--config")) and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
+            try writeStdout(aio, usage_text);
+            return;
+        } else if (std.mem.eql(u8, a, "--version")) {
+            try writeStdout(aio, build_options.moonraker_version);
+            try writeStdout(aio, "\n");
+            return;
+        } else if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "--config")) {
             i += 1;
+            if (i >= args.len) return usageError(a, " requires a <path> value");
             config_path = args[i];
-        } else if ((std.mem.eql(u8, args[i], "-d") or std.mem.eql(u8, args[i], "--data-path")) and i + 1 < args.len) {
+        } else if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "--data-path")) {
             // Moonraker-compatible datadir flag. Backs the file_manager roots
             // (gcodes/config/logs). Without it phobos uses a temp dir under /tmp,
             // which is tmpfs on embedded targets — never for real data.
             i += 1;
+            if (i >= args.len) return usageError(a, " requires a <path> value");
             data_path = args[i];
+        } else {
+            // Unknown argument: fail loudly with usage instead of silently
+            // ignoring it (a silently-dropped flag looks like it took effect).
+            return usageError(a, ": unknown argument");
         }
     }
 

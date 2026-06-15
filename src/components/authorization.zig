@@ -393,7 +393,15 @@ pub const User = struct {
 
     /// Free only the value fields. The username (== hashmap key) is owned and
     /// freed by the map, never here.
+    ///
+    /// Secret-bearing fields (the pbkdf2/api-key digest in `password`, its
+    /// `salt`, and the Ed25519 `jwt_secret` seed) are wiped before release so
+    /// the material does not linger in freed heap — this also makes account
+    /// deletion a true erasure of the secret, not just a logical unlink.
     fn freeValues(self: *User, alloc: std.mem.Allocator) void {
+        std.crypto.secureZero(u8, @constCast(self.password));
+        std.crypto.secureZero(u8, @constCast(self.salt));
+        std.crypto.secureZero(u8, @constCast(self.jwt_secret));
         alloc.free(self.password);
         alloc.free(self.salt);
         alloc.free(self.source);
@@ -625,8 +633,12 @@ pub const AuthCtx = struct {
             self.gpa.free(e.key_ptr.*);
         }
         self.users.deinit(self.gpa);
-        for (self.oneshot.items) |*t| self.gpa.free(t.username);
+        for (self.oneshot.items) |*t| {
+            std.crypto.secureZero(u8, &t.token);
+            self.gpa.free(t.username);
+        }
         self.oneshot.deinit(self.gpa);
+        std.crypto.secureZero(u8, &self.api_key);
     }
 
     fn loadFromStore(self: *AuthCtx) !void {
@@ -701,14 +713,16 @@ pub const AuthCtx = struct {
         defer arena.deinit();
         const a = arena.allocator();
         const val = u.toDbValue(a) catch return;
-        self.store.insertItem(a, user_namespace, username, val) catch {};
+        self.store.insertItem(a, user_namespace, username, val) catch |err|
+            std.debug.print("phobos: warning: failed to persist user '{s}': {} — change will be lost on restart\n", .{ username, err });
     }
 
     fn deleteUserFromStore(self: *AuthCtx, username: []const u8) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        _ = self.store.deleteItem(a, user_namespace, username) catch {};
+        _ = self.store.deleteItem(a, user_namespace, username) catch |err|
+            std.debug.print("phobos: warning: failed to delete user '{s}' from store: {} — user may reappear on restart\n", .{ username, err });
     }
 
     /// Resolve the public key for a kid by searching users for a matching jwk_id.
@@ -1210,10 +1224,6 @@ fn jwtKid(alloc: std.mem.Allocator, token: []const u8) ?[]const u8 {
     const header_json = b64urlDecodeAlloc(alloc, enc_header) catch return null;
     const header = std.json.parseFromSlice(std.json.Value, alloc, header_json, .{}) catch return null;
     return jsonStr(header.value, "kid");
-}
-
-pub fn jwtKidPublic(alloc: std.mem.Allocator, token: []const u8) ?[]const u8 {
-    return jwtKid(alloc, token);
 }
 
 // ---------------------------------------------------------------------------

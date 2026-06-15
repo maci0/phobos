@@ -302,8 +302,10 @@ Both fixes the flamegraph pointed at, now landed:
    attempt that only changed the REST path deadlocked over JSON-RPC; moving the lock
    into the dispatcher is what makes it safe.)
 2. **Dropped the redundant deep-copy** of the Klippy status payload: the proxy now
-   parses the response straight into the per-request arena (`parseFromSliceLeaky`)
-   and returns it, instead of `parseFromSlice` + a full `deepCopyValue`.
+   parses the response straight into the per-request arena (`parseFromSliceLeaky`
+   with `.allocate = .alloc_always`, so the parsed value owns its bytes instead of
+   aliasing the freed socket buffer) and returns it, instead of `parseFromSlice` +
+   a full `jv.deepCopy`.
 
 Measured (Klippy stubbed): `objects.query` went from **~1 070 req/s, p50 64 ms,
 p99 5 s (saturating)** to **~4 640 req/s, p50 17 ms, p99 ≤ 230 ms** and it now
@@ -324,9 +326,47 @@ tests pass, including the real-Klippy-proxy path.
    not re-broken.
 
 Bounded connection concurrency was already in place (`io.zig`,
-`max_concurrent_conns = 128`). All of the above land with **1239 tests passing**
+`max_concurrent_conns = 128`). All of the above land with **1256 tests passing**
 and both Mainsail + Fluidd validated against phobos on real hardware (WS
 `objects.query` over the off-Core path returns correct results, no deadlock).
+
+### Done: WS parse-once + measured memory/CPU profile
+
+1. **WebSocket requests are parsed once, not twice.** WS is the hot client
+   transport — every Mainsail/Fluidd RPC arrives over it. The handler peeked the
+   method by parsing the frame, then re-parsed the same bytes inside
+   `Dispatcher.handle`. Split out `Dispatcher.handleParsedRoot(root, alloc)` and
+   had the WS path reuse its single parse (`transport/ws.zig`), eliminating a full
+   `std.json.parseFromSlice` + its arena allocations on every WS request. The HTTP
+   JSON-RPC bridge keeps the raw-bytes `handle` path. The CPU profile below shows
+   per-request work is dominated by `ArenaAllocator.alloc` (build + serialize), so
+   halving the parse is the cheapest real-world win on that path.
+
+2. **Memory profile (ReleaseFast, Klippy-stubbed, vegeta).**
+
+   | State | VmRSS | Threads |
+   |---|---|---|
+   | idle (settled) | **3.5 MB** | 6 |
+   | `server.info` @ 8 000 req/s (local, off-Core) | **12.4 MB** | 63 |
+   | `objects.query` @ 2 000 req/s (Klippy-proxied) | ~12 MB | 54 |
+
+   `server.info` sustains **8 000 req/s at 100 %, p50 32 µs** — local dispatch
+   scales linearly. `objects.query` is bounded by the single Klippy socket
+   (p50 ~12 ms), as designed. RSS stays tiny (≤ 12 MB) even under saturation; the
+   growth is the `std.Io.Threaded` worker pool, which expands to the peak number of
+   concurrent connection tasks and is **retained** (not shrunk) — bounded by
+   `max_concurrent_conns`. Comfortably within the 107 MB embedded budget.
+
+3. **CPU hotspot:** the on-CPU flamegraph
+   ([`perf/flamegraph-serverinfo.svg`](perf/flamegraph-serverinfo.svg)) of the
+   pure-dispatch path is ~25 % `ArenaAllocator.alloc` and ~30 %
+   `wrapResult`→`jsonStringify` — i.e. building and serialising the response. This
+   is inherent per-request work; the remaining levers (caching immutable response
+   bodies) help only synthetic single-endpoint floods, not the real Klippy-bound
+   workload, so they were not pursued.
+
+All of the above land with **1273 tests passing** (20× + 10× full-suite stability
+runs clean; printer e2e tests 25× clean in isolation).
 
 ## Reproduce
 

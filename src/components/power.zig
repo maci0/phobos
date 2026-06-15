@@ -39,24 +39,6 @@ const Registry = registry.Registry;
 // Device types (matches power.py dev_types)
 // ---------------------------------------------------------------------------
 
-/// All supported device types from Moonraker's power.py.
-pub const DeviceType = enum {
-    gpio,
-    klipper_device,
-    tplink_smartplug,
-    tasmota,
-    shelly,
-    homeseer,
-    homeassistant,
-    loxonev1,
-    rf,
-    mqtt,
-    smartthings,
-    hue,
-    http,
-    uhubctl,
-};
-
 /// A configured power device. State is tracked in memory and, for HTTP and
 /// `type: gpio` devices, mirrored to real hardware on on/off (see
 /// processRequest); other vendor types are in-memory only.
@@ -179,7 +161,8 @@ pub const PowerCtx = struct {
         const g = gpio_sysfs.SysfsGpio{ .io = io, .root = self.gpio_root };
         // active_low: "on" places a LOW level on the line.
         const physical_high = on != dev.gpio_active_low;
-        g.setValue(arena.allocator(), pin, physical_high) catch {};
+        g.setValue(arena.allocator(), pin, physical_high) catch |err|
+            std.debug.print("phobos: warning: power device '{s}' gpio pin {d} drive failed: {} — reported state may not match hardware\n", .{ dev.name, pin, err });
     }
 
     /// Issue an HTTP GET to a device URL. Silently returns on any error
@@ -201,7 +184,10 @@ pub const PowerCtx = struct {
             .location = .{ .url = url },
             .method = .GET,
             .response_writer = &aw.writer,
-        }) catch return;
+        }) catch |err| {
+            std.debug.print("phobos: warning: power device http GET {s} failed: {} — reported state may not match hardware\n", .{ url, err });
+            return;
+        };
         _ = result;
     }
 

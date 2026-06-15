@@ -91,6 +91,34 @@ fn mkdirRaw(path_z: [:0]const u8) void {
     if (e != .SUCCESS and e != .EXIST) {}
 }
 
+/// mkdir a single component, returning an error on anything but success/exists.
+fn mkdirChecked(path_z: [:0]const u8) error{DataDirCreateFailed}!void {
+    const rc = std.os.linux.mkdir(path_z.ptr, 0o755);
+    const e = std.os.linux.errno(rc);
+    if (e != .SUCCESS and e != .EXIST) return error.DataDirCreateFailed;
+}
+
+/// `mkdir -p` for an absolute path: create every parent then the leaf,
+/// fail-fast on a real error (permission, ENOTDIR, …). Unlike mkdirRaw this is
+/// used for an explicitly configured `-d` datadir, where a silent failure would
+/// otherwise surface only as confusing request-time errors.
+fn ensureDirPathRaw(path: []const u8) error{ DataDirCreateFailed, DataPathTooLong }!void {
+    var buf: [512]u8 = undefined;
+    if (path.len >= buf.len) return error.DataPathTooLong;
+    // Create each intermediate prefix at every '/'.
+    var i: usize = 1;
+    while (i < path.len) : (i += 1) {
+        if (path[i] != '/') continue;
+        @memcpy(buf[0..i], path[0..i]);
+        buf[i] = 0;
+        try mkdirChecked(buf[0..i :0]);
+    }
+    // Create the leaf.
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    try mkdirChecked(buf[0..path.len :0]);
+}
+
 /// Which DataStore backend to use. `sqlite` (default) is Moonraker
 /// `moonraker-sql.db`-compatible and needs no `io` handle; `file` is the pure-Zig
 /// atomic-rename JSON backend (no C dependency) and requires an `io` handle.
@@ -191,6 +219,12 @@ pub const App = struct {
     /// dir is used (tests / --dump-api only — never write real data under /tmp,
     /// which is tmpfs on embedded targets).
     pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, db_io: ?std.Io, db_path: ?[]const u8, data_path: ?[]const u8) !App {
+        // Validate an explicitly configured datadir up front (before any
+        // allocation) so a rejection doesn't leak partially-built state. A
+        // relative `-d` would resolve against an unpredictable cwd.
+        if (data_path) |dp| {
+            if (!std.fs.path.isAbsolute(dp)) return error.InvalidDataPath;
+        }
         const core = try alloc.create(Core);
         errdefer alloc.destroy(core);
         core.* = Core.init();
@@ -277,7 +311,8 @@ pub const App = struct {
         job_state_ctx.job_queue = job_queue_ctx;
 
         // Mark any jobs left "in_progress" from a previous run as interrupted.
-        history_ctx.markInterruptedJobs() catch {};
+        history_ctx.markInterruptedJobs() catch |err|
+            std.debug.print("phobos: warning: failed to mark interrupted jobs on startup: {} — stale 'in_progress' jobs may remain\n", .{err});
 
         // --- Announcements context ---
         const announcements_ctx = try alloc.create(AnnouncementsCtx);
@@ -352,10 +387,10 @@ pub const App = struct {
         // wired later via httpServer/setIo).
         var dd_buf: [256]u8 = undefined;
         const datadir = if (data_path) |dp| dd: {
-            // Configured datadir (Moonraker's `-d`): create it + reuse it.
-            const dz = try alloc.dupeZ(u8, dp);
-            defer alloc.free(dz);
-            mkdirRaw(dz);
+            // Configured datadir (Moonraker's `-d`, validated absolute above):
+            // create it and any missing parents fail-fast so a bad/unwritable
+            // path is reported at startup, not at request time.
+            try ensureDirPathRaw(dp);
             break :dd try alloc.dupe(u8, dp);
         } else dd: {
             // No datadir given (tests / --dump-api): per-instance temp dir.
@@ -376,7 +411,10 @@ pub const App = struct {
             const p = try std.fs.path.join(alloc, &.{ datadir, spec.name });
             const pz = try alloc.dupeZ(u8, p);
             defer alloc.free(pz);
-            mkdirRaw(pz);
+            // For an explicitly configured datadir, a root we can't create means
+            // the daemon can't serve files — fail-fast. For the temp default,
+            // stay lenient (tests / --dump-api may run read-only).
+            if (data_path != null) try mkdirChecked(pz) else mkdirRaw(pz);
             file_roots[i] = .{ .name = spec.name, .path = p, .full_access = spec.full };
         }
 
@@ -560,11 +598,36 @@ pub const App = struct {
             self.cors_domains = list.toOwnedSlice(self.alloc) catch &.{};
         }
 
-        // Wire job_queue transition gcode/delay from [job_queue] section.
+        // Wire [authorization] security options into the auth context. Without
+        // this an operator who sets force_logins / enable_api_key /
+        // login_timeout in the config has those values silently ignored — a
+        // login requirement that is never enforced, or an API key that stays
+        // enabled after being disabled, is a security misconfiguration.
+        if (cfg.hasSection("authorization")) {
+            if (cfg.getBoolean("authorization", "force_logins")) |v| {
+                self.auth_ctx.force_logins = v;
+            } else |_| {}
+            if (cfg.getBoolean("authorization", "enable_api_key")) |v| {
+                self.auth_ctx.enable_api_key = v;
+            } else |_| {}
+            // login_timeout is expressed in days (Moonraker default 90); ignore
+            // non-positive or unparseable values rather than minting tokens that
+            // expire immediately.
+            if (cfg.getInt("authorization", "login_timeout")) |days| {
+                if (days > 0) self.auth_ctx.login_timeout_days = days;
+            } else |_| {}
+        }
+
+        // Wire job_queue transition gcode/delay + behaviour flags from the
+        // [job_queue] section.
         if (cfg.hasSection("job_queue")) {
             const tg = cfg.get("job_queue", "job_transition_gcode");
             const td: f64 = cfg.getFloat("job_queue", "job_transition_delay") catch 0.0;
             self.job_queue_ctx.setTransitionConfig(tg, td);
+            // Moonraker defaults: both false.
+            const automatic = cfg.getBoolean("job_queue", "automatic_transition") catch false;
+            const load_on_start = cfg.getBoolean("job_queue", "load_on_startup") catch false;
+            self.job_queue_ctx.setQueueOptions(automatic, load_on_start);
         }
 
         // Wire MQTT broker config from [mqtt] section.
@@ -573,7 +636,8 @@ pub const App = struct {
             const port: u16 = clampInt(u16, cfg.getInt("mqtt", "port") catch 1883, 1883);
             const username = cfg.get("mqtt", "username");
             const password = cfg.get("mqtt", "password");
-            self.mqtt_ctx.setConfig(host, port, username, password) catch {};
+            self.mqtt_ctx.setConfig(host, port, username, password) catch |err|
+                std.debug.print("phobos: warning: failed to apply [mqtt] config: {} — MQTT disabled\n", .{err});
             if (cfg.get("mqtt", "instance_name")) |iname| {
                 self.mqtt_ctx.setInstanceName(iname) catch {};
             }
@@ -733,8 +797,10 @@ pub const App = struct {
                         std.debug.print("phobos: warning: failed to add sensor '{s}': {}\n", .{ sname, err });
                         continue;
                     };
-                    if (cfg.get(sect, "state_topic")) |t| self.sensor_ctx.setSensorTopic(sname, t) catch {};
-                    if (cfg.get(sect, "state_response_template")) |tm| self.sensor_ctx.setSensorTemplate(sname, tm) catch {};
+                    if (cfg.get(sect, "state_topic")) |t| self.sensor_ctx.setSensorTopic(sname, t) catch |err|
+                        std.debug.print("phobos: warning: sensor '{s}' state_topic not set: {} — sensor will not update\n", .{ sname, err });
+                    if (cfg.get(sect, "state_response_template")) |tm| self.sensor_ctx.setSensorTemplate(sname, tm) catch |err|
+                        std.debug.print("phobos: warning: sensor '{s}' template not set: {}\n", .{ sname, err });
                 }
             }
         } else |_| {}
@@ -771,6 +837,7 @@ pub const App = struct {
         for (self.file_roots) |r| self.alloc.free(r.path);
         self.alloc.free(self.file_roots);
         self.alloc.free(self.datadir);
+        self.file_ctx.deinit(); // frees the metadata cache
         self.alloc.destroy(self.file_ctx);
         self.alloc.destroy(self.update_ctx);
         self.power_ctx.deinit();
@@ -1161,6 +1228,32 @@ test "initWithStore: data_path sets the datadir (Moonraker -d); null uses a temp
     // No data_path → a per-instance /tmp dir, never the configured one.
     try std.testing.expect(std.mem.startsWith(u8, app2.datadir, "/tmp/phobos-data-"));
     try std.testing.expect(!std.mem.eql(u8, app2.datadir, dp));
+}
+
+test "initWithStore: relative data_path is rejected at startup" {
+    const alloc = std.testing.allocator;
+    // A relative -d would resolve against an unpredictable cwd — fail-fast.
+    try std.testing.expectError(error.InvalidDataPath, App.initWithStore(alloc, .sqlite, null, null, "relative/datadir"));
+}
+
+test "initWithStore: nested absolute data_path is created (mkdir -p)" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Parent does not exist yet — ensureDirPathRaw must create the whole chain,
+    // and each gcodes/config/logs root under it (mkdirChecked). If any step
+    // failed, initWithStore would return an error rather than reach here.
+    const dp = "/tmp/phobos-ddtest-a/b/c";
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, "/tmp/phobos-ddtest-a") catch {};
+    defer cwd.deleteTree(io, "/tmp/phobos-ddtest-a") catch {};
+    var app = try App.initWithStore(alloc, .sqlite, null, null, dp);
+    defer app.deinit(io);
+    try std.testing.expectEqualStrings(dp, app.datadir);
+    // The gcodes root beneath the nested datadir must now be openable.
+    var d = try cwd.openDir(io, "/tmp/phobos-ddtest-a/b/c/gcodes", .{});
+    d.close(io);
 }
 
 test "App.init registers WS-only methods in the dispatcher" {

@@ -980,15 +980,51 @@ pub const KlippyCtx = struct {
 
     /// Process a notify_gcode_response or process_gcode_response from Klippy.
     fn processGcodeResponse(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        const params = frame.object.get("params") orelse return;
-        // Moonraker sends "server:gcode_response" event; match it via notify bus.
-        _ = try self.bus.emit(io, notify.names.gcode_response, params);
+        try self.emitGcodeResponse(io, frame, false);
     }
 
     /// Locked variant — caller holds Core lock.
     fn processGcodeResponseLocked(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
+        try self.emitGcodeResponse(io, frame, true);
+    }
+
+    /// Emit a `notify_gcode_response` matching Moonraker's wire shape.
+    ///
+    /// Klippy delivers the response via the `process_gcode_response` remote
+    /// method, so the frame's `params` is the kwarg object `{"response": "..."}`.
+    /// Moonraker forwards only the response STRING to clients, so the
+    /// notification `params` must be the single-element array `[response]`
+    /// (the notify bus requires an array — see notify.zig). Emitting the raw
+    /// `{"response": ...}` object gave clients the wrong container and value.
+    fn emitGcodeResponse(self: *KlippyCtx, io: std.Io, frame: std.json.Value, locked: bool) !void {
         const params = frame.object.get("params") orelse return;
-        _ = try self.bus.emitLocked(io, notify.names.gcode_response, params);
+        const resp: std.json.Value = switch (params) {
+            // Already array-shaped (defensive: a notify_gcode_response alias) —
+            // forward verbatim.
+            .array => {
+                if (locked) {
+                    _ = try self.bus.emitLocked(io, notify.names.gcode_response, params);
+                } else {
+                    _ = try self.bus.emit(io, notify.names.gcode_response, params);
+                }
+                return;
+            },
+            // Standard remote-method kwarg object.
+            .object => params.object.get("response") orelse return,
+            // A bare string/value — wrap it directly.
+            else => params,
+        };
+        // emit copies params into its own frame, so this scratch array is safe
+        // to free immediately after.
+        var arr: std.json.Array = .init(std.heap.smp_allocator);
+        defer arr.deinit();
+        try arr.append(resp);
+        const params_array = std.json.Value{ .array = arr };
+        if (locked) {
+            _ = try self.bus.emitLocked(io, notify.names.gcode_response, params_array);
+        } else {
+            _ = try self.bus.emit(io, notify.names.gcode_response, params_array);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1033,6 +1069,17 @@ pub const KlippyCtx = struct {
         var rbuf: [4096]u8 = undefined;
         var r = self.stream.?.reader(io, &rbuf);
         while (true) {
+            // Drain a frame already buffered from a prior pipelined read before
+            // blocking on the socket. Klippy can pack several \x03-delimited
+            // frames into one TCP segment; without this, every frame after the
+            // first would stall in read_buf until the next socket read arrives
+            // (and hang outright if no further data is sent).
+            if (self.read_buf.append(&.{})) |payload| {
+                const owned = try self.gpa.dupe(u8, payload);
+                self.read_buf.consume(payload.len + 1);
+                return owned;
+            } else |err| if (err != error.NeedMoreData) return err;
+
             try r.interface.fillMore();
             const chunk = r.interface.buffer[r.interface.seek..r.interface.end];
             if (chunk.len == 0) return error.ConnectionClosed;
@@ -1361,11 +1408,6 @@ pub const KlippyCtx = struct {
     // -----------------------------------------------------------------------
     // Notification emission helpers
     // -----------------------------------------------------------------------
-
-    fn emitReady(self: *KlippyCtx, io: std.Io) void {
-        self.bus.emit(io, notify.names.klippy_ready, .null) catch {};
-        if (self.octoprint) |oc| oc.setKlippyReady();
-    }
 
     fn emitDisconnected(self: *KlippyCtx, io: std.Io) void {
         self.bus.emit(io, notify.names.klippy_disconnected, .null) catch {};
@@ -2014,7 +2056,22 @@ test "processStatusUpdateInner: non-object status_dict returns early" {
     try ctx.processStatusUpdateInner(io, .{ .array = arr }, true);
 }
 
-test "processGcodeResponse: emits server:gcode_response" {
+// Capturing connection sink: records the last notification bytes written.
+const GcodeCapture = struct {
+    buf: [512]u8 = undefined,
+    len: usize = 0,
+    fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *GcodeCapture = @ptrCast(@alignCast(ctx));
+        const n = @min(bytes.len, self.buf.len);
+        @memcpy(self.buf[0..n], bytes[0..n]);
+        self.len = n;
+    }
+    fn slice(self: *const GcodeCapture) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+test "processGcodeResponse: forwards the response STRING as a [response] array" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2024,15 +2081,29 @@ test "processGcodeResponse: emits server:gcode_response" {
     var ctx = try KlippyCtx.init(a, &nb.bus);
     defer ctx.deinit();
 
-    // Build frame: {"params": "gcode response text"}.
-    var obj: std.json.ObjectMap = .empty;
-    try obj.put(a, "params", .{ .string = "ok" });
-    const frame = std.json.Value{ .object = obj };
-
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+
+    // Register a capturing connection so we can inspect the wire frame.
+    var cap = GcodeCapture{};
+    const conn = try nb.conns_obj.add(io);
+    nb.conns_obj.attachWriter(io, conn, &cap, GcodeCapture.write);
+
+    // Klippy delivers params as the remote-method kwarg object {"response": ...}.
+    var pobj: std.json.ObjectMap = .empty;
+    try pobj.put(a, "response", .{ .string = "// ok" });
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(a, "params", .{ .object = pobj });
+    const frame = std.json.Value{ .object = obj };
+
     try ctx.processGcodeResponse(io, frame);
+
+    // Client must receive params as the single-element array ["// ok"], NOT the
+    // raw {"response": ...} object.
+    try std.testing.expect(std.mem.indexOf(u8, cap.slice(), "\"method\":\"notify_gcode_response\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.slice(), "\"params\":[\"// ok\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.slice(), "\"response\"") == null);
 }
 
 test "processGcodeResponse: missing params — no crash" {
