@@ -36,7 +36,7 @@ pub const oracle_normalize = @import("oracle/normalize.zig");
 pub const oracle_replay = @import("oracle/replay.zig");
 
 const usage_text =
-    \\phobos — Moonraker-compatible print server
+    \\phobos: Moonraker-compatible print server
     \\
     \\Usage: phobos [options]
     \\
@@ -44,10 +44,103 @@ const usage_text =
     \\  -c, --config <path>      Moonraker-style config file to load
     \\  -d, --data-path <path>   Data directory (gcodes/config/logs roots)
     \\      --dump-api           Print the API surface as JSON to stdout and exit
+    \\      schema [command]     Print the CLI Spec document and exit
     \\      --version            Print version and exit
+    \\  -o, --output FMT         auto, text, or json. auto stays text on a pipe
     \\  -h, --help               Show this help and exit
     \\
 ;
+
+const OutputMode = enum { auto, text, json };
+var output_mode: OutputMode = .auto;
+
+fn wantsJson() bool {
+    return output_mode == .json;
+}
+
+fn badOutput() noreturn {
+    output_mode = .auto;
+    std.debug.print("phobos: error: --output requires auto, text, or json\n", .{});
+    std.process.exit(2);
+}
+
+fn setOutputMode(value: []const u8) void {
+    if (std.mem.eql(u8, value, "auto")) {
+        output_mode = .auto;
+    } else if (std.mem.eql(u8, value, "text")) {
+        output_mode = .text;
+    } else if (std.mem.eql(u8, value, "json")) {
+        output_mode = .json;
+    } else badOutput();
+}
+
+fn schemaSelected(name: []const u8, filter: []const u8) bool {
+    if (filter.len == 0) return true;
+    if (std.mem.eql(u8, name, filter)) return true;
+    return name.len > filter.len and std.mem.startsWith(u8, name, filter) and name[filter.len] == ' ';
+}
+
+const SpecCmd = struct {
+    name: []const u8,
+    description: []const u8,
+    effects: []const u8,
+    body: []const u8,
+};
+
+fn specCmds() [4]SpecCmd {
+    return .{
+        .{
+            .name = "schema",
+            .effects = "read_only",
+            .description = "Print this CLI Spec document. schema <command> returns the same document filtered to that command.",
+            .body = "\"output_kind\":\"opaque\",\"media_type\":\"application/json\"",
+        },
+        .{
+            .name = "version",
+            .effects = "read_only",
+            .description = "Print the phobos release. --version without JSON prints the Moonraker compatibility string.",
+            .body = "\"cardinality\":\"single\",\"output_fields\":[{\"name\":\"version\",\"type\":\"string\"}]",
+        },
+        .{
+            .name = "dump-api",
+            .effects = "read_only",
+            .description = "Print the API surface. Stdout stays that JSON document in every output mode. Does not bind a socket.",
+            .body = "\"output_kind\":\"opaque\",\"media_type\":\"application/json\"",
+        },
+        .{
+            .name = "serve",
+            .effects = "non_idempotent",
+            .description = "Listen for Moonraker clients. The word serve is not typed. A retry is not safe.",
+            .body = "\"output_kind\":\"opaque\",\"media_type\":\"text/plain\"",
+        },
+    };
+}
+
+fn renderSchema(alloc: std.mem.Allocator, filter: []const u8) ![]u8 {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(alloc);
+    try list.appendSlice(alloc, "{\"clispec\":\"0.3\",\"name\":\"phobos\",\"version\":\"");
+    try list.appendSlice(alloc, build_options.phobos_version);
+    try list.appendSlice(alloc, "\",\"description\":\"Moonraker-compatible print server.\",\"output\":{\"tty\":\"text\",\"piped\":\"text\"},\"global_args\":[{\"name\":\"--output\",\"short\":\"-o\",\"type\":\"string\",\"required\":false,\"description\":\"auto, text, or json. auto stays text when piped.\",\"default\":\"auto\",\"enum\":[\"auto\",\"text\",\"json\"]}],\"commands\":[");
+    var count: usize = 0;
+    for (specCmds()) |cmd| {
+        if (!schemaSelected(cmd.name, filter)) continue;
+        if (count != 0) try list.append(alloc, ',');
+        try list.appendSlice(alloc, "{\"name\":\"");
+        try list.appendSlice(alloc, cmd.name);
+        try list.appendSlice(alloc, "\",\"description\":\"");
+        try list.appendSlice(alloc, cmd.description);
+        try list.appendSlice(alloc, "\",\"effects\":\"");
+        try list.appendSlice(alloc, cmd.effects);
+        try list.appendSlice(alloc, "\",");
+        try list.appendSlice(alloc, cmd.body);
+        try list.append(alloc, '}');
+        count += 1;
+    }
+    if (count == 0) return error.UnknownPath;
+    try list.appendSlice(alloc, "],\"errors\":[{\"kind\":\"usage\",\"exit_code\":2,\"retryable\":false,\"description\":\"The arguments are not valid.\"},{\"kind\":\"failure\",\"exit_code\":1,\"retryable\":true,\"description\":\"The server failed to start.\"}]}\n");
+    return list.toOwnedSlice(alloc);
+}
 
 /// Write to stdout with a small bounded buffer. Used for --help/--version so
 /// requested output lands on stdout (parseable), not the stderr debug channel.
@@ -63,10 +156,23 @@ fn writeStdout(aio: std.Io, bytes: []const u8) !void {
 /// the conventional "command-line usage" status (distinct from 1 = runtime).
 fn usageError(arg: []const u8, detail: []const u8) noreturn {
     std.debug.print("phobos: error: '{s}'{s}\n\n{s}", .{ arg, detail, usage_text });
+    if (output_mode == .json) {
+        std.debug.print("{s}", .{"{\"error\":{\"kind\":\"usage\",\"message\":\"invalid arguments\"}}\n"});
+    }
     std.process.exit(2);
 }
 
 pub fn main(init: std.process.Init) !void {
+    run(init) catch |err| {
+        if (output_mode == .json) {
+            std.debug.print("{s}", .{"{\"error\":{\"kind\":\"failure\",\"message\":\"command failed\"}}\n"});
+            std.process.exit(1);
+        }
+        return err;
+    };
+}
+
+fn run(init: std.process.Init) !void {
     // `init.gpa` is std's DebugAllocator — it captures a dwarf stack trace on
     // every allocation for leak/UAF detection. That tracing dominates the hot
     // path (allocation-heavy Klippy-proxy requests) and is pointless in a
@@ -92,17 +198,42 @@ pub fn main(init: std.process.Init) !void {
     var config_path: ?[]const u8 = null;
     var data_path: ?[]const u8 = null;
     var dump_api = false;
+    var schema = false;
+    var filter_buf: [96]u8 = undefined;
+    var filter_len: usize = 0;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (std.mem.eql(u8, a, "--dump-api")) {
+        if (std.mem.eql(u8, a, "-o") or std.mem.eql(u8, a, "--output")) {
+            i += 1;
+            if (i >= args.len) badOutput();
+            setOutputMode(args[i]);
+        } else if (std.mem.startsWith(u8, a, "--output=")) {
+            setOutputMode(a["--output=".len..]);
+        } else if (std.mem.eql(u8, a, "schema")) {
+            schema = true;
+        } else if (schema and a.len > 0 and a[0] != '-') {
+            if (filter_len != 0 and filter_len < filter_buf.len) {
+                filter_buf[filter_len] = ' ';
+                filter_len += 1;
+            }
+            const n = @min(a.len, filter_buf.len - filter_len);
+            @memcpy(filter_buf[filter_len..][0..n], a[0..n]);
+            filter_len += n;
+        } else if (std.mem.eql(u8, a, "--dump-api")) {
             dump_api = true;
         } else if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             try writeStdout(aio, usage_text);
             return;
         } else if (std.mem.eql(u8, a, "--version")) {
-            try writeStdout(aio, build_options.moonraker_version);
-            try writeStdout(aio, "\n");
+            if (wantsJson()) {
+                try writeStdout(aio, "{\"version\":\"");
+                try writeStdout(aio, build_options.phobos_version);
+                try writeStdout(aio, "\"}\n");
+            } else {
+                try writeStdout(aio, build_options.moonraker_version);
+                try writeStdout(aio, "\n");
+            }
             return;
         } else if (std.mem.eql(u8, a, "-c") or std.mem.eql(u8, a, "--config")) {
             i += 1;
@@ -120,6 +251,19 @@ pub fn main(init: std.process.Init) !void {
             // ignoring it (a silently-dropped flag looks like it took effect).
             return usageError(a, ": unknown argument");
         }
+    }
+
+    if (schema) {
+        const doc = renderSchema(alloc, filter_buf[0..filter_len]) catch |err| switch (err) {
+            error.UnknownPath => {
+                std.debug.print("unknown command path\n", .{});
+                usageError("schema", ": unknown command path");
+            },
+            else => return err,
+        };
+        defer alloc.free(doc);
+        try writeStdout(aio, doc);
+        return;
     }
 
     if (dump_api) return dumpApi(alloc, aio);
@@ -381,6 +525,37 @@ const EndpointEntry = struct {
 
 // --- tests ---------------------------------------------------------------
 
+test "schemaSelected matches a command and rejects a prefix" {
+    try std.testing.expect(schemaSelected("dump-api", ""));
+    try std.testing.expect(schemaSelected("dump-api", "dump-api"));
+    try std.testing.expect(!schemaSelected("serve", "dump-api"));
+    try std.testing.expect(!schemaSelected("dump-api", "dump"));
+}
+
+test "fuzz schemaSelected never panics" {
+    var prng = std.Random.DefaultPrng.init(0xC11_5EC);
+    const rnd = prng.random();
+    var buf: [24]u8 = undefined;
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        const len = rnd.uintLessThan(usize, buf.len + 1);
+        rnd.bytes(buf[0..len]);
+        _ = schemaSelected("dump-api", buf[0..len]);
+        _ = schemaSelected("serve", buf[0..len]);
+    }
+}
+
+test "renderSchema is clispec 0.3 and filters" {
+    const doc = try renderSchema(std.testing.allocator, "");
+    defer std.testing.allocator.free(doc);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"clispec\":\"0.3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"name\":\"dump-api\"") != null);
+    const one = try renderSchema(std.testing.allocator, "serve");
+    defer std.testing.allocator.free(one);
+    try std.testing.expect(std.mem.indexOf(u8, one, "\"name\":\"serve\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, one, "\"name\":\"dump-api\"") == null);
+}
+
 test "dumpApi: output contains server.info and server.config" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
@@ -563,4 +738,6 @@ test "extractBindAddr: enabled boolean has no effect on bind addr" {
     try std.testing.expectEqual(@as(u16, 7125), port);
 }
 
-test { std.testing.refAllDecls(@This()); }
+test {
+    std.testing.refAllDecls(@This());
+}

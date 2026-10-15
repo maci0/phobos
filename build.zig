@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
 
     const build_opts = b.addOptions();
     build_opts.addOption([]const u8, "moonraker_version", moonraker_version);
+    build_opts.addOption([]const u8, "phobos_version", @import("build.zig.zon").version);
 
     // Strip debug info from the shipped binary in any release mode (smaller
     // on-disk binary; tests keep symbols for readable failure traces).

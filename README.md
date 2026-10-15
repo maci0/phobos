@@ -115,6 +115,7 @@ zig build test --summary all
 
 # See the API surface phobos registers
 zig build && zig-out/bin/phobos --dump-api | less
+zig build && zig-out/bin/phobos schema
 
 # Check API coverage against Moonraker (exit 0 == 100%)
 tools/coverage.sh

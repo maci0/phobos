@@ -187,6 +187,7 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 - Build test binary (avoids the `--listen=-` hang):
   `zig build test-artifact && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
 - Full suite: `timeout 220 zig build test --summary all`
+- `schema` prints a CLI Spec 0.3 document and does not load config or bind a socket. `-o`/`--output` accept `auto`, `text`, or `json`. `auto` stays text on a pipe. `--dump-api` stdout stays the API document. `--version` stays the Moonraker compatibility string; `-o json --version` prints the package version.
 - Coverage gate (must stay 100%):
   `zig build && zig-out/bin/phobos --dump-api > /tmp/d.json &&
    PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json`
