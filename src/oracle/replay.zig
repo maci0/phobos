@@ -302,28 +302,7 @@ test "result_only: fails when response has error" {
     try testing.expect(!try resultShapeOk(alloc, resp));
 }
 
-/// Escape a string for embedding in a Zig string literal (escapes \ and ").
-fn escapeForZig(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    for (s) |c| {
-        switch (c) {
-            '\\' => try buf.appendSlice(alloc, "\\\\"),
-            '"' => try buf.appendSlice(alloc, "\\\""),
-            '\n' => try buf.appendSlice(alloc, "\\n"),
-            '\r' => try buf.appendSlice(alloc, "\\r"),
-            '\t' => try buf.appendSlice(alloc, "\\t"),
-            else => try buf.append(alloc, c),
-        }
-    }
-    return buf.toOwnedSlice(alloc);
-}
-
-// ---------------------------------------------------------------------------
-// Capture helper — run this test to print expected responses for golden cases.
-// Run with: ./.zig-cache/o/*/test --cache-dir=./.zig-cache capture
-// Then copy the output into the goldenCases array.
-// ---------------------------------------------------------------------------
-
+// Capture tests write Zig fixture source to .scratch/phobos_golden_captures.txt.
 test "capture: print all golden case responses" {
     const alloc = testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
@@ -335,25 +314,34 @@ test "capture: print all golden case responses" {
     _ = app.httpServer(io);
 
     const cwd = std.Io.Dir.cwd();
-    var file = try cwd.createFile(io, "/tmp/phobos_golden_captures.txt", .{});
+    try cwd.createDirPath(io, ".scratch");
+    const output_path = ".scratch/phobos_golden_captures.txt";
+    var file = try cwd.createFile(io, output_path, .{});
     defer file.close(io);
 
-    var fbuf: [4096]u8 = undefined;
     var wbuf: [4096]u8 = undefined;
+    var writer = file.writer(io, &wbuf);
+    try writer.interface.writeAll("const cases = .{\n");
     for (goldenCases) |*gc| {
         const resp = callEndpoint(alloc, app.dispatcher, gc.method, gc.params_json) catch |err| {
-            const line = try std.fmt.bufPrint(&fbuf, "// {s}: ERROR: {}\n", .{ gc.method, err });
-            var w = file.writer(io, &wbuf);
-            try w.interface.writeAll(line);
+            try writer.interface.print("// {s}: ERROR: {}\n", .{ gc.method, err });
             continue;
         };
         defer alloc.free(resp);
-        const escaped = try escapeForZig(alloc, resp);
-        defer alloc.free(escaped);
-        const line = try std.fmt.bufPrint(&fbuf, "{{ .method = \"{s}\", .params_json = \"{s}\", .expected_response = \"{s}\" }},\n", .{ gc.method, gc.params_json, escaped });
-        var w = file.writer(io, &wbuf);
-        try w.interface.writeAll(line);
+        try writer.interface.print(".{{ .method = \"{f}\", .params_json = \"{f}\", .expected_response = \"{f}\" }},\n", .{
+            std.zig.fmtString(gc.method), std.zig.fmtString(gc.params_json), std.zig.fmtString(resp),
+        });
     }
+    try writer.interface.writeAll("};\n");
+    try writer.interface.flush();
+    const contents = try cwd.readFileAlloc(io, output_path, alloc, .limited(1 << 20));
+    defer alloc.free(contents);
+    const source = try alloc.dupeSentinel(u8, contents, 0);
+    defer alloc.free(source);
+    var parsed = try std.zig.Ast.parse(alloc, source, .{});
+    defer parsed.deinit(alloc);
+    try testing.expectEqual(@as(usize, 0), parsed.errors.len);
+    try testing.expect(std.mem.indexOf(u8, contents, ".expected_response =") != null);
 }
 
 // ---------------------------------------------------------------------------

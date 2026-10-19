@@ -62,9 +62,11 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
     - no new fork/exec code
     - avoid `std.os`, `std.posix`, raw libc unless there is no Zig 0.17 API
     - keep any unavoidable low-level code behind a local wrapper
-    - platform exceptions: termios in `serial.zig`, inotify in `file_manager.zig`,
-      system identity and video ioctls in `machine.zig`, and the C `statvfs` shim.
-      Use typed platform declarations for these layouts and constants.
+    - platform exceptions: termios in `serial.zig`, inotify creation/watch
+      registration in `file_manager.zig`, system identity and the V4L2 layout in
+      `machine.zig`, and the C `statvfs` shim. Use typed platform declarations;
+      reads, close, cancellation and device control use `std.Io`.
+      See `docs/STDLIB.md` for the checked APIs and adapter limits.
     - socket addresses and bound ports come from `socket.address`, not raw syscalls
     - timestamps use `std.Io.Clock`; secrets use `io.randomSecure` with errors
       propagated. Pass the startup I/O handle through constructors. `clock_io`

@@ -62,7 +62,7 @@ pub const SysfsGpio = struct {
         const f = try Dir.cwd().openFile(self.io, path, .{});
         defer f.close(self.io);
         var buf: [8]u8 = undefined;
-        var r = f.reader(self.io, &buf);
+        var r = f.reader(self.io, &.{});
         const n = try r.interface.readSliceShort(&buf);
         if (n == 0) return error.EmptyValue;
         return if (buf[0] == '1') 1 else 0;
@@ -78,7 +78,7 @@ const testing = std.testing;
 fn readSmall(io: Io, path: []const u8, buf: []u8) ![]u8 {
     const f = try Dir.cwd().openFile(io, path, .{});
     defer f.close(io);
-    var r = f.reader(io, buf);
+    var r = f.reader(io, &.{});
     const n = try r.interface.readSliceShort(buf);
     return buf[0..n];
 }
@@ -142,4 +142,20 @@ test "fuzz SysfsGpio.setValue: arbitrary pins never crash" {
             gpio.setValue(testing.allocator, pin, buf[4] & 1 == 1) catch {};
         }
     }.run, .{});
+}
+
+test "GPIO reads keep the leading bytes when the file exceeds the read buffer" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "gpio17", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio17/value", .data = "1000000000000000" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const gpio: SysfsGpio = .{ .io = io, .root = root };
+    try testing.expectEqual(@as(u1, 1), try gpio.readValue(testing.allocator, 17));
+    const path = try std.fs.path.join(testing.allocator, &.{ root, "gpio17/value" });
+    defer testing.allocator.free(path);
+    var bytes: [4]u8 = undefined;
+    try testing.expectEqualStrings("1000", try readSmall(io, path, &bytes));
 }

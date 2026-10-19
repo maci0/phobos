@@ -342,7 +342,7 @@ const Parser = struct {
     rdepth: u16 = 0,
 
     fn skipWs(self: *Parser) void {
-        while (self.pos < self.src.len and (self.src[self.pos] == ' ' or self.src[self.pos] == '\t')) self.pos += 1;
+        self.pos = std.mem.findNonePos(u8, self.src, self.pos, " \t") orelse self.src.len;
     }
     fn peek(self: *Parser) ?u8 {
         self.skipWs();
@@ -700,9 +700,9 @@ fn applyNamedFilter(arena: std.mem.Allocator, name: []const u8, v: Value, arg: ?
     } else if (std.mem.eql(u8, name, "string")) {
         return .{ .string = try toString(arena, v) };
     } else if (std.mem.eql(u8, name, "upper")) {
-        return .{ .string = try mapCase(arena, try toString(arena, v), true) };
+        return .{ .string = try std.ascii.allocUpperString(arena, try toString(arena, v)) };
     } else if (std.mem.eql(u8, name, "lower")) {
-        return .{ .string = try mapCase(arena, try toString(arena, v), false) };
+        return .{ .string = try std.ascii.allocLowerString(arena, try toString(arena, v)) };
     } else if (std.mem.eql(u8, name, "trim")) {
         return .{ .string = std.mem.trim(u8, try toString(arena, v), " \t\r\n") };
     } else if (std.mem.eql(u8, name, "capitalize")) {
@@ -920,14 +920,8 @@ fn toString(arena: std.mem.Allocator, v: Value) RenderError![]const u8 {
     };
 }
 
-fn mapCase(arena: std.mem.Allocator, s: []const u8, upper: bool) RenderError![]u8 {
-    const out = arena.alloc(u8, s.len) catch return error.OutOfMemory;
-    for (s, 0..) |c, i| out[i] = if (upper) std.ascii.toUpper(c) else std.ascii.toLower(c);
-    return out;
-}
-
 fn capitalize(arena: std.mem.Allocator, s: []const u8) RenderError![]u8 {
-    const out = try mapCase(arena, s, false);
+    const out = try std.ascii.allocLowerString(arena, s);
     if (out.len > 0) out[0] = std.ascii.toUpper(out[0]);
     return out;
 }

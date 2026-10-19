@@ -21,8 +21,7 @@ const std = @import("std");
 const net = std.Io.net;
 const Io = std.Io;
 
-const FrameEnd: u8 = 0x03;
-const frame_max: usize = 20 * 1024 * 1024;
+const framing = @import("../util/klippy_frame.zig");
 
 // ---------------------------------------------------------------------------
 // Shared control state (test thread writes, simulator thread reads)
@@ -60,6 +59,8 @@ pub const KlippySim = struct {
 
     /// Listener socket (created by start, closed by stop to unblock accept).
     listener: ?net.Server = null,
+    read_buffer: [4096]u8 = undefined,
+    reader: ?net.Stream.Reader = null,
 
     thread: ?std.Thread = null,
 
@@ -208,6 +209,7 @@ pub const KlippySim = struct {
         // correctly with the Threaded backend.
         const stream = self.listener.?.accept(io) catch return;
         defer stream.close(io);
+        self.reader = stream.reader(io, &self.read_buffer);
 
         // ----- Handshake -----
         if (!self.doHandshake(io, stream)) return;
@@ -229,7 +231,7 @@ pub const KlippySim = struct {
         var gcode_done: bool = false;
 
         while (!self.stop_flag.load(.acquire)) {
-            const payload = self.readFrame(io, stream) catch {
+            const payload = self.readFrame() catch {
                 return false;
             };
             defer self.alloc.free(payload);
@@ -313,7 +315,7 @@ pub const KlippySim = struct {
             self.processCommand(io, stream, &resp_id);
 
             // Read and handle one frame.
-            const payload = self.readFrame(io, stream) catch {
+            const payload = self.readFrame() catch {
                 return;
             };
             defer self.alloc.free(payload);
@@ -466,47 +468,16 @@ pub const KlippySim = struct {
     // Wire helpers
     // -----------------------------------------------------------------------
 
-    fn readFrame(self: *Self, io: Io, stream: net.Stream) ![]const u8 {
-        var rbuf: [4096]u8 = undefined;
-        var r = stream.reader(io, &rbuf);
-        var accum: std.ArrayList(u8) = .empty;
-        defer accum.deinit(self.alloc);
-
-        while (true) {
-            if (self.stop_flag.load(.acquire)) return error.SimulatorStopped;
-            r.interface.fillMore() catch |err| {
-                return err;
-            };
-            const chunk = r.interface.buffer[r.interface.seek..r.interface.end];
-            if (chunk.len == 0) {
-                return error.ConnectionClosed;
-            }
-            try accum.appendSlice(self.alloc, chunk);
-            r.interface.tossBuffered();
-            if (std.mem.indexOfScalar(u8, accum.items, FrameEnd)) |pos| {
-                const payload = try self.alloc.dupe(u8, accum.items[0..pos]);
-                return payload;
-            }
-            if (accum.items.len > frame_max) return error.FrameTooLarge;
-        }
+    fn readFrame(self: *Self) ![]const u8 {
+        if (self.stop_flag.load(.acquire)) return error.SimulatorStopped;
+        return framing.read(self.alloc, &self.reader.?.interface);
     }
 
     fn writeFrame(self: *Self, io: Io, stream: net.Stream, payload: []const u8) !void {
-        var frame_buf: [4096]u8 = undefined;
-        const frame = if (payload.len + 1 <= frame_buf.len) blk: {
-            @memcpy(frame_buf[0..payload.len], payload);
-            frame_buf[payload.len] = FrameEnd;
-            break :blk frame_buf[0 .. payload.len + 1];
-        } else blk: {
-            const f = try self.alloc.alloc(u8, payload.len + 1);
-            @memcpy(f[0..payload.len], payload);
-            f[payload.len] = FrameEnd;
-            break :blk f;
-        };
-        defer if (frame.ptr != &frame_buf) self.alloc.free(frame);
+        _ = self;
         var wbuf: [4096]u8 = undefined;
         var w = stream.writer(io, &wbuf);
-        try w.interface.writeAll(frame);
+        try framing.write(&w.interface, payload);
         try w.interface.flush();
     }
 

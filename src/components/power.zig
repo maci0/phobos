@@ -1383,7 +1383,7 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
             const fh = try Dir.cwd().openFile(i, pindir ++ "/value", .{});
             defer fh.close(i);
             var buf: [8]u8 = undefined;
-            var r = fh.reader(i, &buf);
+            var r = fh.reader(i, &.{});
             const n = try r.interface.readSliceShort(&buf);
             return std.testing.allocator.dupe(u8, buf[0..n]);
         }

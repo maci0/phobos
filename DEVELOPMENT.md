@@ -57,7 +57,7 @@ Notes:
 - Always run socket/WS tests under a `timeout` — a bug can deadlock and hang the suite.
 - DataStore backend selectable via `[database] backend`: vendored SQLite (default) or pure-Zig file backend.
 
-## 3. Zig 0.16 cheat sheet (verified against the installed std)
+## 3. Zig 0.17 cheat sheet (verified against the installed std)
 
 These differ from older Zig docs — use these forms:
 
@@ -174,6 +174,8 @@ the delta in phobos, regenerate the baseline, and confirm `coverage` is back to 
 - If you added a stub or a known limitation, it's noted in the code and in `TODO.md`.
 
 ## Runtime ownership and native I/O
+
+See [standard library choices](docs/STDLIB.md) for APIs and platform adapters.
 
 Pass the startup `std.Io` handle through component constructors. `clock_io` keeps
 clocks available before optional workers and notifications start. Use

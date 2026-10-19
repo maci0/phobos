@@ -128,9 +128,8 @@ pub const FileCtx = struct {
     /// `root/relative` paths omitted from listings. Forge-X `excludes`.
     excludes: [][]const u8 = &.{},
     excludes_owned: bool = false,
-    observer_stop: std.atomic.Value(bool) = .init(false),
-    observer_thread: ?std.Thread = null,
-    observer_fd: i32 = -1,
+    observer_task: ?std.Io.Future(void) = null,
+    observer_file: ?std.Io.File = null,
     last_fs_name: [160]u8 = undefined,
     last_fs_len: std.atomic.Value(usize) = .init(0),
 
@@ -176,47 +175,41 @@ pub const FileCtx = struct {
     }
 
     pub fn startObserver(self: *FileCtx) void {
-        if (self.observer != .inotify or self.observer_thread != null) return;
-        if (self.io == null) return;
+        if (self.observer != .inotify or self.observer_task != null) return;
+        const io = self.io orelse return;
         if (self.roots.len == 0) return;
         const IN = std.os.linux.IN;
-        const fd_rc = std.os.linux.inotify_init1(IN.CLOEXEC | IN.NONBLOCK);
+        const fd_rc = std.os.linux.inotify_init1(IN.CLOEXEC);
         if (std.os.linux.errno(fd_rc) != .SUCCESS) return;
-        const fd: i32 = @intCast(fd_rc);
+        const file: std.Io.File = .{ .handle = @intCast(fd_rc), .flags = .{ .nonblocking = false } };
         const mask: u32 = IN.CLOSE_WRITE | IN.MOVED_FROM | IN.MOVED_TO | IN.CREATE | IN.DELETE;
         var watched: usize = 0;
         for (self.roots) |root| {
             const path_z = self.gpa.dupeSentinel(u8, root.path, 0) catch continue;
             defer self.gpa.free(path_z);
-            const wd = std.os.linux.inotify_add_watch(fd, path_z.ptr, mask);
+            const wd = std.os.linux.inotify_add_watch(file.handle, path_z.ptr, mask);
             if (std.os.linux.errno(wd) == .SUCCESS) watched += 1;
         }
         if (watched == 0) {
-            _ = std.os.linux.close(fd);
+            file.close(io);
             return;
         }
-        self.observer_fd = fd;
-        self.observer_stop.store(false, .release);
+        self.observer_file = file;
         self.last_fs_len.store(0, .release);
-        self.observer_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, observerThread, .{self}) catch {
-            _ = std.os.linux.close(fd);
-            self.observer_fd = -1;
+        self.observer_task = io.concurrent(observerThread, .{self}) catch {
+            file.close(io);
+            self.observer_file = null;
             return;
         };
     }
 
     fn observerThread(self: *FileCtx) void {
         const io = self.io orelse return;
-        const fd = self.observer_fd;
+        const file = self.observer_file orelse return;
         var buf: [4096]u8 align(8) = undefined;
-        while (!self.observer_stop.load(.acquire)) {
-            const n = std.os.linux.read(fd, &buf, buf.len);
-            const err = std.os.linux.errno(n);
-            if (err == .AGAIN) {
-                io.sleep(.fromMilliseconds(20), .awake) catch return;
-                continue;
-            }
-            if (err != .SUCCESS or n == 0) break;
+        while (true) {
+            const n = file.readStreaming(io, &.{&buf}) catch return;
+            if (n == 0) return;
             var off: usize = 0;
             const hdr_size = @sizeOf(std.os.linux.inotify_event);
             while (off + hdr_size <= n) {
@@ -239,14 +232,14 @@ pub const FileCtx = struct {
     }
 
     pub fn stopObserver(self: *FileCtx) void {
-        self.observer_stop.store(true, .release);
-        if (self.observer_thread) |th| {
-            th.join();
-            self.observer_thread = null;
+        const io = self.io orelse return;
+        if (self.observer_task) |*task| {
+            task.cancel(io);
+            self.observer_task = null;
         }
-        if (self.observer_fd >= 0) {
-            _ = std.os.linux.close(self.observer_fd);
-            self.observer_fd = -1;
+        if (self.observer_file) |file| {
+            file.close(io);
+            self.observer_file = null;
         }
     }
 
@@ -795,37 +788,11 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     } else {
         // If the destination already exists as a file, this is a modify.
         action = if (statKind(io, dst_abs) == .file) "modify_file" else "create_file";
-        copyFileSimple(io, alloc, src.abs, dst_abs) catch return error.InvalidParams;
+        Dir.cwd().copyFile(src.abs, Dir.cwd(), dst_abs, io, .{}) catch return error.InvalidParams;
     }
     const info = try buildNotifyInfo(io, alloc, action, dst.root, dst_rel, dst_abs, null);
     emitFilelistChanged(ctx, io, alloc, info);
     return info;
-}
-
-/// Copy a single file by reading it whole and writing it out. Used instead of
-/// `Dir.copyFile` (whose atomic sendfile path can stall on the threaded io in
-/// tests). Sufficient for gcode/config files in the spine.
-fn copyFileSimple(io: std.Io, alloc: std.mem.Allocator, src_abs: []const u8, dst_abs: []const u8) !void {
-    _ = alloc; // streamed, not buffered whole-file
-    const f = try Dir.cwd().openFile(io, src_abs, .{});
-    defer f.close(io);
-    const out = try Dir.cwd().createFile(io, dst_abs, .{});
-    defer out.close(io);
-
-    // Stream chunks src -> dst so a multi-MB gcode file is never held whole in
-    // RAM (allocRemaining(.unlimited) previously buffered the entire file, a peak
-    // far over the RSS budget). 32 KiB buffers, transient to this call.
-    var rbuf: [32 * 1024]u8 = undefined;
-    var fr = f.reader(io, &rbuf);
-    var wbuf: [32 * 1024]u8 = undefined;
-    var fw = out.writer(io, &wbuf);
-    while (true) {
-        _ = fr.interface.stream(&fw.interface, .unlimited) catch |e| switch (e) {
-            error.EndOfStream => break,
-            else => return e,
-        };
-    }
-    try fw.interface.flush();
 }
 
 fn copyTree(io: std.Io, alloc: std.mem.Allocator, src_abs: []const u8, dst_abs: []const u8) !void {
@@ -841,7 +808,7 @@ fn copyTree(io: std.Io, alloc: std.mem.Allocator, src_abs: []const u8, dst_abs: 
             .file => {
                 const child_src = std.fs.path.join(alloc, &.{ src_abs, entry.path }) catch return error.OutOfMemory;
                 if (std.fs.path.dirname(child_dst)) |d| Dir.cwd().createDirPath(io, d) catch {};
-                copyFileSimple(io, alloc, child_src, child_dst) catch return error.InvalidParams;
+                Dir.cwd().copyFile(child_src, Dir.cwd(), child_dst, io, .{}) catch return error.InvalidParams;
             },
             else => {},
         }
@@ -1166,7 +1133,7 @@ const testing = std.testing;
 
 /// A temp directory tree with gcodes/config/logs roots and a live threaded io.
 const TestRoots = struct {
-    threaded: std.Io.Threaded,
+    tmp: testing.TmpDir,
     io: std.Io,
     base_path: []u8,
     roots: [3]Root,
@@ -1175,17 +1142,10 @@ const TestRoots = struct {
     fn init(alloc: std.mem.Allocator) !TestRoots {
         var tr: TestRoots = undefined;
         tr.alloc = alloc;
-        tr.threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-        tr.io = tr.threaded.io();
-
-        // Unique per-instance temp base in /tmp (process-global atomic counter
-        // mixed with the instance address so concurrent threads never collide).
-        const Counter = struct {
-            var v: std.atomic.Value(u64) = .init(0);
-        };
-        const uniq = (Counter.v.fetchAdd(1, .monotonic) *% 0x9e3779b97f4a7c15) ^
-            @as(u64, @intCast(@intFromPtr(&tr)));
-        tr.base_path = try std.fmt.allocPrint(alloc, "/tmp/phobos-fm-test-{x}", .{uniq});
+        tr.io = testing.io;
+        tr.tmp = testing.tmpDir(.{});
+        errdefer tr.tmp.cleanup();
+        tr.base_path = try tr.tmp.dir.realPathFileAlloc(tr.io, ".", alloc);
 
         const dir = Dir.cwd();
         const g = try std.fs.path.join(alloc, &.{ tr.base_path, "gcodes" });
@@ -1208,8 +1168,7 @@ const TestRoots = struct {
     }
 
     fn deinit(self: *TestRoots) void {
-        Dir.cwd().deleteTree(self.io, self.base_path) catch {};
-        self.threaded.deinit();
+        self.tmp.cleanup();
     }
 
     fn writeFile(self: *TestRoots, rel: []const u8, contents: []const u8) !void {
@@ -1263,7 +1222,7 @@ test "inotify observer records a created file name" {
     defer c.deinit();
     c.observer = .inotify;
     c.startObserver();
-    try testing.expect(c.observer_thread != null);
+    try testing.expect(c.observer_task != null);
     try tr.writeFile("gcodes/watched.gcode", "G1\n");
     var i: usize = 0;
     while (i < 50 and c.last_fs_len.load(.acquire) == 0) : (i += 1) {
@@ -1541,8 +1500,12 @@ test "handleCopy: copies file with create_file then modify_file" {
 
     const r1 = try handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/src.gcode\",\"dest\":\"gcodes/dst.gcode\"}"), a);
     try testing.expectEqualStrings("create_file", r1.object.get("action").?.string);
+    const destination = try std.fs.path.join(a, &.{ tr.roots[0].path, "dst.gcode" });
+    try testing.expectEqualStrings("G28\n", try Dir.cwd().readFileAlloc(tr.io, destination, a, .limited(32)));
+    try tr.writeFile("gcodes/src.gcode", "G1 X1\n");
     const r2 = try handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/src.gcode\",\"dest\":\"gcodes/dst.gcode\"}"), a);
     try testing.expectEqualStrings("modify_file", r2.object.get("action").?.string);
+    try testing.expectEqualStrings("G1 X1\n", try Dir.cwd().readFileAlloc(tr.io, destination, a, .limited(32)));
 }
 
 test "handleCopy/Move: destination directory receives the source inside it" {
@@ -2024,4 +1987,23 @@ test "file excludes preserve ownership on allocation failure" {
             try std.testing.expectEqual(@as(usize, 2), ctx.excludes.len);
         }
     }.check, .{});
+}
+
+test "inotify observer cancellation closes an idle native file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tr = try TestRoots.init(arena.allocator());
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    ctx.observer = .inotify;
+    ctx.startObserver();
+    try testing.expect(ctx.observer_task != null);
+    try tr.io.sleep(.fromMilliseconds(10), .awake);
+    const start = std.Io.Clock.Timestamp.now(tr.io, .awake);
+    ctx.stopObserver();
+    try testing.expect(start.untilNow(tr.io).raw.toMilliseconds() < 1000);
+    try testing.expect(ctx.observer_task == null);
+    try testing.expect(ctx.observer_file == null);
+    ctx.stopObserver();
 }

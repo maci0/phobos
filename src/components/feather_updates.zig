@@ -410,11 +410,9 @@ test "dispatchRemoteMethod: reset runs git through the runner before reset_compl
         .gpa = alloc,
         .bus = undefined,
         .uds_path = "/no/such/klippy.sock",
-        .read_buf = try klippy.ReadBuf.init(alloc, 1024),
         .remote_handler = onKlippyMethod,
         .remote_handler_ctx = &feather,
     };
-    defer kctx.read_buf.deinit(alloc);
 
     var params: std.json.ObjectMap = .empty;
     try params.put(ja, "token", .{ .integer = 9 });
@@ -460,11 +458,9 @@ test "dispatchRemoteMethod: idle refusal does not run git" {
         .gpa = alloc,
         .bus = undefined,
         .uds_path = "/no/such/klippy.sock",
-        .read_buf = try klippy.ReadBuf.init(alloc, 1024),
         .remote_handler = onKlippyMethod,
         .remote_handler_ctx = &feather,
     };
-    defer kctx.read_buf.deinit(alloc);
     var params: std.json.ObjectMap = .empty;
     try params.put(ja, "token", .{ .integer = 4 });
     var frame: std.json.ObjectMap = .empty;
@@ -519,11 +515,9 @@ test "dispatchRemoteMethod: update calls machine.update.client before complete" 
         .gpa = alloc,
         .bus = undefined,
         .uds_path = "/no/such/klippy.sock",
-        .read_buf = try klippy.ReadBuf.init(alloc, 1024),
         .remote_handler = onKlippyMethod,
         .remote_handler_ctx = &feather,
     };
-    defer kctx.read_buf.deinit(alloc);
     var params: std.json.ObjectMap = .empty;
     try params.put(ja, "token", .{ .integer = 11 });
     try params.put(ja, "expected_version", .{ .string = "1.4.3" });
@@ -565,11 +559,9 @@ test "dispatchFrame: id-less feather reset reaches onKlippyMethod" {
         .gpa = alloc,
         .bus = undefined,
         .uds_path = "/no/such/klippy.sock",
-        .read_buf = try klippy.ReadBuf.init(alloc, 1024),
         .remote_handler = onKlippyMethod,
         .remote_handler_ctx = &feather,
     };
-    defer kctx.read_buf.deinit(alloc);
     // Klippy call_remote_method shape: response_template method plus params, no id.
     const payload = "{\"method\":\"feather_reset_forge_x_update\",\"params\":{\"token\":5}}";
     try kctx.dispatchFrame(threaded.io(), payload);
@@ -608,11 +600,9 @@ test "dispatchRemoteMethod: no runner does not report reset_complete" {
         .gpa = alloc,
         .bus = undefined,
         .uds_path = "/no/such/klippy.sock",
-        .read_buf = try klippy.ReadBuf.init(alloc, 1024),
         .remote_handler = onKlippyMethod,
         .remote_handler_ctx = &feather,
     };
-    defer kctx.read_buf.deinit(alloc);
     var params: std.json.ObjectMap = .empty;
     try params.put(ja, "token", .{ .integer = 5 });
     var frame: std.json.ObjectMap = .empty;

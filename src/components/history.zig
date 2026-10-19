@@ -765,10 +765,7 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     // Normalize: uppercase
     var order_buf: [8]u8 = undefined;
     const order_len = @min(order_str_raw.len, order_buf.len);
-    for (order_str_raw[0..order_len], 0..) |ch, i| {
-        order_buf[i] = std.ascii.toUpper(ch);
-    }
-    const order = order_buf[0..order_len];
+    const order = std.ascii.upperString(&order_buf, order_str_raw[0..order_len]);
     if (!std.mem.eql(u8, order, "ASC") and !std.mem.eql(u8, order, "DESC")) {
         return error.InvalidParams;
     }

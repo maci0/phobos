@@ -16,6 +16,7 @@
 const std = @import("std");
 const sleep = @import("../util/sleep.zig");
 const net = std.Io.net;
+const framing = @import("../util/klippy_frame.zig");
 const jv = @import("../json/value.zig");
 const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
@@ -35,30 +36,7 @@ const Waiter = struct {
 // Framing: \x03-delimited JSON-RPC over a Unix stream
 // ---------------------------------------------------------------------------
 
-/// Maximum size of a single Klippy protocol frame. Moonraker uses a 20 MiB
-/// Unix-buffer limit; we match that for the read buffer.
-pub const frame_max: usize = 20 * 1024 * 1024;
-
-const FrameEnd = 0x03;
-
-/// Encode a JSON-RPC message for the Klippy wire: append `\x03`.
-pub fn frameEncode(payload: []const u8, buf: []u8) []const u8 {
-    std.debug.assert(buf.len >= payload.len + 1);
-    @memcpy(buf[0..payload.len], payload);
-    buf[payload.len] = FrameEnd;
-    return buf[0 .. payload.len + 1];
-}
-
-/// Decode one `\x03`-delimited frame from accumulated data.
-/// Returns the payload (before the `\x03`) and the number of bytes consumed
-/// from `data` (payload + 1 for the delimiter). Returns null when a complete
-/// frame is not yet available.
-pub fn frameDecode(data: []const u8) ?struct { payload: []const u8, consumed: usize } {
-    if (std.mem.indexOfScalar(u8, data, FrameEnd)) |pos| {
-        return .{ .payload = data[0..pos], .consumed = pos + 1 };
-    }
-    return null;
-}
+const FrameEnd = framing.delimiter;
 
 // ---------------------------------------------------------------------------
 // Klippy connection state
@@ -345,85 +323,6 @@ pub fn isNotification(frame: std.json.Value) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Read buffer: accumulate bytes, yield complete \x03-delimited frames
-// ---------------------------------------------------------------------------
-
-pub const ReadBuf = struct {
-    gpa: std.mem.Allocator,
-    buf: []u8,
-    /// Valid (unconsumed) data is `buf[start..len]`. `consume` advances `start`
-    /// in O(1); the buffer is compacted (one memmove) only when `append` needs
-    /// room at the end. The old design memmove'd on every `consume`, which is
-    /// O(n²) when several status frames batch into one socket read — it was ~half
-    /// the reader's CPU under load.
-    start: usize,
-    len: usize,
-    /// Hard upper bound; the buffer grows on demand up to this and never beyond.
-    max: usize,
-
-    /// Allocate a read buffer that grows lazily up to `max_size`. Starts small
-    /// (16 KiB or `max_size`, whichever is less) so a 20 MiB frame ceiling does
-    /// not commit 20 MiB up front — real Klippy frames are a few KB.
-    pub fn init(alloc: std.mem.Allocator, max_size: usize) !ReadBuf {
-        const initial = @min(max_size, 16 * 1024);
-        const buf = try alloc.alloc(u8, initial);
-        return .{ .gpa = alloc, .buf = buf, .start = 0, .len = 0, .max = max_size };
-    }
-
-    pub fn deinit(self: *ReadBuf, alloc: std.mem.Allocator) void {
-        alloc.free(self.buf);
-        self.start = 0;
-        self.len = 0;
-        self.buf = &.{};
-    }
-
-    /// Grow `buf` (doubling, capped at `max`) so it can hold `need` bytes.
-    fn ensureCapacity(self: *ReadBuf, need: usize) !void {
-        if (need <= self.buf.len) return;
-        if (need > self.max) return error.BufferOverflow;
-        var new_cap = self.buf.len;
-        while (new_cap < need) new_cap = @min(self.max, new_cap *| 2);
-        self.buf = try self.gpa.realloc(self.buf, new_cap);
-    }
-
-    /// Slide the unconsumed bytes back to offset 0 (only when needed for room).
-    fn compact(self: *ReadBuf) void {
-        if (self.start == 0) return;
-        const remaining = self.len - self.start;
-        if (remaining > 0) std.mem.copyForwards(u8, self.buf[0..remaining], self.buf[self.start..self.len]);
-        self.start = 0;
-        self.len = remaining;
-    }
-
-    /// Append bytes from a stream read. Returns the payload of the next complete
-    /// frame (without \x03) if one is available. Call `consume` after processing.
-    pub fn append(self: *ReadBuf, data: []const u8) ![]const u8 {
-        if (self.len + data.len > self.buf.len) {
-            self.compact(); // reclaim consumed prefix before growing
-            try self.ensureCapacity(self.len + data.len);
-        }
-        @memcpy(self.buf[self.len..][0..data.len], data);
-        self.len += data.len;
-        if (std.mem.indexOfScalarPos(u8, self.buf[0..self.len], self.start, FrameEnd)) |pos| {
-            return self.buf[self.start..pos];
-        }
-        return error.NeedMoreData;
-    }
-
-    /// Mark `consumed` bytes (from `start`) as processed — O(1), no copy.
-    pub fn consume(self: *ReadBuf, consumed: usize) void {
-        std.debug.assert(self.start + consumed <= self.len);
-        self.start += consumed;
-        if (self.start >= self.len) self.reset(); // fully drained → cheap rewind
-    }
-
-    pub fn reset(self: *ReadBuf) void {
-        self.start = 0;
-        self.len = 0;
-    }
-};
-
-// ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
 
@@ -483,8 +382,8 @@ pub const KlippyCtx = struct {
     /// path. Reads happen only in the persistent reader, so they need no lock.
     write_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
-    /// Read buffer for accumulating incoming stream data.
-    read_buf: ReadBuf,
+    read_buffer: [4096]u8 = undefined,
+    reader: ?net.Stream.Reader = null,
 
     /// Active Unix socket stream; null when disconnected.
     stream: ?net.Stream = null,
@@ -579,7 +478,6 @@ pub const KlippyCtx = struct {
             .gpa = gpa,
             .bus = bus,
             .uds_path = "/tmp/klippy_uds",
-            .read_buf = try ReadBuf.init(gpa, frame_max),
         };
     }
 
@@ -589,7 +487,6 @@ pub const KlippyCtx = struct {
 
     pub fn deinit(self: *KlippyCtx) void {
         if (self.io) |io| self.stop(io);
-        self.read_buf.deinit(self.gpa);
         var sit = self.extra_sub_objects.keyIterator();
         while (sit.next()) |k| self.gpa.free(k.*);
         self.extra_sub_objects.deinit(self.gpa);
@@ -790,7 +687,7 @@ pub const KlippyCtx = struct {
     fn readResponse(self: *KlippyCtx, io: std.Io, id: []const u8) ![]const u8 {
         var n: u8 = 0;
         while (n < 40) : (n += 1) {
-            const payload = try self.readFrame(io);
+            const payload = try self.readFrame();
             if (frameIdMatches(payload, id)) return payload;
             if (std.mem.indexOf(u8, payload, "\"method\"") != null) {
                 self.dispatchFrame(io, payload) catch {};
@@ -840,6 +737,7 @@ pub const KlippyCtx = struct {
         const addr = try net.UnixAddress.init(self.uds_path);
         const s = try addr.connect(io);
         self.stream = s;
+        self.reader = s.reader(io, &self.read_buffer);
 
         // Phase 1: identify + poll `info` until Klippy is out of startup.
         _ = self.setState(.connecting);
@@ -907,7 +805,7 @@ pub const KlippyCtx = struct {
             const info_frame = try buildInfoRequest("phobos", "1.0.0", info_id, poll_count == 0, &info_buf);
             try self.writeFrame(io, info_frame);
 
-            const info_payload = try self.readFrame(io);
+            const info_payload = try self.readFrame();
             defer self.gpa.free(info_payload);
             const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, info_payload, .{});
             defer parsed.deinit();
@@ -1016,7 +914,7 @@ pub const KlippyCtx = struct {
     fn readerLoop(self: *KlippyCtx) !void {
         const io = self.io.?;
         while (!self.stopping.isSet()) {
-            const payload = try self.readFrame(io);
+            const payload = try self.readFrame();
             defer self.gpa.free(payload);
             // Tolerate a single malformed/oversized frame without dropping the
             // connection (matches Moonraker resilience).
@@ -1252,24 +1150,6 @@ pub const KlippyCtx = struct {
 
     /// Write a framed message to the Klippy socket.
     fn writeFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
-        // Use a small stack buffer for the common case; fall back to the
-        // heap for oversized payloads. The 20 MiB frame_max is the read
-        // buffer limit, not a typical write size.
-        var frame_buf: [4096]u8 = undefined;
-        const frame: []const u8 = if (payload.len + 1 <= frame_buf.len) blk: {
-            @memcpy(frame_buf[0..payload.len], payload);
-            frame_buf[payload.len] = FrameEnd;
-            break :blk frame_buf[0 .. payload.len + 1];
-        } else blk: {
-            if (payload.len + 1 > frame_max) return error.FrameTooLarge;
-            const f = try self.gpa.alloc(u8, payload.len + 1);
-            errdefer self.gpa.free(f);
-            @memcpy(f[0..payload.len], payload);
-            f[payload.len] = FrameEnd;
-            break :blk f;
-        };
-        defer if (frame.ptr != &frame_buf) self.gpa.free(frame);
-
         // Serialize writes: in the concurrent path the reader (acks) and handler
         // threads (request sends) both write; without this their frames interleave.
         self.write_mutex.lockUncancelable(io);
@@ -1278,49 +1158,15 @@ pub const KlippyCtx = struct {
 
         var wbuf: [4096]u8 = undefined;
         var w = self.stream.?.writer(io, &wbuf);
-        try w.interface.writeAll(frame);
+        try framing.write(&w.interface, payload);
         try w.interface.flush();
     }
 
     /// Read one complete framed payload from the Klippy socket.
     /// Blocks until a full \x03-delimited frame is available.
-    fn readFrame(self: *KlippyCtx, io: std.Io) ![]const u8 {
-        var rbuf: [4096]u8 = undefined;
-        var r = self.stream.?.reader(io, &rbuf);
-        while (true) {
-            // Drain a frame already buffered from a prior pipelined read before
-            // blocking on the socket. Klippy can pack several \x03-delimited
-            // frames into one TCP segment; without this, every frame after the
-            // first would stall in read_buf until the next socket read arrives
-            // (and hang outright if no further data is sent).
-            if (self.read_buf.append(&.{})) |payload| {
-                const owned = try self.gpa.dupe(u8, payload);
-                self.read_buf.consume(payload.len + 1);
-                return owned;
-            } else |err| if (err != error.NeedMoreData) return err;
-
-            try r.interface.fillMore();
-            const chunk = r.interface.buffer[r.interface.seek..r.interface.end];
-            if (chunk.len == 0) return error.ConnectionClosed;
-
-            const payload = self.read_buf.append(chunk) catch |err| switch (err) {
-                error.BufferOverflow => {
-                    self.read_buf.reset();
-                    r.interface.tossBuffered();
-                    continue;
-                },
-                error.NeedMoreData => {
-                    r.interface.tossBuffered();
-                    continue;
-                },
-                else => |e| return e,
-            };
-            // Copy payload before consume() shifts the underlying buffer.
-            const owned = try self.gpa.dupe(u8, payload);
-            r.interface.tossBuffered();
-            self.read_buf.consume(payload.len + 1);
-            return owned;
-        }
+    fn readFrame(self: *KlippyCtx) ![]const u8 {
+        if (self.reader == null) return error.KlippyDisconnected;
+        return framing.read(self.gpa, &self.reader.?.interface);
     }
 
     /// Send a JSON-RPC request to Klippy and return the response result.
@@ -1577,7 +1423,7 @@ pub const KlippyCtx = struct {
 
         // Read frames until the matching response arrives.
         while (true) {
-            const payload = try self.readFrame(io);
+            const payload = try self.readFrame();
             defer self.gpa.free(payload);
             const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch |e| {
                 return e;
@@ -1674,54 +1520,6 @@ pub const KlippyCtx = struct {
         if (self.octoprint) |oc| oc.setKlippyDisconnected();
     }
 };
-
-// ===========================================================================
-// Tests: framing
-// ===========================================================================
-
-test "frameEncode: appends \\x03" {
-    var buf: [64]u8 = undefined;
-    const got = frameEncode("hello", &buf);
-    try std.testing.expectEqualStrings("hello\x03", got);
-}
-
-test "frameEncode: empty payload still gets \\x03" {
-    var buf: [64]u8 = undefined;
-    const got = frameEncode("", &buf);
-    try std.testing.expectEqualStrings("\x03", got);
-}
-
-test "frameDecode: extracts payload before \\x03" {
-    const data = "{\"id\":1}\x03more";
-    const frame = frameDecode(data).?;
-    try std.testing.expectEqualStrings("{\"id\":1}", frame.payload);
-    try std.testing.expectEqual(@as(usize, 9), frame.consumed); // 8 + 1
-}
-
-test "frameDecode: null when no delimiter" {
-    try std.testing.expect(frameDecode("no-delimiter") == null);
-}
-
-test "frameDecode: null on empty input" {
-    try std.testing.expect(frameDecode("") == null);
-}
-
-test "frameDecode: handles only delimiter" {
-    const data = "\x03";
-    const frame = frameDecode(data).?;
-    try std.testing.expectEqualStrings("", frame.payload);
-    try std.testing.expectEqual(@as(usize, 1), frame.consumed);
-}
-
-test "frameEncode + frameDecode: round-trip preserves JSON-RPC" {
-    var buf: [1024]u8 = undefined;
-    const msg =
-        \\{"jsonrpc":"2.0","method":"server.info","id":42}
-    ;
-    const framed = frameEncode(msg, &buf);
-    const decoded = frameDecode(framed).?;
-    try std.testing.expectEqualStrings(msg, decoded.payload);
-}
 
 // ===========================================================================
 // Test helpers
@@ -2034,89 +1832,6 @@ test "isNotification: false for response" {
 }
 
 // ===========================================================================
-// Tests: ReadBuf
-// ===========================================================================
-
-test "ReadBuf: append extracts frame" {
-    const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc, 256);
-    defer rb.deinit(alloc);
-    const payload = try rb.append("{\"id\":1}\x03");
-    try std.testing.expectEqualStrings("{\"id\":1}", payload);
-}
-
-test "ReadBuf: consume advances buffer" {
-    const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc, 256);
-    defer rb.deinit(alloc);
-    _ = try rb.append("hello\x03world\x03");
-    try std.testing.expectEqual(@as(usize, 12), rb.len);
-    rb.consume(6); // "hello" + \x03
-    // Cursor advances; valid data is buf[start..len] = "world\x03" (6 bytes).
-    try std.testing.expectEqual(@as(usize, 6), rb.len - rb.start);
-    const payload = try rb.append("");
-    try std.testing.expectEqualStrings("world", payload);
-}
-
-test "ReadBuf: error.NeedMoreData when incomplete" {
-    const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc, 256);
-    defer rb.deinit(alloc);
-    try std.testing.expectError(error.NeedMoreData, rb.append("partial"));
-    // Second append of empty data also returns NeedMoreData (no \x03 yet).
-    try std.testing.expectError(error.NeedMoreData, rb.append(""));
-}
-
-test "ReadBuf: reset clears buffer" {
-    const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc, 256);
-    defer rb.deinit(alloc);
-    _ = try rb.append("data\x03");
-    rb.consume(5);
-    rb.reset();
-    try std.testing.expectEqual(@as(usize, 0), rb.len);
-}
-
-test "ReadBuf: multiple appends accumulate" {
-    const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc, 256);
-    defer rb.deinit(alloc);
-    // "hel" has no \x03 → NeedMoreData
-    _ = rb.append("hel") catch |err| switch (err) {
-        error.NeedMoreData => {},
-        else => |e| return e,
-    };
-    try std.testing.expectError(error.NeedMoreData, rb.append(""));
-    // "lo\x03" completes the frame → returns "hello"
-    const payload = try rb.append("lo\x03");
-    try std.testing.expectEqualStrings("hello", payload);
-}
-
-test "ReadBuf: error.BufferOverflow" {
-    const alloc = std.testing.allocator;
-    var rb = try ReadBuf.init(alloc, 256);
-    defer rb.deinit(alloc);
-    // Fill buffer to cap - 1 using no-\x03 chunks.
-    const chunk: [64]u8 = @splat(0x41);
-    const full_chunks = (rb.buf.len - 1) / chunk.len;
-    for (0..full_chunks) |_| {
-        _ = rb.append(&chunk) catch |err| switch (err) {
-            error.NeedMoreData => {},
-            else => |e| return e,
-        };
-    }
-    const rem = (rb.buf.len - 1) - (full_chunks * chunk.len);
-    if (rem > 0) {
-        _ = rb.append(chunk[0..rem]) catch |err| switch (err) {
-            error.NeedMoreData => {},
-            else => |e| return e,
-        };
-    }
-    // Now len == buf.len - 1. Append 2 bytes → overflow.
-    try std.testing.expectError(error.BufferOverflow, rb.append("xx"));
-}
-
-// ===========================================================================
 // Tests: setState
 // ===========================================================================
 
@@ -2369,46 +2084,6 @@ test "processGcodeResponse: missing params — no crash" {
 // Fuzz tests
 // ===========================================================================
 
-test "fuzz frameDecode: never crashes" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [4096]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-
-            if (frameDecode(&buf)) |f| {
-                // If we got a frame, payload must not exceed consumed.
-                std.debug.assert(f.payload.len < f.consumed);
-                std.debug.assert(f.payload.len + 1 == f.consumed);
-                // consumed must be within input
-                std.debug.assert(f.consumed <= buf.len);
-            }
-        }
-    }.run, .{});
-}
-
-test "fuzz frameEncode: round-trips through decode" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var payload: [256]u8 = undefined;
-            smith.bytesWithHash(&payload, 0);
-
-            // Ensure no embedded \x03 in payload (invalid for this protocol).
-            // frameEncode must still not crash.
-            var frame_buf: [512]u8 = undefined;
-            if (payload.len + 1 > frame_buf.len) return;
-            const framed = frameEncode(payload[0..@min(payload.len, frame_buf.len - 1)], &frame_buf);
-            // The result ends with \x03.
-            std.debug.assert(framed.len > 0);
-            std.debug.assert(framed[framed.len - 1] == FrameEnd);
-
-            // Decode must recover the original (up to embedded \x03).
-            if (frameDecode(framed)) |dec| {
-                std.debug.assert(dec.payload.len + 1 == dec.consumed);
-            }
-        }
-    }.run, .{});
-}
-
 test "fuzz buildJsonRpcRequest: never crashes, always valid JSON" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
@@ -2446,33 +2121,6 @@ test "fuzz parseKlippyInfoResponse: never crashes on arbitrary JSON" {
             _ = parseKlippyInfoResponse(parsed.value);
             _ = getJsonRpcError(parsed.value);
             _ = isNotification(parsed.value);
-        }
-    }.run, .{});
-}
-
-test "fuzz ReadBuf.append: never crashes on arbitrary bytes" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var data: [4096]u8 = undefined;
-            smith.bytesWithHash(&data, 0);
-
-            var rb = ReadBuf.init(std.heap.smp_allocator, 4096) catch return;
-            defer rb.deinit(std.heap.smp_allocator);
-
-            // Feed chunks until we get a frame or run out of space.
-            var offset: usize = 0;
-            while (offset < data.len) {
-                const chunk = data[offset..@min(offset + 256, data.len)];
-                const result = rb.append(chunk);
-                if (result) |payload| {
-                    // Frame extracted — consume and continue.
-                    rb.consume(payload.len + 1);
-                } else |err| {
-                    if (err == error.BufferOverflow) break;
-                    // error.NeedMoreData is fine — keep feeding.
-                }
-                offset += chunk.len;
-            }
         }
     }.run, .{});
 }

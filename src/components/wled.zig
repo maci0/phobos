@@ -1725,7 +1725,7 @@ test "sendWledBody: serial strip writes newline-terminated JSON to the device" {
     const fh = try Dir.cwd().openFile(io, path, .{});
     defer fh.close(io);
     var buf: [64]u8 = undefined;
-    var r = fh.reader(io, &buf);
+    var r = fh.reader(io, &.{});
     const n = try r.interface.readSliceShort(&buf);
     try std.testing.expectEqualStrings("{\"on\":true}\n", buf[0..n]);
 }

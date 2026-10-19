@@ -40,8 +40,26 @@ pub const WsTestConn = struct {
     alloc: std.mem.Allocator,
     /// Deterministic-but-nonzero mask source so each frame is masked.
     mask_rng: std.Random.DefaultPrng = .init(0x1234_5678),
-    /// When set, nextDataFrame uses poll() to bound each readFrame call.
+    /// Deadline for the next complete data frame, including buffered bytes.
     read_timeout_secs: ?u32 = null,
+    read_deadline: ?Io.Clock.Timestamp = null,
+
+    const read_vtable: Io.VTable = blk: {
+        var vtable = Io.failing.vtable.*;
+        vtable.operate = readOperation;
+        break :blk vtable;
+    };
+
+    fn readOperation(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        const self: *WsTestConn = @ptrCast(@alignCast(userdata.?));
+        std.debug.assert(operation == .net_read);
+        const timeout: Io.Timeout = if (self.read_deadline) |deadline| .{ .deadline = deadline } else .none;
+        return self.io.operateTimeout(operation, timeout) catch |err| switch (err) {
+            error.Timeout => .{ .net_read = error.ConnectionTimedOut },
+            error.ConcurrencyUnavailable => .{ .net_read = error.SystemResources },
+            error.Canceled => return error.Canceled,
+        };
+    }
 
     /// Close the stream and free buffers.
     pub fn close(self: *WsTestConn) void {
@@ -82,6 +100,7 @@ pub const WsTestConn = struct {
     /// Read one server frame (unmasked). Returns the opcode and an owned payload
     /// slice (freed with `self.alloc`). Skips nothing; the caller handles ping.
     pub fn readFrame(self: *WsTestConn) !struct { opcode: Opcode, data: []u8 } {
+        self.reader.err = null;
         const r = &self.reader.interface;
         const b0 = try r.takeByte();
         const b1 = try r.takeByte();
@@ -178,7 +197,7 @@ pub fn connect(ts: *TestServer, alloc: std.mem.Allocator) !*WsTestConn {
         .wbuf = wbuf,
         .alloc = alloc,
     };
-    self.reader = stream.reader(io, self.rbuf);
+    self.reader = stream.reader(.{ .userdata = self, .vtable = &WsTestConn.read_vtable }, self.rbuf);
     self.writer = stream.writer(io, self.wbuf);
 
     // Send the upgrade request. The Sec-WebSocket-Key is a fixed base64 value
@@ -399,13 +418,18 @@ fn arrayParam(alloc: std.mem.Allocator, s: []const u8) !std.json.Value {
 const DataFrame = struct { opcode: Opcode, data: []u8 };
 
 fn nextDataFrame(c: *WsTestConn) anyerror!DataFrame {
+    c.read_deadline = if (c.read_timeout_secs) |secs|
+        .fromNow(c.io, .{ .raw = .fromSeconds(secs), .clock = .awake })
+    else
+        null;
+    defer c.read_deadline = null;
     while (true) {
-        if (c.read_timeout_secs) |secs| {
-            var pfd = [1]std.posix.pollfd{.{ .fd = c.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-            const ret = std.posix.poll(&pfd, @intCast(secs * 1000)) catch 0;
-            if (ret == 0) return error.Timeout;
-        }
-        const f = try c.readFrame();
+        const f = c.readFrame() catch |err| {
+            if (c.reader.err) |read_err| {
+                if (read_err == error.ConnectionTimedOut) return error.Timeout;
+            }
+            return err;
+        };
         if (f.opcode == .ping) {
             try c.sendFrame(.pong, f.data);
             c.alloc.free(f.data);
@@ -734,4 +758,35 @@ test "WS: power device action=on emits notify_power_changed" {
     const dev_info = params.items[0].object;
     try std.testing.expectEqualStrings("test_psu", dev_info.get("device").?.string);
     try std.testing.expectEqualStrings("on", dev_info.get("status").?.string);
+}
+
+test "WS deadline reads buffered frames and permits reuse after an idle timeout" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    const client = try connect(ts, std.testing.allocator);
+    defer client.close();
+    @memcpy(client.reader.interface.buffer[0..3], &[_]u8{ 0x81, 1, 'x' });
+    client.reader.interface.seek = 0;
+    client.reader.interface.end = 3;
+    setReadTimeout(client, 0);
+    const frame = try nextDataFrame(client);
+    defer std.testing.allocator.free(frame.data);
+    try std.testing.expectEqualStrings("x", frame.data);
+    try std.testing.expectError(error.Timeout, nextDataFrame(client));
+    clearReadTimeout(client);
+    const response = try client.call(std.testing.allocator, "server.info", null);
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "phobos") != null);
+}
+
+test "WS deadlines cover a stalled payload after a buffered header" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    const client = try connect(ts, std.testing.allocator);
+    defer client.close();
+    @memcpy(client.reader.interface.buffer[0..2], &[_]u8{ 0x81, 4 });
+    client.reader.interface.seek = 0;
+    client.reader.interface.end = 2;
+    setReadTimeout(client, 0);
+    try std.testing.expectError(error.Timeout, nextDataFrame(client));
 }

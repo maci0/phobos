@@ -156,8 +156,8 @@ pub fn pathOf(target: []const u8) []const u8 {
 
 /// Parse a target's query string ("...?a=1&b=two") into a JSON object with
 /// string values. Returns `.null` when there is no query string. Keys/values
-/// are borrowed from `target` (no percent-decoding for the spine — values are
-/// already raw). Allocates the ObjectMap in `alloc`.
+/// use request-arena storage when decoding is needed, otherwise borrow `target`.
+/// Form query strings decode '+' as a space; URL paths keep literal '+'.
 pub fn queryParams(alloc: std.mem.Allocator, target: []const u8) !std.json.Value {
     const q_idx = std.mem.indexOfScalar(u8, target, '?') orelse return .null;
     var query = target[q_idx + 1 ..];
@@ -173,10 +173,22 @@ pub fn queryParams(alloc: std.mem.Allocator, target: []const u8) !std.json.Value
         const key = if (eq) |e| pair[0..e] else pair;
         const value = if (eq) |e| pair[e + 1 ..] else "";
         if (key.len == 0) continue;
-        try obj.put(alloc, key, .{ .string = value });
+        try obj.put(alloc, try decodeUriPart(alloc, key, true), .{ .string = try decodeUriPart(alloc, value, true) });
     }
     if (obj.count() == 0) return .null;
     return .{ .object = obj };
+}
+
+/// Returned storage belongs to the request arena or borrows `encoded`.
+fn decodeUriPart(alloc: std.mem.Allocator, encoded: []const u8, form: bool) ![]const u8 {
+    const text = if (form and std.mem.indexOfScalar(u8, encoded, '+') != null) blk: {
+        const copy = try alloc.dupe(u8, encoded);
+        std.mem.replaceScalar(u8, copy, '+', ' ');
+        break :blk copy;
+    } else encoded;
+    const decoded = try (std.Uri.Component{ .percent_encoded = text }).toRawMaybeAlloc(alloc);
+    if (!std.unicode.utf8ValidateSlice(decoded)) return error.InvalidParams;
+    return decoded;
 }
 
 /// Build a Moonraker-shaped error body `{"error":{"code":<code>,"message":<m>}}`.
@@ -217,7 +229,7 @@ fn wrapResult(alloc: std.mem.Allocator, result: std.json.Value) ![]const u8 {
 pub fn handleRedirect(target: []const u8, body: []const u8, alloc: std.mem.Allocator) !Response {
     // Resolve the url: query string takes precedence, then JSON body.
     var url: ?[]const u8 = null;
-    const qp = try queryParams(alloc, target);
+    const qp = queryParams(alloc, target) catch |err| return fileErrResponse(alloc, err);
     if (qp == .object) {
         if (qp.object.get("url")) |v| switch (v) {
             .string => |s| url = s,
@@ -380,7 +392,7 @@ pub fn handleParsedAuth(
     }
 
     if (params == .null) {
-        params = try queryParams(alloc, target);
+        params = queryParams(alloc, target) catch |err| return fileErrResponse(alloc, err);
     }
 
     // Inject the resolved user, remote IP and HTTP method into the params so the
@@ -675,15 +687,8 @@ fn sendFileStreaming(io: Io, req: *std.http.Server.Request, abs: []const u8, hea
         .content_length = st.size,
         .respond_options = .{ .status = .ok, .extra_headers = headers },
     });
-    // Copy file -> response body. `bw.end()` with content-length framing asserts
-    // that exactly `st.size` bytes were written, so a file truncated/appended
-    // between stat and read (a re-upload during download) would panic. Guard it:
-    // only end() cleanly on an exact-size copy; on a short/over/aborted stream the
-    // framing is already broken, so return an error and let the caller close the
-    // connection (it won't be byte-synced for keep-alive).
-    const written = std.Io.Reader.streamRemaining(&fr.interface, &bw.writer) catch
-        return error.DownloadAborted;
-    if (written != st.size) return error.DownloadAborted;
+    // Send the advertised size; growth is ignored and truncation aborts the response.
+    fr.interface.streamExact64(&bw.writer, st.size) catch return error.DownloadAborted;
     try bw.end();
 }
 
@@ -821,7 +826,7 @@ fn handleFileServe(
     alloc: std.mem.Allocator,
 ) !Response {
     const prefix = "/server/files/";
-    const request_path = path[prefix.len..];
+    const request_path = decodeUriPart(alloc, path[prefix.len..], false) catch |err| return fileErrResponse(alloc, err);
 
     if (verb == .DELETE) {
         // Delete via the file_manager (runs under the serialized core).
@@ -1207,6 +1212,11 @@ test "queryParams parses key/value pairs into a string-valued object" {
     const o = v.object;
     try std.testing.expectEqualStrings("true", o.get("raw").?.string);
     try std.testing.expectEqualStrings("2", o.get("n").?.string);
+
+    const encoded = try queryParams(a, "/printer/objects/query?temperature_sensor+tvocValue=temperature&file=hello%20%2B%25.gcode&%E9%87%8D=%E9%87%8F");
+    try std.testing.expectEqualStrings("temperature", encoded.object.get("temperature_sensor tvocValue").?.string);
+    try std.testing.expectEqualStrings("hello +%.gcode", encoded.object.get("file").?.string);
+    try std.testing.expectEqualStrings("量", encoded.object.get("重").?.string);
 }
 
 test "handleParsed: GET /server/info wraps result with klippy_connected false" {
@@ -1485,6 +1495,42 @@ test "fuzz peer address formatting stays within its buffer" {
             smith.bytesWithHash(&bytes, 0);
             var buf: [64]u8 = undefined;
             _ = try peerAddress(&buf, .{ .ip6 = .{ .bytes = bytes, .port = 65535, .interface = .none } });
+        }
+    }.run, .{});
+}
+
+test "file downloads send exactly the advertised size for a virtual file" {
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    ts.app.file_ctx.roots = &.{.{ .name = "virtual", .path = "/proc", .full_access = false }};
+    const file = try std.Io.Dir.cwd().openFile(ts.io, "/proc/version", .{});
+    defer file.close(ts.io);
+    try std.testing.expectEqual(@as(u64, 0), (try file.stat(ts.io)).size);
+    const contents = try ts.get(std.testing.allocator, "/server/files/virtual/version");
+    defer std.testing.allocator.free(contents);
+    try std.testing.expectEqual(@as(usize, 0), contents.len);
+}
+
+test "fuzz HTTP query decoding returns UTF-8 or rejects the request" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var bytes: [128]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+            const target = try std.fmt.allocPrint(alloc, "/?{s}", .{bytes});
+            const params = queryParams(alloc, target) catch |err| switch (err) {
+                error.InvalidParams => return,
+                else => return err,
+            };
+            if (params != .object) return;
+            var it = params.object.iterator();
+            while (it.next()) |entry| {
+                try std.testing.expect(std.unicode.utf8ValidateSlice(entry.key_ptr.*));
+                try std.testing.expect(std.unicode.utf8ValidateSlice(entry.value_ptr.string));
+            }
         }
     }.run, .{});
 }

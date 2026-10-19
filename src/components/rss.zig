@@ -10,21 +10,29 @@
 //!
 //! Usage:
 //!   var parser = RssParser.init(alloc);
-//!   defer parser.deinit();
 //!   const entries = try parser.parse(xml_data, feed_name);
-//!   defer alloc.free(entries);
+//!   defer {
+//!       for (entries) |entry| entry.deinit(alloc);
+//!       alloc.free(entries);
+//!   }
 
 const std = @import("std");
 
 /// One parsed RSS item with calendar date converted to Unix seconds.
 pub const RssItem = struct {
-    guid: []const u8,
-    title: []const u8,
-    link: []const u8,
-    description: []const u8,
-    category: []const u8,
+    guid: []const u8 = "",
+    title: []const u8 = "",
+    link: []const u8 = "",
+    description: []const u8 = "",
+    category: []const u8 = "",
     /// Unix timestamp (UTC seconds since epoch), 0 if unparseable.
     date: f64,
+
+    pub fn deinit(self: RssItem, alloc: std.mem.Allocator) void {
+        inline for (comptime std.meta.fieldNames(RssItem)) |field| {
+            if (@TypeOf(@field(self, field)) == []const u8) alloc.free(@field(self, field));
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -54,108 +62,53 @@ const Tokenizer = struct {
         return .{ .src = src, .pos = 0 };
     }
 
-    fn skipWs(self: *Tokenizer) void {
-        while (self.pos < self.src.len) {
-            switch (self.src[self.pos]) {
-                ' ', '\t', '\r', '\n' => self.pos += 1,
-                else => break,
-            }
-        }
-    }
-
     fn next(self: *Tokenizer) Token {
-        self.skipWs();
+        self.pos = std.mem.findNonePos(u8, self.src, self.pos, " \t\r\n") orelse self.src.len;
         if (self.pos >= self.src.len) return .{ .type = .eof, .tag = "", .text = "" };
 
         if (self.src[self.pos] == '<') {
             self.pos += 1;
             if (self.pos >= self.src.len) return .{ .type = .eof, .tag = "", .text = "" };
 
-            // Closing tag: </tag>
             if (self.src[self.pos] == '/') {
                 self.pos += 1;
                 const start = self.pos;
-                var name_end = self.pos;
-                while (self.pos < self.src.len and self.src[self.pos] != '>') {
-                    name_end = self.pos;
-                    self.pos += 1;
-                }
-                const tag_slice = self.src[start .. name_end + 1];
-                const tag = self.lowerTag(tag_slice);
-                if (self.pos < self.src.len) self.pos += 1; // skip '>'
+                self.pos = std.mem.findScalarPos(u8, self.src, self.pos, '>') orelse self.src.len;
+                const tag = self.lowerTag(self.src[start..self.pos]);
+                if (self.pos < self.src.len) self.pos += 1;
                 return .{ .type = .end_tag, .tag = tag, .text = "" };
             }
 
-            // Processing instruction / declaration / comment
             if (self.src[self.pos] == '?' or self.src[self.pos] == '!') {
-                // CDATA: <![CDATA[...]]> — scan for ]]> terminator
-                if (self.pos + 8 <= self.src.len and
-                    self.src[self.pos] == '!' and self.src[self.pos + 1] == '[' and
-                    self.src[self.pos + 2] == 'C' and self.src[self.pos + 3] == 'D' and
-                    self.src[self.pos + 4] == 'A' and self.src[self.pos + 5] == 'T' and
-                    self.src[self.pos + 6] == 'A' and self.src[self.pos + 7] == '[')
-                {
-                    self.pos += 8; // skip "![CDATA["
-                    const content_start = self.pos;
-                    while (self.pos + 2 < self.src.len and
-                        !(self.src[self.pos] == ']' and self.src[self.pos + 1] == ']' and self.src[self.pos + 2] == '>'))
-                        self.pos += 1;
-                    const content_end = self.pos;
-                    self.pos += 3; // skip "]]>"
-                    return .{ .type = .text, .tag = "", .text = self.src[content_start..content_end] };
+                if (std.mem.startsWith(u8, self.src[self.pos..], "![CDATA[")) {
+                    self.pos += 8;
+                    const start = self.pos;
+                    const end = std.mem.findPos(u8, self.src, self.pos, "]]>") orelse self.src.len;
+                    self.pos = if (end < self.src.len) end + 3 else end;
+                    return .{ .type = .text, .tag = "", .text = self.src[start..end] };
                 }
                 const start = self.pos;
-                while (self.pos < self.src.len and self.src[self.pos] != '>') self.pos += 1;
+                self.pos = std.mem.findScalarPos(u8, self.src, self.pos, '>') orelse self.src.len;
                 if (self.pos < self.src.len) self.pos += 1;
                 return .{ .type = .text, .tag = "", .text = self.src[start..self.pos] };
             }
 
-            // Start tag: <tag> or <tag attr="val">
             const start = self.pos;
-            var name_end = self.pos;
-            while (self.pos < self.src.len and self.src[self.pos] != '>' and self.src[self.pos] != ' ' and self.src[self.pos] != '\t' and self.src[self.pos] != '\r' and self.src[self.pos] != '\n') {
-                name_end = self.pos;
-                self.pos += 1;
-            }
-            const tag_slice = self.src[start .. name_end + 1];
-            const tag = self.lowerTag(tag_slice);
-
-            // Self-closing: <tag/>
-            if (self.pos < self.src.len and self.src[self.pos] == '/') {
-                self.pos += 1;
-                // treat as both start + end implicitly
-            }
-
-            // Skip to '>'
-            while (self.pos < self.src.len and self.src[self.pos] != '>') self.pos += 1;
+            const end = std.mem.findAnyPos(u8, self.src, self.pos, "> \t\r\n") orelse self.src.len;
+            const tag = self.lowerTag(self.src[start..end]);
+            self.pos = std.mem.findScalarPos(u8, self.src, end, '>') orelse self.src.len;
             if (self.pos < self.src.len) self.pos += 1;
             return .{ .type = .start_tag, .tag = tag, .text = "" };
         }
 
-        // Text content (including CDATA)
         const start = self.pos;
-        while (self.pos < self.src.len and self.src[self.pos] != '<') self.pos += 1;
-        var text = self.src[start..self.pos];
-
-        // Unwrap CDATA: <![CDATA[...]]>
-        if (text.len > 9 and std.mem.startsWith(u8, text, "<![CDATA[")) {
-            const cdata_start = 9;
-            const cdata_end = if (std.mem.endsWith(u8, text, "]]>"))
-                text.len - 3
-            else
-                text.len;
-            text = if (cdata_end > cdata_start) text[cdata_start..cdata_end] else "";
-        }
-
-        return .{ .type = .text, .tag = "", .text = text };
+        self.pos = std.mem.findScalarPos(u8, self.src, self.pos, '<') orelse self.src.len;
+        return .{ .type = .text, .tag = "", .text = self.src[start..self.pos] };
     }
 
     fn lowerTag(self: *Tokenizer, tag: []const u8) []const u8 {
         const n = @min(tag.len, 64);
-        for (tag[0..n], 0..) |c, i| {
-            self.buf[i] = std.ascii.toLower(c);
-        }
-        return self.buf[0..n];
+        return std.ascii.lowerString(&self.buf, tag[0..n]);
     }
 };
 
@@ -164,7 +117,10 @@ const Tokenizer = struct {
 // ---------------------------------------------------------------------------
 
 /// Recognised element names inside <item>.
-const known_fields = [_][]const u8{ "title", "link", "description", "pubdate", "guid", "category" };
+const known_fields = std.StaticStringMap(void).initComptime(.{
+    .{ "title", {} },   .{ "link", {} }, .{ "description", {} },
+    .{ "pubdate", {} }, .{ "guid", {} }, .{ "category", {} },
+});
 
 pub const RssParser = struct {
     alloc: std.mem.Allocator,
@@ -183,11 +139,7 @@ pub const RssParser = struct {
         var items: std.ArrayList(RssItem) = .empty;
         errdefer {
             for (items.items) |it| {
-                self.alloc.free(it.guid);
-                self.alloc.free(it.title);
-                self.alloc.free(it.link);
-                self.alloc.free(it.description);
-                self.alloc.free(it.category);
+                it.deinit(self.alloc);
             }
             items.deinit(self.alloc);
         }
@@ -206,7 +158,7 @@ pub const RssParser = struct {
                     } else if (std.mem.eql(u8, t.tag, "item")) {
                         depth = 2;
                         cur.reset();
-                    } else if (depth == 2 and isKnownField(t.tag)) {
+                    } else if (depth == 2 and known_fields.has(t.tag)) {
                         field = t.tag;
                     }
                 },
@@ -215,6 +167,7 @@ pub const RssParser = struct {
                         depth = 1;
                         if (cur.guid.items.len > 0) {
                             const item = try cur.finalize(self.alloc, feed_name);
+                            errdefer item.deinit(self.alloc);
                             try items.append(self.alloc, item);
                         }
                         cur.reset();
@@ -233,13 +186,6 @@ pub const RssParser = struct {
         }
 
         return items.toOwnedSlice(self.alloc);
-    }
-
-    fn isKnownField(tag: []const u8) bool {
-        for (known_fields) |f| {
-            if (std.mem.eql(u8, f, tag)) return true;
-        }
-        return false;
     }
 };
 
@@ -300,28 +246,20 @@ const RssItemBuilder = struct {
     fn finalize(self: *RssItemBuilder, alloc: std.mem.Allocator, _: []const u8) !RssItem {
         const date = parseRfc2822(self.pub_date.items);
 
-        return RssItem{
-            .guid = try copyOwned(alloc, self.guid.items),
-            .title = try copyOwned(alloc, self.title.items),
-            .link = try copyOwned(alloc, self.link.items),
-            .description = try copyOwned(alloc, self.description.items),
-            .category = try copyOwned(alloc, self.category.items),
-            .date = date,
-        };
+        var item: RssItem = .{ .date = date };
+        errdefer item.deinit(alloc);
+        inline for (comptime std.meta.fieldNames(RssItem)) |field| {
+            if (@TypeOf(@field(item, field)) == []const u8) @field(item, field) = try alloc.dupe(u8, @field(self, field).items);
+        }
+        return item;
     }
 };
-
-fn copyOwned(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
-    const dst = try alloc.alloc(u8, src.len);
-    @memcpy(dst, src);
-    return dst;
-}
 
 // ---------------------------------------------------------------------------
 // RFC 2822 date parser
 // ---------------------------------------------------------------------------
 
-const MONTH_NAMES = [_][]const u8{ "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+const epoch = std.time.epoch;
 const DAY_NAMES = [_][]const u8{ "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
 
 /// Parse an RFC 2822 date string to Unix timestamp (UTC seconds).
@@ -331,38 +269,33 @@ fn parseRfc2822(s: []const u8) f64 {
     var pos: usize = 0;
     for (DAY_NAMES) |day| {
         if (std.ascii.startsWithIgnoreCase(s, day)) {
-            for (s, 0..) |c, i| {
-                if (c == ',') {
-                    pos = i + 1;
-                    break;
-                }
-            }
+            pos = if (std.mem.findScalar(u8, s, ',')) |comma| comma + 1 else 0;
             break;
         }
     }
 
-    // Trim whitespace
-    while (pos < s.len and (s[pos] == ' ' or s[pos] == '\t' or s[pos] == '\r' or s[pos] == '\n')) pos += 1;
+    var tokens = std.mem.tokenizeAny(u8, s[pos..], " \t\r\n");
 
     // Day (1-31)
-    const day_str = extractToken(s, &pos) orelse return 0;
+    const day_str = tokens.next() orelse return 0;
     const day_num = std.fmt.parseInt(u32, day_str, 10) catch return 0;
 
     // Month (3-letter)
-    const month_str = extractToken(s, &pos) orelse return 0;
+    const month_str = tokens.next() orelse return 0;
     const month_idx = findMonth(month_str) orelse return 0;
 
     // Year (4-digit)
-    const year_str = extractToken(s, &pos) orelse return 0;
-    const year = std.fmt.parseInt(u32, year_str, 10) catch return 0;
+    const year_str = tokens.next() orelse return 0;
+    const year = std.fmt.parseInt(epoch.Year, year_str, 10) catch return 0;
+    if (year < epoch.epoch_year or day_num == 0 or day_num > epoch.getDaysInMonth(year, month_idx)) return 0;
 
     // Time HH:MM:SS
-    const time_str = extractToken(s, &pos) orelse return 0;
+    const time_str = tokens.next() orelse return 0;
     const hms = parseHms(time_str) catch return 0;
 
     // Timezone: GMT, UT, Z, EST, EDT, CST, CDT, MST, MDT, PST, PDT, or +/-HHMM
     var tz_offset: i64 = 0;
-    const tz_str = extractToken(s, &pos);
+    const tz_str = tokens.next();
     if (tz_str) |tz| {
         if (std.ascii.eqlIgnoreCase(tz, "gmt") or std.ascii.eqlIgnoreCase(tz, "ut") or std.ascii.eqlIgnoreCase(tz, "z")) {
             tz_offset = 0;
@@ -391,14 +324,6 @@ fn parseRfc2822(s: []const u8) f64 {
     return unixFromFields(year, month_idx, day_num, hms[0], hms[1], hms[2]) - @as(f64, @floatFromInt(tz_offset));
 }
 
-fn extractToken(s: []const u8, pos: *usize) ?[]const u8 {
-    while (pos.* < s.len and (s[pos.*] == ' ' or s[pos.*] == '\t' or s[pos.*] == '\r' or s[pos.*] == '\n')) pos.* += 1;
-    if (pos.* >= s.len) return null;
-    const start = pos.*;
-    while (pos.* < s.len and s[pos.*] != ' ' and s[pos.*] != '\t' and s[pos.*] != '\r' and s[pos.*] != '\n') pos.* += 1;
-    return s[start..pos.*];
-}
-
 fn parseHms(s: []const u8) ![3]u32 {
     var parts: [3]u32 = undefined;
     var it = std.mem.splitScalar(u8, s, ':');
@@ -406,6 +331,7 @@ fn parseHms(s: []const u8) ![3]u32 {
         const segment = it.next() orelse return error.InvalidDate;
         p.* = try std.fmt.parseInt(u32, segment, 10);
     }
+    if (parts[0] > 23 or parts[1] > 59 or parts[2] > 60 or it.next() != null) return error.InvalidDate;
     return parts;
 }
 
@@ -422,38 +348,20 @@ fn parseTzOffset(s: []const u8) !i64 {
     return secs;
 }
 
-fn findMonth(name: []const u8) ?u32 {
-    for (MONTH_NAMES, 0..) |m, i| {
-        if (std.ascii.eqlIgnoreCase(name, m)) return @intCast(i);
-    }
-    return null;
+fn findMonth(name: []const u8) ?epoch.Month {
+    if (name.len != 3) return null;
+    var lower: [3]u8 = undefined;
+    return std.meta.stringToEnum(epoch.Month, std.ascii.lowerString(&lower, name));
 }
 
-fn unixFromFields(year: u32, month: u32, day: u32, hour: u32, min: u32, sec: u32) f64 {
-    // Days since Unix epoch for the start of the given year.
-    const y = year;
-    if (y < 1970) return 0;
-
-    var days: u32 = 0;
-    var i: u32 = 1970;
-    while (i < y) : (i += 1) {
-        days += if (isLeapYear(i)) @as(u32, 366) else @as(u32, 365);
-    }
-
-    const month_days = [_]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    var m: u32 = 0;
-    while (m < month) : (m += 1) {
-        days += month_days[m];
-        if (m == 1 and isLeapYear(y)) days += 1;
-    }
-
+fn unixFromFields(year: epoch.Year, month: epoch.Month, day: u32, hour: u32, min: u32, sec: u32) f64 {
+    var days: u64 = 0;
+    var current_year: epoch.Year = epoch.epoch_year;
+    while (current_year < year) : (current_year += 1) days += epoch.getDaysInYear(current_year);
+    var current_month: u4 = 1;
+    while (current_month < month.numeric()) : (current_month += 1) days += epoch.getDaysInMonth(year, @fromBackingInt(current_month));
     days += day - 1;
-    const secs: f64 = @floatFromInt(days * 86400 + hour * 3600 + min * 60 + sec);
-    return secs;
-}
-
-fn isLeapYear(y: u32) bool {
-    return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0);
+    return @floatFromInt(days * epoch.secs_per_day + hour * 3600 + min * 60 + sec);
 }
 
 // ---------------------------------------------------------------------------
@@ -484,11 +392,7 @@ test "RssParser: basic RSS 2.0 feed" {
     const items = try p.parse(xml, "testfeed");
     defer {
         for (items) |it| {
-            testing.allocator.free(it.guid);
-            testing.allocator.free(it.title);
-            testing.allocator.free(it.link);
-            testing.allocator.free(it.description);
-            testing.allocator.free(it.category);
+            it.deinit(testing.allocator);
         }
         testing.allocator.free(items);
     }
@@ -514,11 +418,7 @@ test "RssParser: multiple items" {
     const items = try p.parse(xml, "mf");
     defer {
         for (items) |it| {
-            testing.allocator.free(it.guid);
-            testing.allocator.free(it.title);
-            testing.allocator.free(it.link);
-            testing.allocator.free(it.description);
-            testing.allocator.free(it.category);
+            it.deinit(testing.allocator);
         }
         testing.allocator.free(items);
     }
@@ -546,11 +446,7 @@ test "RssParser: CDATA description" {
     const items = try p.parse(xml, "cf");
     defer {
         for (items) |it| {
-            testing.allocator.free(it.guid);
-            testing.allocator.free(it.title);
-            testing.allocator.free(it.link);
-            testing.allocator.free(it.description);
-            testing.allocator.free(it.category);
+            it.deinit(testing.allocator);
         }
         testing.allocator.free(items);
     }
@@ -572,11 +468,7 @@ test "RssParser: item with missing fields" {
     const items = try p.parse(xml, "mf");
     defer {
         for (items) |it| {
-            testing.allocator.free(it.guid);
-            testing.allocator.free(it.title);
-            testing.allocator.free(it.link);
-            testing.allocator.free(it.description);
-            testing.allocator.free(it.category);
+            it.deinit(testing.allocator);
         }
         testing.allocator.free(items);
     }
@@ -647,7 +539,91 @@ test "fuzz RssParser: random bytes never crash" {
 
             var p = RssParser.init(a);
             const items = p.parse(input, "fuzz") catch return;
+            for (items) |it| it.deinit(a);
             a.free(items);
+        }
+    }.run, .{});
+}
+
+test "RSS parsing tolerates truncated markup" {
+    const alloc = testing.allocator;
+    for ([_][]const u8{ "</", "<rss></", "<item><guid>x</guid></", "<rss><![CDATA[abc" }) |text| {
+        var parser = RssParser.init(alloc);
+        const items = try parser.parse(text, "test");
+        defer {
+            for (items) |item| item.deinit(alloc);
+            alloc.free(items);
+        }
+        try testing.expectEqual(@as(usize, 0), items.len);
+    }
+    var tokenizer = Tokenizer.init("<![CDATA[abc");
+    const token = tokenizer.next();
+    try testing.expectEqual(TokenType.text, token.type);
+    try testing.expectEqualStrings("abc", token.text);
+}
+
+test "fuzz RSS tokenization keeps truncated markup within the input" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [256]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const prefixes = [_][]const u8{ "</", "<![CDATA[", "<item>", "<?", "<" };
+            const prefix = prefixes[smith.valueRangeAtMostWithHash(u8, 0, prefixes.len - 1, 1)];
+            @memcpy(bytes[0..prefix.len], prefix);
+            const len = smith.valueRangeAtMostWithHash(u16, 0, bytes.len, 2);
+            var tokenizer = Tokenizer.init(bytes[0..len]);
+            while (true) {
+                const before = tokenizer.pos;
+                const token = tokenizer.next();
+                try testing.expect(tokenizer.pos <= len);
+                if (token.type == .eof) break;
+                try testing.expect(tokenizer.pos > before);
+            }
+        }
+    }.run, .{});
+}
+
+test "RSS dates retain timestamps beyond the 32-bit Unix range" {
+    try testing.expectEqual(@as(f64, 4323283200), parseRfc2822("01 Jan 2107 00:00:00 GMT"));
+}
+
+test "RSS dates reject invalid calendar fields and out-of-range years" {
+    for ([_][]const u8{
+        "00 Jan 2024 00:00:00 GMT",
+        "31 Feb 2024 00:00:00 GMT",
+        "29 Feb 2100 00:00:00 GMT",
+        "01 Jan 4294967295 00:00:00 GMT",
+        "01 Jan 2024 24:00:00 GMT",
+    }) |input| try testing.expectEqual(@as(f64, 0), parseRfc2822(input));
+}
+
+test "RSS parsing releases partial native string copies on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn parse(alloc: std.mem.Allocator) !void {
+            var parser = RssParser.init(alloc);
+            const items = try parser.parse(
+                "<rss><channel><item><guid>g</guid><title>title</title><link>url</link><description>body</description><category>high</category></item><item><guid>h</guid><title>next</title></item></channel></rss>",
+                "feed",
+            );
+            defer alloc.free(items);
+            defer for (items) |item| item.deinit(alloc);
+            try testing.expectEqual(@as(usize, 2), items.len);
+        }
+    }.parse, .{});
+}
+
+test "fuzz RSS calendar fields agree with the standard epoch calendar" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const year = smith.valueRangeAtMostWithHash(u16, 1970, 9999, 0);
+            const month: epoch.Month = @fromBackingInt(smith.valueRangeAtMostWithHash(u4, 1, 12, 1));
+            const seconds = unixFromFields(year, month, 1, 0, 0, 0);
+            const parsed: epoch.EpochSeconds = .{ .secs = @intFromFloat(seconds) };
+            const year_day = parsed.getEpochDay().calculateYearDay();
+            try testing.expectEqual(year, year_day.year);
+            const month_day = year_day.calculateMonthDay();
+            try testing.expectEqual(month, month_day.month);
+            try testing.expectEqual(@as(u5, 0), month_day.day_index);
         }
     }.run, .{});
 }

@@ -1906,7 +1906,7 @@ test "setConfig loads announcement subscriptions and gcode store size" {
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     try std.testing.expect(app.announcements_ctx.dev_mode);
-    try std.testing.expectEqual(@as(usize, 2), app.data_store_ctx.gcode_ring.capacity);
+    try std.testing.expectEqual(@as(usize, 2), app.data_store_ctx.gcode_ring.entries.buffer.len);
     try std.testing.expectEqual(@as(usize, 3), app.data_store_ctx.temp_capacity);
     try app.data_store_ctx.pushGcodeCommand("one", 1);
     try app.data_store_ctx.pushGcodeCommand("two", 2);
@@ -2103,7 +2103,7 @@ test "setConfig loads auto-refresh, excludes, observer none, and hidden objects"
     try std.testing.expectEqual(@as(i64, 5), app.update_ctx.refresh_window_end);
     try std.testing.expect(app.update_ctx.refresh_thread == null);
     try std.testing.expect(app.file_ctx.observer == .none);
-    try std.testing.expect(app.file_ctx.observer_thread == null);
+    try std.testing.expect(app.file_ctx.observer_task == null);
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", ".mod"));
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", "logFiles/a.log"));
     try std.testing.expect(!app.update_ctx.tickAutoRefresh(alloc, 2));

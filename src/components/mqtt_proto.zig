@@ -45,18 +45,9 @@ pub const max_remaining_length: u32 = 268_435_455; // 0xFF,0xFF,0xFF,0x7F
 /// Encode a remaining-length value into `buf` (max 4 bytes). Returns the slice.
 pub fn encodeVarInt(value: u32, buf: []u8) ![]const u8 {
     if (value > max_remaining_length) return error.ValueTooLarge;
-    var v = value;
-    var i: usize = 0;
-    while (true) {
-        if (i >= buf.len) return error.NoSpaceLeft;
-        var byte: u8 = @intCast(v & 0x7F);
-        v >>= 7;
-        if (v != 0) byte |= 0x80;
-        buf[i] = byte;
-        i += 1;
-        if (v == 0) break;
-    }
-    return buf[0..i];
+    var writer: std.Io.Writer = .fixed(buf);
+    writer.writeLeb128(@as(u28, @intCast(value))) catch return error.NoSpaceLeft;
+    return writer.buffered();
 }
 
 pub const VarIntResult = struct { value: u32, len: usize };
@@ -65,18 +56,24 @@ pub const VarIntResult = struct { value: u32, len: usize };
 /// `data` does not yet hold a complete varint (needs more bytes), errors when
 /// the varint is malformed (more than 4 bytes).
 pub fn decodeVarInt(data: []const u8) !?VarIntResult {
-    var value: u32 = 0;
-    var multiplier: u32 = 1;
-    var i: usize = 0;
-    while (i < data.len) {
-        const byte = data[i];
-        value += @as(u32, byte & 0x7F) * multiplier;
-        i += 1;
-        if (byte & 0x80 == 0) return VarIntResult{ .value = value, .len = i };
-        multiplier *= 128;
-        if (i >= 4) return error.MalformedVarInt;
-    }
-    return null; // incomplete
+    var reader: std.Io.Reader = .fixed(data);
+    const value = readVarInt(&reader) catch |err| switch (err) {
+        error.EndOfStream => return null,
+        else => return err,
+    };
+    return .{ .value = value, .len = reader.seek };
+}
+
+/// Read MQTT's four-byte unsigned LEB128 length without consuming packet data.
+pub fn readVarInt(reader: *std.Io.Reader) !u32 {
+    // One byte of lookahead keeps the following packet bytes in the source reader.
+    var buffer: [1]u8 = undefined;
+    var limited = reader.limited(.limited(4), &buffer);
+    return limited.interface.takeLeb128(u28) catch |err| switch (err) {
+        error.EndOfStream => if (limited.remaining == .nothing) error.MalformedVarInt else error.EndOfStream,
+        error.Overflow => error.MalformedVarInt,
+        error.ReadFailed => error.ReadFailed,
+    };
 }
 
 // ===========================================================================
@@ -471,6 +468,35 @@ test "fuzz encodeConnect: arbitrary ids/creds never crash" {
             }) catch return;
             defer testing.allocator.free(pkt);
             _ = decode(pkt) catch {};
+        }
+    }.run, .{});
+}
+
+test "readVarInt stops before packet data and enforces MQTT's four-byte bound" {
+    var source: std.Io.Reader = .fixed(&.{ 0x80, 0x01, 'n', 'e', 'x', 't' });
+    try testing.expectEqual(@as(u32, 128), try readVarInt(&source));
+    try testing.expectEqualStrings("next", source.buffered());
+    var padded: std.Io.Reader = .fixed(&.{ 0x80, 0x80, 0x80, 0x80, 0, 'x' });
+    try testing.expectError(error.MalformedVarInt, readVarInt(&padded));
+    try testing.expectEqual(@as(usize, 4), padded.seek);
+    var short: std.Io.Reader = .fixed(&.{ 0x80, 0x80 });
+    try testing.expectError(error.EndOfStream, readVarInt(&short));
+    var empty: [0]u8 = .{};
+    try testing.expectError(error.NoSpaceLeft, encodeVarInt(0, &empty));
+}
+
+test "fuzz readVarInt consumes at most four bytes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [8]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var reader: std.Io.Reader = .fixed(&bytes);
+            const result = readVarInt(&reader) catch {
+                try testing.expect(reader.seek <= 4);
+                return;
+            };
+            try testing.expect(result <= max_remaining_length);
+            try testing.expect(reader.seek <= 4);
         }
     }.run, .{});
 }

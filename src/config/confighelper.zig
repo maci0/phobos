@@ -374,9 +374,7 @@ pub const ConfigParser = struct {
 
     /// Caller owns the returned slice but NOT the strings (parser-owned).
     pub fn sectionNames(self: *const ConfigParser, alloc: std.mem.Allocator) ConfigError![][]const u8 {
-        const out = alloc.alloc([]const u8, self.section_order.items.len) catch return ConfigError.OutOfMemory;
-        for (self.section_order.items, 0..) |s, i| out[i] = s;
-        return out;
+        return alloc.dupe([]const u8, self.section_order.items) catch ConfigError.OutOfMemory;
     }
 
     /// Caller owns the returned slice but NOT the strings.
@@ -494,9 +492,7 @@ fn stripInlineComment(src: []const u8, buf: []u8) []const u8 {
 }
 
 fn countLeadingSpaces(s: []const u8) usize {
-    var n: usize = 0;
-    while (n < s.len and s[n] == ' ') : (n += 1) {}
-    return n;
+    return std.mem.findNone(u8, s, " ") orelse s.len;
 }
 
 fn findSeparator(s: []const u8) ?usize {

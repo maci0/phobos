@@ -544,13 +544,10 @@ test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const pid = std.os.linux.getpid();
-    const path = try std.fmt.allocPrintSentinel(a, "/tmp/phobos-sqlite-test-{d}.db", .{pid}, 0);
-    const wal = try std.fmt.allocPrint(a, "{s}-wal", .{path});
-    const shm = try std.fmt.allocPrint(a, "{s}-shm", .{path});
-    const cwd = std.Io.Dir.cwd();
-    for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
-    defer for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/moonraker-sql.db", .{root}, 0);
     {
         var s = try SqliteStore.open(testing.allocator, testing.io, path);
         defer s.deinit();
@@ -578,14 +575,10 @@ test "SqliteStore: reads Moonraker job_history/job_totals tables (drop-in compat
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const pid = std.os.linux.getpid();
-    const path = try std.fmt.allocPrintSentinel(a, "/tmp/phobos-hist-test-{d}.db", .{pid}, 0);
-    const wal = try std.fmt.allocPrint(a, "{s}-wal", .{path});
-    const shm = try std.fmt.allocPrint(a, "{s}-shm", .{path});
-    const cwd = std.Io.Dir.cwd();
-    for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
-    defer for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
-
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const path = try std.fmt.allocPrintSentinel(a, "{s}/moonraker-sql.db", .{root}, 0);
     var s = try SqliteStore.open(testing.allocator, testing.io, path);
     defer s.deinit();
     // Recreate Moonraker's dedicated history tables + a couple of rows.

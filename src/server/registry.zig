@@ -141,7 +141,7 @@ pub fn deriveMethodName(
 
 fn dotJoin(buf: []u8, s: []const u8) error{NameTooLong}![]const u8 {
     if (s.len > buf.len) return error.NameTooLong;
-    for (s, 0..) |c, i| buf[i] = if (c == '/') '.' else c;
+    _ = std.mem.replace(u8, s, "/", ".", buf);
     return buf[0..s.len];
 }
 

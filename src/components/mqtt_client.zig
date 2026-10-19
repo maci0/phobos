@@ -233,18 +233,7 @@ pub const MqttClient = struct {
     fn readRawPacket(self: *MqttClient) !RawPacket {
         const r = self.inIface();
         const b0 = try r.takeByte();
-        // Remaining-length varint.
-        var mult: u32 = 1;
-        var rl: u32 = 0;
-        var count: u8 = 0;
-        while (true) {
-            const c = try r.takeByte();
-            rl += @as(u32, c & 0x7F) * mult;
-            count += 1;
-            if (c & 0x80 == 0) break;
-            mult *= 128;
-            if (count >= 4) return error.MalformedVarInt;
-        }
+        const rl = try proto.readVarInt(r);
         // Bound the allocation: a malformed/hostile broker frame can encode up to
         // ~256 MB in the remaining-length field. Reject oversized packets rather
         // than allocate attacker-controlled memory.
@@ -322,15 +311,10 @@ pub const TestBroker = struct {
 
     pub fn readRaw(alloc: std.mem.Allocator, r: *std.Io.Reader) !struct { b0: u8, body: []u8 } {
         const b0 = try r.takeByte();
-        var mult: u32 = 1;
-        var rl: u32 = 0;
-        while (true) {
-            const c = try r.takeByte();
-            rl += @as(u32, c & 0x7F) * mult;
-            if (c & 0x80 == 0) break;
-            mult *= 128;
-        }
+        const rl = try proto.readVarInt(r);
+        if (rl > max_packet_len) return error.PacketTooLarge;
         const body = try alloc.alloc(u8, rl);
+        errdefer alloc.free(body);
         if (rl > 0) try r.readSliceAll(body);
         return .{ .b0 = b0, .body = body };
     }
@@ -603,4 +587,11 @@ test "connect preserves PUBLISH buffered with CONNACK when the client moves" {
     try testing.expectEqualStrings("t", captured.topic[0..captured.topic_len]);
     try testing.expectEqualStrings("v", captured.payload[0..captured.payload_len]);
     try future.await(io);
+}
+
+test "test broker bounds remaining lengths and frees truncated bodies" {
+    var short: std.Io.Reader = .fixed(&.{ 0x30, 4, 0, 1, 't' });
+    try testing.expectError(error.EndOfStream, TestBroker.readRaw(testing.allocator, &short));
+    var malformed: std.Io.Reader = .fixed(&.{ 0x30, 0x80, 0x80, 0x80, 0x80, 0 });
+    try testing.expectError(error.MalformedVarInt, TestBroker.readRaw(testing.allocator, &malformed));
 }

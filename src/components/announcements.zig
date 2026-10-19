@@ -272,9 +272,8 @@ pub const AnnouncementsCtx = struct {
     /// Does not fetch the feed.
     pub fn addSubscription(self: *AnnouncementsCtx, name: []const u8) !void {
         if (name.len == 0) return;
-        const owned = try self.gpa.alloc(u8, name.len);
+        const owned = try std.ascii.allocLowerString(self.gpa, name);
         errdefer self.gpa.free(owned);
-        for (name, 0..) |ch, i| owned[i] = std.ascii.toLower(ch);
         if (self.hasFeed(owned)) {
             self.gpa.free(owned);
             return;
@@ -310,11 +309,7 @@ pub const AnnouncementsCtx = struct {
         const items = parser.parse(body, feed_name) catch return false;
         defer {
             for (items) |it| {
-                alloc.free(it.guid);
-                alloc.free(it.title);
-                alloc.free(it.link);
-                alloc.free(it.description);
-                alloc.free(it.category);
+                it.deinit(alloc);
             }
             alloc.free(items);
         }
@@ -788,8 +783,7 @@ pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
     const name_raw = try getStr(params, "name");
     // Normalize to lowercase (matches announcements.py `name.lower()`)
-    const name_lower = try alloc.alloc(u8, name_raw.len);
-    for (name_raw, 0..) |ch, i| name_lower[i] = std.ascii.toLower(ch);
+    const name_lower = try std.ascii.allocLowerString(alloc, name_raw);
 
     const action: []const u8 = if (c.hasFeed(name_lower)) "skipped" else blk: {
         const owned = try c.gpa.dupe(u8, name_lower);
@@ -815,8 +809,7 @@ pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 pub fn handleDeleteFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
     const name_raw = try getStr(params, "name");
-    const name_lower = try alloc.alloc(u8, name_raw.len);
-    for (name_raw, 0..) |ch, i| name_lower[i] = std.ascii.toLower(ch);
+    const name_lower = try std.ascii.allocLowerString(alloc, name_raw);
 
     // Built-in feeds cannot be deleted
     if (AnnouncementsCtx.isBuiltin(name_lower)) return error.Forbidden;

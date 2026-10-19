@@ -551,32 +551,16 @@ fn getStrDefault(params: std.json.Value, field: []const u8, default_val: []const
 // File reading helper
 // ---------------------------------------------------------------------------
 
-/// Read a whole file into an arena-allocated slice. Returns null on any error
-/// (missing file, permission denied) so callers fall back to the empty shape.
-///
-/// Streams chunk-by-chunk until EOF rather than trusting the stat size: /proc
-/// and /sys virtual files report a size of 0 even though they yield content, so
-/// the size-based `allocRemaining` would return an empty slice for them.
+const max_file_bytes = 4 * 1024 * 1024;
+
+/// Read bounded file contents into an owned slice, including size-zero proc/sys files.
+/// Returns null on I/O or allocation failure.
 fn readFile(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?[]u8 {
     const f = Dir.cwd().openFile(io, path, .{}) catch return null;
     defer f.close(io);
     var rbuf: [4096]u8 = undefined;
-    var fr = f.reader(io, &rbuf);
-    var out: std.ArrayList(u8) = .empty;
-    // One up-front reservation avoids the realloc chain as chunks append; /proc
-    // files read here (stat, meminfo, net/dev, temp) fit comfortably in 4 KiB.
-    out.ensureTotalCapacity(alloc, 4096) catch {};
-    // Cap total read to guard against unbounded /proc files.
-    const max_total: usize = 4 * 1024 * 1024;
-    while (out.items.len < max_total) {
-        const chunk = fr.interface.peekGreedy(1) catch |e| {
-            if (e == error.EndOfStream) break;
-            return null;
-        };
-        out.appendSlice(alloc, chunk) catch return null;
-        fr.interface.toss(chunk.len);
-    }
-    return out.items;
+    var fr = f.readerStreaming(io, &rbuf);
+    return fr.interface.allocRemaining(alloc, .limited(max_file_bytes)) catch null;
 }
 
 // ===========================================================================
@@ -2145,10 +2129,38 @@ pub fn handleVideo(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloca
     return .{ .object = obj };
 }
 
-// v4l2 VIDIOC_QUERYCAP = _IOR('V', 0, struct v4l2_capability) (sizeof 104).
-const VIDIOC_QUERYCAP: u32 = 0x80685600;
+// linux/videodev2.h; the standard library provides the ioctl encoder, not this ABI.
+const V4l2Capability = extern struct {
+    driver: [16]u8,
+    card: [32]u8,
+    bus_info: [32]u8,
+    version: u32,
+    capabilities: u32,
+    device_caps: u32,
+    reserved: [3]u32,
+};
+const VIDIOC_QUERYCAP = std.os.linux.IOCTL.IOR('V', 0, V4l2Capability);
 
-const V4l2Cap = struct { driver: []const u8, bus_info: []const u8, version: u32, caps: u32 };
+const V4l2Cap = struct {
+    driver: []const u8,
+    bus_info: []const u8,
+    version: u32,
+    caps: u32,
+
+    fn read(io: std.Io, file: std.Io.File, alloc: std.mem.Allocator) !?V4l2Cap {
+        var raw: V4l2Capability = std.mem.zeroes(V4l2Capability);
+        const result = try io.operate(.{ .device_io_control = .{ .file = file, .code = VIDIOC_QUERYCAP, .arg = &raw } });
+        if (result.device_io_control < 0) return null;
+        const driver = try alloc.dupe(u8, cField(&raw.driver));
+        errdefer alloc.free(driver);
+        return .{
+            .driver = driver,
+            .bus_info = try alloc.dupe(u8, cField(&raw.bus_info)),
+            .version = raw.version,
+            .caps = raw.capabilities,
+        };
+    }
+};
 
 /// Trim a fixed-size C string field at its first NUL.
 fn cField(buf: []const u8) []const u8 {
@@ -2189,17 +2201,7 @@ fn formatV4l2Version(alloc: std.mem.Allocator, v: u32) []const u8 {
 fn queryV4l2Cap(io: std.Io, alloc: std.mem.Allocator, dev_path: []const u8) ?V4l2Cap {
     const f = Dir.cwd().openFile(io, dev_path, .{}) catch return null;
     defer f.close(io);
-    var buf: [104]u8 align(8) = @splat(0);
-    const rc = std.os.linux.ioctl(f.handle, VIDIOC_QUERYCAP, @intFromPtr(&buf));
-    // Raw linux syscalls return -errno (a large usize) on failure.
-    const signed: isize = @bitCast(rc);
-    if (signed < 0) return null;
-    return .{
-        .driver = alloc.dupe(u8, cField(buf[0..16])) catch return null,
-        .bus_info = alloc.dupe(u8, cField(buf[48..80])) catch return null,
-        .version = std.mem.readInt(u32, buf[80..84], .little),
-        .caps = std.mem.readInt(u32, buf[84..88], .little),
-    };
+    return V4l2Cap.read(io, f, alloc) catch null;
 }
 
 fn enumVideo(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
@@ -3632,6 +3634,136 @@ test "fuzz process CPU sample starts independently of other contexts" {
             var second = MachineCtx.init(std.testing.allocator, std.testing.io, null, null);
             defer second.deinit();
             try std.testing.expectEqual(@as(f64, 0), procCpuUsage(&second, std.testing.io));
+        }
+    }.run, .{});
+}
+
+const V4l2IoStub = struct {
+    raw: V4l2Capability = std.mem.zeroes(V4l2Capability),
+    result: i32 = 0,
+    canceled: bool = false,
+
+    const vtable: std.Io.VTable = blk: {
+        var table = std.Io.failing.vtable.*;
+        table.operate = operate;
+        break :blk table;
+    };
+
+    fn io(self: *@This()) std.Io {
+        return .{ .userdata = self, .vtable = &vtable };
+    }
+
+    fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *@This() = @ptrCast(@alignCast(userdata.?));
+        std.debug.assert(operation == .device_io_control);
+        const request = operation.device_io_control;
+        std.debug.assert(request.code == std.os.linux.IOCTL.IOR('V', 0, V4l2Capability));
+        if (self.canceled) return error.Canceled;
+        const out: *V4l2Capability = @ptrCast(@alignCast(request.arg.?));
+        out.* = self.raw;
+        return .{ .device_io_control = self.result };
+    }
+};
+
+test "video query uses native device control and owns typed capability fields" {
+    try std.testing.expectEqual(@as(usize, 104), @sizeOf(V4l2Capability));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(V4l2Capability, "bus_info"));
+    try std.testing.expectEqual(@as(usize, 80), @offsetOf(V4l2Capability, "version"));
+    var stub: V4l2IoStub = .{};
+    @memcpy(stub.raw.driver[0..6], "uvcvid");
+    @memcpy(stub.raw.bus_info[0..5], "usb-1");
+    stub.raw.version = 0x060c05;
+    stub.raw.capabilities = 0x04000001;
+    const file: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
+    const cap = (try V4l2Cap.read(stub.io(), file, std.testing.allocator)).?;
+    defer std.testing.allocator.free(cap.driver);
+    defer std.testing.allocator.free(cap.bus_info);
+    @memset(std.mem.asBytes(&stub.raw), 0);
+    try std.testing.expectEqualStrings("uvcvid", cap.driver);
+    try std.testing.expectEqualStrings("usb-1", cap.bus_info);
+    try std.testing.expectEqual(@as(u32, 0x060c05), cap.version);
+    try std.testing.expectEqual(@as(u32, 0x04000001), cap.caps);
+    stub.result = -1;
+    try std.testing.expectEqual(null, try V4l2Cap.read(stub.io(), file, std.testing.allocator));
+    stub.canceled = true;
+    try std.testing.expectError(error.Canceled, V4l2Cap.read(stub.io(), file, std.testing.allocator));
+    stub.canceled = false;
+    stub.result = 0;
+    @memcpy(stub.raw.driver[0..6], "uvcvid");
+    @memcpy(stub.raw.bus_info[0..5], "usb-1");
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn read(alloc: std.mem.Allocator, peer: *V4l2IoStub, f: std.Io.File) !void {
+            const result = (try V4l2Cap.read(peer.io(), f, alloc)).?;
+            defer alloc.free(result.driver);
+            defer alloc.free(result.bus_info);
+        }
+    }.read, .{ &stub, file });
+}
+
+test "fuzz video capability fields stay bounded with native device control" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var stub: V4l2IoStub = .{};
+            smith.bytesWithHash(std.mem.asBytes(&stub.raw), 0);
+            const file: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
+            const cap = (try V4l2Cap.read(stub.io(), file, std.testing.allocator)).?;
+            defer std.testing.allocator.free(cap.driver);
+            defer std.testing.allocator.free(cap.bus_info);
+            try std.testing.expect(cap.driver.len <= stub.raw.driver.len);
+            try std.testing.expect(cap.bus_info.len <= stub.raw.bus_info.len);
+            try std.testing.expectEqual(stub.raw.version, cap.version);
+        }
+    }.run, .{});
+}
+
+test "machine file reads own exact storage and stream virtual files" {
+    const alloc = std.testing.allocator;
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(aio, .{ .sub_path = "sample", .data = "abc" });
+    const path = try tmp.dir.realPathFileAlloc(aio, "sample", alloc);
+    defer alloc.free(path);
+    const contents = readFile(aio, alloc, path) orelse return error.MissingFile;
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("abc", contents);
+    const virtual = readFile(aio, alloc, "/proc/version") orelse return error.MissingFile;
+    defer alloc.free(virtual);
+    try std.testing.expect(std.mem.startsWith(u8, virtual, "Linux version "));
+}
+
+test "machine file reads reject oversized inputs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const bytes = try alloc.alloc(u8, max_file_bytes + 1);
+    @memset(bytes, 'x');
+    try tmp.dir.writeFile(aio, .{ .sub_path = "large", .data = bytes });
+    const path = try tmp.dir.realPathFileAlloc(aio, "large", alloc);
+    try std.testing.expect(readFile(aio, alloc, path) == null);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "large", .data = bytes[0..max_file_bytes] });
+    try std.testing.expectEqual(max_file_bytes, (readFile(aio, alloc, path) orelse return error.MissingFile).len);
+}
+
+test "fuzz machine file reads preserve bytes with exact owned storage" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const alloc = std.testing.allocator;
+            const aio = std.testing.io;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var bytes: [128]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const len = smith.valueRangeAtMostWithHash(u8, 0, bytes.len, 1);
+            try tmp.dir.writeFile(aio, .{ .sub_path = "sample", .data = bytes[0..len] });
+            const path = try tmp.dir.realPathFileAlloc(aio, "sample", alloc);
+            defer alloc.free(path);
+            const contents = readFile(aio, alloc, path) orelse return error.MissingFile;
+            defer alloc.free(contents);
+            try std.testing.expectEqualSlices(u8, bytes[0..len], contents);
         }
     }.run, .{});
 }

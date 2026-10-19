@@ -189,14 +189,6 @@ pub const FileStore = struct {
 
 const testing = std.testing;
 
-fn tmpDirPath(arena: std.mem.Allocator, io: std.Io) ![]const u8 {
-    // Unique-ish temp dir under /tmp (no Date/random in this std build → pid).
-    const pid = std.os.linux.getpid();
-    const p = try std.fmt.allocPrint(arena, "/tmp/phobos-filestore-test-{d}", .{pid});
-    std.Io.Dir.cwd().deleteTree(io, p) catch {};
-    return p;
-}
-
 test "FileStore: insert / get / update / delete round-trip + persistence" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -204,8 +196,9 @@ test "FileStore: insert / get / update / delete round-trip + persistence" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const dir = try tmpDirPath(a, io);
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
 
     {
         var fs = try FileStore.open(testing.allocator, io, dir);
@@ -246,8 +239,9 @@ test "FileStore: missing key/namespace error/empty as expected" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const dir = try tmpDirPath(a, io);
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
     var fs = try FileStore.open(testing.allocator, io, dir);
     defer fs.deinit();
 
@@ -267,10 +261,9 @@ test "fuzz FileStore: arbitrary namespace/key/value never crashes" {
             var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
             defer threaded.deinit();
             const io = threaded.io();
-            const pid = std.os.linux.getpid();
-            const dir = try std.fmt.allocPrint(a, "/tmp/phobos-fs-fuzz-{d}", .{pid});
-            std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-            defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
             var fs = FileStore.open(testing.allocator, io, dir) catch return;
             defer fs.deinit();
             var kbuf: [48]u8 = undefined;

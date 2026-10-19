@@ -30,7 +30,7 @@ pub const GcodeMetadata = struct {
 };
 
 /// A single embedded thumbnail parsed from a `; thumbnail begin … end` block.
-/// `data` borrows the source text (base64-encoded).
+/// Caller owns `data` and frees it with the parser allocator.
 pub const Thumbnail = struct {
     width: i64,
     height: i64,
@@ -39,8 +39,8 @@ pub const Thumbnail = struct {
 };
 
 /// Parse gcode header text and return extracted metadata. The caller owns the
-/// returned `GcodeMetadata`; note that string fields borrow `text` and
-/// `thumbnails` is allocated in `alloc`.
+/// returned `GcodeMetadata`. String fields borrow `text`; free each thumbnail's
+/// `data`, then the thumbnail slice, with `alloc`.
 pub fn parse(alloc: std.mem.Allocator, text: []const u8) GcodeMetadata {
     var m: GcodeMetadata = .{};
 
@@ -555,11 +555,7 @@ fn findMaxG1Z(text: []const u8) ?f64 {
 // ---------------------------------------------------------------------------
 
 fn scanLineEnd(text: []const u8, start: usize) usize {
-    var end = start;
-    while (end < text.len) : (end += 1) {
-        if (text[end] == '\n' or text[end] == '\r') break;
-    }
-    return end;
+    return std.mem.findAnyPos(u8, text, start, "\r\n") orelse text.len;
 }
 
 fn findIntAfterPrefix(text: []const u8, prefix: []const u8) ?i64 {
@@ -594,11 +590,13 @@ fn findFloatAfterPrefix(text: []const u8, prefix: []const u8) ?f64 {
 ///   ; <base64 lines...>
 ///   ; thumbnail end
 ///
-/// Returns alloc-allocated slice of Thumbnail structs. `data` fields borrow
-/// `text` (base64 lines with semicolons and newlines stripped).
+/// Caller owns the returned slice and each thumbnail's `data` allocation.
 fn parseThumbnails(alloc: std.mem.Allocator, text: []const u8) ![]Thumbnail {
     var list: std.ArrayList(Thumbnail) = .empty;
-    errdefer list.deinit(alloc);
+    errdefer {
+        for (list.items) |thumb| alloc.free(thumb.data);
+        list.deinit(alloc);
+    }
 
     const begin_tag = "; thumbnail begin ";
     var search_start: usize = 0;
@@ -654,8 +652,8 @@ fn parseThumbnails(alloc: std.mem.Allocator, text: []const u8) ![]Thumbnail {
         const cap: usize = @min(@as(usize, @intCast(size)), max_data);
 
         // Extract base64 data between begin and end (strip "; " prefix and newlines).
-        var data_buf = try alloc.alloc(u8, cap);
-        var data_pos: usize = 0;
+        var data = try std.Io.Writer.Allocating.initCapacity(alloc, cap);
+        defer data.deinit();
         var line_start = header_end + 1; // skip the \n after header
         while (line_start < end_idx) {
             const line_end2 = scanLineEnd(text, line_start);
@@ -667,19 +665,20 @@ fn parseThumbnails(alloc: std.mem.Allocator, text: []const u8) ![]Thumbnail {
             } else if (content.len >= 1 and content[0] == ';') {
                 content = content[1..];
             }
-            if (data_pos + content.len <= data_buf.len) {
-                @memcpy(data_buf[data_pos .. data_pos + content.len], content);
-                data_pos += content.len;
+            if (data.written().len + content.len <= cap) {
+                data.writer.writeAll(content) catch return error.OutOfMemory;
             }
             line_start = line_end2 + 1;
             if (line_start >= text.len) break;
         }
 
+        const owned = try data.toOwnedSlice();
+        errdefer alloc.free(owned);
         try list.append(alloc, Thumbnail{
             .width = w,
             .height = h,
             .size = size,
-            .data = data_buf[0..data_pos],
+            .data = owned,
         });
 
         search_start = end_idx + end_tag.len;
@@ -864,6 +863,43 @@ test "parseThumbnails: single thumbnail" {
     try testing.expectEqual(@as(i64, 32), thumbs[0].height);
     try testing.expectEqual(@as(i64, 8), thumbs[0].size);
     try testing.expectEqualStrings("YQAB", thumbs[0].data);
+}
+
+test "thumbnail data owns exact storage and cleans up on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const block = "; thumbnail begin 32x32 8\n; YQAB\n; thumbnail end\n";
+            const text = block ++ block;
+            const thumbs = try parseThumbnails(alloc, text);
+            defer {
+                for (thumbs) |thumb| alloc.free(thumb.data);
+                alloc.free(thumbs);
+            }
+            try testing.expectEqual(@as(usize, 2), thumbs.len);
+            for (thumbs) |thumb| try testing.expectEqualStrings("YQAB", thumb.data);
+        }
+    }.run, .{});
+}
+
+test "fuzz thumbnail data remains owned after source storage changes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const alloc = testing.allocator;
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const expected = std.fmt.bytesToHex(bytes, .lower);
+            const text = try std.fmt.allocPrint(alloc, "; thumbnail begin 32x32 80\n; {s}\n; thumbnail end\n", .{expected});
+            defer alloc.free(text);
+            const thumbs = try parseThumbnails(alloc, text);
+            defer {
+                for (thumbs) |thumb| alloc.free(thumb.data);
+                alloc.free(thumbs);
+            }
+            @memset(text, 0);
+            try testing.expectEqual(@as(usize, 1), thumbs.len);
+            try testing.expectEqualStrings(&expected, thumbs[0].data);
+        }
+    }.run, .{});
 }
 
 test "parse: full header extracts slicer and values" {

@@ -49,68 +49,38 @@ pub const GcodeEntry = struct {
 /// strings duplicated). Evicts oldest when full, matching Python's deque(maxlen=N).
 pub const GcodeRingBuffer = struct {
     alloc: std.mem.Allocator,
-    buf: []GcodeEntry,
-    head: usize, // next write position
-    count: usize, // number of valid entries (0..capacity)
-    capacity: usize,
+    entries: std.Deque(GcodeEntry),
 
     pub fn init(alloc: std.mem.Allocator, capacity: usize) !GcodeRingBuffer {
-        const buf = try alloc.alloc(GcodeEntry, capacity);
-        return .{
-            .alloc = alloc,
-            .buf = buf,
-            .head = 0,
-            .count = 0,
-            .capacity = capacity,
-        };
+        if (capacity == 0) return error.InvalidCapacity;
+        return .{ .alloc = alloc, .entries = try .initCapacity(alloc, capacity) };
     }
 
     pub fn deinit(self: *GcodeRingBuffer) void {
-        const n = self.count;
-        const start = if (self.count < self.capacity) 0 else self.head;
-        var i: usize = 0;
-        while (i < n) : (i += 1) {
-            self.alloc.free(self.buf[(start + i) % self.capacity].message);
-        }
-        self.alloc.free(self.buf);
+        while (self.entries.popFront()) |entry| self.alloc.free(entry.message);
+        self.entries.deinit(self.alloc);
     }
 
-    /// Push a new entry. Evicts oldest if at capacity. Duplicates message string.
+    /// Duplicates the message before evicting, so allocation failure preserves the store.
     pub fn push(self: *GcodeRingBuffer, message: []const u8, time: f64, entry_type: GcodeEntryType) !void {
-        const msg_dup = try self.alloc.dupe(u8, message);
-        if (self.count == self.capacity) {
-            // Evict oldest: free its message and overwrite slot
-            self.alloc.free(self.buf[self.head].message);
-            self.buf[self.head] = .{ .message = msg_dup, .time = time, .type = entry_type };
-            self.head = (self.head + 1) % self.capacity;
-            // count stays at capacity
-        } else {
-            const slot = (self.head + self.count) % self.capacity;
-            self.buf[slot] = .{ .message = msg_dup, .time = time, .type = entry_type };
-            self.count += 1;
-        }
+        const owned = try self.alloc.dupe(u8, message);
+        if (self.entries.len == self.entries.buffer.len) self.alloc.free(self.entries.popFront().?.message);
+        self.entries.pushBackAssumeCapacity(.{ .message = owned, .time = time, .type = entry_type });
     }
 
-    /// Copy all entries in FIFO order into `out_slice` (caller provides it).
-    /// Returns the number of entries written.
+    /// Copy borrowed entries in FIFO order, bounded by the caller's output slice.
     pub fn copyAll(self: *const GcodeRingBuffer, out_slice: []GcodeEntry) usize {
-        const n = @min(self.count, out_slice.len);
-        const start = if (self.count < self.capacity) 0 else self.head;
-        for (0..n) |i| {
-            out_slice[i] = self.buf[(start + i) % self.capacity];
-        }
+        const n = @min(self.entries.len, out_slice.len);
+        for (out_slice[0..n], 0..) |*entry, i| entry.* = self.entries.at(i);
         return n;
     }
 
-    /// Return the last `count` entries (or all if count >= self.count).
+    /// Copy the newest entries that fit, preserving their chronological order.
     pub fn copyLast(self: *const GcodeRingBuffer, count: usize, out_slice: []GcodeEntry) usize {
-        const actual = @min(count, self.count);
-        const skip = self.count - actual;
-        const start = if (self.count < self.capacity) 0 else self.head;
-        for (0..actual) |i| {
-            out_slice[i] = self.buf[(start + skip + i) % self.capacity];
-        }
-        return actual;
+        const n = @min(count, self.entries.len, out_slice.len);
+        const skip = self.entries.len - n;
+        for (out_slice[0..n], 0..) |*entry, i| entry.* = self.entries.at(skip + i);
+        return n;
     }
 };
 
@@ -118,50 +88,37 @@ pub const GcodeRingBuffer = struct {
 // Context
 // ---------------------------------------------------------------------------
 
-/// Capacity of each per-field temperature ring (Moonraker default 1200 ≈ 20 min
-/// at 1 Hz).
+/// Capacity of each per-field temperature store (about 20 minutes at 1 Hz).
 pub const temp_store_size = 1200;
 
-/// Ring buffer of f64 samples. Empty until `ensure` allocates `capacity`.
+/// A bounded deque of samples, allocated lazily at its exact configured capacity.
 pub const FieldRing = struct {
-    buf: []f64 = &.{},
-    head: usize = 0,
-    count: usize = 0,
+    values: std.Deque(f64) = .empty,
 
     pub fn ensure(self: *FieldRing, alloc: std.mem.Allocator, capacity: usize) !void {
         if (capacity == 0) return error.InvalidCapacity;
-        if (self.buf.len == capacity) return;
-        const buf = try alloc.alloc(f64, capacity);
-        if (self.buf.len > 0) alloc.free(self.buf);
-        self.buf = buf;
-        self.head = 0;
-        self.count = 0;
+        if (self.values.buffer.len == capacity) return;
+        const next = try std.Deque(f64).initCapacity(alloc, capacity);
+        self.values.deinit(alloc);
+        self.values = next;
     }
 
     pub fn deinit(self: *FieldRing, alloc: std.mem.Allocator) void {
-        if (self.buf.len > 0) alloc.free(self.buf);
+        self.values.deinit(alloc);
         self.* = .{};
     }
 
-    pub fn push(self: *FieldRing, v: f64) void {
-        const capacity = self.buf.len;
-        if (capacity == 0) return;
-        const slot = (self.head + self.count) % capacity;
-        self.buf[slot] = v;
-        if (self.count == capacity) {
-            self.head = (self.head + 1) % capacity;
-        } else {
-            self.count += 1;
-        }
+    pub fn push(self: *FieldRing, value: f64) void {
+        if (self.values.buffer.len == 0) return;
+        if (self.values.len == self.values.buffer.len) _ = self.values.popFront();
+        self.values.pushBackAssumeCapacity(value);
     }
 
-    /// Append samples in chronological order into `out` (len ≥ count). Returns count.
+    /// Copy samples chronologically, bounded by the caller's output slice.
     pub fn snapshot(self: *const FieldRing, out: []f64) usize {
-        const capacity = self.buf.len;
-        if (capacity == 0) return 0;
-        var i: usize = 0;
-        while (i < self.count) : (i += 1) out[i] = self.buf[(self.head + i) % capacity];
-        return self.count;
+        const n = @min(out.len, self.values.len);
+        for (out[0..n], 0..) |*value, i| value.* = self.values.at(i);
+        return n;
     }
 };
 
@@ -212,10 +169,10 @@ pub const DataStoreCtx = struct {
 
     /// `[data_store] gcode_store_size`. Keeps the newest entries that fit.
     pub fn setGcodeStoreSize(self: *DataStoreCtx, capacity: usize) !void {
-        if (capacity == 0 or capacity == self.gcode_ring.capacity) return;
+        if (capacity == 0 or capacity == self.gcode_ring.entries.buffer.len) return;
         var next = try GcodeRingBuffer.init(self.gpa, capacity);
         errdefer next.deinit();
-        const tmp = try self.gpa.alloc(GcodeEntry, self.gcode_ring.count);
+        const tmp = try self.gpa.alloc(GcodeEntry, self.gcode_ring.entries.len);
         defer self.gpa.free(tmp);
         const n = self.gcode_ring.copyLast(capacity, tmp);
         for (tmp[0..n]) |entry| try next.push(entry.message, entry.time, entry.type);
@@ -290,7 +247,7 @@ pub const DataStoreCtx = struct {
         const s = gop.value_ptr;
         self.ensureSensor(s) catch return;
         if (temperature) |t| s.temperature = @round(t * 100) / 100;
-        if (s.temperatures.count == 0) s.temperatures.push(s.temperature);
+        if (s.temperatures.values.len == 0) s.temperatures.push(s.temperature);
         if (target) |t| {
             s.target = @round(t * 100) / 100;
             if (!s.has_target) s.targets.push(s.target);
@@ -401,7 +358,7 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const c: *DataStoreCtx = @ptrCast(@alignCast(ctx));
     const ring = &c.gcode_ring;
 
-    var tmp_buf = try alloc.alloc(GcodeEntry, ring.count);
+    var tmp_buf = try alloc.alloc(GcodeEntry, ring.entries.len);
     defer alloc.free(tmp_buf);
 
     const n: usize = if (getOptInt(params, "count")) |cnt|
@@ -498,6 +455,62 @@ test "GcodeRingBuffer: empty ring returns no entries" {
     var out: [5]GcodeEntry = undefined;
     try testing.expectEqual(@as(usize, 0), ring.copyAll(&out));
     try testing.expectEqual(@as(usize, 0), ring.copyLast(3, &out));
+}
+
+test "GcodeRingBuffer rejects zero capacity and bounds a short output slice" {
+    const alloc = testing.allocator;
+    try testing.expectError(error.InvalidCapacity, GcodeRingBuffer.init(alloc, 0));
+    var ring = try GcodeRingBuffer.init(alloc, 3);
+    defer ring.deinit();
+    try ring.push("first", 1, .command);
+    try ring.push("second", 2, .response);
+    var out: [1]GcodeEntry = undefined;
+    try testing.expectEqual(@as(usize, 1), ring.copyLast(2, &out));
+    try testing.expectEqualStrings("second", out[0].message);
+}
+
+test "bounded stores preserve ownership across allocation failures" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var ring = try GcodeRingBuffer.init(alloc, 3);
+            defer ring.deinit();
+            for (0..9) |i| try ring.push("entry", @floatFromInt(i), .response);
+            var entries: [3]GcodeEntry = undefined;
+            try testing.expectEqual(@as(usize, 3), ring.copyAll(&entries));
+            try testing.expectEqual(@as(f64, 6), entries[0].time);
+            try testing.expectEqual(@as(f64, 8), entries[2].time);
+            var field: FieldRing = .{};
+            defer field.deinit(alloc);
+            try field.ensure(alloc, 3);
+            for ([_]f64{ 1, 2, 3, 4, 5 }) |value| field.push(value);
+            var samples: [3]f64 = undefined;
+            try testing.expectEqual(@as(usize, 3), field.snapshot(&samples));
+            try testing.expectEqualSlices(f64, &.{ 3, 4, 5 }, &samples);
+            try field.ensure(alloc, 1200);
+            try testing.expectEqual(@as(usize, 1200), field.values.buffer.len);
+            try testing.expectEqual(@as(usize, 0), field.snapshot(&samples));
+        }
+    }.run, .{});
+}
+
+test "fuzz bounded sample deque returns the newest window in order" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const capacity = smith.valueRangeAtMostWithHash(u8, 1, 32, 1);
+            var field: FieldRing = .{};
+            defer field.deinit(testing.allocator);
+            try field.ensure(testing.allocator, capacity);
+            for (bytes) |byte| field.push(@floatFromInt(byte));
+            var samples: [32]f64 = undefined;
+            const count = field.snapshot(&samples);
+            try testing.expectEqual(capacity, count);
+            for (bytes[bytes.len - count ..], samples[0..count]) |byte, sample|
+                try testing.expectEqual(@as(f64, @floatFromInt(byte)), sample);
+            try testing.expectEqual(@as(usize, 1), field.snapshot(samples[0..1]));
+        }
+    }.run, .{});
 }
 
 test "GcodeRingBuffer: push and retrieve all" {
@@ -907,9 +920,9 @@ test "fuzz temperature sampling: bounded rings retain cached fields" {
                 ctx.sampleTemperatures(io);
             }
             const s = ctx.sensors.get("sensor").?;
-            try testing.expectEqual(@min(@as(usize, ticks) + 1, capacity), s.temperatures.count);
-            try testing.expectEqual(s.temperatures.count, s.targets.count);
-            try testing.expectEqual(s.temperatures.count, s.powers.count);
+            try testing.expectEqual(@min(@as(usize, ticks) + 1, capacity), s.temperatures.values.len);
+            try testing.expectEqual(s.temperatures.values.len, s.targets.values.len);
+            try testing.expectEqual(s.temperatures.values.len, s.powers.values.len);
             try testing.expect(ctx.sampler_thread == null);
             try testing.expectError(error.IoNotSet, ctx.startSampler());
         }

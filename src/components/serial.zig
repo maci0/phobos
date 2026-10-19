@@ -5,9 +5,8 @@
 //! best-effort — failures, e.g. on a non-tty, are ignored so the byte path still
 //! works), and exposes blocking write/read.
 //!
-//! NOTE: exercised in tests against a regular file (byte path). Baud/raw termios
-//! configuration is applied on real ttys only and is not verified here — it
-//! requires physical serial hardware.
+//! Tests cover regular-file bytes and pseudo-terminal baud/raw settings.
+//! Physical UART and USB-CDC timing still requires target hardware.
 
 const std = @import("std");
 const Dir = std.Io.Dir;
@@ -30,14 +29,14 @@ pub const Serial = struct {
         t.iflag = .{};
         t.oflag = .{};
         t.lflag = .{};
-        t.cflag.CSIZE = .CS8;
-        t.cflag.PARENB = false;
-        t.cflag.CSTOPB = false;
-        t.cflag.CREAD = true;
-        t.cflag.CLOCAL = true;
+        t.cflag = .{ .CSIZE = .CS8, .CREAD = true, .CLOCAL = true };
         const spd = baudToSpeed(baud);
+        // Linux tcsetattr reads the baud bits in cflag, including with musl.
+        t.cflag = @bitCast(@as(u32, @bitCast(t.cflag)) | @as(u32, @backingInt(spd)));
         t.ispeed = spd;
         t.ospeed = spd;
+        t.cc[@backingInt(std.posix.V.MIN)] = 1;
+        t.cc[@backingInt(std.posix.V.TIME)] = 0;
         std.posix.tcsetattr(handle, .NOW, t) catch {};
     }
 
@@ -61,8 +60,10 @@ pub const Serial = struct {
 
     /// Read up to `buf.len` bytes; returns the count actually read (may be 0).
     pub fn readSome(self: *Serial, buf: []u8) !usize {
-        var r = self.file.reader(self.io, buf);
-        return r.interface.readSliceShort(buf);
+        return self.file.readStreaming(self.io, &.{buf}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
     }
 
     pub fn close(self: *Serial) void {
@@ -123,6 +124,81 @@ test "fuzz Serial.open: arbitrary paths never crash" {
             smith.bytesWithHash(&buf, 0);
             var s = Serial.open(io, &buf, 115200) catch return;
             s.close();
+        }
+    }.run, .{});
+}
+
+test "Serial.readSome advances the stream without losing unread bytes" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "serial", .data = "abcdefgh" });
+    const path = try tmp.dir.realPathFileAlloc(io, "serial", testing.allocator);
+    defer testing.allocator.free(path);
+    var serial = try Serial.open(io, path, 115200);
+    defer serial.close();
+    var bytes: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 4), try serial.readSome(&bytes));
+    try testing.expectEqualStrings("abcd", &bytes);
+    try testing.expectEqual(@as(usize, 4), try serial.readSome(&bytes));
+    try testing.expectEqualStrings("efgh", &bytes);
+    try testing.expectEqual(@as(usize, 0), try serial.readSome(&bytes));
+}
+
+test "Serial.open configures baud and raw 8N1 on a pseudo-terminal" {
+    const io = testing.io;
+    const master = try Dir.cwd().openFile(io, "/dev/ptmx", .{ .mode = .read_write });
+    defer master.close(io);
+    var unlock: c_int = 0;
+    try testing.expectEqual(@as(i32, 0), (try io.operate(.{ .device_io_control = .{
+        .file = master,
+        .code = std.os.linux.T.IOCSPTLCK,
+        .arg = &unlock,
+    } })).device_io_control);
+    var number: c_uint = undefined;
+    try testing.expectEqual(@as(i32, 0), (try io.operate(.{ .device_io_control = .{
+        .file = master,
+        .code = std.os.linux.T.IOCGPTN,
+        .arg = &number,
+    } })).device_io_control);
+    var path: [64]u8 = undefined;
+    var serial = try Serial.open(io, try std.fmt.bufPrint(&path, "/dev/pts/{d}", .{number}), 115200);
+    defer serial.close();
+    const attrs = try std.posix.tcgetattr(serial.file.handle);
+    const baud_mask = comptime blk: {
+        var mask: u32 = 0;
+        for (std.meta.tags(std.posix.speed_t)) |speed| mask |= @backingInt(speed);
+        break :blk mask;
+    };
+    try testing.expectEqual(@as(u32, @backingInt(std.posix.speed_t.B115200)), @as(u32, @bitCast(attrs.cflag)) & baud_mask);
+    try testing.expectEqual(.CS8, attrs.cflag.CSIZE);
+    try testing.expect(!attrs.cflag.PARENB and !attrs.cflag.CSTOPB and !attrs.cflag.CRTSCTS);
+    try testing.expectEqual(@as(u8, 1), attrs.cc[@backingInt(std.posix.V.MIN)]);
+    try testing.expectEqual(@as(u8, 0), attrs.cc[@backingInt(std.posix.V.TIME)]);
+}
+
+test "fuzz Serial.readSome preserves bytes across bounded read sizes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const io = testing.io;
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var expected: [32]u8 = undefined;
+            smith.bytesWithHash(&expected, 0);
+            try tmp.dir.writeFile(io, .{ .sub_path = "serial", .data = &expected });
+            const path = try tmp.dir.realPathFileAlloc(io, "serial", testing.allocator);
+            defer testing.allocator.free(path);
+            var serial = try Serial.open(io, path, 115200);
+            defer serial.close();
+            var actual: [32]u8 = undefined;
+            const chunk = smith.valueRangeAtMostWithHash(u8, 1, 16, 1);
+            var offset: usize = 0;
+            while (offset < actual.len) {
+                const count = try serial.readSome(actual[offset..@min(actual.len, offset + chunk)]);
+                try testing.expect(count > 0);
+                offset += count;
+            }
+            try testing.expectEqualSlices(u8, &expected, &actual);
         }
     }.run, .{});
 }

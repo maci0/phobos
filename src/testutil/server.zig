@@ -1042,6 +1042,42 @@ test "files: upload → list → metadata → download round-trip" {
     try std.testing.expectEqualStrings("G28\nG1 X1 Y2\n", dl);
 }
 
+test "files: encoded names work through metadata download and delete" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const name = "hello +%重.gcode";
+    const upload = try ts.uploadFile(alloc, "gcodes", null, name, "G1\n");
+    defer alloc.free(upload);
+    const metadata = try ts.get(alloc, "/server/files/metadata?filename=hello+%2B%25%E9%87%8D.gcode");
+    defer alloc.free(metadata);
+    const parsed = try resultOf(alloc, metadata);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(name, parsed.value.object.get("result").?.object.get("filename").?.string);
+    const path = "/server/files/gcodes/hello%20+%25%E9%87%8D.gcode";
+    const download = try ts.get(alloc, path);
+    defer alloc.free(download);
+    try std.testing.expectEqualStrings("G1\n", download);
+    const deleted = try ts.deleteJson(alloc, path, null);
+    defer alloc.free(deleted);
+    const deletion = try resultOf(alloc, deleted);
+    defer deletion.deinit();
+    try std.testing.expectEqualStrings("delete_file", deletion.value.object.get("result").?.object.get("action").?.string);
+
+    for ([_][]const u8{ "/server/files/metadata?filename=%FF", "/server/files/gcodes/%FF" }) |invalid| {
+        const body = try ts.get(alloc, invalid);
+        defer alloc.free(body);
+        const failure = try resultOf(alloc, body);
+        defer failure.deinit();
+        try std.testing.expectEqual(@as(i64, 400), failure.value.object.get("error").?.object.get("code").?.integer);
+    }
+    const traversal = try ts.get(alloc, "/server/files/gcodes/%2E%2E/%2E%2E/etc/passwd");
+    defer alloc.free(traversal);
+    const denied = try resultOf(alloc, traversal);
+    defer denied.deinit();
+    try std.testing.expectEqual(@as(i64, 403), denied.value.object.get("error").?.object.get("code").?.integer);
+}
+
 test "files: get_directory shows uploaded file with disk_usage and root_info" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
