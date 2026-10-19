@@ -23,17 +23,13 @@
 //! Each root has a name, an absolute filesystem path, and a read/write
 //! permission ("rw" when full_access, otherwise "r").
 //!
-//! PATH SAFETY: `resolveRequestPath` is the single security-critical function.
-//! It parses "<root>/<relative>", lexically normalizes the relative part
-//! (collapsing "." and ".." without ever ascending above the root), and
-//! produces an absolute path guaranteed to live inside the root directory. Any
-//! attempt to escape (e.g. "gcodes/../../etc/passwd") is rejected with
-//! `error.Forbidden`. The resolver is purely lexical — it never touches the
-//! filesystem to decide containment — so it cannot be tricked by symlinks into
-//! reporting a path as in-root.
+//! PATH SAFETY: `resolveRequestPath` normalizes the requested relative path.
+//! `Resolved` opens relative to a registered root directory handle, resolves
+//! links within that root, and rejects escaping links. Actual opens do not
+//! follow replacement symlinks. `Resolved.abs` is for display and cache keys.
 //!
 //! On every successful mutation the component emits `notify_filelist_changed`
-//! through `bus.emit` with Moonraker's exact payload:
+//! through `bus.emitLocked` with Moonraker's exact payload:
 //!   params: [ { "action": "create_file"|"delete_file"|"create_dir"|
 //!               "delete_dir"|"move_file"|"move_dir"|"modify_file",
 //!              "item": { "path", "root", "size", "modified", "permissions" },
@@ -43,7 +39,7 @@
 //! Extended gcodes directory listings reuse the same bounded metadata cache as
 //! individual metadata requests. See `buildMetadata`.
 //!
-//! File I/O uses `std.Io.Dir`; disk capacity uses musl's `statvfs`. The live
+//! File I/O uses `std.Io.Dir`; disk capacity uses musl's `fstatvfs`. The live
 //! `io` handle is stored in `FileCtx.io` and
 //! supplied after the App event loop starts (via `setIo`); handlers return
 //! `error.NotReady` if invoked before io is wired.
@@ -336,7 +332,8 @@ pub const FileCtx = struct {
         const a = arena.allocator();
         const req = std.fmt.allocPrint(a, "{s}/{s}", .{ root_name, rel }) catch return false;
         const resolved = resolveRequestPath(self, a, req) catch return false;
-        _ = Dir.cwd().statFile(io, resolved.abs, .{}) catch return false;
+        const file = resolved.openFile(io, a) catch return false;
+        file.close(io);
         return true;
     }
 
@@ -403,17 +400,214 @@ pub const Resolved = struct {
     /// Relative path inside the root, normalized, no leading slash. "" for the
     /// root itself.
     rel: []const u8,
-    /// Absolute path on disk (root.path joined with rel). Guaranteed to be
-    /// inside root.path.
+    /// Lexical path for display and cache keys. Open through the methods below.
     abs: []const u8,
+
+    pub const ParentOptions = struct {
+        make_path: bool = false,
+        follow_leaf: bool = false,
+    };
+
+    pub const Parent = struct {
+        dir: Dir,
+        name: []const u8,
+        arena: std.heap.ArenaAllocator,
+
+        pub fn close(self: *Parent, io: std.Io) void {
+            self.dir.close(io);
+            self.arena.deinit();
+        }
+    };
+
+    /// Owns the returned directory and name. Resolve links within this root,
+    /// then open each directory without following a replacement symlink.
+    pub fn parent(self: Resolved, io: std.Io, alloc: std.mem.Allocator, options: ParentOptions) !Parent {
+        var local = std.heap.ArenaAllocator.init(alloc);
+        errdefer local.deinit();
+        const a = local.allocator();
+        const root_dir = try Dir.cwd().openDir(io, self.root.path, .{});
+        defer root_dir.close(io);
+        var root_buf: [Dir.max_path_bytes]u8 = undefined;
+        const canonical_root = root_buf[0..try root_dir.realPath(io, &root_buf)];
+        var dir = try root_dir.openDir(io, ".", .{});
+        errdefer dir.close(io);
+        if (self.rel.len > Dir.max_path_bytes) return error.InvalidParams;
+        var pending: []const u8 = try normalizeRel(a, self.rel);
+        var links: usize = 0;
+        resolve: while (true) {
+            if (pending.len == 0) return .{ .dir = dir, .name = ".", .arena = local };
+            var parts = std.mem.splitScalar(u8, pending, '/');
+            while (parts.next()) |part| {
+                const tail = parts.rest();
+                const last = tail.len == 0;
+                if (!last or options.follow_leaf) {
+                    const is_link = if (dir.statFile(io, part, .{ .follow_symlinks = false })) |info|
+                        info.kind == .sym_link
+                    else |err| switch (err) {
+                        error.FileNotFound => false,
+                        else => return err,
+                    };
+                    if (is_link) {
+                        links += 1;
+                        if (links > max_path_links) return error.Forbidden;
+                        var target_buf: [Dir.max_path_bytes]u8 = undefined;
+                        const target = target_buf[0..try dir.realPathFile(io, part, &target_buf)];
+                        const relative = if (std.mem.eql(u8, canonical_root, "/"))
+                            target[1..]
+                        else if (std.mem.eql(u8, target, canonical_root))
+                            ""
+                        else if (std.mem.startsWith(u8, target, canonical_root) and target.len > canonical_root.len and target[canonical_root.len] == '/')
+                            target[canonical_root.len + 1 ..]
+                        else
+                            return error.Forbidden;
+                        pending = try std.fs.path.join(a, &.{ relative, tail });
+                        if (pending.len > Dir.max_path_bytes) return error.Forbidden;
+                        const restarted = try root_dir.openDir(io, ".", .{});
+                        dir.close(io);
+                        dir = restarted;
+                        continue :resolve;
+                    }
+                }
+                if (last) return .{ .dir = dir, .name = try a.dupe(u8, part), .arena = local };
+                const next = dir.openDir(io, part, .{ .follow_symlinks = false }) catch |err| blk: {
+                    if (err != error.FileNotFound or !options.make_path) return err;
+                    try dir.createDirPath(io, part);
+                    break :blk try dir.openDir(io, part, .{ .follow_symlinks = false });
+                };
+                dir.close(io);
+                dir = next;
+            }
+            unreachable;
+        }
+    }
+
+    pub fn openFile(self: Resolved, io: std.Io, alloc: std.mem.Allocator) !std.Io.File {
+        var p = self.parent(io, alloc, .{ .follow_leaf = true }) catch |err| return accessError(err);
+        defer p.close(io);
+        const before = p.dir.statFile(io, p.name, .{ .follow_symlinks = false }) catch |err| return accessError(err);
+        if (before.kind == .sym_link) return error.Forbidden;
+        if (before.kind != .file) return error.NotFound;
+        const file = p.dir.openFile(io, p.name, .{ .follow_symlinks = false }) catch |err| return accessError(err);
+        errdefer file.close(io);
+        if ((try file.stat(io)).kind != .file) return error.NotFound;
+        return file;
+    }
+
+    pub fn openDirectory(self: Resolved, io: std.Io, alloc: std.mem.Allocator) !Dir {
+        var p = self.parent(io, alloc, .{ .follow_leaf = true }) catch |err| return accessError(err);
+        defer p.close(io);
+        return p.dir.openDir(io, p.name, .{ .iterate = true, .follow_symlinks = false }) catch |err| return accessError(err);
+    }
+
+    pub fn stat(self: Resolved, io: std.Io, alloc: std.mem.Allocator) !std.Io.File.Stat {
+        var p = self.parent(io, alloc, .{ .follow_leaf = true }) catch |err| return accessError(err);
+        defer p.close(io);
+        const result = try p.dir.statFile(io, p.name, .{ .follow_symlinks = false });
+        if (result.kind == .sym_link) return error.Forbidden;
+        return result;
+    }
+
+    /// Dir.copyFile reopens its source by name; keep the checked file open here.
+    pub fn copyTo(self: Resolved, io: std.Io, alloc: std.mem.Allocator, destination: Resolved) !void {
+        const source = try self.openFile(io, alloc);
+        defer source.close(io);
+        const info = try source.stat(io);
+        var p = try destination.parent(io, alloc, .{ .make_path = true });
+        defer p.close(io);
+        var output = try p.dir.createFileAtomic(io, p.name, .{ .permissions = info.permissions, .replace = true });
+        defer output.deinit(io);
+        var reader: std.Io.File.Reader = .initSize(source, io, &.{}, info.size);
+        var buf: [4096]u8 = undefined;
+        var writer = output.file.writer(io, &buf);
+        _ = writer.interface.sendFileAll(&reader, .unlimited) catch |err| switch (err) {
+            error.ReadFailed => return reader.err.?,
+            error.WriteFailed => return writer.err.?,
+        };
+        try writer.flush();
+        try output.replace(io);
+    }
 };
+
+const max_path_links = 40;
+
+// Dir.Walker reopens directories with symlink following enabled.
+const RootWalker = struct {
+    alloc: std.mem.Allocator,
+    base: Resolved,
+    stack: std.ArrayList(Frame) = .empty,
+    last_path: ?[]u8 = null,
+
+    const Frame = struct { dir: Dir, iter: Dir.Iterator, prefix: []u8 };
+    const Entry = struct { path: []const u8, kind: std.Io.File.Kind, dir: Dir, basename: []const u8 };
+
+    fn init(io: std.Io, alloc: std.mem.Allocator, base: Resolved) !RootWalker {
+        const dir = try base.openDirectory(io, alloc);
+        errdefer dir.close(io);
+        const prefix = try alloc.dupe(u8, "");
+        errdefer alloc.free(prefix);
+        var self: RootWalker = .{ .alloc = alloc, .base = base };
+        errdefer self.stack.deinit(alloc);
+        try self.stack.append(alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
+        return self;
+    }
+
+    fn deinit(self: *RootWalker, io: std.Io) void {
+        while (self.stack.pop()) |frame| {
+            frame.dir.close(io);
+            self.alloc.free(frame.prefix);
+        }
+        if (self.last_path) |path| self.alloc.free(path);
+        self.stack.deinit(self.alloc);
+    }
+
+    /// Entry storage remains valid until the next call or deinit.
+    fn next(self: *RootWalker, io: std.Io) !?Entry {
+        if (self.last_path) |path| self.alloc.free(path);
+        self.last_path = null;
+        while (self.stack.items.len > 0) {
+            const top = &self.stack.items[self.stack.items.len - 1];
+            const entry = try top.iter.next(io) orelse {
+                const frame = self.stack.pop().?;
+                frame.dir.close(io);
+                self.alloc.free(frame.prefix);
+                continue;
+            };
+            const path = try std.fs.path.join(self.alloc, &.{ top.prefix, entry.name });
+            errdefer self.alloc.free(path);
+            const kind = entry.kind;
+            const parent_dir = top.dir;
+            if (kind == .directory) {
+                const child = try childResolved(self.alloc, self.base, path);
+                defer self.alloc.free(child.rel);
+                defer self.alloc.free(child.abs);
+                const dir = try child.openDirectory(io, self.alloc);
+                errdefer dir.close(io);
+                const prefix = try self.alloc.dupe(u8, path);
+                errdefer self.alloc.free(prefix);
+                try self.stack.append(self.alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
+            }
+            self.last_path = path;
+            return .{ .path = path, .kind = kind, .dir = parent_dir, .basename = std.fs.path.basename(path) };
+        }
+        return null;
+    }
+};
+
+fn accessError(err: anyerror) anyerror {
+    return switch (err) {
+        error.FileNotFound, error.NotDir => error.NotFound,
+        error.SymLinkLoop, error.AccessDenied, error.PermissionDenied => error.Forbidden,
+        error.NameTooLong, error.BadPathName, error.DirNotEmpty, error.PathAlreadyExists => error.InvalidParams,
+        else => err,
+    };
+}
 
 /// Lexically normalize a relative path: collapse "." and "" segments, resolve
 /// ".." against the accumulated stack, and REJECT any ".." that would ascend
 /// above the (virtual) root. Returns the normalized slash-joined relative path.
 ///
-/// This never touches the filesystem; containment is decided purely from the
-/// textual segments, so symlinks cannot be used to fool it.
+/// This is lexical normalization. Filesystem containment is enforced by
+/// `Resolved` when opening a path.
 pub fn normalizeRel(alloc: std.mem.Allocator, rel: []const u8) ResolveError![]const u8 {
     var stack: std.ArrayList([]const u8) = .empty;
     defer stack.deinit(alloc);
@@ -438,7 +632,7 @@ pub fn normalizeRel(alloc: std.mem.Allocator, rel: []const u8) ResolveError![]co
 
 /// Parse a request path of the form "<root>" or "<root>/<relative...>" into the
 /// root, normalized relative path, and absolute on-disk path. Rejects unknown
-/// roots and any path that escapes the root.
+/// roots and lexical escapes; `Resolved` checks symlinks when opening the path.
 pub fn resolveRequestPath(
     ctx: *const FileCtx,
     alloc: std.mem.Allocator,
@@ -477,9 +671,8 @@ fn mtimeSecs(st: std.Io.File.Stat) f64 {
 
 /// Build a `{ "modified", "size", "permissions" }` object for a path, matching
 /// Moonraker's `get_path_info`. On stat failure returns the zeroed shape.
-fn buildPathInfo(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, root: Root) !std.json.Value {
+fn buildPathInfo(alloc: std.mem.Allocator, st: ?std.Io.File.Stat, root: Root) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
-    const st: ?std.Io.File.Stat = Dir.cwd().statFile(io, abs, .{}) catch null;
     if (st) |s| {
         try obj.put(alloc, "modified", .{ .float = mtimeSecs(s) });
         try obj.put(alloc, "size", .{ .integer = @intCast(s.size) });
@@ -493,15 +686,6 @@ fn buildPathInfo(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, root: Ro
 }
 
 const StatKind = enum { file, dir, other, missing };
-
-fn statKind(io: std.Io, abs: []const u8) StatKind {
-    const st = Dir.cwd().statFile(io, abs, .{}) catch return .missing;
-    return switch (st.kind) {
-        .file => .file,
-        .directory => .dir,
-        else => .other,
-    };
-}
 
 // ---------------------------------------------------------------------------
 // notify_filelist_changed emission
@@ -520,7 +704,8 @@ fn buildNotifyInfo(
     abs: []const u8,
     source: ?SourceItem,
 ) !std.json.Value {
-    var item = try buildPathInfo(io, alloc, abs, root);
+    const resolved: Resolved = .{ .root = root, .rel = rel, .abs = abs };
+    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, root);
     try item.object.put(alloc, "path", .{ .string = rel });
     try item.object.put(alloc, "root", .{ .string = root.name });
 
@@ -580,18 +765,18 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
     const root = ctx.findRoot(root_name) orelse return error.InvalidParams;
 
     var arr: std.json.Array = .init(alloc);
-    var dir = Dir.cwd().openDir(io, root.path, .{ .iterate = true }) catch
-        return .{ .array = arr };
-    defer dir.close(io);
-
-    var walker = try dir.walk(alloc);
-    defer walker.deinit();
+    const base: Resolved = .{ .root = root, .rel = "", .abs = root.path };
+    var walker = RootWalker.init(io, alloc, base) catch |err| switch (err) {
+        error.FileNotFound, error.NotFound, error.NotDir => return .{ .array = arr },
+        else => return err,
+    };
+    defer walker.deinit(io);
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (FileCtx.pathExcluded(ctx.excludes, root_name, entry.path)) continue;
         const rel = try alloc.dupe(u8, entry.path);
-        const abs = try std.fs.path.join(alloc, &.{ root.path, rel });
-        var info = try buildPathInfo(io, alloc, abs, root);
+        const stat = entry.dir.statFile(io, entry.basename, .{ .follow_symlinks = false }) catch null;
+        var info = try buildPathInfo(alloc, stat, root);
         try info.object.put(alloc, "path", .{ .string = rel });
         try arr.append(info);
     }
@@ -612,21 +797,18 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     const extended = getBool(params, "extended", false);
     const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
 
-    if (statKind(io, resolved.abs) != .dir) return error.NotFound;
-
     var dirs: std.json.Array = .init(alloc);
     var files: std.json.Array = .init(alloc);
 
-    var dir = Dir.cwd().openDir(io, resolved.abs, .{ .iterate = true }) catch
-        return error.NotFound;
+    var dir = resolved.openDirectory(io, alloc) catch |err| return accessError(err);
     defer dir.close(io);
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         const child_rel = if (resolved.rel.len == 0) entry.name else try std.fmt.allocPrint(alloc, "{s}/{s}", .{ resolved.rel, entry.name });
         if (FileCtx.pathExcluded(ctx.excludes, resolved.root.name, child_rel)) continue;
-        const child_abs = try std.fs.path.join(alloc, &.{ resolved.abs, entry.name });
-        var info = try buildPathInfo(io, alloc, child_abs, resolved.root);
+        const stat = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch null;
+        var info = try buildPathInfo(alloc, stat, resolved.root);
         switch (entry.kind) {
             .directory => {
                 try info.object.put(alloc, "dirname", .{ .string = try alloc.dupe(u8, entry.name) });
@@ -653,7 +835,7 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "dirs", .{ .array = dirs });
     try out.put(alloc, "files", .{ .array = files });
-    try out.put(alloc, "disk_usage", try diskUsage(alloc, resolved.abs));
+    try out.put(alloc, "disk_usage", try diskUsage(alloc, dir));
 
     var root_info: std.json.ObjectMap = .empty;
     try root_info.put(alloc, "name", .{ .string = resolved.root.name });
@@ -664,21 +846,19 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
 }
 
 /// `{ "total", "used", "free" }` matching shutil.disk_usage._asdict().
-fn diskUsage(alloc: std.mem.Allocator, abs: []const u8) !std.json.Value {
-    const path_z = try alloc.dupeSentinel(u8, abs, 0);
-    defer alloc.free(path_z);
+fn diskUsage(alloc: std.mem.Allocator, dir: Dir) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     var total: u64 = 0;
     var used: u64 = 0;
     var free: u64 = 0;
-    phobos_disk_usage(path_z, &total, &used, &free);
+    phobos_disk_usage(dir.handle, &total, &used, &free);
     try obj.put(alloc, "total", .{ .integer = @intCast(total) });
     try obj.put(alloc, "used", .{ .integer = @intCast(used) });
     try obj.put(alloc, "free", .{ .integer = @intCast(free) });
     return .{ .object = obj };
 }
 
-extern "c" fn phobos_disk_usage(path: [*:0]const u8, total: *u64, used: *u64, available: *u64) void;
+extern "c" fn phobos_disk_usage(fd: c_int, total: *u64, used: *u64, available: *u64) void;
 
 // ---------------------------------------------------------------------------
 // POST /server/files/directory (mkdir)
@@ -693,7 +873,9 @@ pub fn handlePostDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: s
     if (!resolved.root.full_access) return error.Forbidden;
     if (resolved.rel.len == 0) return error.Forbidden; // cannot recreate the root
 
-    Dir.cwd().createDirPath(io, resolved.abs) catch return error.InvalidParams;
+    var parent = resolved.parent(io, alloc, .{ .make_path = true, .follow_leaf = true }) catch |err| return accessError(err);
+    defer parent.close(io);
+    parent.dir.createDirPath(io, parent.name) catch |err| return accessError(err);
 
     const info = try buildNotifyInfo(io, alloc, "create_dir", resolved.root, resolved.rel, resolved.abs, null);
     emitFilelistChanged(ctx, io, alloc, info);
@@ -713,12 +895,13 @@ pub fn handleDeleteDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc:
 
     if (!resolved.root.full_access) return error.Forbidden;
     if (resolved.rel.len == 0) return error.Forbidden; // cannot delete root
-    if (statKind(io, resolved.abs) != .dir) return error.NotFound;
-
+    if (try resolvedKind(io, alloc, resolved) != .dir) return error.NotFound;
+    var parent = resolved.parent(io, alloc, .{}) catch |err| return accessError(err);
+    defer parent.close(io);
     if (force) {
-        Dir.cwd().deleteTree(io, resolved.abs) catch return error.InvalidParams;
+        parent.dir.deleteTree(io, parent.name) catch |err| return accessError(err);
     } else {
-        Dir.cwd().deleteDir(io, resolved.abs) catch return error.InvalidParams;
+        parent.dir.deleteDir(io, parent.name) catch |err| return accessError(err);
     }
 
     const info = try buildNotifyInfo(io, alloc, "delete_dir", resolved.root, resolved.rel, resolved.abs, null);
@@ -743,76 +926,93 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     const io = try ctx.requireIo();
     const source = try getStr(params, "source");
     const dest = try getStr(params, "dest");
-
-    const src = resolveRequestPath(ctx, alloc, source) catch |e| return mapResolveErr(e);
-    const dst = resolveRequestPath(ctx, alloc, dest) catch |e| return mapResolveErr(e);
-
+    const src = try resolveRequestPath(ctx, alloc, source);
+    const dst = try resolveRequestPath(ctx, alloc, dest);
     if (!dst.root.full_access) return error.Forbidden;
-
-    const src_kind = statKind(io, src.abs);
+    const src_kind = try resolvedKind(io, alloc, src);
     if (src_kind == .missing) return error.NotFound;
-
-    // If the destination is an existing directory, place the source INSIDE it
-    // (dst/basename(src)) — matching shutil.move/shutil.copy. Without this, a
-    // move/copy onto an existing folder (a common UI drag-into-folder) failed or
-    // landed at the wrong path.
-    var dst_abs = dst.abs;
-    var dst_rel = dst.rel;
-    if (statKind(io, dst.abs) == .dir) {
+    var target = dst;
+    if (try resolvedKind(io, alloc, dst) == .dir) {
         const base = std.fs.path.basename(src.abs);
-        dst_abs = try std.fs.path.join(alloc, &.{ dst.abs, base });
-        dst_rel = try std.fs.path.join(alloc, &.{ dst.rel, base });
+        target.rel = try std.fs.path.join(alloc, &.{ dst.rel, base });
+        target.abs = try std.fs.path.join(alloc, &.{ dst.abs, base });
     }
-
-    // Reject source == destination. A move is a no-op, but a COPY would open the
-    // source then `createFile` (truncating) the same path → a 0-byte file (data
-    // loss). Reachable as `copy a.gcode -> gcodes/` (dir-dest resolves to a.gcode)
-    // or directly with dest == source. Moonraker raises on same-path move/copy.
-    if (std.mem.eql(u8, src.abs, dst_abs)) return error.InvalidParams;
+    if (std.mem.eql(u8, src.abs, target.abs)) return error.InvalidParams;
+    if (src_kind == .dir and std.mem.startsWith(u8, target.abs, src.abs) and
+        target.abs.len > src.abs.len and target.abs[src.abs.len] == '/') return error.InvalidParams;
 
     var action: []const u8 = undefined;
     if (is_move) {
         if (!src.root.full_access) return error.Forbidden;
-        Dir.cwd().rename(src.abs, Dir.cwd(), dst_abs, io) catch return error.InvalidParams;
+        var sp = src.parent(io, alloc, .{}) catch |err| return accessError(err);
+        defer sp.close(io);
+        var dp = target.parent(io, alloc, .{}) catch |err| return accessError(err);
+        defer dp.close(io);
+        sp.dir.rename(sp.name, dp.dir, dp.name, io) catch |err| return accessError(err);
         action = if (src_kind == .dir) "move_dir" else "move_file";
-        const src_info: SourceItem = .{ .root = src.root, .rel = src.rel };
-        const info = try buildNotifyInfo(io, alloc, action, dst.root, dst_rel, dst_abs, src_info);
-        emitFilelistChanged(ctx, io, alloc, info);
-        return info;
-    }
-
-    // copy
-    if (src_kind == .dir) {
+    } else if (src_kind == .dir) {
+        try copyTree(io, alloc, src, target);
         action = "create_dir";
-        try copyTree(io, alloc, src.abs, dst_abs);
     } else {
-        // If the destination already exists as a file, this is a modify.
-        action = if (statKind(io, dst_abs) == .file) "modify_file" else "create_file";
-        Dir.cwd().copyFile(src.abs, Dir.cwd(), dst_abs, io, .{}) catch return error.InvalidParams;
+        action = if (try resolvedKind(io, alloc, target) == .file) "modify_file" else "create_file";
+        src.copyTo(io, alloc, target) catch |err| return accessError(err);
     }
-    const info = try buildNotifyInfo(io, alloc, action, dst.root, dst_rel, dst_abs, null);
+    const info = try buildNotifyInfo(io, alloc, action, target.root, target.rel, target.abs, if (is_move) .{ .root = src.root, .rel = src.rel } else null);
     emitFilelistChanged(ctx, io, alloc, info);
     return info;
 }
 
-fn copyTree(io: std.Io, alloc: std.mem.Allocator, src_abs: []const u8, dst_abs: []const u8) !void {
-    Dir.cwd().createDirPath(io, dst_abs) catch return error.InvalidParams;
-    var src_dir = Dir.cwd().openDir(io, src_abs, .{ .iterate = true }) catch return error.InvalidParams;
-    defer src_dir.close(io);
-    var walker = src_dir.walk(alloc) catch return error.OutOfMemory;
-    defer walker.deinit();
-    while (walker.next(io) catch return error.InvalidParams) |entry| {
-        const child_dst = std.fs.path.join(alloc, &.{ dst_abs, entry.path }) catch return error.OutOfMemory;
+fn resolvedKind(io: std.Io, alloc: std.mem.Allocator, path: Resolved) !StatKind {
+    const info = path.stat(io, alloc) catch |err| switch (err) {
+        error.FileNotFound, error.NotFound, error.NotDir => return .missing,
+        else => return accessError(err),
+    };
+    return switch (info.kind) {
+        .file => .file,
+        .directory => .dir,
+        else => .other,
+    };
+}
+
+fn copyTree(io: std.Io, alloc: std.mem.Allocator, source: Resolved, destination: Resolved) !void {
+    var target = try destination.parent(io, alloc, .{ .make_path = true, .follow_leaf = true });
+    defer target.close(io);
+    var source_dir = try source.openDirectory(io, alloc);
+    defer source_dir.close(io);
+    var source_buf: [Dir.max_path_bytes]u8 = undefined;
+    var target_buf: [Dir.max_path_bytes]u8 = undefined;
+    const source_real = source_buf[0..try source_dir.realPath(io, &source_buf)];
+    const parent_real = target_buf[0..try target.dir.realPath(io, &target_buf)];
+    const target_real = try std.fs.path.resolve(alloc, &.{ parent_real, target.name });
+    defer alloc.free(target_real);
+    if (std.mem.eql(u8, source_real, target_real) or
+        (std.mem.startsWith(u8, target_real, source_real) and target_real.len > source_real.len and target_real[source_real.len] == '/')) return error.InvalidParams;
+    try target.dir.createDirPath(io, target.name);
+    var walker = try RootWalker.init(io, alloc, source);
+    defer walker.deinit(io);
+    while (try walker.next(io)) |entry| {
+        const from = try childResolved(alloc, source, entry.path);
+        defer alloc.free(from.rel);
+        defer alloc.free(from.abs);
+        const to = try childResolved(alloc, destination, entry.path);
+        defer alloc.free(to.rel);
+        defer alloc.free(to.abs);
         switch (entry.kind) {
-            .directory => Dir.cwd().createDirPath(io, child_dst) catch return error.InvalidParams,
-            .file => {
-                const child_src = std.fs.path.join(alloc, &.{ src_abs, entry.path }) catch return error.OutOfMemory;
-                if (std.fs.path.dirname(child_dst)) |d| Dir.cwd().createDirPath(io, d) catch {};
-                Dir.cwd().copyFile(child_src, Dir.cwd(), child_dst, io, .{}) catch return error.InvalidParams;
+            .directory => {
+                var parent = try to.parent(io, alloc, .{ .make_path = true, .follow_leaf = true });
+                defer parent.close(io);
+                try parent.dir.createDirPath(io, parent.name);
             },
+            .file => try from.copyTo(io, alloc, to),
             else => {},
         }
     }
+}
+
+fn childResolved(alloc: std.mem.Allocator, base: Resolved, child: []const u8) !Resolved {
+    const rel = try std.fs.path.join(alloc, &.{ base.rel, child });
+    errdefer alloc.free(rel);
+    return .{ .root = base.root, .rel = rel, .abs = try std.fs.path.join(alloc, &.{ base.abs, child }) };
 }
 
 // ---------------------------------------------------------------------------
@@ -830,9 +1030,10 @@ pub fn deleteFileImpl(ctx: *FileCtx, alloc: std.mem.Allocator, path: []const u8)
     const io = try ctx.requireIo();
     const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
     if (!resolved.root.full_access) return error.Forbidden;
-    if (statKind(io, resolved.abs) != .file) return error.NotFound;
-
-    Dir.cwd().deleteFile(io, resolved.abs) catch return error.InvalidParams;
+    if (try resolvedKind(io, alloc, resolved) != .file) return error.NotFound;
+    var parent = resolved.parent(io, alloc, .{}) catch |err| return accessError(err);
+    defer parent.close(io);
+    parent.dir.deleteFile(io, parent.name) catch |err| return accessError(err);
 
     const info = try buildNotifyInfo(io, alloc, "delete_file", resolved.root, resolved.rel, resolved.abs, null);
     emitFilelistChanged(ctx, io, alloc, info);
@@ -851,7 +1052,9 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
-    const st = Dir.cwd().statFile(io, resolved.abs, .{}) catch return error.NotFound;
+    const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
+    defer file.close(io);
+    const st = try file.stat(io);
     if (st.kind != .file) return error.NotFound;
     const size: u64 = @intCast(st.size);
     const mtime = mtimeSecs(st);
@@ -860,7 +1063,7 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     // re-reading 256 KiB + re-parsing the gcode header on every request.
     if (ctx.cachedMetadata(alloc, resolved.abs, size, mtime)) |cached| return cached;
 
-    const value = try buildMetadata(io, alloc, resolved.abs, filename);
+    const value = try buildMetadata(io, alloc, file, filename);
     ctx.cacheMetadata(resolved.abs, size, mtime, value);
     return value;
 }
@@ -869,9 +1072,9 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 /// fields (slicer, layer_height, estimated_time, filament_total, thumbnails,
 /// temperatures). Reads the first 256 KiB of the file to extract comment-header
 /// metadata via `gcode_metadata.parse`.
-fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, filename: []const u8) !std.json.Value {
+fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, filename: []const u8) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
-    const st = Dir.cwd().statFile(io, abs, .{}) catch return error.NotFound;
+    const st = try file.stat(io);
     try obj.put(alloc, "size", .{ .integer = @intCast(st.size) });
     try obj.put(alloc, "modified", .{ .float = mtimeSecs(st) });
     try obj.put(alloc, "uuid", .{ .string = try stableUuid(alloc, filename) });
@@ -883,10 +1086,10 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, filename
     // to extract slicer info, layer count, estimated time, filament usage,
     // temperatures, layer height, and embedded thumbnails.
     if (isGcodeExt(filename)) {
-        if (readFileHeader(io, alloc, abs)) |header_text| {
+        if (readFileHeader(io, alloc, file)) |header_text| {
             // Real PrusaSlicer/Orca/Bambu files carry their config block at the
             // end, so also scan the footer for est-time/filament/height/temps.
-            const footer_text = readFileFooter(io, alloc, abs);
+            const footer_text = readFileFooter(io, alloc, file);
             const meta = gcode_metadata.parseFull(alloc, header_text, footer_text);
 
             if (meta.slicer) |s| {
@@ -939,28 +1142,31 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, abs: []const u8, filename
 const header_max_bytes = 256 * 1024;
 const footer_max_bytes = 32 * 1024;
 
-fn readFileHeader(io: std.Io, alloc: std.mem.Allocator, abs: []const u8) ![]u8 {
-    const f = Dir.cwd().openFile(io, abs, .{}) catch return error.FileNotFound;
-    defer f.close(io);
-    const st = try f.stat(io);
+fn readFileHeader(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File) ![]u8 {
+    const st = try file.stat(io);
     const buf = try alloc.alloc(u8, @intCast(@min(st.size, header_max_bytes)));
-    const got = try f.readPositionalAll(io, buf, 0);
-    return buf[0..got];
+    errdefer alloc.free(buf);
+    const got = try file.readPositionalAll(io, buf, 0);
+    return alloc.realloc(buf, got);
 }
 
 /// Read the last `footer_max_bytes` of the file (slicer config block for
 /// PrusaSlicer/Orca/Bambu). Returns "" when the file is no larger than the
 /// header window (the header already covers it).
-fn readFileFooter(io: std.Io, alloc: std.mem.Allocator, abs: []const u8) []u8 {
-    const f = Dir.cwd().openFile(io, abs, .{}) catch return "";
-    defer f.close(io);
-    const st = f.stat(io) catch return "";
+fn readFileFooter(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File) []u8 {
+    const st = file.stat(io) catch return "";
     const size: u64 = st.size;
     if (size <= header_max_bytes) return ""; // header already has the whole file
     const n: usize = @intCast(@min(size, @as(u64, footer_max_bytes)));
     const buf = alloc.alloc(u8, n) catch return "";
-    const got = f.readPositionalAll(io, buf, size - n) catch return "";
-    return buf[0..got];
+    const got = file.readPositionalAll(io, buf, size - n) catch {
+        alloc.free(buf);
+        return "";
+    };
+    return alloc.realloc(buf, got) catch {
+        alloc.free(buf);
+        return "";
+    };
 }
 
 /// A deterministic uuid-shaped string derived from the filename (NOT a parsed
@@ -993,9 +1199,10 @@ pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     const filename = try getStr(params, "filename");
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
-    if (statKind(io, resolved.abs) != .file) return error.NotFound;
+    const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
+    defer file.close(io);
     if (!isGcodeExt(filename)) return error.InvalidParams;
-    return buildMetadata(io, alloc, resolved.abs, filename);
+    return buildMetadata(io, alloc, file, filename);
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,10 +1221,11 @@ pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
     if (filename.len == 0) return .{ .array = .init(alloc) };
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
-    if (statKind(io, resolved.abs) != .file) return error.NotFound;
+    const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
+    defer file.close(io);
     if (!isGcodeExt(filename)) return .{ .array = .init(alloc) };
 
-    const header_text = readFileHeader(io, alloc, resolved.abs) catch return .{ .array = .init(alloc) };
+    const header_text = readFileHeader(io, alloc, file) catch return .{ .array = .init(alloc) };
     const meta = gcode_metadata.parse(alloc, header_text);
 
     var thumbs: std.json.Array = .init(alloc);
@@ -1046,7 +1254,7 @@ pub fn handleZip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const resolved = resolveRequestPath(ctx, alloc, dest) catch |e| return mapResolveErr(e);
     if (!resolved.root.full_access) return error.Forbidden;
 
-    var item = try buildPathInfo(io, alloc, resolved.abs, resolved.root);
+    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, resolved.root);
     try item.object.put(alloc, "path", .{ .string = resolved.rel });
     try item.object.put(alloc, "root", .{ .string = resolved.root.name });
 
@@ -1178,8 +1386,12 @@ const TestRoots = struct {
     }
 
     fn exists(self: *TestRoots, rel_to_base: []const u8) StatKind {
-        const abs = std.fs.path.join(self.alloc, &.{ self.base_path, rel_to_base }) catch return .missing;
-        return statKind(self.io, abs);
+        const st = self.tmp.dir.statFile(self.io, rel_to_base, .{}) catch return .missing;
+        return switch (st.kind) {
+            .file => .file,
+            .directory => .dir,
+            else => .other,
+        };
     }
 };
 
@@ -1290,6 +1502,136 @@ test "resolveRequestPath: escape attempt → Forbidden" {
     try testing.expectError(error.Forbidden, resolveRequestPath(&c, a, "gcodes/../config/secret"));
 }
 
+test "file operations reject symlink escapes from their registered root" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tr = try TestRoots.init(alloc);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("config/secret.gcode", "secret\n");
+    const target = try std.fs.path.join(alloc, &.{ tr.roots[1].path, "secret.gcode" });
+    const link = try std.fs.path.join(alloc, &.{ tr.roots[0].path, "escape.gcode" });
+    try Dir.cwd().symLink(tr.io, target, link, .{});
+    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"escape.gcode\"}"), alloc));
+    try testing.expect(!ctx.fileExists("gcodes", "escape.gcode"));
+    try testing.expectError(error.Forbidden, handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/escape.gcode\",\"dest\":\"gcodes/copied.gcode\"}"), alloc));
+    try testing.expectEqual(StatKind.missing, tr.exists("gcodes/copied.gcode"));
+    try tr.writeFile("gcodes/inside.gcode", "inside\n");
+    try tr.tmp.dir.symLink(tr.io, tr.roots[1].path, "gcodes/outside", .{});
+    const cases = .{
+        .{ handleGetDirectory, "{\"path\":\"gcodes/outside\"}" },
+        .{ handlePostDirectory, "{\"path\":\"gcodes/outside/new\"}" },
+        .{ handleDeleteDirectory, "{\"path\":\"gcodes/outside/sub\",\"force\":true}" },
+        .{ handleDeleteFile, "{\"path\":\"gcodes/outside/secret.gcode\"}" },
+        .{ handleMove, "{\"source\":\"gcodes/inside.gcode\",\"dest\":\"gcodes/outside/moved.gcode\"}" },
+        .{ handleCopy, "{\"source\":\"gcodes/inside.gcode\",\"dest\":\"gcodes/outside/copied.gcode\"}" },
+    };
+    inline for (cases) |case| try testing.expectError(error.Forbidden, case[0](@ptrCast(&ctx), try objParams(alloc, case[1]), alloc));
+    try testing.expectEqual(StatKind.file, tr.exists("config/secret.gcode"));
+    try testing.expectEqual(StatKind.file, tr.exists("gcodes/inside.gcode"));
+    try testing.expectEqual(StatKind.missing, tr.exists("config/new"));
+    try testing.expectEqual(StatKind.missing, tr.exists("config/moved.gcode"));
+    try testing.expectEqual(StatKind.missing, tr.exists("config/copied.gcode"));
+}
+
+test "root handles retain in-root aliases and reject link loops and recursive copies" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tr = try TestRoots.init(alloc);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("gcodes/real/file.gcode", "G1\n");
+    try tr.tmp.dir.symLink(tr.io, "real", "gcodes/alias", .{});
+    const real = try std.fs.path.join(alloc, &.{ tr.roots[0].path, "real" });
+    try tr.tmp.dir.symLink(tr.io, real, "gcodes/absolute", .{});
+    for ([_][]const u8{ "alias/file.gcode", "absolute/file.gcode" }) |name| {
+        const params = try std.fmt.allocPrint(alloc, "{{\"filename\":\"{s}\"}}", .{name});
+        const metadata = try handleMetadata(@ptrCast(&ctx), try objParams(alloc, params), alloc);
+        try testing.expectEqual(@as(i64, 3), metadata.object.get("size").?.integer);
+        try testing.expectEqualStrings(name, metadata.object.get("filename").?.string);
+    }
+    try tr.writeFile("gcodes/target.gcode", "wrong\n");
+    try tr.writeFile("gcodes/real/target.gcode", "correct\n");
+    try tr.writeFile("gcodes/real/sub/empty.gcode", "");
+    try tr.tmp.dir.symLink(tr.io, "real/sub", "gcodes/inner", .{});
+    try tr.tmp.dir.symLink(tr.io, "inner/../target.gcode", "gcodes/indirect", .{});
+    const indirect = try resolveRequestPath(&ctx, alloc, "gcodes/indirect");
+    const opened = try indirect.openFile(tr.io, alloc);
+    defer opened.close(tr.io);
+    try testing.expectEqualStrings("correct\n", try readFileHeader(tr.io, alloc, opened));
+    try tr.tmp.dir.symLink(tr.io, "loop_b", "gcodes/loop_a", .{});
+    try tr.tmp.dir.symLink(tr.io, "loop_a", "gcodes/loop_b", .{});
+    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"loop_a\"}"), alloc));
+    const prefix_escape = try std.fmt.allocPrint(alloc, "{s}-outside/file.gcode", .{tr.roots[0].path});
+    try tr.writeFile("gcodes-outside/file.gcode", "outside\n");
+    try tr.tmp.dir.symLink(tr.io, prefix_escape, "gcodes/prefix_escape", .{});
+    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"prefix_escape\"}"), alloc));
+    try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/alias/copy\"}"), alloc));
+    try testing.expectEqual(StatKind.missing, tr.exists("gcodes/real/copy"));
+    const copied = try handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/copied\"}"), alloc);
+    try testing.expectEqualStrings("create_dir", copied.object.get("action").?.string);
+    const file = try Dir.cwd().readFileAlloc(tr.io, try std.fs.path.join(alloc, &.{ tr.roots[0].path, "copied/file.gcode" }), alloc, .limited(32));
+    try testing.expectEqualStrings("G1\n", file);
+}
+
+test "root traversal and copies release partial allocations" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tr = try TestRoots.init(alloc);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    try tr.writeFile("gcodes/source/sub/file.gcode", "G28\n");
+    const source = try resolveRequestPath(&ctx, alloc, "gcodes/source");
+    const destination = try resolveRequestPath(&ctx, alloc, "gcodes/destination");
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(gpa: std.mem.Allocator, aio: std.Io, from: Resolved, to: Resolved) !void {
+            var walker = try RootWalker.init(aio, gpa, from);
+            defer walker.deinit(aio);
+            var count: usize = 0;
+            while (try walker.next(aio)) |_| count += 1;
+            try testing.expectEqual(@as(usize, 2), count);
+            try copyTree(aio, gpa, from, to);
+        }
+    }.run, .{ tr.io, source, destination });
+}
+
+test "fuzz root file access: links cannot expose another registered root" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const alloc = arena.allocator();
+            var tr = try TestRoots.init(alloc);
+            defer tr.deinit();
+            var ctx = tr.ctx();
+            defer ctx.deinit();
+            try tr.writeFile("gcodes/sub/file.gcode", "inside\n");
+            try tr.writeFile("config/file.gcode", "outside\n");
+            const segments = [_][]const u8{ "sub", "..", ".", "config", "file.gcode", "alias" };
+            var target: std.ArrayList(u8) = .empty;
+            for (0..1 + smith.value(u8) % 8) |_| {
+                if (target.items.len != 0) try target.append(alloc, '/');
+                try target.appendSlice(alloc, segments[smith.value(u8) % segments.len]);
+            }
+            try tr.tmp.dir.symLink(tr.io, target.items, "gcodes/alias", .{});
+            const path = try resolveRequestPath(&ctx, alloc, "gcodes/alias");
+            const file = path.openFile(tr.io, alloc) catch return;
+            defer file.close(tr.io);
+            try testing.expectEqualStrings("inside\n", try readFileHeader(tr.io, alloc, file));
+            var parent = try path.parent(tr.io, alloc, .{ .follow_leaf = true });
+            defer parent.close(tr.io);
+            const canonical = try parent.dir.realPathFileAlloc(tr.io, parent.name, alloc);
+            try testing.expect(std.mem.startsWith(u8, canonical, tr.roots[0].path));
+            try testing.expectEqual(@as(u64, 7), (try path.stat(tr.io, alloc)).size);
+        }
+    }.run, .{});
+}
+
 // ---- handlers ----
 
 test "handleRoots: lists configured roots with permissions" {
@@ -1357,14 +1699,11 @@ test "handleGetDirectory: dirs/files/disk_usage/root_info shape" {
     try testing.expectEqual(@as(usize, 1), o.get("files").?.array.items.len);
 }
 
-test "diskUsage: missing path returns zero byte counts" {
+test "diskUsage: invalid directory returns zero byte counts" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var tr = try TestRoots.init(a);
-    defer tr.deinit();
-    const missing = try std.fs.path.join(a, &.{ tr.roots[0].path, "missing" });
-    const result = try diskUsage(a, missing);
+    const result = try diskUsage(a, .{ .handle = -1 });
     inline for (.{ "total", "used", "free" }) |field| {
         try testing.expectEqual(@as(i64, 0), result.object.get(field).?.integer);
     }
@@ -1397,17 +1736,18 @@ test "handleGetDirectory: extended gcodes include metadata and preserve basename
     try testing.expect(config.object.get("files").?.array.items[0].object.get("slicer") == null);
 }
 
-test "fuzz diskUsage: filesystem paths return bounded byte counts" {
+test "fuzz diskUsage: directory handles return bounded byte counts" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var suffix: [32]u8 = undefined;
-            smith.bytesWithHash(&suffix, 0);
-            for (&suffix) |*byte| byte.* = 'a' + byte.* % 26;
-            const path = if (suffix[0] % 2 == 0) "." else try std.fmt.allocPrint(a, "./{s}/missing", .{suffix});
-            const result = try diskUsage(a, path);
+            const dir: Dir = if (smith.valueWithHash(bool, 0))
+                try Dir.cwd().openDir(testing.io, ".", .{ .iterate = true })
+            else
+                .{ .handle = -1 };
+            defer if (dir.handle != -1) dir.close(testing.io);
+            const result = try diskUsage(a, dir);
             const total = result.object.get("total").?.integer;
             const used = result.object.get("used").?.integer;
             const free = result.object.get("free").?.integer;
@@ -1545,7 +1885,9 @@ test "handleCopy: source == destination is rejected (no self-truncation)" {
     try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/a.gcode\",\"dest\":\"gcodes/a.gcode\"}"), a));
     try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/a.gcode\",\"dest\":\"gcodes\"}"), a));
     // The source file is untouched (still its original size, not truncated to 0).
-    const md = try buildMetadata(tr.io, a, try std.fs.path.join(a, &.{ tr.roots[0].path, "a.gcode" }), "a.gcode");
+    const file = try Dir.cwd().openFile(tr.io, try std.fs.path.join(a, &.{ tr.roots[0].path, "a.gcode" }), .{});
+    defer file.close(tr.io);
+    const md = try buildMetadata(tr.io, a, file, "a.gcode");
     try testing.expectEqual(@as(i64, @intCast(contents.len)), md.object.get("size").?.integer);
 }
 
@@ -1735,7 +2077,9 @@ test "fuzz readFileHeader: reads a bounded prefix of any file size" {
             @memset(content, 'G');
             try tr.writeFile("gcodes/prefix.gcode", content);
             const abs = try std.fs.path.join(a, &.{ tr.roots[0].path, "prefix.gcode" });
-            const header = try readFileHeader(tr.io, a, abs);
+            const file = try Dir.cwd().openFile(tr.io, abs, .{});
+            defer file.close(tr.io);
+            const header = try readFileHeader(tr.io, a, file);
             try testing.expectEqualSlices(u8, content[0..@min(size, header_max_bytes)], header);
         }
     }.run, .{});

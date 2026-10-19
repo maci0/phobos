@@ -7,17 +7,6 @@ pub const ParseError = error{InvalidChecksum};
 
 const file_cmds = [_][]const u8{ "M23", "M30", "M32", "M36", "M37", "M98" };
 
-fn hasM112(line: []const u8) bool {
-    if (line.len < 4) return false;
-    var i: usize = 0;
-    while (i + 4 <= line.len) : (i += 1) {
-        const c0 = line[i];
-        const m = if (c0 == 'm') 'M' else c0;
-        if (m == 'M' and line[i + 1] == '1' and line[i + 2] == '1' and line[i + 3] == '2') return true;
-    }
-    return false;
-}
-
 fn isFileCmd(cmd: []const u8) bool {
     for (file_cmds) |c| if (std.mem.eql(u8, c, cmd)) return true;
     return false;
@@ -53,7 +42,7 @@ pub const PanelDue = struct {
 
     pub fn processLine(self: *PanelDue, line: []const u8) ParseError!void {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (hasM112(trimmed)) {
+        if (std.ascii.findIgnoreCase(trimmed, "M112") != null) {
             self.emergency_stop = true;
             self.part_count = 0;
             return;
@@ -158,6 +147,29 @@ test "processLine: bad checksum is rejected and M112 is emergency stop" {
     var due = PanelDue{ .enable_checksum = true };
     try std.testing.expectError(error.InvalidChecksum, due.processLine("N1 M23 f.gco*0"));
     due.enable_checksum = false;
-    try due.processLine("M112");
-    try std.testing.expect(due.emergency_stop);
+    for ([_][]const u8{ "M112", "m112", "N12 m112 ; stop", "xxM112" }) |line| {
+        due.emergency_stop = false;
+        try due.processLine(line);
+        try std.testing.expect(due.emergency_stop);
+    }
+}
+
+test "fuzz processLine: arbitrary serial input preserves emergency detection" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var buf: [128]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const line = buf[0 .. smith.value(u8) % (buf.len + 1)];
+            var due: PanelDue = .{};
+            try due.processLine(line);
+            try std.testing.expect(due.part_count <= due.parts.len);
+            due.enable_checksum = true;
+            due.processLine(line) catch |err| try std.testing.expectEqual(error.InvalidChecksum, err);
+            var stop_buf: [buf.len + 4]u8 = undefined;
+            const with_stop = try std.fmt.bufPrint(&stop_buf, "{s}m112", .{line});
+            try due.processLine(with_stop);
+            try std.testing.expect(due.emergency_stop);
+            try std.testing.expectEqual(@as(usize, 0), due.part_count);
+        }
+    }.run, .{});
 }

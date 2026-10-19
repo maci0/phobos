@@ -176,8 +176,7 @@ fn detectSimplify3D(text: []const u8) ?SlicerInfo {
     const ver_prefix = "Version ";
     if (std.mem.indexOf(u8, line, ver_prefix)) |vi| {
         const ver_start = vi + ver_prefix.len;
-        var ver_end = ver_start;
-        while (ver_end < line.len and !std.ascii.isWhitespace(line[ver_end]) and line[ver_end] != '\r') : (ver_end += 1) {}
+        const ver_end = std.mem.findAnyPos(u8, line, ver_start, &std.ascii.whitespace) orelse line.len;
         return SlicerInfo{ .name = "Simplify3D", .version = line[ver_start..ver_end] };
     }
     return SlicerInfo{ .name = "Simplify3D", .version = "" };
@@ -370,8 +369,7 @@ fn findNozzleDiameter(text: []const u8) ?f64 {
 /// Helper: find a comma-separated list of floats after prefix and return their sum.
 fn findSumFloatsAfterPrefix(text: []const u8, prefix: []const u8) ?f64 {
     const idx = std.mem.indexOf(u8, text, prefix) orelse return null;
-    var start = idx + prefix.len;
-    while (start < text.len and (text[start] == ' ' or text[start] == '\t')) : (start += 1) {}
+    const start = idx + prefix.len;
     const line_end = scanLineEnd(text, start);
     const num_str = std.mem.trim(u8, text[start..line_end], " \t\r");
     var sum: f64 = 0;
@@ -390,8 +388,7 @@ fn findSumFloatsAfterPrefix(text: []const u8, prefix: []const u8) ?f64 {
 /// Helper: find floats inside brackets "[...]" after prefix and return their sum.
 fn findBracketedSumFloats(text: []const u8, prefix: []const u8) ?f64 {
     const idx = std.mem.indexOf(u8, text, prefix) orelse return null;
-    var start = idx + prefix.len;
-    while (start < text.len and (text[start] == ' ' or text[start] == '\t')) : (start += 1) {}
+    var start = std.mem.findNonePos(u8, text, idx + prefix.len, " \t") orelse text.len;
     if (start >= text.len or text[start] != '[') return null;
     start += 1; // skip '['
     const line_end = scanLineEnd(text, start);
@@ -539,8 +536,7 @@ fn findMaxG1Z(text: []const u8) ?f64 {
             if (zi > 0 and trimmed[zi - 1] != ' ') continue;
             const zstart = zi + 1;
             if (zstart >= trimmed.len) continue;
-            var zend = zstart;
-            while (zend < trimmed.len and (std.ascii.isDigit(trimmed[zend]) or trimmed[zend] == '.' or trimmed[zend] == '-')) : (zend += 1) {}
+            const zend = std.mem.findNonePos(u8, trimmed, zstart, "0123456789.-") orelse trimmed.len;
             if (zend == zstart) continue;
             if (std.fmt.parseFloat(f64, trimmed[zstart..zend])) |z| {
                 if (max_z == null or z > max_z.?) max_z = z;
@@ -560,8 +556,7 @@ fn scanLineEnd(text: []const u8, start: usize) usize {
 
 fn findIntAfterPrefix(text: []const u8, prefix: []const u8) ?i64 {
     const idx = std.mem.indexOf(u8, text, prefix) orelse return null;
-    var start = idx + prefix.len;
-    while (start < text.len and (text[start] == ' ' or text[start] == '\t')) : (start += 1) {}
+    const start = idx + prefix.len;
     const line_end = scanLineEnd(text, start);
     const num_str = std.mem.trim(u8, text[start..line_end], " \t\r");
     return std.fmt.parseInt(i64, num_str, 10) catch null;
@@ -569,8 +564,7 @@ fn findIntAfterPrefix(text: []const u8, prefix: []const u8) ?i64 {
 
 fn findFloatAfterPrefix(text: []const u8, prefix: []const u8) ?f64 {
     const idx = std.mem.indexOf(u8, text, prefix) orelse return null;
-    var start = idx + prefix.len;
-    while (start < text.len and (text[start] == ' ' or text[start] == '\t')) : (start += 1) {}
+    const start = idx + prefix.len;
     const line_end = scanLineEnd(text, start);
     const num_str = std.mem.trim(u8, text[start..line_end], " \t\rs");
     // Strip trailing 's' (seconds) or 'm' (meters) suffix.

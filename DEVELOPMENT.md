@@ -89,6 +89,9 @@ These differ from older Zig docs — use these forms:
 - **Filesystem**: `std.fs.cwd()` is gone; FS ops need `std.Io.Dir`/`std.Io.File` + a live
   `io`. Virtual files (`/proc`, `/sys`) report size 0 — read by streaming to EOF, not by
   size-based `allocRemaining`.
+  File-root operations use `file_manager.Resolved` to obtain checked handles;
+  never open its lexical `abs` path. See [`docs/STDLIB.md`](docs/STDLIB.md) for
+  symlink handling, atomic writes and the remaining platform adapters.
 - **errno on raw linux syscalls**: `std.os.linux.errno(rc)` returns `std.os.linux.E`.
 
 ## 4. The concurrency model (read before touching handlers or notifications)

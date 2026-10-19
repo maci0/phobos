@@ -496,22 +496,9 @@ fn getBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
 fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) ?[]const u8 {
     if (repo_path.len == 0) return null;
 
-    var arg_buf: [8][]const u8 = undefined;
-    var n: usize = 0;
-    arg_buf[n] = "git";
-    n += 1;
-    arg_buf[n] = "-C";
-    n += 1;
-    arg_buf[n] = repo_path;
-    n += 1;
-    for (argv) |a| {
-        arg_buf[n] = a;
-        n += 1;
-    }
-
-    const result = std.process.run(alloc, io, .{
-        .argv = arg_buf[0..n],
-    }) catch return null;
+    const args = std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv }) catch return null;
+    defer alloc.free(args);
+    const result = std.process.run(alloc, io, .{ .argv = args }) catch return null;
     defer alloc.free(result.stderr);
 
     if (result.term != .exited or result.term.exited != 0) {
@@ -543,22 +530,9 @@ fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: 
 fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) bool {
     if (repo_path.len == 0) return false;
 
-    var arg_buf: [8][]const u8 = undefined;
-    var n: usize = 0;
-    arg_buf[n] = "git";
-    n += 1;
-    arg_buf[n] = "-C";
-    n += 1;
-    arg_buf[n] = repo_path;
-    n += 1;
-    for (argv) |a| {
-        arg_buf[n] = a;
-        n += 1;
-    }
-
-    const result = std.process.run(alloc, io, .{
-        .argv = arg_buf[0..n],
-    }) catch return false;
+    const args = std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv }) catch return false;
+    defer alloc.free(args);
+    const result = std.process.run(alloc, io, .{ .argv = args }) catch return false;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
@@ -1661,30 +1635,66 @@ test "gitFetch: returns false for nonexistent repo" {
     try testing.expect(!gitFetch(threaded.io(), std.heap.smp_allocator, "/nonexistent/path"));
 }
 
-test "gitFetch: succeeds for real repo" {
+const TestRepo = struct {
+    tmp: testing.TmpDir,
+    path: [:0]u8,
+
+    fn init() !TestRepo {
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const path = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+        errdefer testing.allocator.free(path);
+        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "init", "--initial-branch=main" }));
+        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial" }));
+        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "remote", "add", "origin", path }));
+        return .{ .tmp = tmp, .path = path };
+    }
+
+    fn deinit(self: *TestRepo) void {
+        self.tmp.cleanup();
+        testing.allocator.free(self.path);
+    }
+};
+
+test "gitFetch: fetches only the local fixture origin" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    // Use the project's own git repo (always available during dev/test).
-    // Skip if no origin remote — git fetch needs a remote to succeed.
-    if (!gitCheck(io, std.heap.smp_allocator, ".", &.{ "remote", "get-url", "origin" })) {
-        return error.SkipZigTest;
-    }
-    try testing.expect(gitFetch(io, std.heap.smp_allocator, "."));
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    try testing.expect(gitFetch(io, testing.allocator, repo.path));
+    const head = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "HEAD" }).?;
+    defer testing.allocator.free(head);
+    const remote = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "origin/main" }).?;
+    defer testing.allocator.free(remote);
+    try testing.expectEqualStrings(head, remote);
 }
 
-test "handleRefresh: runs gitFetch for sources with repo_path set (real repo)" {
+test "fuzz git command arguments: long read-only lists retain every argument" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var repo = try TestRepo.init();
+            defer repo.deinit();
+            var args: [32][]const u8 = @splat("--is-inside-work-tree");
+            args[0] = "rev-parse";
+            const count = 2 + @as(usize, smith.value(u8) % 31);
+            try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, args[0..count]));
+            const output = gitOutput(testing.io, testing.allocator, repo.path, args[0..count]) orelse return error.MissingGitOutput;
+            defer testing.allocator.free(output);
+            try testing.expectEqual(count - 1, std.mem.count(u8, output, "true"));
+        }
+    }.run, .{});
+}
+
+test "handleRefresh: fetches sources from a local repository" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    // Skip if no origin remote — git fetch needs a remote to succeed.
-    if (!gitCheck(io, std.heap.smp_allocator, ".", &.{ "remote", "get-url", "origin" })) {
-        return error.SkipZigTest;
-    }
-    // Use the current directory as repo_path so gitFetch actually works.
+    var repo = try TestRepo.init();
+    defer repo.deinit();
     const test_sources = [_]Source{
         .{ .name = "system", .type = .system },
-        .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = "." },
+        .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = repo.path, .branch = "main" },
     };
     var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1693,23 +1703,27 @@ test "handleRefresh: runs gitFetch for sources with repo_path set (real repo)" {
     const v = try handleRefresh(@ptrCast(&ctx), .null, a);
     try testing.expect(v.object.get("version_info") != null);
     try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
+    try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
 }
 
 test "handleStatus: refresh=true fetches before building payload" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var repo = try TestRepo.init();
+    defer repo.deinit();
     const test_sources = [_]Source{
         .{ .name = "system", .type = .system },
-        .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = "." },
+        .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = repo.path, .branch = "main" },
     };
     var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const v = try handleStatus(@ptrCast(&ctx), .{ .bool = true }, a);
+    const v = try handleStatus(@ptrCast(&ctx), try objParams(a, "{\"refresh\":true}"), a);
     try testing.expect(v.object.get("version_info") != null);
     try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
+    try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
 }
 
 // ---- fuzz ----

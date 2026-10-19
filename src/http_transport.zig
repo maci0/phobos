@@ -89,7 +89,7 @@ pub const Response = struct {
     /// instead of sending `body` — so large gcode downloads use constant memory
     /// rather than buffering the whole file in the request arena. `body` is
     /// ignored when this is non-null.
-    file_path: ?[]const u8 = null,
+    file_request: ?file_manager.Resolved = null,
 };
 
 /// Context bundling the shared state a connection needs.
@@ -646,10 +646,10 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
             Response{ .status = .internal_server_error, .body = "{\"error\":{\"code\":500,\"message\":\"Internal Server Error\"}}" };
 
         const headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
-        if (resp.file_path) |fpath| {
+        if (resp.file_request) |file_request| {
             // Stream the file from disk in 64 KB chunks — constant memory
             // regardless of file size. Falls back to a 404 on open failure.
-            sendFileStreaming(io, &req, fpath, headers) catch return;
+            sendFileStreaming(io, &req, file_request, alloc, headers) catch return;
         } else {
             req.respond(resp.body, .{
                 .status = resp.status,
@@ -665,8 +665,9 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
 /// content-length set from the file size, so a download uses constant memory
 /// regardless of file size (large gcode would otherwise buffer whole-file in the
 /// request arena). Replies 404 if the file can't be opened.
-fn sendFileStreaming(io: Io, req: *std.http.Server.Request, abs: []const u8, headers: []const std.http.Header) !void {
-    const f = std.Io.Dir.cwd().openFile(io, abs, .{}) catch {
+fn sendFileStreaming(io: Io, req: *std.http.Server.Request, file_request: file_manager.Resolved, alloc: std.mem.Allocator, headers: []const std.http.Header) !void {
+    const f = file_request.openFile(io, alloc) catch |err| {
+        if (err == error.Forbidden) return req.respond("{\"error\":{\"code\":403,\"message\":\"Forbidden\"}}", .{ .status = .forbidden, .extra_headers = headers });
         return req.respond("{\"error\":{\"code\":404,\"message\":\"File not found\"}}", .{
             .status = .not_found,
             .extra_headers = headers,
@@ -847,12 +848,13 @@ fn handleFileServe(
     };
     // Verify the file exists here so the 404 is correct for ALL consumers, not
     // only the streaming HTTP path (which opens it again — a tiny benign re-open).
-    const probe = std.Io.Dir.cwd().openFile(srv.io, resolved.abs, .{}) catch {
+    const probe = resolved.openFile(srv.io, alloc) catch |err| {
+        if (err == error.Forbidden or err == error.InvalidParams) return fileErrResponse(alloc, err);
         const b = try errorBody(alloc, 404, "File not found");
         return .{ .status = .not_found, .body = b };
     };
     probe.close(srv.io);
-    return .{ .status = .ok, .body = "", .file_path = resolved.abs };
+    return .{ .status = .ok, .body = "", .file_request = resolved };
 }
 
 fn mapResolveErr(err: file_manager.ResolveError) anyerror {
@@ -979,28 +981,19 @@ fn handleUploadStreaming(
             const res = file_manager.resolveRequestPath(fctx, alloc, req_path) catch
                 return bad(req, alloc, headers, "Invalid upload path");
             if (!res.root.full_access or res.rel.len == 0) return bad(req, alloc, headers, "Invalid upload path");
-            const dir = std.Io.Dir.cwd();
-            if (std.fs.path.dirname(res.abs)) |d| dir.createDirPath(io, d) catch {};
-            const file = dir.createFile(io, res.abs, .{}) catch return bad(req, alloc, headers, "Write error");
-            // If the body is truncated or the disk fills mid-stream, unlink the
-            // partial file so a half-written gcode can't be listed/printed.
-            var upload_ok = false;
-            errdefer if (!upload_ok) dir.deleteFile(io, res.abs) catch {};
-            {
-                defer file.close(io);
-                var wbuf2: [32 * 1024]u8 = undefined;
-                var fw = file.writer(io, &wbuf2);
-                streamUntilSeparator(r, &fw.interface, part_sep, max_upload_bytes) catch |e| {
-                    dir.deleteFile(io, res.abs) catch {};
-                    if (e == error.UploadTooLarge) return tooLarge(req, alloc, headers);
-                    return bad(req, alloc, headers, "Invalid upload form");
-                };
-                fw.interface.flush() catch {
-                    dir.deleteFile(io, res.abs) catch {};
-                    return bad(req, alloc, headers, "Write error");
-                };
-            }
-            upload_ok = true;
+            var parent = res.parent(io, alloc, .{ .make_path = true }) catch return bad(req, alloc, headers, "Invalid upload path");
+            defer parent.close(io);
+            var output = parent.dir.createFileAtomic(io, parent.name, .{ .replace = true }) catch return bad(req, alloc, headers, "Write error");
+            defer output.deinit(io);
+            var wbuf2: [32 * 1024]u8 = undefined;
+            var fw = output.file.writer(io, &wbuf2);
+            streamUntilSeparator(r, &fw.interface, part_sep, max_upload_bytes) catch |err| {
+                if (err == error.UploadTooLarge) return tooLarge(req, alloc, headers);
+                return bad(req, alloc, headers, "Invalid upload form");
+            };
+            fw.interface.flush() catch return bad(req, alloc, headers, "Write error");
+            output.file.sync(io) catch return bad(req, alloc, headers, "Write error");
+            output.replace(io) catch return bad(req, alloc, headers, "Write error");
             resolved = res;
         } else if (extractDispositionField(cd, "name")) |n| {
             // Small field value — buffer it (root / path).

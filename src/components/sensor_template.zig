@@ -562,7 +562,7 @@ const Parser = struct {
         const quote = self.src[self.pos];
         self.pos += 1;
         const start = self.pos;
-        while (self.pos < self.src.len and self.src[self.pos] != quote) self.pos += 1;
+        self.pos = std.mem.findScalarPos(u8, self.src, self.pos, quote) orelse self.src.len;
         if (self.pos >= self.src.len) return error.ParseError;
         const s = self.src[start..self.pos];
         self.pos += 1;

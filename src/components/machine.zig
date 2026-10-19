@@ -700,10 +700,8 @@ pub fn parseVersionParts(version: []const u8) struct { major: []const u8 = "", m
     var n: usize = 0;
     var i: usize = 0;
     while (i < version.len and n < 3) {
-        while (i < version.len and !std.ascii.isDigit(version[i])) i += 1;
-        if (i >= version.len) break;
-        const start = i;
-        while (i < version.len and std.ascii.isDigit(version[i])) i += 1;
+        const start = std.mem.findAnyPos(u8, version, i, "0123456789") orelse break;
+        i = std.mem.findNonePos(u8, version, start, "0123456789") orelse version.len;
         out[n] = version[start..i];
         n += 1;
         if (i < version.len and version[i] == '.') i += 1;

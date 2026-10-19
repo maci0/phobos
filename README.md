@@ -46,8 +46,8 @@ uses a vendored SQLite for moonraker-sql.db compatibility.) Details:
 - **100% of Moonraker's API surface is covered**: 130/130 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
-- 1427 in-tree tests pass, with one gated real-Klippy test skipped.
-- [v0.1.3 release notes](docs/releases/v0.1.3.md) cover native I/O, owned state, and client transport fixes. [v0.1.2](docs/releases/v0.1.2.md) covers the ARM Fluidd crash fix; [v0.1.1](docs/releases/v0.1.1.md) records earlier Forge-X checks.
+- 1435 in-tree tests pass, with one gated real-Klippy test skipped.
+- [v0.1.4 release notes](docs/releases/v0.1.4.md) cover standard streams, bounded containers and root-contained file operations. [v0.1.3](docs/releases/v0.1.3.md) covers native I/O, owned state and client transports. [v0.1.2](docs/releases/v0.1.2.md) covers the ARM Fluidd crash fix.
 - This is **surface + shape parity**, plus a live Klippy path validated by a gated real-Klippy
   integration test. Byte-identical *behavioral* parity (verified against a running stock
   Moonraker) is still being hardened — see [`TODO.md`](TODO.md).

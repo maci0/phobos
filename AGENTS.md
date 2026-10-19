@@ -68,6 +68,9 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
       reads, close, cancellation and device control use `std.Io`.
       See `docs/STDLIB.md` for the checked APIs and adapter limits.
     - socket addresses and bound ports come from `socket.address`, not raw syscalls
+    - file-root paths open through `file_manager.Resolved`; its `abs` field is
+      only a display/cache key. Use checked directory handles for mutations and
+      atomic replacement for uploaded or copied files.
     - timestamps use `std.Io.Clock`; secrets use `io.randomSecure` with errors
       propagated. Pass the startup I/O handle through constructors. `clock_io`
       keeps clocks available before optional component I/O and workers are enabled.
@@ -168,6 +171,8 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
     - tests run under `std.testing.allocator` — it detects leaks/double-free, so
       exercise allocation paths with it (arenas mask these bugs)
     - keep fuzz harnesses deterministic and bounded
+    - update tests fetch only local temporary repositories. Never use the
+      checkout's `origin` or a real deployment for refresh/recovery tests.
     - the Klippy sim (`testutil/klippy_sim.zig`) does NOT reproduce a real
       Klippy's continuous status flood or backpressure, so it MASKS bridge
       concurrency/protocol bugs (a proxy deadlock + a wrong `objects/subscribe`

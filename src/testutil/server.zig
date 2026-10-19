@@ -1078,6 +1078,51 @@ test "files: encoded names work through metadata download and delete" {
     try std.testing.expectEqual(@as(i64, 403), denied.value.object.get("error").?.object.get("code").?.integer);
 }
 
+test "files: failed upload preserves an existing complete file" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const upload = try ts.uploadFile(alloc, "gcodes", null, "existing.gcode", "complete\n");
+    defer alloc.free(upload);
+    const broken = "--broken\r\nContent-Disposition: form-data; name=\"file\"; filename=\"existing.gcode\"\r\n\r\npartial";
+    const rejected = try ts.postJson(alloc, "/server/files/upload", broken);
+    defer alloc.free(rejected);
+    const parsed = try resultOf(alloc, rejected);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 400), parsed.value.object.get("error").?.object.get("code").?.integer);
+    const contents = try ts.get(alloc, "/server/files/gcodes/existing.gcode");
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("complete\n", contents);
+}
+
+test "files: downloads and uploads reject an escaping directory link" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    var outside = std.testing.tmpDir(.{});
+    defer outside.cleanup();
+    try outside.dir.writeFile(ts.io, .{ .sub_path = "outside.gcode", .data = "outside\n" });
+    const target = try outside.dir.realPathFileAlloc(ts.io, ".", alloc);
+    defer alloc.free(target);
+    const root = ts.app.file_ctx.findRoot("gcodes").?;
+    const link = try std.fs.path.join(alloc, &.{ root.path, "escape" });
+    defer alloc.free(link);
+    try std.Io.Dir.cwd().symLink(ts.io, target, link, .{});
+    const download = try ts.get(alloc, "/server/files/gcodes/escape/outside.gcode");
+    defer alloc.free(download);
+    const result = try resultOf(alloc, download);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(i64, 403), result.value.object.get("error").?.object.get("code").?.integer);
+    const upload = try ts.uploadFile(alloc, "gcodes", "escape", "outside.gcode", "replacement\n");
+    defer alloc.free(upload);
+    const failure = try resultOf(alloc, upload);
+    defer failure.deinit();
+    try std.testing.expectEqual(@as(i64, 400), failure.value.object.get("error").?.object.get("code").?.integer);
+    const contents = try outside.dir.readFileAlloc(ts.io, "outside.gcode", alloc, .limited(32));
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("outside\n", contents);
+}
+
 test "files: get_directory shows uploaded file with disk_usage and root_info" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
