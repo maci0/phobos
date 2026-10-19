@@ -487,6 +487,13 @@ pub fn connHandler(ctx: *anyopaque, _: Io, stream: net.Stream) void {
 /// Serve a single HTTP connection: build the std.http.Server over the stream,
 /// receive the head, dispatch, and respond. Keeps the connection alive for
 /// subsequent requests until the client closes or an error occurs.
+fn peerAddress(buf: []u8, address: net.IpAddress) ![]const u8 {
+    return switch (address) {
+        .ip4 => |ip| std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip.bytes[0], ip.bytes[1], ip.bytes[2], ip.bytes[3] }),
+        .ip6 => |ip| std.fmt.bufPrint(buf, "{f}", .{net.Ip6Address.Unresolved{ .bytes = ip.bytes, .interface_name = null }}),
+    };
+}
+
 pub fn serveConn(srv: *Server, stream: net.Stream) void {
     serveConnInner(srv, stream) catch {};
 }
@@ -494,20 +501,8 @@ pub fn serveConn(srv: *Server, stream: net.Stream) void {
 fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     const io = srv.io;
 
-    // Extract the socket peer IP once per connection for trusted-client auth.
-    // `sockaddr.in.addr` is network byte order. Its in-memory bytes are the
-    // octets; swapping to host order and then printing the low byte first
-    // reverses them (127.0.0.1 became 1.0.0.127).
-    var peer_ip_buf: [16]u8 = undefined;
-    const peer_ip: ?[]const u8 = blk: {
-        var sa: std.os.linux.sockaddr.in = undefined;
-        var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
-        const rc = std.os.linux.getpeername(stream.socket.handle, @ptrCast(&sa), &slen);
-        if (std.os.linux.errno(rc) != .SUCCESS) break :blk null;
-        if (sa.family != std.os.linux.AF.INET) break :blk null;
-        const b: *const [4]u8 = @ptrCast(&sa.addr);
-        break :blk std.fmt.bufPrint(&peer_ip_buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch null;
-    };
+    var peer_ip_buf: [64]u8 = undefined;
+    const peer_ip: ?[]const u8 = try peerAddress(&peer_ip_buf, stream.socket.address);
 
     // Reader buffer also backs WebSocket input after upgrade
     // (std.http.WebSocket.input == server.reader.in), and `readSmallMessage`
@@ -1473,6 +1468,23 @@ test "fuzz_http_transport: random request bytes never crash, always a well-forme
             _ = parsed;
             // Status must be a sane HTTP status.
             try std.testing.expect(@backingInt(resp.status) >= 200);
+        }
+    }.run, .{});
+}
+
+test "peer addresses exclude ports for both IP families" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("127.0.0.1", try peerAddress(&buf, try net.IpAddress.parse("127.0.0.1", 1234)));
+    try std.testing.expectEqualStrings("::1", try peerAddress(&buf, try net.IpAddress.parse("::1", 1234)));
+}
+
+test "fuzz peer address formatting stays within its buffer" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var bytes: [16]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var buf: [64]u8 = undefined;
+            _ = try peerAddress(&buf, .{ .ip6 = .{ .bytes = bytes, .port = 65535, .interface = .none } });
         }
     }.run, .{});
 }

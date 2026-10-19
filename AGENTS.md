@@ -30,7 +30,7 @@ Phobos is a memory-efficient Zig 0.17 reimplementation of Moonraker. See
 ## Stay on Zig 0.17.0
 
 Avoid writing code that assumes older `std.fs`, `std.net`, or `std.Thread`
-synchronization APIs. This Zig build is stripped: `std.fs.cwd`,
+synchronization APIs. In Zig 0.17, `std.fs.cwd`,
 `std.posix.access`, `std.Thread.Mutex`, and `std.Thread.sleep` are NOT available
 — verify an API exists before using it, and prefer the `std.Io` paths below.
 (`std.Thread.spawn`/`join` ARE available and used for background workers; only
@@ -62,14 +62,19 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
     - no new fork/exec code
     - avoid `std.os`, `std.posix`, raw libc unless there is no Zig 0.17 API
     - keep any unavoidable low-level code behind a local wrapper
-    - sanctioned exceptions already in use (no `std.Io` equivalent — reuse these
-      patterns, don't invent new ones): termios in `serial.zig`, the bound-port
-      read via `std.os.linux.getsockname` (mirror `io.zig` `Listener.port`),
-      `std.os.linux.clock_gettime` for timestamps, sysfs GPIO in `gpio_sysfs.zig`
+    - platform exceptions: termios in `serial.zig`, inotify in `file_manager.zig`,
+      system identity and video ioctls in `machine.zig`, and the C `statvfs` shim.
+      Use typed platform declarations for these layouts and constants.
+    - socket addresses and bound ports come from `socket.address`, not raw syscalls
+    - timestamps use `std.Io.Clock`; secrets use `io.randomSecure` with errors
+      propagated. Pass the startup I/O handle through constructors. `clock_io`
+      keeps clocks available before optional component I/O and workers are enabled.
+    - interruptible timers use `std.Io.Event.waitTimeout` with an absolute deadline
+      to handle spurious wakes. Signal the event before joining the worker.
 
 - Prefer structured stdlib helpers:
     - `std.mem` for slicing/search/copying
-    - `std.fmt.bufPrint` / `bufPrintZ` for fixed buffers
+    - `std.fmt.bufPrint` / `bufPrintSentinel` for fixed buffers
     - `std.testing` helpers in tests
     - `std.heap` allocators only when fixed buffers are not enough
 

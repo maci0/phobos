@@ -302,7 +302,7 @@ fn run(init: std.process.Init) !void {
     // Start the background Klippy Unix-socket bridge. Only the real daemon
     // path calls start(); tests go through App.init/httpServer which only
     // calls setIo() so no background task is spawned during testing.
-    server_app.klippy_ctx.start();
+    try server_app.klippy_ctx.start();
     try server_app.data_store_ctx.startSampler();
     server_app.update_ctx.startAutoRefresh();
 
@@ -417,7 +417,7 @@ pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io) !void {
 
 /// Build the --dump-api JSON without touching stdout (testable).
 pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io) ![]u8 {
-    var server_app = try app.App.init(alloc);
+    var server_app = try app.App.init(alloc, aio);
     defer server_app.deinit(aio);
 
     // Collect endpoints from the registry, grouped by path.

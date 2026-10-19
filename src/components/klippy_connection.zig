@@ -14,6 +14,7 @@
 //!   https://www.klipper3d.org/API_Server.html
 
 const std = @import("std");
+const sleep = @import("../util/sleep.zig");
 const net = std.Io.net;
 const jv = @import("../json/value.zig");
 const notify = @import("../server/notify.zig");
@@ -534,7 +535,8 @@ pub const KlippyCtx = struct {
     remote_methods: []const []const u8 = &.{},
 
     /// Set by stop() to signal the background klippyTask to exit.
-    stopping: bool = false,
+    stopping: std.Io.Event = .unset,
+    task: ?std.Io.Future(void) = null,
 
     /// Extra Klipper object names that other components want subscribed (e.g. the
     /// MQTT bridge's status_objects: heaters, fans...). Merged with the base set
@@ -586,6 +588,7 @@ pub const KlippyCtx = struct {
     }
 
     pub fn deinit(self: *KlippyCtx) void {
+        if (self.io) |io| self.stop(io);
         self.read_buf.deinit(self.gpa);
         var sit = self.extra_sub_objects.keyIterator();
         while (sit.next()) |k| self.gpa.free(k.*);
@@ -647,26 +650,19 @@ pub const KlippyCtx = struct {
     /// Start the background Klippy connection task. Must be called after setIo().
     /// Spawns a task on the thread pool that connects, handshakes, and enters
     /// the read loop, with automatic reconnection on failure.
-    pub fn start(self: *KlippyCtx) void {
-        const io = self.io orelse return;
-        _ = io.async(klippyTask, .{self});
+    pub fn start(self: *KlippyCtx) !void {
+        if (self.task != null) return;
+        const io = self.io orelse return error.NotReady;
+        self.stopping.reset();
+        self.task = try io.concurrent(klippyTask, .{self});
     }
 
-    /// Signal the background klippyTask to exit and close any active stream.
-    /// Safe to call multiple times. After this returns, the background task
-    /// will exit its loop at the next sleep/error boundary; call
-    /// `threaded.deinit()` to join it.
+    /// Cancel and join the owned task before closing its stream. Idempotent.
     pub fn stop(self: *KlippyCtx, io: std.Io) void {
-        self.stopping = true;
-        // Read self.stream WITHOUT stream_mutex on purpose: the background task
-        // may hold stream_mutex while blocked in readv, so acquiring it here
-        // first would deadlock. shutdown(.recv) interrupts that blocked read so
-        // it releases the mutex; closeStream then takes the mutex and closes.
-        // Worst case this shutdown hits an already-closed/stale fd → harmless
-        // (caught). Only do this from stop(), never from the klippyTask
-        // reconnect error path.
-        if (self.stream) |*s| {
-            s.shutdown(io, .recv) catch {};
+        self.stopping.set(io);
+        if (self.task) |*task| {
+            task.cancel(io);
+            self.task = null;
         }
         self.closeStream(io);
     }
@@ -677,18 +673,18 @@ pub const KlippyCtx = struct {
 
     fn klippyTask(self: *KlippyCtx) void {
         const io = self.io.?;
-        while (!self.stopping) {
+        while (!self.stopping.isSet()) {
             _ = self.setState(.connecting);
             self.connectAndHandshake() catch {
                 _ = self.setState(.disconnected);
                 self.emitDisconnected(io);
                 self.closeStream(io);
                 // Check stopping before reconnect sleep.
-                if (self.stopping) break;
+                if (self.stopping.isSet()) break;
                 // Sleep ~1s between reconnect attempts (monotonic, so a wall-clock
                 // adjustment can't lengthen/shorten the backoff).
-                std.Io.sleep(self.io.?, std.Io.Duration.fromSeconds(1), .awake) catch {};
-                if (self.stopping) break;
+                if (sleep.untilStopped(io, .fromSeconds(1), &self.stopping)) break;
+                if (self.stopping.isSet()) break;
                 continue;
             };
             // Handshake succeeded — the connection is ready for request().
@@ -707,9 +703,9 @@ pub const KlippyCtx = struct {
             _ = self.setState(.disconnected);
             self.emitDisconnected(io);
             self.closeStream(io);
-            if (self.stopping) break;
-            std.Io.sleep(io, std.Io.Duration.fromSeconds(1), .awake) catch {};
-            if (self.stopping) break;
+            if (self.stopping.isSet()) break;
+            if (sleep.untilStopped(io, .fromSeconds(1), &self.stopping)) break;
+            if (self.stopping.isSet()) break;
             continue;
         }
     }
@@ -719,8 +715,8 @@ pub const KlippyCtx = struct {
         // never close the fd out from under an in-flight `request()` that holds
         // `stream_mutex` (use-after-close), and two concurrent closeStream calls
         // (stop() + the reconnect error path) can't double-close (only the one
-        // that observes non-null closes). stop() issues shutdown(.recv) first to
-        // unblock a request blocked in readFrame so it releases the mutex.
+        // that observes non-null closes). stop() cancels and joins the reader
+        // before this teardown.
         // lockUncancelable: a teardown path must not skip the lock on
         // cancellation (which `lock(io) catch {}` would, then mutate + unlock
         // without holding it).
@@ -768,29 +764,9 @@ pub const KlippyCtx = struct {
         try collectHeaterNames(result, "available_monitors", self.gpa, &monitors);
         if (sensors.items.len == 0 and monitors.items.len == 0) return;
 
-        var aw: std.Io.Writer.Allocating = .init(self.gpa);
-        defer aw.deinit();
-        try aw.writer.writeAll("{");
-        var first = true;
-        for (sensors.items) |name| {
-            if (!first) try aw.writer.writeAll(",");
-            first = false;
-            try appendJsonNullField(&aw.writer, name);
-        }
-        for (monitors.items) |name| {
-            var dup = false;
-            for (sensors.items) |s| if (std.mem.eql(u8, s, name)) {
-                dup = true;
-                break;
-            };
-            if (dup) continue;
-            if (!first) try aw.writer.writeAll(",");
-            first = false;
-            try appendJsonNullField(&aw.writer, name);
-        }
-        try aw.writer.writeAll("}");
-        if (first) return;
-        const objs = try self.gpa.dupe(u8, aw.written());
+        for (sensors.items) |name| try self.addSubscriptionObject(name);
+        for (monitors.items) |name| try self.addSubscriptionObject(name);
+        const objs = try self.buildSubObjectsJson(self.gpa);
         defer self.gpa.free(objs);
 
         const fbuf = try self.gpa.alloc(u8, objs.len + 256);
@@ -805,7 +781,7 @@ pub const KlippyCtx = struct {
             for (monitors.items) |n| ts.markTempMonitor(io, n);
         }
         const sresult = parseKlippyResult(arena.allocator(), sresp) catch return;
-        self.feedSubscribedTemps(io, sresult);
+        self.seedSubscribedStatus(io, sresult);
     }
 
     /// Read until the JSON-RPC response with this string id. Klippy may push
@@ -827,11 +803,20 @@ pub const KlippyCtx = struct {
     /// Seed the temperature store from an `objects/subscribe` result
     /// (`result.status`, `result.eventtime`). Later pushes arrive as
     /// `process_status_update` and take the same path in the reader.
-    fn feedSubscribedTemps(self: *KlippyCtx, io: std.Io, result: std.json.Value) void {
-        const ts = self.temp_store orelse return;
+    fn seedSubscribedStatus(self: *KlippyCtx, io: std.Io, result: std.json.Value) void {
+        if (self.core) |core| return core.run(io, seedSubscribedStatusLocked, .{ self, io, result });
+        self.seedSubscribedStatusLocked(io, result);
+    }
+
+    fn seedSubscribedStatusLocked(self: *KlippyCtx, io: std.Io, result: std.json.Value) void {
         if (result != .object) return;
         const status = result.object.get("status") orelse return;
         if (status != .object) return;
+        if (status.object.get("print_stats")) |ps| {
+            if (self.job_state) |js| js.initialize(ps);
+            if (self.octoprint) |oc| oc.statusUpdate(ps);
+        }
+        const ts = self.temp_store orelse return;
         var it = status.object.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.* != .object) continue;
@@ -875,8 +860,11 @@ pub const KlippyCtx = struct {
             const sub_id = self.nextReqId(&rid_buf);
             const sub_frame = try buildSubscribeRequest(objs, sub_id, fbuf);
             try self.writeFrame(io, sub_frame);
-            const sub_resp = try self.readFrame(io);
-            self.gpa.free(sub_resp);
+            const sub_resp = try self.readResponse(io, sub_id);
+            defer self.gpa.free(sub_resp);
+            var snapshot_arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer snapshot_arena.deinit();
+            if (parseKlippyResult(snapshot_arena.allocator(), sub_resp)) |result| self.seedSubscribedStatus(io, result) else |_| {}
         }
 
         // Phase 2b: temperature sensors. The base subscription does not include
@@ -888,7 +876,7 @@ pub const KlippyCtx = struct {
             const gc_id = self.nextReqId(&rid_buf);
             const gc_frame = try buildSubscribeGcodeRequest(gc_id, &sub_buf);
             try self.writeFrame(io, gc_frame);
-            const gc_resp = try self.readFrame(io);
+            const gc_resp = try self.readResponse(io, gc_id);
             self.gpa.free(gc_resp);
         }
 
@@ -899,7 +887,7 @@ pub const KlippyCtx = struct {
             const reg_id = self.nextReqId(&rid_buf);
             const reg_frame = buildRegisterMethodRequest(name, reg_id, &reg_buf) catch continue;
             self.writeFrame(io, reg_frame) catch continue;
-            const reg_resp = self.readFrame(io) catch continue;
+            const reg_resp = self.readResponse(io, reg_id) catch continue;
             self.gpa.free(reg_resp);
         }
 
@@ -977,20 +965,28 @@ pub const KlippyCtx = struct {
         defer parsed.deinit();
 
         const frame = parsed.value;
+        if (frame != .object) return error.InvalidFrame;
 
         // Remote-method call: has both method AND a non-null id.
         if (frame.object.get("method")) |method_val| {
+            if (method_val != .string) return error.InvalidFrame;
             const method_str = method_val.string;
             const has_id = if (frame.object.get("id")) |id_val| id_val != .null else false;
 
             if (has_id) {
                 // Klippy is calling a remote method on us. Dispatch and ack.
                 const id = frame.object.get("id").?;
-                try self.dispatchRemoteMethod(io, method_str, frame);
+                if (self.core) |core|
+                    try core.run(io, dispatchInlineLocked, .{ self, io, method_str, frame })
+                else
+                    try self.dispatchRemoteMethod(io, method_str, frame);
                 try self.sendAck(io, id);
             } else {
                 // Notification — no id or null id.
-                try self.dispatchNotification(io, method_str, frame);
+                if (self.core) |core|
+                    try core.run(io, dispatchInlineLocked, .{ self, io, method_str, frame })
+                else
+                    try self.dispatchNotification(io, method_str, frame);
             }
             self.forwardToBridges(payload);
             return;
@@ -1019,7 +1015,7 @@ pub const KlippyCtx = struct {
     /// waiters. Returns on connection drop (readFrame error).
     fn readerLoop(self: *KlippyCtx) !void {
         const io = self.io.?;
-        while (!self.stopping) {
+        while (!self.stopping.isSet()) {
             const payload = try self.readFrame(io);
             defer self.gpa.free(payload);
             // Tolerate a single malformed/oversized frame without dropping the
@@ -1353,8 +1349,6 @@ pub const KlippyCtx = struct {
             if (params_json.len == 0) "{}" else params_json,
         });
         defer alloc.free(body);
-        self.write_mutex.lockUncancelable(io);
-        defer self.write_mutex.unlock(io);
         try self.writeFrame(io, body);
     }
 
@@ -1439,8 +1433,10 @@ pub const KlippyCtx = struct {
         // after. The handler that called us runs under Core (core.run), so the
         // balance is preserved (core.run's final unlock matches its initial lock).
         core.unlock(io);
-        waiter.sem.waitUncancelable(io);
-        core.lock(io);
+        {
+            defer core.lock(io);
+            try waiter.sem.wait(io);
+        }
 
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
@@ -1489,7 +1485,7 @@ pub const KlippyCtx = struct {
         const frame = try buildSubscribeRequest(objs, rid, fbuf);
         try self.writeFrame(io, frame);
 
-        waiter.sem.waitUncancelable(io);
+        try waiter.sem.wait(io);
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
         return parseKlippyResult(alloc, payload);
@@ -1536,7 +1532,7 @@ pub const KlippyCtx = struct {
         const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
         try self.writeFrame(io, req_frame);
 
-        waiter.sem.waitUncancelable(io); // no Core held → reader runs freely
+        try waiter.sem.wait(io); // no Core held → reader runs freely
         if (waiter.failed) return error.KlippyDisconnected;
         const payload = waiter.payload orelse return error.KlippyDisconnected;
         return parseKlippyResult(alloc, payload);
@@ -2515,4 +2511,61 @@ test "serializeParams rejects pathologically deep params (guards the Stringify n
         break :blk o;
     } });
     try std.testing.expect(ok.len > 0);
+}
+
+test "postMethod sends a frame without waiting for a reply" {
+    const aio = std.testing.io;
+    var server = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(aio, .{});
+    defer server.deinit(aio);
+    const stream = try server.socket.address.connect(aio, .{ .mode = .stream });
+    const peer = try server.accept(aio);
+    defer peer.close(aio);
+    var bus: notify.NotifyBus = undefined;
+    var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
+    defer ctx.deinit();
+    ctx.io = aio;
+    ctx.stream = stream;
+    try ctx.postMethod("feather/update_status", .null, std.testing.allocator);
+    var buf: [512]u8 = undefined;
+    var reader = peer.reader(aio, &buf);
+    const wire = try reader.interface.takeDelimiterInclusive(FrameEnd);
+    const frame = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, wire[0 .. wire.len - 1], .{});
+    defer frame.deinit();
+    try std.testing.expectEqualStrings("feather/update_status", frame.value.object.get("method").?.string);
+}
+
+test "dispatchFrame rejects non-object roots and non-string methods" {
+    var bus: notify.NotifyBus = undefined;
+    var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
+    defer ctx.deinit();
+    for ([_][]const u8{ "[]", "null", "42", "{\"method\":4}", "{\"method\":null}" }) |wire| {
+        try std.testing.expectError(error.InvalidFrame, ctx.dispatchFrame(std.testing.io, wire));
+    }
+}
+
+test "subscription snapshots seed owned print state and keep heater subscriptions additive" {
+    var bus: notify.NotifyBus = undefined;
+    var js = try @import("job_state.zig").JobStateCtx.init(std.testing.allocator, &bus);
+    defer js.deinit();
+    var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
+    defer ctx.deinit();
+    ctx.job_state = &js;
+    {
+        const response = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+            \\{"status":{"print_stats":{"state":"printing","filename":"benchy.gcode"}}}
+        , .{});
+        defer response.deinit();
+        ctx.seedSubscribedStatus(std.testing.io, response.value);
+    }
+    try std.testing.expect(js.isActive());
+    try std.testing.expectEqualStrings("benchy.gcode", js.getLastStats().get("filename").?.string);
+    try std.testing.expectEqual(@import("job_state.zig").JobEvent.standby, js.getLastEvent());
+    try ctx.addSubscriptionObject("extruder");
+    const objects = try ctx.buildSubObjectsJson(std.testing.allocator);
+    defer std.testing.allocator.free(objects);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, objects, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.contains("print_stats"));
+    try std.testing.expect(parsed.value.object.contains("webhooks"));
+    try std.testing.expect(parsed.value.object.contains("extruder"));
 }

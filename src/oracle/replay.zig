@@ -143,7 +143,7 @@ test "conformance: snapshots — all golden cases return valid JSON-RPC" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc);
+    var app = try App.init(alloc, io);
     defer app.deinit(io);
     // Wire live io into components so handlers that need it (file_manager,
     // spoolman, etc.) don't crash on null-io dereference.
@@ -193,7 +193,7 @@ test "conformance: server.info has required fields" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc);
+    var app = try App.init(alloc, io);
     defer app.deinit(io);
 
     const resp = try callEndpoint(alloc, app.dispatcher, "server.info", "{}");
@@ -221,7 +221,7 @@ test "conformance: server.config has required fields" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc);
+    var app = try App.init(alloc, io);
     defer app.deinit(io);
 
     const resp = try callEndpoint(alloc, app.dispatcher, "server.config", "{}");
@@ -330,7 +330,7 @@ test "capture: print all golden case responses" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc);
+    var app = try App.init(alloc, io);
     defer app.deinit(io);
     _ = app.httpServer(io);
 

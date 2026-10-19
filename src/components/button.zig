@@ -14,6 +14,7 @@
 //!   { name, type: "gpio", event: { elapsed_time, received_time, render_time, pressed } }
 
 const std = @import("std");
+const sleep = @import("../util/sleep.zig");
 const notify = @import("../server/notify.zig");
 const registry = @import("../server/registry.zig");
 const clock = @import("../util/clock.zig");
@@ -92,6 +93,7 @@ pub const Button = struct {
 // ---------------------------------------------------------------------------
 
 pub const ButtonCtx = struct {
+    clock_io: std.Io,
     gpa: std.mem.Allocator,
     bus: ?*NotifyBus,
     io: ?std.Io,
@@ -100,10 +102,11 @@ pub const ButtonCtx = struct {
     gpio_root: []const u8 = "/sys/class/gpio",
     /// Background GPIO poll thread (started by App when buttons are configured).
     poll_thread: ?std.Thread = null,
-    poll_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    poll_stop: std.Io.Event = .unset,
 
-    pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) ButtonCtx {
+    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io, bus: ?*NotifyBus) ButtonCtx {
         return .{
+            .clock_io = clock_io,
             .gpa = alloc,
             .bus = bus,
             .io = null,
@@ -132,13 +135,13 @@ pub const ButtonCtx = struct {
         if (self.poll_thread != null) return;
         if (self.io == null) return;
         if (self.buttons.count() == 0) return;
-        self.poll_stop.store(false, .release);
+        self.poll_stop.reset();
         self.poll_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, pollLoop, .{self}) catch null;
     }
 
     /// Stop and join the poll thread.
     pub fn stopPolling(self: *ButtonCtx) void {
-        self.poll_stop.store(true, .release);
+        self.poll_stop.set(self.clock_io);
         if (self.poll_thread) |t| {
             t.join();
             self.poll_thread = null;
@@ -147,9 +150,8 @@ pub const ButtonCtx = struct {
 
     fn pollLoop(self: *ButtonCtx) void {
         const io = self.io orelse return;
-        while (!self.poll_stop.load(.acquire)) {
-            io.sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
-            if (self.poll_stop.load(.acquire)) break;
+        while (!self.poll_stop.isSet()) {
+            if (sleep.untilStopped(io, .fromMilliseconds(100), &self.poll_stop)) break;
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             self.pollAndEmitAll(arena.allocator());
@@ -168,9 +170,13 @@ pub const ButtonCtx = struct {
     ) !void {
         const k = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(k);
+        const owned_name = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(owned_name);
+        const owned_pin = try self.gpa.dupe(u8, pin);
+        errdefer self.gpa.free(owned_pin);
         const b: Button = .{
-            .name = try self.gpa.dupe(u8, name),
-            .pin = try self.gpa.dupe(u8, pin),
+            .name = owned_name,
+            .pin = owned_pin,
             .min_event_time = min_event_time,
             .notification_sent = false,
             .event = .{
@@ -180,18 +186,18 @@ pub const ButtonCtx = struct {
                 .pressed = false,
             },
         };
-        errdefer {
-            self.gpa.free(b.name);
-            self.gpa.free(b.pin);
+        if (try self.buttons.fetchPut(k, b)) |prior| {
+            self.gpa.free(k); // Replacements retain the map's existing key.
+            self.gpa.free(prior.value.name);
+            self.gpa.free(prior.value.pin);
         }
-        try self.buttons.put(k, b);
     }
 
     /// Update the event state for a button (simulates a GPIO event).
     /// Returns the new pressed state or error.NotFound.
     pub fn sendEvent(self: *ButtonCtx, name: []const u8, pressed: bool) !void {
         const b = self.buttons.getPtr(name) orelse return error.NotFound;
-        const now = clock.wallSeconds();
+        const now = clock.wallSeconds(self.clock_io);
         // Seconds since the previous event for this button (Moonraker GpioButton
         // reports elapsed time between presses). 0 on the first event.
         b.event.elapsed_time = if (b.event.received_time > 0) now - b.event.received_time else 0;
@@ -302,7 +308,7 @@ pub fn registerButton(reg: *Registry, ctx: *ButtonCtx) !void {
 const testing = std.testing;
 
 fn testCtx(alloc: std.mem.Allocator) ButtonCtx {
-    return ButtonCtx.init(alloc, null);
+    return ButtonCtx.init(alloc, std.testing.io, null);
 }
 
 test "parsePin: gpio prefixes, chip prefix, inversion, bare number" {
@@ -332,7 +338,7 @@ test "pollButton: detects a debounced edge against a temp sysfs root" {
     try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
     defer Dir.cwd().deleteTree(io, root) catch {};
 
-    var ctx = ButtonCtx.init(testing.allocator, null);
+    var ctx = ButtonCtx.init(testing.allocator, std.testing.io, null);
     defer ctx.deinit();
     ctx.io = io;
     ctx.gpio_root = root;
@@ -368,7 +374,7 @@ test "pollButton: inverted pin (active-low) reads pressed at level 0" {
     try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "1" });
     defer Dir.cwd().deleteTree(io, root) catch {};
 
-    var ctx = ButtonCtx.init(testing.allocator, null);
+    var ctx = ButtonCtx.init(testing.allocator, std.testing.io, null);
     defer ctx.deinit();
     ctx.io = io;
     ctx.gpio_root = root;
@@ -519,7 +525,7 @@ test "fuzz addButton: arbitrary names and pins never crash" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = ButtonCtx.init(a, null);
+            var ctx = ButtonCtx.init(a, std.testing.io, null);
             defer ctx.deinit();
             const names = [_][]const u8{ "a", "ab", "long_button_name_here", "" };
             const pins = [_][]const u8{ "gpio1", "gpio26", "", "!invalid" };
@@ -585,7 +591,7 @@ test "fuzz emitButtonEvent: never panics without bus/io" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = ButtonCtx.init(a, null);
+            var ctx = ButtonCtx.init(a, std.testing.io, null);
             defer ctx.deinit();
             const names = [_][]const u8{ "btn", "missing", "" };
             const nm = names[buf[0] % names.len];
@@ -594,4 +600,16 @@ test "fuzz emitButtonEvent: never panics without bus/io" {
             ctx.emitButtonEvent(a, nm) catch {};
         }
     }.run, .{});
+}
+
+test "buttons free partial fields and replaced records on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx = ButtonCtx.init(alloc, std.testing.io, null);
+            defer ctx.deinit();
+            try ctx.addButton("test", "gpio17", 0.1);
+            try ctx.addButton("test", "gpio18", 0.2);
+            try std.testing.expectEqualStrings("gpio18", ctx.findButton("test").?.pin);
+        }
+    }.check, .{});
 }

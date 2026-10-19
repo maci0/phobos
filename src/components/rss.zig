@@ -332,7 +332,10 @@ fn parseRfc2822(s: []const u8) f64 {
     for (DAY_NAMES) |day| {
         if (std.ascii.startsWithIgnoreCase(s, day)) {
             for (s, 0..) |c, i| {
-                if (c == ',') { pos = i + 1; break; }
+                if (c == ',') {
+                    pos = i + 1;
+                    break;
+                }
             }
             break;
         }

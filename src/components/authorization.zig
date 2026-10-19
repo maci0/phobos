@@ -47,6 +47,7 @@
 //!   is keyed by username and carries the UserInfo fields.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const clock = @import("../util/clock.zig");
@@ -85,21 +86,6 @@ pub fn isReservedUser(name: []const u8) bool {
 // Crypto helpers
 // ---------------------------------------------------------------------------
 
-/// Fill `buf` with cryptographically-secure random bytes via the kernel CSPRNG.
-pub fn randomBytes(buf: []u8) void {
-    var off: usize = 0;
-    while (off < buf.len) {
-        const rc = std.os.linux.getrandom(buf.ptr + off, buf.len - off, 0);
-        const n: isize = @bitCast(rc);
-        if (n <= 0) {
-            // getrandom should not fail for these small buffers; on the
-            // off-chance, retry. (EINTR returns -EINTR which is <= 0.)
-            continue;
-        }
-        off += @intCast(n);
-    }
-}
-
 /// Hex-encode `bytes` into `out` (must be 2*bytes.len). Returns the slice.
 pub fn toHex(out: []u8, bytes: []const u8) []const u8 {
     return std.fmt.bufPrint(out, "{x}", .{bytes}) catch unreachable;
@@ -115,11 +101,9 @@ pub fn hashPassword(out: []u8, password: []const u8, salt: []const u8) []const u
 }
 
 /// Constant-time comparison of two equal-or-different-length byte slices.
-pub fn constEql(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    var diff: u8 = 0;
-    for (a, b) |x, y| diff |= x ^ y;
-    return diff == 0;
+pub fn constEql(comptime len: usize, a: []const u8, b: []const u8) bool {
+    if (a.len != len or b.len != len) return false;
+    return std.crypto.timing_safe.eql([len]u8, a[0..len].*, b[0..len].*);
 }
 
 /// Decode a hex string into `out`. Returns the decoded slice or error.
@@ -355,7 +339,7 @@ fn jsonInt(v: std.json.Value, key: []const u8) ?i64 {
     return switch (v) {
         .object => |o| switch (o.get(key) orelse return null) {
             .integer => |i| i,
-            .float => |f| @intFromFloat(f),
+            .float => |f| jv.floatToInt(f),
             else => null,
         },
         else => null,
@@ -380,15 +364,12 @@ pub const User = struct {
     /// Duplicate the *value* fields with `alloc`, leaving `username` borrowing
     /// the caller-supplied owned key (the hashmap key owns the username string).
     fn dupeValues(self: *const User, alloc: std.mem.Allocator, owned_key: []const u8) !User {
-        return .{
-            .username = owned_key,
-            .password = try alloc.dupe(u8, self.password),
-            .salt = try alloc.dupe(u8, self.salt),
-            .source = try alloc.dupe(u8, self.source),
-            .created_on = self.created_on,
-            .jwt_secret = try alloc.dupe(u8, self.jwt_secret),
-            .jwk_id = try alloc.dupe(u8, self.jwk_id),
-        };
+        var owned: User = .{ .username = owned_key, .source = "", .created_on = self.created_on };
+        errdefer owned.freeValues(alloc);
+        inline for (.{ "password", "salt", "source", "jwt_secret", "jwk_id" }) |field| {
+            @field(owned, field) = try alloc.dupe(u8, @field(self, field));
+        }
+        return owned;
     }
 
     /// Free only the value fields. The username (== hashmap key) is owned and
@@ -591,6 +572,7 @@ const OneshotToken = struct {
 
 pub const AuthCtx = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     store: DataStore,
     /// Issuer string ("http://<hostname>:<port>"). Owned externally.
     issuer: []const u8,
@@ -614,15 +596,16 @@ pub const AuthCtx = struct {
     trust_unknown_ip: bool = false,
     oneshot: std.ArrayList(OneshotToken) = .empty,
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, issuer: []const u8) !AuthCtx {
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, store: DataStore, issuer: []const u8) !AuthCtx {
         var ctx = AuthCtx{
             .gpa = alloc,
+            .io = io,
             .store = store,
             .issuer = issuer,
         };
         // Generate a fresh api key by default (uuid4().hex equivalent: 32 hex).
         var raw: [16]u8 = undefined;
-        randomBytes(&raw);
+        try io.randomSecure(&raw);
         _ = toHex(&ctx.api_key, &raw);
         ctx.loadFromStore() catch {};
         ctx.ensureApiUser() catch {};
@@ -708,7 +691,7 @@ pub const AuthCtx = struct {
         const u = User{
             .username = api_user,
             .password = &self.api_key,
-            .created_on = nowSeconds(),
+            .created_on = nowSeconds(self.io),
         };
         try self.putUser(u);
         self.syncUser(api_user);
@@ -791,7 +774,7 @@ pub const AuthCtx = struct {
     pub fn createOneshot(self: *AuthCtx, ip: IpAddress, username: []const u8, now: i64) ![]const u8 {
         self.pruneOneshot(now);
         var raw: [20]u8 = undefined;
-        randomBytes(&raw);
+        try self.io.randomSecure(&raw);
         var tok_buf: [32]u8 = undefined;
         const tok = base32Encode(&tok_buf, &raw);
         var entry = OneshotToken{
@@ -829,12 +812,12 @@ pub const AuthCtx = struct {
     }
 };
 
-fn nowSeconds() f64 {
-    return clock.wallSeconds();
+fn nowSeconds(io: std.Io) f64 {
+    return clock.wallSeconds(io);
 }
 
-fn nowSecondsInt() i64 {
-    return clock.wallSecondsInt();
+fn nowSecondsInt(io: std.Io) i64 {
+    return clock.wallSecondsInt(io);
 }
 
 // ---------------------------------------------------------------------------
@@ -903,7 +886,7 @@ fn loginOrCreate(
     if (new_user) {
         if (c.users.getPtr(username) != null) return error.UserExists;
         var salt: [32]u8 = undefined;
-        randomBytes(&salt);
+        try c.io.randomSecure(&salt);
         var salt_hex: [64]u8 = undefined;
         _ = toHex(&salt_hex, &salt);
         var hash_buf: [64]u8 = undefined;
@@ -913,7 +896,7 @@ fn loginOrCreate(
             .password = hashed,
             .salt = &salt_hex,
             .source = "moonraker",
-            .created_on = nowSeconds(),
+            .created_on = nowSeconds(c.io),
         };
         try c.putUser(u);
         c.syncUser(username);
@@ -925,7 +908,7 @@ fn loginOrCreate(
         const salt_bytes = fromHex(&salt, u.salt) catch return error.InvalidPassword;
         var hash_buf: [64]u8 = undefined;
         const hashed = hashPassword(&hash_buf, password, salt_bytes);
-        if (!constEql(hashed, u.password)) return error.InvalidPassword;
+        if (!constEql(64, hashed, u.password)) return error.InvalidPassword;
     }
 
     return issueTokens(c, alloc, username, new_user);
@@ -953,7 +936,7 @@ fn issueTokens(
         _ = fromHex(&seed, u.jwt_secret) catch return error.Unauthorized;
         if (u.jwk_id.len == 0) {
             var rnd: [32]u8 = undefined;
-            randomBytes(&rnd);
+            try c.io.randomSecure(&rnd);
             const new_kid = b64url.Encoder.encode(&jwk_id_buf, &rnd);
             var tmpl = u.*;
             tmpl.jwk_id = new_kid;
@@ -965,11 +948,11 @@ fn issueTokens(
             jwk_id = try alloc.dupe(u8, u.jwk_id);
         }
     } else {
-        randomBytes(&seed);
+        try c.io.randomSecure(&seed);
         var secret_hex: [64]u8 = undefined;
         _ = toHex(&secret_hex, &seed);
         var rnd: [32]u8 = undefined;
-        randomBytes(&rnd);
+        try c.io.randomSecure(&rnd);
         const new_kid = b64url.Encoder.encode(&jwk_id_buf, &rnd);
         var tmpl = u.*;
         tmpl.jwt_secret = &secret_hex;
@@ -979,7 +962,7 @@ fn issueTokens(
         jwk_id = try alloc.dupe(u8, new_kid);
     }
 
-    const now = nowSecondsInt();
+    const now = nowSecondsInt(c.io);
     const token = try generateJwt(alloc, c.issuer, username, jwk_id, seed, .access, now, jwt_exp_seconds);
     const refresh = try generateJwt(alloc, c.issuer, username, jwk_id, seed, .refresh, now, c.login_timeout_days * 24 * 3600);
 
@@ -1037,7 +1020,7 @@ pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     // Resolve kid → public key, verify the refresh token.
     const kid = jwtKid(alloc, refresh_token) orelse return error.Unauthorized;
     const pk = c.publicKeyForKid(kid) orelse return error.Unauthorized;
-    const claims = decodeJwt(alloc, refresh_token, pk, .refresh, c.issuer, nowSecondsInt(), true) catch
+    const claims = decodeJwt(alloc, refresh_token, pk, .refresh, c.issuer, nowSecondsInt(c.io), true) catch
         return error.Unauthorized;
 
     const u = c.users.getPtr(claims.username) orelse return error.Unauthorized;
@@ -1045,7 +1028,7 @@ pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 
     var seed: [32]u8 = undefined;
     _ = fromHex(&seed, u.jwt_secret) catch return error.Unauthorized;
-    const now = nowSecondsInt();
+    const now = nowSecondsInt(c.io);
     const token = try generateJwt(alloc, c.issuer, claims.username, u.jwk_id, seed, .access, now, jwt_exp_seconds);
 
     var obj: std.json.ObjectMap = .empty;
@@ -1102,7 +1085,7 @@ pub fn handleUserGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
         if (std.mem.eql(u8, name, trusted_user)) {
             try obj.put(alloc, "username", .{ .string = trusted_user });
             try obj.put(alloc, "source", .{ .string = "moonraker" });
-            try obj.put(alloc, "created_on", .{ .float = nowSeconds() });
+            try obj.put(alloc, "created_on", .{ .float = nowSeconds(c.io) });
             return .{ .object = obj };
         }
     }
@@ -1170,7 +1153,7 @@ pub fn handlePasswordReset(ctx: *anyopaque, params: std.json.Value, alloc: std.m
     const salt_bytes = fromHex(&salt, u.salt) catch return error.InvalidParams;
     var hash_buf: [64]u8 = undefined;
     const cur_hash = hashPassword(&hash_buf, password, salt_bytes);
-    if (!constEql(cur_hash, u.password)) return error.Forbidden;
+    if (!constEql(64, cur_hash, u.password)) return error.Forbidden;
 
     var new_hash_buf: [64]u8 = undefined;
     const new_hash = hashPassword(&new_hash_buf, new_password, salt_bytes);
@@ -1197,7 +1180,7 @@ pub fn handlePostApiKey(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const c = ctxOf(ctx);
     _ = params;
     var raw: [16]u8 = undefined;
-    randomBytes(&raw);
+    try c.io.randomSecure(&raw);
     _ = toHex(&c.api_key, &raw);
     // Update the API user's password.
     if (c.users.getPtr(api_user)) |u| {
@@ -1214,7 +1197,7 @@ pub fn handleOneshot(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const c = ctxOf(ctx);
     const ip = currentIp(params) orelse parseIp("127.0.0.1") catch unreachable;
     const username = currentUser(params) orelse api_user;
-    const tok = try c.createOneshot(ip, username, nowSecondsInt());
+    const tok = try c.createOneshot(ip, username, nowSecondsInt(c.io));
     defer c.gpa.free(tok);
     return .{ .string = try alloc.dupe(u8, tok) };
 }
@@ -1335,7 +1318,7 @@ pub fn authenticateRequest(
 ) AuthOutcome {
     if (transport == .INTERNAL) return .{ .anonymous = {} };
 
-    const now = nowSecondsInt();
+    const now = nowSecondsInt(c.io);
 
     // 1) JWT
     if (creds.jwt) |raw| {
@@ -1372,7 +1355,7 @@ pub fn authenticateRequest(
     if (creds.api_key) |raw| {
         const key = std.mem.trim(u8, raw, " \t");
         if (key.len > 0 and c.enable_api_key) {
-            if (constEql(key, &c.api_key)) return .{ .user = api_user };
+            if (constEql(32, key, &c.api_key)) return .{ .user = api_user };
             return .{ .unauthorized = {} };
         }
     }
@@ -1562,7 +1545,7 @@ const MemStore = struct {
 };
 
 fn mkCtx(alloc: std.mem.Allocator, mem: *MemStore) !AuthCtx {
-    return AuthCtx.init(alloc, mem.dataStore(), "http://test:7125");
+    return AuthCtx.init(alloc, testing.io, mem.dataStore(), "http://test:7125");
 }
 
 fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
@@ -1592,9 +1575,39 @@ test "hashPassword: string-salt vector parity" {
 }
 
 test "constEql: equal and unequal" {
-    try testing.expect(constEql("abc", "abc"));
-    try testing.expect(!constEql("abc", "abd"));
-    try testing.expect(!constEql("abc", "ab"));
+    try testing.expect(constEql(3, "abc", "abc"));
+    try testing.expect(!constEql(3, "abc", "abd"));
+    try testing.expect(!constEql(3, "abc", "ab"));
+}
+
+test "authorization fails promptly when secure entropy is unavailable" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var vtable = testing.io.vtable.*;
+    vtable.randomSecure = struct {
+        fn unavailable(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+            return error.EntropyUnavailable;
+        }
+    }.unavailable;
+    const io: std.Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    try testing.expectError(error.EntropyUnavailable, AuthCtx.init(testing.allocator, io, mem.dataStore(), "http://test"));
+    var ctx = try mkCtx(testing.allocator, &mem);
+    defer ctx.deinit();
+    ctx.io = io;
+    const key = ctx.api_key;
+    try testing.expectError(error.EntropyUnavailable, handlePostApiKey(@ptrCast(&ctx), .null, testing.allocator));
+    try testing.expectEqualSlices(u8, &key, &ctx.api_key);
+}
+
+test "fuzz constant-time comparison validates lengths" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            try testing.expectEqual(std.mem.eql(u8, bytes[0..32], bytes[32..64]), constEql(32, bytes[0..32], bytes[32..64]));
+            try testing.expect(!constEql(64, bytes[0..63], &bytes));
+        }
+    }.run, .{});
 }
 
 test "base32Encode: 20 bytes → 32 chars, matches RFC4648" {
@@ -1626,7 +1639,7 @@ test "generateJwt + decodeJwt: round-trip with signature and claims" {
     const a = arena.allocator();
 
     var seed: [32]u8 = undefined;
-    randomBytes(&seed);
+    try testing.io.randomSecure(&seed);
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
 
     const token = try generateJwt(a, "http://test:7125", "alice", "kid123", seed, .access, 1000, 3600);
@@ -1643,7 +1656,7 @@ test "decodeJwt: expired token rejected" {
     defer arena.deinit();
     const a = arena.allocator();
     var seed: [32]u8 = undefined;
-    randomBytes(&seed);
+    try testing.io.randomSecure(&seed);
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
     const token = try generateJwt(a, "iss", "bob", "k", seed, .access, 1000, 100);
     try testing.expectError(error.Expired, decodeJwt(a, token, kp.public_key, .access, "iss", 5000, true));
@@ -1654,7 +1667,7 @@ test "decodeJwt: wrong token_type rejected" {
     defer arena.deinit();
     const a = arena.allocator();
     var seed: [32]u8 = undefined;
-    randomBytes(&seed);
+    try testing.io.randomSecure(&seed);
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
     const token = try generateJwt(a, "iss", "bob", "k", seed, .access, 1000, 3600);
     try testing.expectError(error.TokenTypeMismatch, decodeJwt(a, token, kp.public_key, .refresh, "iss", 1500, true));
@@ -1665,7 +1678,7 @@ test "decodeJwt: tampered signature rejected" {
     defer arena.deinit();
     const a = arena.allocator();
     var seed: [32]u8 = undefined;
-    randomBytes(&seed);
+    try testing.io.randomSecure(&seed);
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
     const token = try generateJwt(a, "iss", "bob", "k", seed, .access, 1000, 3600);
     // Flip a char near the start of the signature segment (length-preserving so
@@ -1682,7 +1695,7 @@ test "decodeJwt: wrong issuer/audience rejected" {
     defer arena.deinit();
     const a = arena.allocator();
     var seed: [32]u8 = undefined;
-    randomBytes(&seed);
+    try testing.io.randomSecure(&seed);
     const kp = try Ed25519.KeyPair.generateDeterministic(seed);
     const token = try generateJwt(a, "iss-A", "bob", "k", seed, .access, 1000, 3600);
     try testing.expectError(error.InvalidIssuer, decodeJwt(a, token, kp.public_key, .access, "iss-B", 1500, true));
@@ -1693,7 +1706,7 @@ test "JWT header/payload are compact JSON in fixed order (Moonraker parity)" {
     defer arena.deinit();
     const a = arena.allocator();
     var seed: [32]u8 = undefined;
-    randomBytes(&seed);
+    try testing.io.randomSecure(&seed);
     const token = try generateJwt(a, "http://h:7125", "u", "kid", seed, .access, 100, 3600);
     const first_dot = std.mem.indexOfScalar(u8, token, '.').?;
     const enc_header = token[0..first_dot];
@@ -2175,7 +2188,7 @@ test "fuzz decodeJwt: arbitrary tokens never crash" {
                 len += 1;
             }
             var seed: [32]u8 = undefined;
-            randomBytes(&seed);
+            try testing.io.randomSecure(&seed);
             const kp = Ed25519.KeyPair.generateDeterministic(seed) catch return;
             _ = decodeJwt(a, tbuf[0..len], kp.public_key, .access, "iss", 1000, true) catch {};
         }
@@ -2205,7 +2218,7 @@ test "fuzz authenticateRequest: arbitrary creds never crash" {
             const a = arena.allocator();
             var mem = MemStore.init(a);
             defer mem.deinit();
-            var ctx = AuthCtx.init(a, mem.dataStore(), "http://test:7125") catch return;
+            var ctx = AuthCtx.init(a, testing.io, mem.dataStore(), "http://test:7125") catch return;
             defer ctx.deinit();
 
             var buf: [96]u8 = undefined;

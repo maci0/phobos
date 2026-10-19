@@ -93,7 +93,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1358 pass / 1 skip / 0 fail**, with 226 fuzz tests discovered. The skip
+- Tests: **1410 pass / 1 skip / 0 fail**, with 236 fuzz tests discovered. The skip
   is the gated real-Klippy proxy test. Build with `zig build test-artifact` and run
   the newest standalone test binary to avoid the build runner's `--listen=-` hang.
 - All register functions now have unit tests verifying all expected routes are wired

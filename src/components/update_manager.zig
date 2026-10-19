@@ -41,6 +41,7 @@
 //! via `setIo`; emission is a no-op until then (pure unit tests).
 
 const std = @import("std");
+const sleep = @import("../util/sleep.zig");
 const clock = @import("../util/clock.zig");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
@@ -301,7 +302,7 @@ test "sourcesFromConfig: forge-x clients and system updates off" {
     try std.testing.expect(guppy.?.type == .zip);
     try std.testing.expectEqualStrings("stable", guppy.?.channel);
 
-    var ctx = UpdateCtx{ .gpa = alloc, .sources = sources, .bus = null, .io = null };
+    var ctx = UpdateCtx{ .clock_io = std.testing.io, .gpa = alloc, .sources = sources, .bus = null, .io = null };
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const status = try handleStatus(@ptrCast(&ctx), .null, arena.allocator());
@@ -320,6 +321,7 @@ test "sourcesFromConfig: forge-x clients and system updates off" {
 // ---------------------------------------------------------------------------
 
 pub const UpdateCtx = struct {
+    clock_io: std.Io,
     gpa: std.mem.Allocator,
     /// Configured sources. Borrowed; owned by the App (or a test).
     sources: []const Source,
@@ -358,7 +360,7 @@ pub const UpdateCtx = struct {
     /// (which runs git when a repo path and io are set).
     refresh_hook: ?*const fn (*anyopaque) void = null,
     refresh_hook_ctx: ?*anyopaque = null,
-    refresh_stop: std.atomic.Value(bool) = .init(false),
+    refresh_stop: std.Io.Event = .unset,
     refresh_thread: ?std.Thread = null,
 
     pub const ShellFn = *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void;
@@ -379,7 +381,7 @@ pub const UpdateCtx = struct {
         if (!self.initial_refresh_done) return true;
         if (printing) return false;
         if (!inRefreshWindow(self.refresh_window_start, self.refresh_window_end, hour)) return false;
-        const now = clock.wallSecondsInt();
+        const now = clock.wallSecondsInt(self.clock_io);
         const wait_s = self.refresh_interval_hours * 3600;
         if (wait_s > 0 and self.last_auto_refresh_s > 0 and now < self.last_auto_refresh_s + wait_s) return false;
         return true;
@@ -391,7 +393,7 @@ pub const UpdateCtx = struct {
     pub fn tickAutoRefresh(self: *UpdateCtx, alloc: std.mem.Allocator, hour: i64) bool {
         if (!self.autoRefreshDue(hour, self.isPrinting())) return false;
         self.initial_refresh_done = true;
-        self.last_auto_refresh_s = clock.wallSecondsInt();
+        self.last_auto_refresh_s = clock.wallSecondsInt(self.clock_io);
         if (self.refresh_hook) |hook| {
             const ctx = self.refresh_hook_ctx orelse return true;
             hook(ctx);
@@ -403,12 +405,12 @@ pub const UpdateCtx = struct {
 
     pub fn startAutoRefresh(self: *UpdateCtx) void {
         if (!self.auto_refresh or self.refresh_thread != null) return;
-        self.refresh_stop.store(false, .release);
+        self.refresh_stop.reset();
         self.refresh_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, autoRefreshThread, .{self}) catch null;
     }
 
     pub fn stopAutoRefresh(self: *UpdateCtx) void {
-        self.refresh_stop.store(true, .release);
+        self.refresh_stop.set(self.clock_io);
         if (self.refresh_thread) |th| {
             th.join();
             self.refresh_thread = null;
@@ -439,14 +441,9 @@ fn autoRefreshThread(ctx: *UpdateCtx) void {
     const bus = ctx.bus orelse return;
     // Wait out the check interval before the first refresh so process
     // startup does not fetch. Tests call `tickAutoRefresh` directly.
-    while (!ctx.refresh_stop.load(.acquire)) {
-        var i: u32 = 0;
-        while (i < 3600 and !ctx.refresh_stop.load(.acquire)) : (i += 1) {
-            var req = std.os.linux.timespec{ .sec = 1, .nsec = 0 };
-            _ = std.os.linux.nanosleep(&req, null);
-        }
-        if (ctx.refresh_stop.load(.acquire)) break;
-        const now = clock.wallSecondsInt();
+    while (!ctx.refresh_stop.isSet()) {
+        if (sleep.untilStopped(io, .fromSeconds(3600), &ctx.refresh_stop)) break;
+        const now = clock.wallSecondsInt(ctx.clock_io);
         const hour: i64 = @mod(@divFloor(now, 3600), 24);
         var request_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer request_arena.deinit();
@@ -1194,11 +1191,11 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 }
 
 fn testCtx() UpdateCtx {
-    return .{ .gpa = testing.allocator, .sources = &default_sources, .bus = null, .io = null };
+    return .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &default_sources, .bus = null, .io = null };
 }
 
 test "status reads persistent git and web versions without refreshing" {
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
     defer db.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1215,7 +1212,7 @@ test "status reads persistent git and web versions without refreshing" {
         .{ .name = "forge-x", .type = .git_repo, .owner = "DrA1ex", .repo_name = "ff5m", .repo_path = "/no/such/repo", .branch = "1.4.2" },
         .{ .name = "fluidd", .type = .web, .owner = "fluidd-core", .repo_name = "fluidd" },
     };
-    var ctx = UpdateCtx{ .gpa = testing.allocator, .sources = &sources, .store = store, .bus = null };
+    var ctx = UpdateCtx{ .clock_io = std.testing.io, .gpa = testing.allocator, .sources = &sources, .store = store, .bus = null };
     const result = try handleStatus(&ctx, .null, a);
     const info = result.object.get("version_info").?.object;
     const git = info.get("forge-x").?.object;
@@ -1689,7 +1686,7 @@ test "handleRefresh: runs gitFetch for sources with repo_path set (real repo)" {
         .{ .name = "system", .type = .system },
         .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = "." },
     };
-    var ctx: UpdateCtx = .{ .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
+    var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1706,7 +1703,7 @@ test "handleStatus: refresh=true fetches before building payload" {
         .{ .name = "system", .type = .system },
         .{ .name = "moonraker", .type = .git_repo, .owner = "test", .repo_name = "test", .repo_path = "." },
     };
-    var ctx: UpdateCtx = .{ .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
+    var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = std.heap.smp_allocator, .sources = &test_sources, .bus = null, .io = io };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1725,7 +1722,7 @@ test "fuzz_status: arbitrary params never crash handleStatus, always payload" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx: UpdateCtx = .{ .gpa = a, .sources = &default_sources, .bus = null, .io = null };
+            var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = a, .sources = &default_sources, .bus = null, .io = null };
             const refresh = (buf[0] & 1) == 0;
             const params: std.json.Value = if (refresh) .{ .bool = true } else .null;
             const v = try handleStatus(@ptrCast(&ctx), params, a);
@@ -1743,7 +1740,7 @@ test "fuzz_handlers: arbitrary name params never crash update/recover/rollback" 
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx: UpdateCtx = .{ .gpa = a, .sources = &default_sources, .bus = null, .io = null };
+            var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = a, .sources = &default_sources, .bus = null, .io = null };
 
             // Build a random-ish name from a safe alphabet.
             const alphabet = "abcklmnopr_";
@@ -1774,7 +1771,7 @@ test "fuzz_handlers_update_full_system: never crash on update_moonraker/klipper/
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx: UpdateCtx = .{ .gpa = a, .sources = &default_sources, .bus = null, .io = null };
+            var ctx: UpdateCtx = .{ .clock_io = std.testing.io, .gpa = a, .sources = &default_sources, .bus = null, .io = null };
 
             _ = handleUpdateMoonraker(@ptrCast(&ctx), .null, a) catch {};
             _ = handleUpdateKlipper(@ptrCast(&ctx), .null, a) catch {};
@@ -1994,7 +1991,7 @@ test "fuzz buildStatusPayload: never panics with any source set" {
             const end: usize = @min(all.len, start + @as(usize, buf[1]) % 3 + 1);
             const sources: []const Source = all[start..end];
 
-            var ctx = UpdateCtx{ .gpa = a, .sources = sources, .bus = null, .io = null, .busy = buf[2] % 2 == 0 };
+            var ctx = UpdateCtx{ .clock_io = std.testing.io, .gpa = a, .sources = sources, .bus = null, .io = null, .busy = buf[2] % 2 == 0 };
             const payload = try buildStatusPayload(&ctx, a);
 
             try testing.expect(payload.object.get("version_info") != null);
@@ -2064,7 +2061,7 @@ test "tickAutoRefresh: disabled and out of window do not refresh" {
     try testing.expectEqual(@as(usize, 1), count.n);
     try testing.expect(ctx.initial_refresh_done);
 
-    ctx.last_auto_refresh_s = clock.wallSecondsInt();
+    ctx.last_auto_refresh_s = clock.wallSecondsInt(ctx.clock_io);
     try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
     try testing.expectEqual(@as(usize, 1), count.n);
 

@@ -35,6 +35,7 @@
 //! mapping). We replicate that mapping faithfully.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const clock = @import("../util/clock.zig");
 const ds = @import("../store/datastore.zig");
@@ -67,6 +68,20 @@ pub const Webcam = struct {
     extra_data: std.json.ObjectMap,
     uid: []const u8,
 
+    fn dupe(self: Webcam, alloc: std.mem.Allocator) !Webcam {
+        var owned = self;
+        inline for (comptime std.meta.fieldNames(Webcam)) |field| {
+            if (@TypeOf(@field(owned, field)) == []const u8) @field(owned, field) = "";
+        }
+        owned.extra_data = .empty;
+        errdefer freeWebcam(alloc, &owned);
+        inline for (comptime std.meta.fieldNames(Webcam)) |field| {
+            if (@TypeOf(@field(owned, field)) == []const u8) @field(owned, field) = try alloc.dupe(u8, @field(self, field));
+        }
+        owned.extra_data = (try jv.deepCopy(alloc, .{ .object = self.extra_data })).object;
+        return owned;
+    }
+
     /// Serialize to JSON object (as_dict equivalent).
     /// All string values are duplicated into `alloc` so the returned value
     /// is safe to use after the Webcam is freed.
@@ -86,7 +101,7 @@ pub const Webcam = struct {
         try obj.put(alloc, "flip_vertical", .{ .bool = self.flip_vertical });
         try obj.put(alloc, "rotation", .{ .integer = self.rotation });
         try obj.put(alloc, "source", .{ .string = try alloc.dupe(u8, self.source) });
-        try obj.put(alloc, "extra_data", .{ .object = self.extra_data });
+        try obj.put(alloc, "extra_data", try jv.deepCopy(alloc, .{ .object = self.extra_data }));
         try obj.put(alloc, "uid", .{ .string = try alloc.dupe(u8, self.uid) });
         return .{ .object = obj };
     }
@@ -160,15 +175,6 @@ pub fn configWebcamUid(instance_uuid: []const u8, name: []const u8, buf: *[36]u8
     return formatUuid(&bytes, buf);
 }
 
-fn hexNibble(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
-}
-
 fn parseUuid(text: []const u8, out: *[16]u8) !void {
     const s = std.mem.trim(u8, text, " \t\r\n");
     var hex: [32]u8 = undefined;
@@ -184,42 +190,24 @@ fn parseUuid(text: []const u8, out: *[16]u8) !void {
         }
         if (n != 32) return error.InvalidUuid;
     } else return error.InvalidUuid;
-    var i: usize = 0;
-    while (i < 16) : (i += 1) {
-        const hi = hexNibble(hex[i * 2]) orelse return error.InvalidUuid;
-        const lo = hexNibble(hex[i * 2 + 1]) orelse return error.InvalidUuid;
-        out[i] = (hi << 4) | lo;
-    }
+    _ = std.fmt.hexToBytes(out, &hex) catch return error.InvalidUuid;
 }
 
 /// Lowercase 32-hex form of an instance UUID. Accepts dashed or bare hex.
 pub fn canonicalInstanceHex(text: []const u8, out: *[32]u8) bool {
     var bytes: [16]u8 = undefined;
     parseUuid(text, &bytes) catch return false;
-    const hexd = "0123456789abcdef";
-    for (bytes, 0..) |b, i| {
-        out[i * 2] = hexd[b >> 4];
-        out[i * 2 + 1] = hexd[b & 0xf];
-    }
+    out.* = std.fmt.bytesToHex(bytes, .lower);
     return true;
 }
 
 fn formatUuid(bytes: *const [16]u8, buf: *[36]u8) []const u8 {
-    const hexd = "0123456789abcdef";
-    var o: usize = 0;
-    for (bytes, 0..) |b, i| {
-        if (i == 4 or i == 6 or i == 8 or i == 10) {
-            buf[o] = '-';
-            o += 1;
-        }
-        buf[o] = hexd[b >> 4];
-        buf[o + 1] = hexd[b & 0xf];
-        o += 2;
-    }
-    return buf;
+    const hex = std.fmt.bytesToHex(bytes.*, .lower);
+    return std.fmt.bufPrint(buf, "{s}-{s}-{s}-{s}-{s}", .{ hex[0..8], hex[8..12], hex[12..16], hex[16..20], hex[20..32] }) catch unreachable;
 }
 
 pub const WebcamCtx = struct {
+    clock_io: std.Io,
     store: DataStore,
     bus: *NotifyBus,
     io: ?std.Io,
@@ -234,8 +222,9 @@ pub const WebcamCtx = struct {
 
     const ns: [:0]const u8 = "webcams";
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !WebcamCtx {
+    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io, store: DataStore, bus: *NotifyBus) !WebcamCtx {
         var ctx = WebcamCtx{
+            .clock_io = clock_io,
             .store = store,
             .bus = bus,
             .io = null,
@@ -273,10 +262,6 @@ pub const WebcamCtx = struct {
         }
         self.cams.deinit(self.gpa);
         self.order.deinit(self.gpa);
-    }
-
-    fn track(self: *WebcamCtx, uid: []const u8) !void {
-        try self.order.append(self.gpa, uid);
     }
 
     fn untrack(self: *WebcamCtx, uid: []const u8) void {
@@ -320,11 +305,13 @@ pub const WebcamCtx = struct {
             const cam_data = e.value_ptr.*;
             if (cam_data != .object) continue;
 
-            const cam = fromDbValue(self.gpa, uid, cam_data.object) catch continue;
+            var cam = fromDbValue(self.gpa, uid, cam_data.object) catch continue;
+            errdefer freeWebcam(self.gpa, &cam);
             const uid_owned = try self.gpa.dupe(u8, uid);
             errdefer self.gpa.free(uid_owned);
+            try self.order.ensureUnusedCapacity(self.gpa, 1);
             try self.cams.put(self.gpa, uid_owned, cam);
-            try self.track(uid_owned);
+            self.order.appendAssumeCapacity(uid_owned);
         }
     }
 
@@ -384,32 +371,34 @@ pub const WebcamCtx = struct {
         const uid_tmp = try configWebcamUid(namespace, spec.name, &uid_buf);
         if (self.findByName(spec.name)) |existing| {
             if (std.mem.eql(u8, existing.uid, uid_tmp)) return;
-            self.dropByName(spec.name);
         }
-        var cam = Webcam{
-            .name = try gpa.dupe(u8, spec.name),
+        var cam = try (Webcam{
+            .name = spec.name,
             .enabled = spec.enabled,
-            .icon = try gpa.dupe(u8, spec.icon),
-            .aspect_ratio = try gpa.dupe(u8, spec.aspect_ratio),
+            .icon = spec.icon,
+            .aspect_ratio = spec.aspect_ratio,
             .target_fps = spec.target_fps,
             .target_fps_idle = spec.target_fps_idle,
-            .location = try gpa.dupe(u8, spec.location),
-            .service = try gpa.dupe(u8, spec.service),
-            .stream_url = try gpa.dupe(u8, spec.stream_url),
-            .snapshot_url = try gpa.dupe(u8, spec.snapshot_url),
+            .location = spec.location,
+            .service = spec.service,
+            .stream_url = spec.stream_url,
+            .snapshot_url = spec.snapshot_url,
             .flip_horizontal = spec.flip_horizontal,
             .flip_vertical = spec.flip_vertical,
             .rotation = spec.rotation,
-            .source = try gpa.dupe(u8, "config"),
+            .source = "config",
             .extra_data = .empty,
-            .uid = try gpa.dupe(u8, uid_tmp),
-        };
+            .uid = uid_tmp,
+        }).dupe(gpa);
         errdefer freeWebcam(gpa, &cam);
         try cam.validate();
         const key = try gpa.dupe(u8, cam.uid);
         errdefer gpa.free(key);
-        try self.cams.put(gpa, key, cam);
-        try self.track(key);
+        try self.order.ensureUnusedCapacity(gpa, 1);
+        try self.cams.ensureUnusedCapacity(gpa, 1);
+        self.dropByName(spec.name);
+        self.cams.putAssumeCapacity(key, cam);
+        self.order.appendAssumeCapacity(key);
     }
 
     /// Find cam by name (caller must hold mutex).
@@ -430,7 +419,7 @@ pub const WebcamCtx = struct {
     fn newUid(self: *WebcamCtx, alloc: std.mem.Allocator) ![]const u8 {
         // Use a simple counter-based approach since we can't call UUID4 easily.
         // In production Moonraker uses uuid.uuid4(). We use a timestamp + count.
-        const now_ns = clock.wallNanos();
+        const now_ns = clock.wallNanos(self.clock_io);
         var attempt: u64 = 0;
         while (attempt < 1000) : (attempt += 1) {
             var buf: [40]u8 = undefined;
@@ -498,24 +487,24 @@ fn toDbValue(alloc: std.mem.Allocator, cam: *const Webcam) !std.json.Value {
 
 /// Parse a Webcam from its DB representation (from_database equivalent).
 fn fromDbValue(alloc: std.mem.Allocator, uid: []const u8, obj: std.json.ObjectMap) !Webcam {
-    return Webcam{
-        .name = try alloc.dupe(u8, strField(obj, "name", "")),
+    return (Webcam{
+        .name = strField(obj, "name", ""),
         .enabled = boolField(obj, "enabled", true),
-        .icon = try alloc.dupe(u8, strField(obj, "icon", "mdiWebcam")),
-        .aspect_ratio = try alloc.dupe(u8, strField(obj, "aspectRatio", "4:3")),
+        .icon = strField(obj, "icon", "mdiWebcam"),
+        .aspect_ratio = strField(obj, "aspectRatio", "4:3"),
         .target_fps = intField(obj, "targetFps", 15),
         .target_fps_idle = intField(obj, "targetFpsIdle", 5),
-        .location = try alloc.dupe(u8, strField(obj, "location", "printer")),
-        .service = try alloc.dupe(u8, strField(obj, "service", "mjpegstreamer")),
-        .stream_url = try alloc.dupe(u8, strField(obj, "urlStream", "")),
-        .snapshot_url = try alloc.dupe(u8, strField(obj, "urlSnapshot", "")),
+        .location = strField(obj, "location", "printer"),
+        .service = strField(obj, "service", "mjpegstreamer"),
+        .stream_url = strField(obj, "urlStream", ""),
+        .snapshot_url = strField(obj, "urlSnapshot", ""),
         .flip_horizontal = boolField(obj, "flipX", false),
         .flip_vertical = boolField(obj, "flipY", false),
         .rotation = intField(obj, "rotation", 0),
-        .source = try alloc.dupe(u8, "database"),
-        .extra_data = .empty,
-        .uid = try alloc.dupe(u8, uid),
-    };
+        .source = "database",
+        .extra_data = if (obj.get("extra_data")) |v| if (v == .object) v.object else .empty else .empty,
+        .uid = uid,
+    }).dupe(alloc);
 }
 
 fn strField(obj: std.json.ObjectMap, key: []const u8, default: []const u8) []const u8 {
@@ -539,22 +528,17 @@ fn intField(obj: std.json.ObjectMap, key: []const u8, default: i64) i64 {
     const v = obj.get(key) orelse return default;
     return switch (v) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| jv.floatToInt(f) orelse default,
         else => default,
     };
 }
 
 /// Free all owned strings in a Webcam.
 fn freeWebcam(alloc: std.mem.Allocator, cam: *Webcam) void {
-    alloc.free(cam.name);
-    alloc.free(cam.icon);
-    alloc.free(cam.aspect_ratio);
-    alloc.free(cam.location);
-    alloc.free(cam.service);
-    alloc.free(cam.stream_url);
-    alloc.free(cam.snapshot_url);
-    alloc.free(cam.source);
-    alloc.free(cam.uid);
+    inline for (comptime std.meta.fieldNames(Webcam)) |field| {
+        if (@TypeOf(@field(cam, field)) == []const u8) alloc.free(@field(cam, field));
+    }
+    jv.free(alloc, .{ .object = cam.extra_data });
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +584,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
             const v = obj.get(field) orelse return default_val;
             return switch (v) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f) orelse default_val,
                 .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
                 else => default_val,
             };
@@ -662,27 +646,32 @@ pub fn handleWebcamPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
             return error.Forbidden;
         }
         // Apply updates from params
-        try updateCamFromParams(c.gpa, cam, params, c);
-        try cam.validate();
+        var updated = try cam.dupe(c.gpa);
+        errdefer freeWebcam(c.gpa, &updated);
+        try updateCamFromParams(c.gpa, &updated, params, c);
+        try updated.validate();
+        freeWebcam(c.gpa, cam);
+        cam.* = updated;
         c.saveToStore(cam);
     } else {
         // Create new webcam
         const name = try getStr(params, "name");
         const uid = try c.newUid(alloc);
-        errdefer alloc.free(uid);
+        defer alloc.free(uid);
 
         // Check for name collision
         if (c.findByName(name) != null) return error.InvalidParams;
 
-        const new_cam = try camFromWebRequest(c.gpa, params, uid);
+        var new_cam = try camFromWebRequest(c.gpa, params, uid);
+        errdefer freeWebcam(c.gpa, &new_cam);
         try new_cam.validate();
 
         const uid_owned = try c.gpa.dupe(u8, uid);
         errdefer c.gpa.free(uid_owned);
-        alloc.free(uid); // we duped it
 
+        try c.order.ensureUnusedCapacity(c.gpa, 1);
         try c.cams.put(c.gpa, uid_owned, new_cam);
-        try c.track(uid_owned);
+        c.order.appendAssumeCapacity(uid_owned);
         const stored_cam = c.cams.getPtr(uid_owned).?;
         c.saveToStore(stored_cam);
     }
@@ -786,59 +775,39 @@ fn lookupCamera(c: *WebcamCtx, params: std.json.Value, _: bool) ?*Webcam {
 fn camFromWebRequest(alloc: std.mem.Allocator, params: std.json.Value, uid: []const u8) !Webcam {
     const name = try getStr(params, "name");
     const stream_url = try getStr(params, "stream_url");
-    return Webcam{
-        .name = try alloc.dupe(u8, name),
+    return (Webcam{
+        .name = name,
         .enabled = getOptBool(params, "enabled", true),
-        .icon = try alloc.dupe(u8, getOptStr(params, "icon") orelse "mdiWebcam"),
-        .aspect_ratio = try alloc.dupe(u8, getOptStr(params, "aspect_ratio") orelse "4:3"),
+        .icon = getOptStr(params, "icon") orelse "mdiWebcam",
+        .aspect_ratio = getOptStr(params, "aspect_ratio") orelse "4:3",
         .target_fps = getOptInt(params, "target_fps", 15),
         .target_fps_idle = getOptInt(params, "target_fps_idle", 5),
-        .location = try alloc.dupe(u8, getOptStr(params, "location") orelse "printer"),
-        .service = try alloc.dupe(u8, getOptStr(params, "service") orelse "mjpegstreamer"),
-        .stream_url = try alloc.dupe(u8, stream_url),
-        .snapshot_url = try alloc.dupe(u8, getOptStr(params, "snapshot_url") orelse ""),
+        .location = getOptStr(params, "location") orelse "printer",
+        .service = getOptStr(params, "service") orelse "mjpegstreamer",
+        .stream_url = stream_url,
+        .snapshot_url = getOptStr(params, "snapshot_url") orelse "",
         .flip_horizontal = getOptBool(params, "flip_horizontal", false),
         .flip_vertical = getOptBool(params, "flip_vertical", false),
         .rotation = getOptInt(params, "rotation", 0),
-        .source = try alloc.dupe(u8, "database"),
+        .source = "database",
         .extra_data = getOptObj(params, "extra_data"),
-        .uid = try alloc.dupe(u8, uid),
-    };
+        .uid = uid,
+    }).dupe(alloc);
 }
 
 /// Apply updates from POST params to an existing webcam (update equivalent).
 fn updateCamFromParams(alloc: std.mem.Allocator, cam: *Webcam, params: std.json.Value, c: *WebcamCtx) !void {
-    // Handle name rename
-    if (getOptStr(params, "name")) |new_name| {
-        if (!std.mem.eql(u8, cam.name, new_name)) {
-            if (c.findByName(new_name) != null) return error.InvalidParams;
-            alloc.free(cam.name);
-            cam.name = try alloc.dupe(u8, new_name);
+    inline for (.{ "name", "icon", "aspect_ratio", "location", "service", "stream_url", "snapshot_url" }) |field| {
+        if (getOptStr(params, field)) |value| {
+            if (!std.mem.eql(u8, @field(cam, field), value)) {
+                if (comptime std.mem.eql(u8, field, "name")) {
+                    if (c.findByName(value) != null) return error.InvalidParams;
+                }
+                const owned = try alloc.dupe(u8, value);
+                alloc.free(@field(cam, field));
+                @field(cam, field) = owned;
+            }
         }
-    }
-    if (getOptStr(params, "icon")) |v| {
-        alloc.free(cam.icon);
-        cam.icon = try alloc.dupe(u8, v);
-    }
-    if (getOptStr(params, "aspect_ratio")) |v| {
-        alloc.free(cam.aspect_ratio);
-        cam.aspect_ratio = try alloc.dupe(u8, v);
-    }
-    if (getOptStr(params, "location")) |v| {
-        alloc.free(cam.location);
-        cam.location = try alloc.dupe(u8, v);
-    }
-    if (getOptStr(params, "service")) |v| {
-        alloc.free(cam.service);
-        cam.service = try alloc.dupe(u8, v);
-    }
-    if (getOptStr(params, "stream_url")) |v| {
-        alloc.free(cam.stream_url);
-        cam.stream_url = try alloc.dupe(u8, v);
-    }
-    if (getOptStr(params, "snapshot_url")) |v| {
-        alloc.free(cam.snapshot_url);
-        cam.snapshot_url = try alloc.dupe(u8, v);
     }
 
     // Numeric/bool fields
@@ -974,7 +943,41 @@ const NullDS = struct {
 };
 
 fn makeCtx(alloc: std.mem.Allocator, nb: *NullBus) !WebcamCtx {
-    return WebcamCtx.init(alloc, NullDS.dataStore(), &nb.bus);
+    return WebcamCtx.init(alloc, std.testing.io, NullDS.dataStore(), &nb.bus);
+}
+
+test "webcam copies free partial fields and nested extra data" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"name\":\"cam\",\"stream_url\":\"/stream\",\"extra_data\":{\"layout\":[\"wide\",2]}}", .{});
+    defer parsed.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn copy(alloc: std.mem.Allocator, params: std.json.Value) !void {
+            var cam = try camFromWebRequest(alloc, params, "uid");
+            defer freeWebcam(alloc, &cam);
+            try cam.validate();
+        }
+    }.copy, .{parsed.value});
+}
+
+test "webcam extra data survives its request and invalid updates preserve the record" {
+    var nb = NullBus.init(testing.allocator);
+    var ctx = try makeCtx(testing.allocator, &nb);
+    defer ctx.deinit();
+    {
+        var request = std.heap.ArenaAllocator.init(testing.allocator);
+        defer request.deinit();
+        const params = try mkParams(request.allocator(), "{\"name\":\"cam\",\"stream_url\":\"/stream\",\"extra_data\":{\"layout\":[\"wide\",2]}}");
+        _ = try handleWebcamPost(@ptrCast(&ctx), params, request.allocator());
+    }
+    const cam = ctx.findByName("cam").?;
+    try testing.expectEqualStrings("wide", cam.extra_data.get("layout").?.array.items[0].string);
+    var response = std.heap.ArenaAllocator.init(testing.allocator);
+    defer response.deinit();
+    const serialized = try cam.asJson(response.allocator());
+    const params = try mkParams(response.allocator(), "{\"name\":\"cam\",\"stream_url\":\"/changed\",\"rotation\":45}");
+    try testing.expectError(error.InvalidParams, handleWebcamPost(@ptrCast(&ctx), params, response.allocator()));
+    try testing.expectEqualStrings("/stream", ctx.findByName("cam").?.stream_url);
+    ctx.dropByName("cam");
+    try testing.expectEqualStrings("wide", serialized.object.get("extra_data").?.object.get("layout").?.array.items[0].string);
 }
 
 test "configWebcamUid matches Moonraker uuid5 for the printer instance" {
@@ -990,10 +993,10 @@ test "addFromConfig: config webcam is listed and cannot be overwritten" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
     defer db.deinit();
     var nb = NullBus.init(a);
-    var ctx = try WebcamCtx.init(a, db.dataStore(), &nb.bus);
+    var ctx = try WebcamCtx.init(a, std.testing.io, db.dataStore(), &nb.bus);
     defer ctx.deinit();
 
     try ctx.addFromConfig(.{
@@ -1045,7 +1048,7 @@ test "webcam CRUD: create, get, update, delete round-trip" {
     const a = arena.allocator();
 
     var nb = NullBus.init(ctx_alloc);
-    var ctx = try WebcamCtx.init(ctx_alloc, NullDS.dataStore(), &nb.bus);
+    var ctx = try WebcamCtx.init(ctx_alloc, std.testing.io, NullDS.dataStore(), &nb.bus);
     defer ctx.deinit();
 
     // Create via POST

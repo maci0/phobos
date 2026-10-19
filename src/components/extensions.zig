@@ -39,14 +39,26 @@ const Registry = registry.Registry;
 
 pub const AgentData = struct {
     name: []const u8,
-    @"type": []const u8,
+    type: []const u8,
     version: []const u8,
     url: []const u8,
+
+    fn dupe(self: AgentData, alloc: std.mem.Allocator) !AgentData {
+        var owned = self;
+        inline for (comptime std.meta.fieldNames(AgentData)) |field| @field(owned, field) = "";
+        errdefer owned.deinit(alloc);
+        inline for (comptime std.meta.fieldNames(AgentData)) |field| @field(owned, field) = try alloc.dupe(u8, @field(self, field));
+        return owned;
+    }
+
+    fn deinit(self: *AgentData, alloc: std.mem.Allocator) void {
+        inline for (comptime std.meta.fieldNames(AgentData)) |field| alloc.free(@field(self, field));
+    }
 
     pub fn asJson(self: *const AgentData, alloc: std.mem.Allocator) !std.json.Value {
         var obj: std.json.ObjectMap = .empty;
         try obj.put(alloc, "name", .{ .string = self.name });
-        try obj.put(alloc, "type", .{ .string = self.@"type" });
+        try obj.put(alloc, "type", .{ .string = self.type });
         try obj.put(alloc, "version", .{ .string = self.version });
         try obj.put(alloc, "url", .{ .string = self.url });
         return .{ .object = obj };
@@ -71,10 +83,7 @@ pub const ExtensionsCtx = struct {
         var it = self.agents.iterator();
         while (it.next()) |e| {
             self.gpa.free(e.key_ptr.*);
-            self.gpa.free(e.value_ptr.name);
-            self.gpa.free(e.value_ptr.@"type");
-            self.gpa.free(e.value_ptr.version);
-            self.gpa.free(e.value_ptr.url);
+            e.value_ptr.deinit(self.gpa);
         }
         self.agents.deinit(self.gpa);
     }
@@ -84,18 +93,8 @@ pub const ExtensionsCtx = struct {
         if (self.agents.contains(data.name)) return error.AgentAlreadyRegistered;
         const key = try self.gpa.dupe(u8, data.name);
         errdefer self.gpa.free(key);
-        const owned = AgentData{
-            .name = try self.gpa.dupe(u8, data.name),
-            .@"type" = try self.gpa.dupe(u8, data.@"type"),
-            .version = try self.gpa.dupe(u8, data.version),
-            .url = try self.gpa.dupe(u8, data.url),
-        };
-        errdefer {
-            self.gpa.free(owned.name);
-            self.gpa.free(owned.@"type");
-            self.gpa.free(owned.version);
-            self.gpa.free(owned.url);
-        }
+        var owned = try data.dupe(self.gpa);
+        errdefer owned.deinit(self.gpa);
         try self.agents.put(self.gpa, key, owned);
     }
 
@@ -103,10 +102,8 @@ pub const ExtensionsCtx = struct {
     pub fn removeAgent(self: *ExtensionsCtx, name: []const u8) void {
         if (self.agents.fetchRemove(name)) |kv| {
             self.gpa.free(kv.key);
-            self.gpa.free(kv.value.name);
-            self.gpa.free(kv.value.@"type");
-            self.gpa.free(kv.value.version);
-            self.gpa.free(kv.value.url);
+            var old = kv.value;
+            old.deinit(self.gpa);
         }
     }
 };
@@ -293,7 +290,7 @@ test "handleList: with registered agent returns correct shape" {
 
     try ctx.registerAgent(.{
         .name = "test_agent",
-        .@"type" = "agent",
+        .type = "agent",
         .version = "1.0.0",
         .url = "http://localhost:9000",
     });
@@ -338,7 +335,7 @@ test "handleRequest: agent registered but RPC stub" {
 
     try ctx.registerAgent(.{
         .name = "myagent",
-        .@"type" = "agent",
+        .type = "agent",
         .version = "0.1",
         .url = "",
     });
@@ -450,13 +447,13 @@ test "ExtensionsCtx: registerAgent duplicate → error" {
 
     try ctx.registerAgent(.{
         .name = "ag1",
-        .@"type" = "agent",
+        .type = "agent",
         .version = "1.0",
         .url = "",
     });
     try testing.expectError(error.AgentAlreadyRegistered, ctx.registerAgent(.{
         .name = "ag1",
-        .@"type" = "agent",
+        .type = "agent",
         .version = "1.0",
         .url = "",
     }));
@@ -472,7 +469,7 @@ test "ExtensionsCtx: removeAgent removes from list" {
 
     try ctx.registerAgent(.{
         .name = "ag2",
-        .@"type" = "agent",
+        .type = "agent",
         .version = "1.0",
         .url = "",
     });
@@ -579,4 +576,15 @@ test "fuzz handleRegisterRemoteMethod: never panics on arbitrary params" {
             _ = handleRegisterRemoteMethod(@ptrCast(&ctx), p.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "agents free partial fields on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx = ExtensionsCtx.init(alloc);
+            defer ctx.deinit();
+            try ctx.registerAgent(.{ .name = "agent", .type = "agent", .version = "1", .url = "http://localhost" });
+            ctx.removeAgent("agent");
+        }
+    }.check, .{});
 }

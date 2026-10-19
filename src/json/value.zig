@@ -2,6 +2,12 @@
 //! Provides insertion-ordered object construction and allocation-backed serialization.
 const std = @import("std");
 
+/// Checked truncation for numeric fields accepted as either JSON integers or floats.
+pub fn floatToInt(value: f64) ?i64 {
+    if (!std.math.isFinite(value) or value < -0x1p63 or value >= 0x1p63) return null;
+    return @intFromFloat(value);
+}
+
 /// An owned JSON serialization result. Caller must free with allocator.free().
 pub const OwnedJson = struct {
     bytes: []u8,
@@ -29,22 +35,49 @@ pub fn deepCopy(alloc: std.mem.Allocator, val: std.json.Value) error{OutOfMemory
         .number_string => .{ .number_string = try alloc.dupe(u8, val.number_string) },
         .object => |obj| {
             var new_obj: std.json.ObjectMap = .empty;
+            errdefer free(alloc, .{ .object = new_obj });
             // Final size is known: size the map once instead of rehashing as it grows.
             try new_obj.ensureTotalCapacity(alloc, obj.count());
             var it = obj.iterator();
             while (it.next()) |kv| {
-                new_obj.putAssumeCapacity(try alloc.dupe(u8, kv.key_ptr.*), try deepCopy(alloc, kv.value_ptr.*));
+                const key = try alloc.dupe(u8, kv.key_ptr.*);
+                errdefer alloc.free(key);
+                new_obj.putAssumeCapacity(key, try deepCopy(alloc, kv.value_ptr.*));
             }
             return .{ .object = new_obj };
         },
         .array => |arr| {
             var new_arr: std.json.Array = .init(alloc);
+            errdefer free(alloc, .{ .array = new_arr });
             // Final length is known: reserve once instead of doubling-realloc per append.
             try new_arr.ensureTotalCapacity(arr.items.len);
             for (arr.items) |item| new_arr.appendAssumeCapacity(try deepCopy(alloc, item));
             return .{ .array = new_arr };
         },
     };
+}
+
+/// Release a bounded JSON tree owned by `deepCopy`, including keys and strings.
+pub fn free(alloc: std.mem.Allocator, val: std.json.Value) void {
+    switch (val) {
+        .string => |s| alloc.free(s),
+        .number_string => |s| alloc.free(s),
+        .object => |obj| {
+            var owned = obj;
+            var it = owned.iterator();
+            while (it.next()) |entry| {
+                alloc.free(entry.key_ptr.*);
+                free(alloc, entry.value_ptr.*);
+            }
+            owned.deinit(alloc);
+        },
+        .array => |arr| {
+            var owned = arr;
+            for (owned.items) |item| free(alloc, item);
+            owned.deinit();
+        },
+        .integer, .float, .bool, .null => {},
+    }
 }
 
 /// Maximum JSON nesting depth phobos accepts for stored/echoed values. Real
@@ -232,6 +265,52 @@ test "fuzz_value_helpers: never crash on arbitrary values" {
 
             const e = try errorResponse(alloc, id, -32600, buf[0..len]);
             defer alloc.free(e);
+        }
+    }.run, .{});
+}
+
+test "floatToInt rejects non-finite and overflowing values" {
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 0x1p63, -0x1p64 }) |value|
+        try std.testing.expectEqual(null, floatToInt(value));
+    try std.testing.expectEqual(@as(?i64, std.math.minInt(i64)), floatToInt(-0x1p63));
+    try std.testing.expectEqual(@as(?i64, 42), floatToInt(42.9));
+    try std.testing.expectEqual(@as(?i64, -42), floatToInt(-42.9));
+}
+
+test "fuzz floatToInt handles arbitrary IEEE values" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const value: f64 = @bitCast(smith.value(u64));
+            if (floatToInt(value)) |integer| {
+                try std.testing.expect(std.math.isFinite(value));
+                try std.testing.expectEqual(@trunc(value), @as(f64, @floatFromInt(integer)));
+            }
+        }
+    }.run, .{});
+}
+
+test "JSON copy cleans up every partial allocation" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"text\":\"hello\",\"array\":[true,null,{\"n\":1}],\"object\":{}}", .{});
+    defer parsed.deinit();
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn copy(alloc: std.mem.Allocator, val: std.json.Value) !void {
+            const owned = try deepCopy(alloc, val);
+            defer free(alloc, owned);
+        }
+    }.copy, .{parsed.value});
+}
+
+test "fuzz JSON copy owns and releases bounded trees" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var raw: [32]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            var source: std.json.Array = .init(std.testing.allocator);
+            defer source.deinit();
+            for (&raw) |*b| try source.append(.{ .string = b[0..1] });
+            const copy = try deepCopy(std.testing.allocator, .{ .array = source });
+            defer free(std.testing.allocator, copy);
+            for (copy.array.items, &raw) |item, b| try std.testing.expectEqual(b, item.string[0]);
         }
     }.run, .{});
 }

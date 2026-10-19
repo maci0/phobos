@@ -140,12 +140,27 @@ pub fn findTd1Devices(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         const ids = readTd1Ids(io, alloc, tty_root, entry.name) orelse continue;
-        if (!isTd1VidPid(ids.vid, ids.pid)) continue;
-        if (ids.serial.len == 0) continue;
-        const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dev_prefix, entry.name }) catch continue;
-        list.append(alloc, .{ .path = path, .serial = ids.serial }) catch continue;
+        if (!isTd1VidPid(ids.vid, ids.pid) or ids.serial.len == 0) {
+            alloc.free(ids.serial);
+            continue;
+        }
+        const path = std.fmt.allocPrint(alloc, "{s}/{s}", .{ dev_prefix, entry.name }) catch {
+            alloc.free(ids.serial);
+            continue;
+        };
+        list.append(alloc, .{ .path = path, .serial = ids.serial }) catch {
+            alloc.free(path);
+            alloc.free(ids.serial);
+        };
     }
-    return list.toOwnedSlice(alloc) catch &.{};
+    return list.toOwnedSlice(alloc) catch {
+        for (list.items) |device| {
+            alloc.free(device.path);
+            alloc.free(device.serial);
+        }
+        list.deinit(alloc);
+        return &.{};
+    };
 }
 
 /// TD-1 reboot handshake step (td1.py reboot): after sending "change settings\n"
@@ -196,8 +211,8 @@ pub const Td1Connection = struct {
 
 /// Current UTC time as an ISO-8601 string ("YYYY-MM-DDTHH:MM:SSZ"), written into
 /// `buf` (needs >= 20 bytes). Used for TD-1 scan timestamps.
-pub fn nowIso8601(buf: []u8) []const u8 {
-    return clock.iso8601(buf);
+pub fn nowIso8601(io: std.Io, buf: []u8) []const u8 {
+    return clock.iso8601(io, buf);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +220,7 @@ pub fn nowIso8601(buf: []u8) []const u8 {
 // ---------------------------------------------------------------------------
 
 pub const Td1Ctx = struct {
+    clock_io: std.Io,
     gpa: std.mem.Allocator,
     conns: std.StringHashMap(Td1Connection),
     /// Background discovery/poll plumbing (set via setIo/setCore + startPolling).
@@ -213,14 +229,14 @@ pub const Td1Ctx = struct {
     io: ?std.Io = null,
     core: ?*Core = null,
     poll_thread: ?std.Thread = null,
-    poll_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    poll_stop: std.Io.Event = .unset,
     tty_root: []const u8 = "/sys/class/tty",
     dev_prefix: []const u8 = "/dev",
     baud: u32 = 115200,
     poll_interval_ns: u64 = 1_000_000_000, // 1 s
 
-    pub fn init(alloc: std.mem.Allocator) Td1Ctx {
-        return .{ .gpa = alloc, .conns = std.StringHashMap(Td1Connection).init(alloc) };
+    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io) Td1Ctx {
+        return .{ .clock_io = clock_io, .gpa = alloc, .conns = std.StringHashMap(Td1Connection).init(alloc) };
     }
 
     pub fn setIo(self: *Td1Ctx, io: std.Io) void {
@@ -235,12 +251,12 @@ pub const Td1Ctx = struct {
     pub fn startPolling(self: *Td1Ctx) void {
         if (self.poll_thread != null) return;
         if (self.io == null or self.core == null) return;
-        self.poll_stop.store(false, .release);
+        self.poll_stop.reset();
         self.poll_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, pollLoop, .{self}) catch null;
     }
 
     pub fn stopPolling(self: *Td1Ctx) void {
-        self.poll_stop.store(true, .release);
+        self.poll_stop.set(self.clock_io);
         if (self.poll_thread) |t| {
             t.join();
             self.poll_thread = null;
@@ -250,10 +266,10 @@ pub const Td1Ctx = struct {
     fn pollLoop(self: *Td1Ctx) void {
         const io = self.io orelse return;
         const core = self.core orelse return;
-        while (!self.poll_stop.load(.acquire)) {
+        while (!self.poll_stop.isSet()) {
             // Chunked so stopPolling's join returns promptly instead of blocking
             // a full interval.
-            if (sleep.chunked(io, self.poll_interval_ns / 1_000_000, &self.poll_stop)) break;
+            if (sleep.untilStopped(io, .fromNanoseconds(self.poll_interval_ns), &self.poll_stop)) break;
             // Run the scan under the Core lock so conns mutations are serialized
             // with handleGetData.
             core.run(io, Td1Ctx.scanOnce, .{ self, io, self.tty_root, self.dev_prefix, self.baud });
@@ -292,7 +308,7 @@ pub const Td1Ctx = struct {
         // Refresh scan_time on each successful reading (td1.py _parse_line sets
         // `_scan_time = datetime.utcnow().isoformat()+"Z"`).
         var ts_buf: [32]u8 = undefined;
-        const new_scan = try self.gpa.dupe(u8, nowIso8601(&ts_buf));
+        const new_scan = try self.gpa.dupe(u8, nowIso8601(self.clock_io, &ts_buf));
         if (conn.color) |c| self.gpa.free(c);
         conn.color = new_color;
         self.gpa.free(conn.scan_time);
@@ -310,15 +326,25 @@ pub const Td1Ctx = struct {
         errdefer self.gpa.free(sn);
         const st = try self.gpa.dupe(u8, conn.scan_time);
         errdefer self.gpa.free(st);
+        const color = if (conn.color) |c| try self.gpa.dupe(u8, c) else null;
+        errdefer if (color) |c| self.gpa.free(c);
+        const error_msg = if (conn.error_msg) |e| try self.gpa.dupe(u8, e) else null;
+        errdefer if (error_msg) |e| self.gpa.free(e);
         const v: Td1Connection = .{
             .serial_number = sn,
             .td = conn.td,
-            .color = if (conn.color) |c| try self.gpa.dupe(u8, c) else null,
+            .color = color,
             .scan_time = st,
-            .error_msg = if (conn.error_msg) |e| try self.gpa.dupe(u8, e) else null,
+            .error_msg = error_msg,
             .done_initializing = conn.done_initializing,
         };
-        try self.conns.put(k, v);
+        if (try self.conns.fetchPut(k, v)) |prior| {
+            self.gpa.free(k); // Replacements retain the map's existing key.
+            self.gpa.free(prior.value.serial_number);
+            self.gpa.free(prior.value.scan_time);
+            if (prior.value.color) |c| self.gpa.free(c);
+            if (prior.value.error_msg) |e| self.gpa.free(e);
+        }
     }
 
     /// One discovery + poll pass (matches td1.py's enumerate→connect loop):
@@ -334,7 +360,7 @@ pub const Td1Ctx = struct {
                 var ts_buf: [32]u8 = undefined;
                 self.addConnection(.{
                     .serial_number = d.serial,
-                    .scan_time = nowIso8601(&ts_buf),
+                    .scan_time = nowIso8601(self.clock_io, &ts_buf),
                 }) catch continue;
             }
             self.pollSerialOnce(io, d.serial, d.path, baud) catch {};
@@ -488,12 +514,28 @@ test "findTd1Devices: matches TD-1 vid/pid in a temp sysfs tree, skips others" {
     }
     try Dir.cwd().createDirPath(io, root ++ "/ttyS0");
 
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const devs = findTd1Devices(io, arena.allocator(), root, "/dev");
+    const devs = findTd1Devices(io, testing.allocator, root, "/dev");
+    defer {
+        for (devs) |device| {
+            testing.allocator.free(device.path);
+            testing.allocator.free(device.serial);
+        }
+        testing.allocator.free(devs);
+    }
     try testing.expectEqual(@as(usize, 1), devs.len);
     try testing.expectEqualStrings("/dev/ttyACM0", devs[0].path);
     try testing.expectEqualStrings("TD1ABC", devs[0].serial);
+    for (0..8) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        const alloc = failing.allocator();
+        const devices = findTd1Devices(io, alloc, root, "/dev");
+        for (devices) |device| {
+            alloc.free(device.path);
+            alloc.free(device.serial);
+        }
+        alloc.free(devices);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 test "scanOnce: registers a discovered TD-1 connection" {
@@ -510,7 +552,7 @@ test "scanOnce: registers a discovered TD-1 connection" {
     try writeFileStr(io, dev ++ "/idProduct", "0045\n");
     try writeFileStr(io, dev ++ "/serial", "SCANME\n");
 
-    var ctx = Td1Ctx.init(testing.allocator);
+    var ctx = Td1Ctx.init(testing.allocator, std.testing.io);
     defer ctx.deinit();
     // Device node won't open (no real serial) → poll fails, but the connection
     // is registered from discovery.
@@ -537,7 +579,7 @@ test "fuzz findTd1Devices/parseUsbHex: arbitrary inputs never crash" {
 
 test "nowIso8601: ISO-8601 UTC shape (YYYY-MM-DDTHH:MM:SSZ)" {
     var buf: [32]u8 = undefined;
-    const s = nowIso8601(&buf);
+    const s = nowIso8601(std.testing.io, &buf);
     try testing.expectEqual(@as(usize, 20), s.len);
     try testing.expectEqual(@as(u8, '-'), s[4]);
     try testing.expectEqual(@as(u8, '-'), s[7]);
@@ -557,7 +599,7 @@ test "fuzz nowIso8601: any buffer size never crashes" {
             // either way it must not crash and must return a non-empty string.
             const n: usize = smith.valueRangeAtMostWithHash(u32, 0, 40, 0);
             var buf: [40]u8 = undefined;
-            const s = nowIso8601(buf[0..n]);
+            const s = nowIso8601(std.testing.io, buf[0..n]);
             try testing.expect(s.len > 0);
         }
     }.run, .{});
@@ -569,7 +611,7 @@ test "handleGetData: returns status=ok and empty devices map" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
     const v = try handleGetData(@ptrCast(&ctx), .null, a);
     const o = v.object;
@@ -582,7 +624,7 @@ test "handleGetData: result shape matches upstream (status + devices keys)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
     const v = try handleGetData(@ptrCast(&ctx), .null, a);
     try testing.expect(v.object.get("status") != null);
@@ -595,7 +637,7 @@ test "handleReboot: missing serial param returns InvalidParams" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
     try testing.expectError(error.InvalidParams, handleReboot(@ptrCast(&ctx), .null, a));
     try testing.expectError(error.InvalidParams, handleReboot(@ptrCast(&ctx), try objParams(a, "{}"), a));
@@ -605,7 +647,7 @@ test "handleReboot: unknown serial returns serial_error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
     const v = try handleReboot(@ptrCast(&ctx), try objParams(a, "{\"serial\":\"ABC123\"}"), a);
     try testing.expectEqualStrings("serial_error", v.object.get("status").?.string);
@@ -615,7 +657,7 @@ test "handleReboot: result always contains status key" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
     const v = try handleReboot(@ptrCast(&ctx), try objParams(a, "{\"serial\":\"SN-0001\"}"), a);
     try testing.expect(v.object.get("status") != null);
@@ -631,7 +673,7 @@ test "fuzz_td1_data: handleGetData never crashes on arbitrary params" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = Td1Ctx.init(a);
+            var ctx = Td1Ctx.init(a, std.testing.io);
             defer ctx.deinit();
             const params: std.json.Value = if (buf[0] & 1 == 0) .null else .{ .bool = true };
             const v = try handleGetData(@ptrCast(&ctx), params, a);
@@ -648,7 +690,7 @@ test "fuzz_td1_reboot: handleReboot never panics on arbitrary serial values" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = Td1Ctx.init(a);
+            var ctx = Td1Ctx.init(a, std.testing.io);
             defer ctx.deinit();
 
             const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
@@ -673,7 +715,7 @@ test "registerTd1: wires expected routes" {
     var reg = Registry.init(testing.allocator, &d);
     defer reg.deinit();
 
-    var ctx = Td1Ctx.init(testing.allocator);
+    var ctx = Td1Ctx.init(testing.allocator, std.testing.io);
     defer ctx.deinit();
     try registerTd1(&reg, &ctx);
 
@@ -687,7 +729,7 @@ test "addConnection: device appears in handleGetData" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
 
     try ctx.addConnection(.{
@@ -711,7 +753,7 @@ test "addConnection: device not done_initializing is excluded" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
 
     try ctx.addConnection(.{
@@ -729,7 +771,7 @@ test "addConnection: null td and color are represented as null" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
 
     try ctx.addConnection(.{
@@ -748,7 +790,7 @@ test "addConnection: error string is passed through" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
 
     try ctx.addConnection(.{
@@ -769,7 +811,7 @@ test "handleReboot: known serial returns ok and removes device" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
 
     try ctx.addConnection(.{
@@ -789,7 +831,7 @@ test "handleReboot: multiple devices only removes the targeted one" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = Td1Ctx.init(a);
+    var ctx = Td1Ctx.init(a, std.testing.io);
     defer ctx.deinit();
 
     try ctx.addConnection(.{ .serial_number = "A", .scan_time = "2025-01-01T00:00:00Z", .done_initializing = true });
@@ -811,7 +853,7 @@ test "fuzz_addConnection_getData: never crashes on arbitrary connection fields" 
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var ctx = Td1Ctx.init(a);
+            var ctx = Td1Ctx.init(a, std.testing.io);
             defer ctx.deinit();
 
             const sn = try std.fmt.allocPrint(a, "SN-{d}", .{buf[0]});
@@ -865,7 +907,7 @@ test "pollSerialOnce: reads a line from the device and updates the connection" {
     try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "ts,sn,fw,batt,1.72,Green\n" });
     defer Dir.cwd().deleteFile(io, path) catch {};
 
-    var ctx = Td1Ctx.init(std.testing.allocator);
+    var ctx = Td1Ctx.init(std.testing.allocator, std.testing.io);
     defer ctx.deinit();
     try ctx.addConnection(.{ .serial_number = "TD1A", .scan_time = "init", .done_initializing = false });
 
@@ -883,7 +925,7 @@ test "handleReboot: removing a known device frees the map key (no leak)" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var ctx = Td1Ctx.init(std.testing.allocator);
+    var ctx = Td1Ctx.init(std.testing.allocator, std.testing.io);
     defer ctx.deinit();
     try ctx.addConnection(.{ .serial_number = "TD1X", .scan_time = "t", .color = "Red", .done_initializing = true });
 
@@ -891,4 +933,16 @@ test "handleReboot: removing a known device frees the map key (no leak)" {
     const r = try handleReboot(@ptrCast(&ctx), params.value, a);
     try std.testing.expectEqualStrings("ok", r.object.get("status").?.string);
     try std.testing.expect(ctx.conns.count() == 0);
+}
+
+test "TD1 connections free partial and replaced records on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx = Td1Ctx.init(alloc, std.testing.io);
+            defer ctx.deinit();
+            try ctx.addConnection(.{ .serial_number = "SN", .scan_time = "now", .color = "blue", .error_msg = "test" });
+            try ctx.addConnection(ctx.conns.getPtr("SN").?.*);
+            try std.testing.expectEqualStrings("blue", ctx.conns.get("SN").?.color.?);
+        }
+    }.check, .{});
 }

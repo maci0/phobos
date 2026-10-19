@@ -267,22 +267,22 @@ fn jsonLessThan(a: std.json.Value, b: std.json.Value) bool {
     switch (a) {
         .string => |as| {
             if (b == .string) return std.mem.lessThan(u8, as, b.string);
-            return @intFromEnum(std.json.Value.string) < @intFromEnum(b);
+            return @backingInt(std.json.Value.string) < @backingInt(b);
         },
         .integer => |ai| {
             if (b == .integer) return ai < b.integer;
-            return @intFromEnum(std.json.Value.integer) < @intFromEnum(b);
+            return @backingInt(std.json.Value.integer) < @backingInt(b);
         },
         .float => |af| {
             if (b == .float) return af < b.float;
-            return @intFromEnum(std.json.Value.float) < @intFromEnum(b);
+            return @backingInt(std.json.Value.float) < @backingInt(b);
         },
         .bool => |ab| {
             if (b == .bool) return !ab and b.bool; // false < true
-            return @intFromEnum(std.json.Value.bool) < @intFromEnum(b);
+            return @backingInt(std.json.Value.bool) < @backingInt(b);
         },
         .null => return true, // null < everything
-        else => return @intFromEnum(a) < @intFromEnum(b),
+        else => return @backingInt(a) < @backingInt(b),
     }
 }
 
@@ -428,7 +428,6 @@ fn normalizeFiles(alloc: std.mem.Allocator, arr: std.json.Array) error{OutOfMemo
     return .{ .array = new_arr };
 }
 
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -502,12 +501,12 @@ test "path_relativize: config_file normalized" {
 
 test "structure_compare: warnings with different text, same structure" {
     const alloc = testing.allocator;
-    const a = 
+    const a =
         \\{"warnings":[
         \\  {"message":"disk full on /dev/sda","type":"warning"}
         \\]}
     ;
-    const b = 
+    const b =
         \\{"warnings":[
         \\  {"message":"network timeout eth0","type":"warning"}
         \\]}

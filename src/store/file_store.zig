@@ -1,11 +1,9 @@
 //! FileStore — an atomic-rename JSON DataStore backend.
 //!
 //! One file per namespace: `<dir>/<namespace>.json` holds a JSON object mapping
-//! each top-level record key to its record value. Writes are durable + atomic:
-//! the new content is written to `<namespace>.json.tmp`, then `rename`d over the
-//! live file. A rename within one directory is atomic on POSIX, so a crash (or a
-//! printer power-cut) mid-write can never leave a torn/half-written namespace —
-//! you either see the old file or the new one, never garbage.
+//! each top-level record key to its record value. `std.Io.File.Atomic` publishes
+//! each complete namespace. Data is synced before replacement; failed writes
+//! leave the previous namespace in place and clean up the temporary file.
 //!
 //! Pure Zig, no C dependency — the lean alternative to the SQLite backend for
 //! deployments that don't need Moonraker `moonraker-sql.db` compatibility. The
@@ -32,8 +30,7 @@ pub const FileStore = struct {
     /// Open (creating if absent) the database directory.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8) !FileStore {
         const cwd = std.Io.Dir.cwd();
-        try cwd.createDirPath(io, dir_path);
-        const dir = try cwd.openDir(io, dir_path, .{ .iterate = true });
+        const dir = try cwd.createDirPathOpen(io, dir_path, .{ .open_options = .{ .iterate = true } });
         return .{ .gpa = gpa, .io = io, .dir = dir };
     }
 
@@ -65,10 +62,11 @@ pub const FileStore = struct {
         const bytes = aw.written();
 
         const fname = std.fmt.allocPrint(arena, "{s}.json", .{namespace}) catch return Error.BackendError;
-        const tmp = std.fmt.allocPrint(arena, "{s}.json.tmp", .{namespace}) catch return Error.BackendError;
-        self.dir.writeFile(self.io, .{ .sub_path = tmp, .data = bytes }) catch return Error.BackendError;
-        // Atomic publish: rename within the same dir replaces the live file in one step.
-        self.dir.rename(tmp, self.dir, fname, self.io) catch return Error.BackendError;
+        var pending = self.dir.createFileAtomic(self.io, fname, .{ .replace = true }) catch return Error.BackendError;
+        defer pending.deinit(self.io);
+        pending.file.writeStreamingAll(self.io, bytes) catch return Error.BackendError;
+        pending.file.sync(self.io) catch return Error.BackendError;
+        pending.replace(self.io) catch return Error.BackendError;
     }
 
     // --- DataStore API (shared dotted-key path helpers) -------------------

@@ -23,6 +23,8 @@
 //!   Default capacity: 1200 (matches data_store.py temperature_store_size default)
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
+const sleep = @import("../util/sleep.zig");
 const registry = @import("../server/registry.zig");
 
 const Registry = registry.Registry;
@@ -194,7 +196,7 @@ pub const DataStoreCtx = struct {
     gpa: std.mem.Allocator,
     /// `[data_store] temperature_store_size`. Default 1200.
     temp_capacity: usize = temp_store_size,
-    sampler_stop: std.atomic.Value(bool) = .init(false),
+    sampler_stop: std.Io.Event = .unset,
     sampler_thread: ?std.Thread = null,
 
     pub fn setIo(self: *DataStoreCtx, io: std.Io) void {
@@ -322,12 +324,12 @@ pub const DataStoreCtx = struct {
     pub fn startSampler(self: *DataStoreCtx) !void {
         if (self.sampler_thread != null) return;
         if (self.io == null) return error.IoNotSet;
-        self.sampler_stop.store(false, .release);
+        self.sampler_stop.reset();
         self.sampler_thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, samplerThread, .{self});
     }
 
     pub fn stopSampler(self: *DataStoreCtx) void {
-        self.sampler_stop.store(true, .release);
+        if (self.io) |stop_io| self.sampler_stop.set(stop_io) else self.sampler_stop = .is_set;
         if (self.sampler_thread) |thread| {
             thread.join();
             self.sampler_thread = null;
@@ -336,9 +338,8 @@ pub const DataStoreCtx = struct {
 
     fn samplerThread(self: *DataStoreCtx) void {
         const io = self.io.?;
-        while (!self.sampler_stop.load(.acquire)) {
-            std.Io.sleep(io, .fromSeconds(1), .awake) catch return;
-            if (self.sampler_stop.load(.acquire)) break;
+        while (!self.sampler_stop.isSet()) {
+            if (sleep.untilStopped(io, .fromSeconds(1), &self.sampler_stop)) break;
             self.sampleTemperatures(io);
         }
     }
@@ -367,7 +368,7 @@ fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
             const v = obj.get(field) orelse return null;
             return switch (v) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f),
                 .string => |s| std.fmt.parseInt(i64, s, 10) catch null,
                 else => null,
             };

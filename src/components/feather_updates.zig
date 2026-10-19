@@ -393,7 +393,7 @@ test "dispatchRemoteMethod: reset runs git through the runner before reset_compl
         for (rec.states.items) |s| alloc.free(s);
         rec.states.deinit(alloc);
     }
-    var updates = update_manager.UpdateCtx{ .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
+    var updates = update_manager.UpdateCtx{ .clock_io = std.testing.io, .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
     var feather = FeatherCtx{
         .updates = &updates,
         .idle = idleYes,
@@ -445,7 +445,7 @@ test "dispatchRemoteMethod: idle refusal does not run git" {
         for (rec.states.items) |s| alloc.free(s);
         rec.states.deinit(alloc);
     }
-    var updates = update_manager.UpdateCtx{ .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
+    var updates = update_manager.UpdateCtx{ .clock_io = std.testing.io, .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
     var feather = FeatherCtx{
         .updates = &updates,
         .cmd = Recorder.cmd,
@@ -501,7 +501,7 @@ test "dispatchRemoteMethod: update calls machine.update.client before complete" 
         .pinned_remote_hash = "bbb",
         .pinned_behind = 2,
     }};
-    var updates = update_manager.UpdateCtx{ .gpa = alloc, .sources = &sources, .bus = null, .io = null };
+    var updates = update_manager.UpdateCtx{ .clock_io = std.testing.io, .gpa = alloc, .sources = &sources, .bus = null, .io = null };
     var feather = FeatherCtx{
         .update_key = "forge-x",
         .updates = &updates,
@@ -548,7 +548,7 @@ test "dispatchFrame: id-less feather reset reaches onKlippyMethod" {
         for (rec.states.items) |s| alloc.free(s);
         rec.states.deinit(alloc);
     }
-    var updates = update_manager.UpdateCtx{ .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
+    var updates = update_manager.UpdateCtx{ .clock_io = std.testing.io, .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
     var feather = FeatherCtx{
         .updates = &updates,
         .idle = idleYes,
@@ -593,7 +593,7 @@ test "dispatchRemoteMethod: no runner does not report reset_complete" {
         rec.states.deinit(alloc);
         rec.cmds.deinit(alloc);
     }
-    var updates = update_manager.UpdateCtx{ .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
+    var updates = update_manager.UpdateCtx{ .clock_io = std.testing.io, .gpa = alloc, .sources = &update_manager.default_sources, .bus = null, .io = null };
     var feather = FeatherCtx{
         .updates = &updates,
         .idle = idleYes,

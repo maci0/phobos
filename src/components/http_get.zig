@@ -50,7 +50,7 @@ pub fn getConditional(
     var redirect_buf: [8192]u8 = undefined;
     var response = try req.receiveHead(&redirect_buf);
 
-    const status: u16 = @intFromEnum(response.head.status);
+    const status: u16 = @backingInt(response.head.status);
 
     // Capture the ETag header (case-insensitive).
     var etag_out: ?[]u8 = null;
@@ -91,12 +91,8 @@ const EtagServer = struct {
         var ip = try net.IpAddress.parseIp4("127.0.0.1", 0);
         return .{ .io = io, .server = try ip.listen(io, .{ .reuse_address = true }) };
     }
-    fn port(self: *EtagServer) !u16 {
-        var sa: std.os.linux.sockaddr.in = undefined;
-        var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
-        const rc = std.os.linux.getsockname(self.server.socket.handle, @ptrCast(&sa), &slen);
-        if (std.os.linux.errno(rc) != .SUCCESS) return error.GetSockNameFailed;
-        return std.mem.bigToNative(u16, sa.port);
+    fn port(self: *const EtagServer) u16 {
+        return self.server.socket.address.getPort();
     }
     fn deinit(self: *EtagServer) void {
         self.server.deinit(self.io);
@@ -137,7 +133,7 @@ test "getConditional: 200 returns body + ETag; conditional re-fetch returns 304"
 
     var srv = try EtagServer.bind(io);
     defer srv.deinit();
-    const p = try srv.port();
+    const p = srv.port();
     const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/feed", .{p});
     defer testing.allocator.free(url);
 

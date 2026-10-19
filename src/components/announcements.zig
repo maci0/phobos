@@ -36,6 +36,7 @@
 //!   notify_announcement_wake    (dismissed entry woke up)
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
@@ -57,6 +58,7 @@ const UPDATE_CHECK_TIME: u64 = 1800;
 // ---------------------------------------------------------------------------
 
 pub const AnnouncementsCtx = struct {
+    clock_io: std.Io,
     store: DataStore,
     bus: *NotifyBus,
     io: ?std.Io,
@@ -67,9 +69,9 @@ pub const AnnouncementsCtx = struct {
     /// Counter for new entry keys (hex sequence).
     next_key: u64,
     /// Background refresh timer stop flag. Set by deinit, polled by the timer thread.
-    refresh_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    refresh_stop: std.Io.Event = .unset,
     /// Handle for the background refresh timer thread, joined in deinit.
-    refresh_thread: ?std.Thread = null,
+    refresh_thread: ?std.Io.Future(void) = null,
     /// Per-feed ETag from the last successful fetch, for `If-None-Match`
     /// conditional GETs (keyed by feed name; both key and value gpa-owned).
     etags: std.StringHashMap([]u8) = undefined,
@@ -81,15 +83,18 @@ pub const AnnouncementsCtx = struct {
 
     pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
         self.io = io;
+        if (self.refresh_thread != null) return;
+        self.refresh_stop.reset();
         // Start the periodic RSS refresh timer (30 minute interval).
-        self.refresh_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, announcementsRefreshTimerThread, .{self}) catch null;
+        self.refresh_thread = io.concurrent(announcementsRefreshTimerThread, .{self}) catch null;
     }
 
     /// Built-in feeds (always present, cannot be deleted).
     pub const builtin_feeds = [_][]const u8{ "moonraker", "klipper" };
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !AnnouncementsCtx {
+    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io, store: DataStore, bus: *NotifyBus) !AnnouncementsCtx {
         var ctx = AnnouncementsCtx{
+            .clock_io = clock_io,
             .store = store,
             .bus = bus,
             .io = null,
@@ -98,9 +103,12 @@ pub const AnnouncementsCtx = struct {
             .next_key = 0,
             .etags = std.StringHashMap([]u8).init(alloc),
         };
+        errdefer ctx.deinit();
         // Add built-in feeds
         for (builtin_feeds) |f| {
-            try ctx.feeds.append(alloc, try alloc.dupe(u8, f));
+            const name = try alloc.dupe(u8, f);
+            errdefer alloc.free(name);
+            try ctx.feeds.append(alloc, name);
         }
         // Load stored feeds
         ctx.loadFeeds() catch {};
@@ -110,15 +118,12 @@ pub const AnnouncementsCtx = struct {
     }
 
     pub fn deinit(self: *AnnouncementsCtx) void {
-        self.refresh_stop.store(true, .release);
-        // Clear io so the timer thread returns early even if it already passed
-        // the while-condition. This prevents use-after-free when App tears down
-        // the bus/connections before joining the announcements thread.
-        self.io = null;
-        if (self.refresh_thread) |th| {
-            th.join();
+        self.refresh_stop.set(self.clock_io);
+        if (self.refresh_thread) |*th| {
+            th.cancel(self.io.?);
             self.refresh_thread = null;
         }
+        self.io = null;
         for (self.feeds.items) |f| self.gpa.free(f);
         self.feeds.deinit(self.gpa);
         var eit = self.etags.iterator();
@@ -142,6 +147,7 @@ pub const AnnouncementsCtx = struct {
                     const name = item.string;
                     if (self.hasFeed(name)) continue;
                     const owned = try self.gpa.dupe(u8, name);
+                    errdefer self.gpa.free(owned);
                     try self.feeds.append(self.gpa, owned);
                 }
             },
@@ -461,13 +467,6 @@ pub const AnnouncementsCtx = struct {
 // Background refresh timer
 // ---------------------------------------------------------------------------
 
-/// Background thread spawned via std.Thread.spawn. Periodically fetches all
-/// subscribed RSS feeds and emits notify_announcement_update when entries
-/// change. Runs every UPDATE_CHECK_TIME seconds (30 min), matching Moonraker.
-///
-/// Sleeps in 1-second increments so the stop flag is polled frequently,
-/// keeping deinit→join latency bounded (~1 s); otherwise the thread would
-/// block in nanosleep for up to UPDATE_CHECK_TIME seconds.
 /// True if a stored entry is dismissed with a `dismiss_wake` time at/<= `now`.
 /// Pure; the unit of wake detection.
 fn entryShouldWake(entry: std.json.Value, now: f64) bool {
@@ -494,7 +493,7 @@ fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
     const ns = self.store.getNamespace(alloc, ns_entries) catch return;
     if (ns != .object) return;
 
-    const now: f64 = @floatFromInt(clock.wallSecondsInt());
+    const now: f64 = @floatFromInt(clock.wallSecondsInt(self.clock_io));
 
     var it = ns.object.iterator();
     while (it.next()) |kv| {
@@ -530,14 +529,8 @@ fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
 fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
     const io = self.io orelse return;
     var elapsed: u64 = 0;
-    while (!self.refresh_stop.load(.acquire)) {
-        // Sleep the 1-second tick in 100 ms chunks, polling the stop flag between
-        // each, so deinit→join returns within ~100 ms instead of up to a full
-        // second. Across the e2e suite's hundreds of server start/stop cycles the
-        // old 1 s granularity compounded into minutes and tripped the test-runner
-        // timeout. (std.Thread sync primitives are gone in 0.16; this mirrors the
-        // chunked-sleep pattern already used by button.zig / td1.zig.)
-        if (sleep.chunked(io, 1000, &self.refresh_stop)) break;
+    while (!self.refresh_stop.isSet()) {
+        if (sleep.untilStopped(io, .fromSeconds(1), &self.refresh_stop)) break;
 
         // Each second: re-surface any dismissed entries past their wake time.
         {
@@ -611,7 +604,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default: ?i64) ?i64 {
             const v = obj.get(field) orelse return default;
             return switch (v) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f) orelse default,
                 .string => |s| std.fmt.parseInt(i64, s, 10) catch default,
                 .null => null,
                 else => default,
@@ -746,7 +739,7 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
         while (it.next()) |kv| try new_entry.put(alloc, kv.key_ptr.*, kv.value_ptr.*);
     }
     try new_entry.put(alloc, "dismissed", .{ .bool = true });
-    const cur_time = clock.wallSeconds();
+    const cur_time = clock.wallSeconds(c.clock_io);
     try new_entry.put(alloc, "date_dismissed", .{ .float = cur_time });
     if (wake_time) |wt| {
         try new_entry.put(alloc, "dismiss_wake", .{ .float = cur_time + @as(f64, @floatFromInt(wt)) });
@@ -1107,7 +1100,7 @@ test "handleListFeeds: returns built-in feeds" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const result = try handleListFeeds(@ptrCast(&ctx), .null, a);
@@ -1136,7 +1129,7 @@ test "addSubscription: configured feed is listed and dev_mode skips fetch" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.dev_mode = true;
     try ctx.addSubscription("Fluidd");
@@ -1165,7 +1158,7 @@ test "handleList: empty store returns empty entries and built-in feeds" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const result = try handleList(@ptrCast(&ctx), .null, a);
@@ -1194,7 +1187,7 @@ test "handleList: include_dismissed=false filters dismissed entries" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"include_dismissed\":false}");
@@ -1216,7 +1209,7 @@ test "handlePostFeed: adds new feed" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"name\":\"myapp\"}");
@@ -1240,7 +1233,7 @@ test "handlePostFeed: duplicate feed returns skipped" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"name\":\"moonraker\"}");
@@ -1262,7 +1255,7 @@ test "handleDeleteFeed: removes stored feed" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // Add it first
@@ -1290,7 +1283,7 @@ test "handleDeleteFeed: builtin feed → Forbidden" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"name\":\"moonraker\"}");
@@ -1315,7 +1308,7 @@ test "handleDismiss: marks entry dismissed" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"entry_id\":\"e1\"}");
@@ -1337,7 +1330,7 @@ test "handleDismiss: unknown entry_id → NotFound" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"entry_id\":\"nope\"}");
@@ -1358,7 +1351,7 @@ test "handleUpdate: returns entries and modified=false" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const result = try handleUpdate(@ptrCast(&ctx), .null, a);
@@ -1384,7 +1377,7 @@ test "registerAnnouncements: wires expected routes and JSON-RPC methods" {
     var conns = NullConns.init(alloc, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(alloc, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(alloc, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     try registerAnnouncements(&reg, &ctx);
@@ -1422,7 +1415,7 @@ test "notifyUpdate: locked=true uses emitLocked" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.io = io;
 
@@ -1431,7 +1424,7 @@ test "notifyUpdate: locked=true uses emitLocked" {
         \\{"entry_id":"e1","dismissed":false,"date":100.0,"feed":"moonraker"}
     );
     // Re-init to pick up the inserted entry for next_key etc.
-    var ctx2 = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx2 = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx2.deinit();
     ctx2.io = io;
 
@@ -1462,7 +1455,7 @@ test "notifyUpdate: locked=false uses emit" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.io = io;
 
@@ -1485,7 +1478,7 @@ test "deinit: handles null refresh_thread gracefully" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     // No setIo → refresh_thread is null. deinit must not crash.
     ctx.deinit();
 }
@@ -1504,17 +1497,17 @@ test "deinit: sets refresh_stop and nulls io" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(std.heap.smp_allocator, std.testing.io, mem.dataStore(), &bus);
     ctx.io = io;
 
     // Spawn the timer thread.
-    ctx.refresh_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, announcementsRefreshTimerThread, .{&ctx}) catch null;
+    ctx.refresh_thread = io.concurrent(announcementsRefreshTimerThread, .{&ctx}) catch null;
 
     // deinit must set the stop flag, null io, and join the thread.
     ctx.deinit();
     try testing.expect(ctx.refresh_thread == null);
     try testing.expect(ctx.io == null);
-    try testing.expect(ctx.refresh_stop.load(.acquire));
+    try testing.expect(ctx.refresh_stop.isSet());
 }
 
 test "announcementsRefreshTimerThread: exits when pre-stopped" {
@@ -1531,11 +1524,11 @@ test "announcementsRefreshTimerThread: exits when pre-stopped" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // Pre-set stop flag; the thread should exit the while loop without sleeping.
-    ctx.refresh_stop.store(true, .release);
+    ctx.refresh_stop.set(ctx.clock_io);
     announcementsRefreshTimerThread(&ctx);
     // If we reach here, the thread exited cleanly.
 }
@@ -1554,12 +1547,12 @@ test "announcementsRefreshTimerThread: exits when io is null" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // io is null (setIo never called). Thread should break on null io check
     // after the first 1-second sleep.
-    ctx.refresh_stop.store(false, .release);
+    ctx.refresh_stop.reset();
     announcementsRefreshTimerThread(&ctx);
     // If we reach here, the thread exited cleanly after the null io check.
 }
@@ -1580,7 +1573,7 @@ test "fuzz notifyUpdate: locked=true/false never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
             ctx.io = io;
 
@@ -1612,7 +1605,7 @@ test "fuzz handleList: never panics on arbitrary params" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -1645,7 +1638,7 @@ test "fuzz handlePostFeed: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -1678,7 +1671,7 @@ test "fuzz handleDismiss: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -1711,7 +1704,7 @@ test "fuzz handleListFeeds: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -1737,7 +1730,7 @@ test "fuzz handleDeleteFeed: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -1771,7 +1764,7 @@ test "fuzz handleUpdate: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -1803,7 +1796,7 @@ test "handleFeedDispatchMulti: POST dispatches to post_feed" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const params = try std.json.parseFromSlice(std.json.Value, a,
@@ -1828,7 +1821,7 @@ test "handleFeedDispatchMulti: DELETE dispatches to delete_feed" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // First add a feed via POST
@@ -1860,7 +1853,7 @@ test "handleFeedDispatchMulti: missing _method defaults to POST" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const params = try std.json.parseFromSlice(std.json.Value, a,
@@ -1887,7 +1880,7 @@ test "fuzz handleFeedDispatchMulti: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = AnnouncementsCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;

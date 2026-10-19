@@ -12,7 +12,8 @@ and what's next; read this for *how* to work in the codebase.
 3. **TDD**: write the failing test → run it and watch it fail → minimal implementation →
    run it and watch it pass → commit. Small, frequent commits.
 4. **Use the standard library for I/O** — `std.Io.net` + `std.Io.Threaded` for sockets,
-   `std.http` for HTTP/WebSocket. Never hand-roll socket syscalls or HTTP/RFC6455 framing.
+   `std.http` for HTTP and WebSocket servers. The standard library has no WebSocket
+   client; keep masked client frames in `components/ws_client.zig`.
 5. **Match upstream exactly** — every component reads its
    `vendor/moonraker/moonraker/components/<name>.py` to copy endpoint paths, params,
    response shapes, and error semantics. The goal is identical observable behavior.
@@ -70,13 +71,15 @@ These differ from older Zig docs — use these forms:
   `smith.bytesWithHash(&buf, 0)`; bounded ints with
   `smith.valueRangeAtMostWithHash(u8, 0, 255, 0)`. The input is a `*Smith`, **not** a byte
   slice.
-- **Networking**: `std.net` is gone; use `std.Io.net` over `std.Io.Threaded`. There are no
-  socket fns in `std.posix`; the one raw exception in this codebase is `getsockname` for
-  ephemeral-port readback.
+- **Networking**: use `std.Io.net` over `std.Io.Threaded`. Bound and accepted sockets
+  expose their address in `socket.address`, including ephemeral ports through
+  `getPort()`. Use `IpAddress.parse` for either IP family and `HostName.connect`
+  for DNS. Accepted socket addresses identify the peer.
 - **HTTP/WS**: `std.http.Server.init(reader, writer)` over a `std.Io.net.Stream`;
   `receiveHead()`, `request.respond(body, .{...})`, `request.respondWebSocket(...)`,
   `ws.readSmallMessage()` / `ws.writeMessage(bytes, .text)`. Client:
-  `std.http.Client.fetch(...)`.
+  `std.http.Client.fetch(...)`. Secure WebSocket and MQTT clients share the
+  heap-stable `std.crypto.tls.Client` state in `util/tls.zig`.
 - **JSON**: parse with `std.json.parseFromSlice(std.json.Value, alloc, src, .{})`;
   serialize with `std.json.Stringify`. `Value.object` is an insertion-ordered
   `StringArrayHashMap`. `ObjectMap` is unmanaged (`.empty`, `put(alloc, k, v)`); `Array`
@@ -169,3 +172,25 @@ the delta in phobos, regenerate the baseline, and confirm `coverage` is back to 
 - Emitting handlers have a socket-level notification test.
 - No AI attribution; commit message is conventional and human.
 - If you added a stub or a known limitation, it's noted in the code and in `TODO.md`.
+
+## Runtime ownership and native I/O
+
+Pass the startup `std.Io` handle through component constructors. `clock_io` keeps
+clocks available before optional workers and notifications start. Use
+`std.Io.Clock` for timestamps and `io.randomSecure` for secrets, propagating
+entropy failures. Timer workers wait on an owned `std.Io.Event`; signal it before
+joining. Workers that can block in a network handshake use an owned
+`std.Io.Future` so teardown can cancel the operation.
+
+Persistent JSON snapshots deep-copy request/message data into their stable
+owner. Print statistics alternate between two reusable arenas; callers borrow
+the snapshot until the next update. Cross-thread printing checks use the atomic
+flag. Background Klippy pushes enter Core before modifying component state;
+response correlation stays outside Core so pending requests can complete.
+
+Use `createDirPathOpen` for data roots and database parents that may already be
+directory symlinks. `createDirPath` rejects an existing final symlink in the
+installed threaded backend. File-backed namespace replacement uses
+`Dir.createFileAtomic`, syncs the complete temporary file, then replaces the
+previous namespace. Namespace replacement does not claim directory-fsync
+protection against power loss.

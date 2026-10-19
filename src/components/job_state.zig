@@ -9,6 +9,7 @@
 //! (for auto-advance) directly.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 
 // ---------------------------------------------------------------------------
 // JobEvent — mirrors Moonraker common.JobEvent
@@ -24,22 +25,15 @@ pub const JobEvent = enum(u3) {
     cancelled = 7,
 
     pub fn fromString(s: []const u8) JobEvent {
-        if (std.mem.eql(u8, s, "standby")) return .standby;
-        if (std.mem.eql(u8, s, "started")) return .started;
-        if (std.mem.eql(u8, s, "paused")) return .paused;
-        if (std.mem.eql(u8, s, "resumed")) return .resumed;
-        if (std.mem.eql(u8, s, "complete")) return .complete;
-        if (std.mem.eql(u8, s, "error")) return .@"error";
-        if (std.mem.eql(u8, s, "cancelled")) return .cancelled;
-        return .standby;
+        return std.meta.stringToEnum(JobEvent, s) orelse .standby;
     }
 
     pub fn finished(self: JobEvent) bool {
-        return @intFromEnum(self) >= 5;
+        return @backingInt(self) >= 5;
     }
 
     pub fn aborted(self: JobEvent) bool {
-        return @intFromEnum(self) >= 6;
+        return @backingInt(self) >= 6;
     }
 
     pub fn isPrinting(self: JobEvent) bool {
@@ -55,10 +49,11 @@ pub const JobStateCtx = struct {
     gpa: std.mem.Allocator,
     bus: *const @import("../server/notify.zig").NotifyBus,
 
-    /// Latest print_stats object from Klippy. Owns keys; values may point
-    /// into parsed JSON (temporary). Used only for comparison; callers should
-    /// not hold references across status updates.
+    /// Owned snapshot, valid until the next update or deinit.
     last_print_stats: std.json.ObjectMap,
+    stats_arenas: [2]std.heap.ArenaAllocator,
+    active_arena: u1 = 0,
+    active: std.atomic.Value(bool) = .init(false),
     last_event: JobEvent,
 
     /// Callback for job_state:layer_changed events (cur_layer, total_layer).
@@ -74,21 +69,18 @@ pub const JobStateCtx = struct {
             .gpa = alloc,
             .bus = bus,
             .last_print_stats = .empty,
+            .stats_arenas = .{ .init(alloc), .init(alloc) },
             .last_event = .standby,
         };
     }
 
     pub fn deinit(self: *JobStateCtx) void {
-        // last_print_stats uses .empty (smp_allocator); no explicit deinit needed.
-        _ = self;
+        for (&self.stats_arenas) |*arena| arena.deinit();
     }
 
-    /// True if a print is in progress (state "printing" or "paused"), matching
-    /// Moonraker `KlippyAPIs.is_printing()`. Used to refuse update operations.
+    /// True while printing or paused; safe for background update checks.
     pub fn isActive(self: *const JobStateCtx) bool {
-        const sv = self.last_print_stats.get("state") orelse return false;
-        if (sv != .string) return false;
-        return std.mem.eql(u8, sv.string, "printing") or std.mem.eql(u8, sv.string, "paused");
+        return self.active.load(.acquire);
     }
 
     /// Type-erased adapter for components (e.g. update_manager) that hold an
@@ -109,52 +101,57 @@ pub const JobStateCtx = struct {
         const state = state_val.string;
         if (!std.mem.eql(u8, state, "printing") and !std.mem.eql(u8, state, "paused")) return;
 
-        self.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "error" }) catch {};
+        self.last_print_stats.getPtr("state").?.* = .{ .string = "error" };
+        self.active.store(false, .release);
         self.last_event = .@"error";
     }
 
     /// Called when Klippy delivers a status update containing print_stats.
     /// `print_stats` must be the decoded JSON object for "print_stats".
     pub fn statusUpdate(self: *JobStateCtx, print_stats: std.json.Value) void {
+        self.updateStats(print_stats, true);
+    }
+
+    /// Seed a newly connected printer without replaying past job events.
+    pub fn initialize(self: *JobStateCtx, print_stats: std.json.Value) void {
+        self.updateStats(print_stats, false);
+    }
+
+    fn updateStats(self: *JobStateCtx, print_stats: std.json.Value, emit_events: bool) void {
         if (print_stats != .object) return;
         const ps = print_stats.object;
 
-        // Check for state field.
-        const state_val = ps.get("state") orelse return;
+        if (jv.exceedsDepth(print_stats, jv.max_value_depth)) return;
+        const state_val: std.json.Value = ps.get("state") orelse self.last_print_stats.get("state") orelse .{ .string = "standby" };
         if (state_val != .string) return;
-
         const new_state_str = state_val.string;
         const old_state_str = if (self.last_print_stats.get("state")) |s|
             if (s == .string) s.string else "standby"
         else
             "standby";
-
-        // Build prev_ps as a shallow clone of last_print_stats.
-        var prev_ps: std.json.ObjectMap = .empty;
-        {
-            var it = self.last_print_stats.iterator();
-            while (it.next()) |kv| {
-                prev_ps.put(std.heap.smp_allocator, kv.key_ptr.*, kv.value_ptr.*) catch continue;
+        const prev_ps = self.last_print_stats;
+        const next_arena = self.active_arena ^ 1;
+        const arena = &self.stats_arenas[next_arena];
+        _ = arena.reset(.retain_capacity);
+        const alloc = arena.allocator();
+        var new_ps = (jv.deepCopy(alloc, .{ .object = prev_ps }) catch return).object;
+        var it = ps.iterator();
+        while (it.next()) |kv| {
+            const value = jv.deepCopy(alloc, kv.value_ptr.*) catch return;
+            if (new_ps.getPtr(kv.key_ptr.*)) |existing| {
+                existing.* = value;
+            } else {
+                const key = alloc.dupe(u8, kv.key_ptr.*) catch return;
+                new_ps.put(alloc, key, value) catch return;
             }
         }
-
-        // Build new_ps: merge ps into a copy of last_print_stats.
-        var new_ps: std.json.ObjectMap = .empty;
-        {
-            var it = self.last_print_stats.iterator();
-            while (it.next()) |kv| {
-                new_ps.put(std.heap.smp_allocator, kv.key_ptr.*, kv.value_ptr.*) catch continue;
-            }
-            var it2 = ps.iterator();
-            while (it2.next()) |kv| {
-                // put updates existing keys
-                new_ps.put(std.heap.smp_allocator, kv.key_ptr.*, kv.value_ptr.*) catch continue;
-            }
-        }
+        self.last_print_stats = new_ps;
+        self.active_arena = next_arena;
+        self.active.store(std.mem.eql(u8, new_state_str, "printing") or std.mem.eql(u8, new_state_str, "paused"), .release);
 
         var effective_event: JobEvent = .standby;
 
-        if (!std.mem.eql(u8, new_state_str, old_state_str)) {
+        if (emit_events and !std.mem.eql(u8, new_state_str, old_state_str)) {
             if (checkIdle(old_state_str)) {
                 if (std.mem.eql(u8, new_state_str, "printing")) {
                     effective_event = .started;
@@ -180,18 +177,18 @@ pub const JobStateCtx = struct {
 
         // Emit job_state:layer_changed when print_stats.info.current_layer
         // is present (mirrors Moonraker job_state._status_update).
-        if (ps.get("info")) |info_val| {
+        if (if (emit_events) ps.get("info") else null) |info_val| {
             if (info_val == .object) {
                 if (info_val.object.get("current_layer")) |cl_val| {
                     const cur_layer: i64 = switch (cl_val) {
                         .integer => |i| i,
-                        .float => |f| @intFromFloat(f),
+                        .float => |f| jv.floatToInt(f) orelse -1,
                         else => -1,
                     };
                     if (cur_layer >= 0) {
                         const total_layer: i64 = if (info_val.object.get("total_layer")) |tl| switch (tl) {
                             .integer => |i| i,
-                            .float => |f| @intFromFloat(f),
+                            .float => |f| jv.floatToInt(f) orelse 0,
                             else => 0,
                         } else 0;
                         if (self.layer_changed) |cb| {
@@ -199,14 +196,6 @@ pub const JobStateCtx = struct {
                         }
                     }
                 }
-            }
-        }
-
-        // Update last_print_stats with new data.
-        {
-            var it = ps.iterator();
-            while (it.next()) |kv| {
-                self.last_print_stats.put(std.heap.smp_allocator, kv.key_ptr.*, kv.value_ptr.*) catch continue;
             }
         }
     }
@@ -327,11 +316,13 @@ test "checkIdle" {
 
 test "checkResumed same file longer duration" {
     var prev: std.json.ObjectMap = .empty;
+    defer prev.deinit(std.heap.smp_allocator);
     try prev.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
     try prev.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     try prev.put(std.heap.smp_allocator, "total_duration", .{ .float = 100.0 });
 
     var newm: std.json.ObjectMap = .empty;
+    defer newm.deinit(std.heap.smp_allocator);
     try newm.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try newm.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     try newm.put(std.heap.smp_allocator, "total_duration", .{ .float = 150.0 });
@@ -341,10 +332,12 @@ test "checkResumed same file longer duration" {
 
 test "checkResumed different file" {
     var prev: std.json.ObjectMap = .empty;
+    defer prev.deinit(std.heap.smp_allocator);
     try prev.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
     try prev.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
 
     var newm: std.json.ObjectMap = .empty;
+    defer newm.deinit(std.heap.smp_allocator);
     try newm.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try newm.put(std.heap.smp_allocator, "filename", .{ .string = "other.gcode" });
 
@@ -353,9 +346,11 @@ test "checkResumed different file" {
 
 test "checkResumed not paused" {
     var prev: std.json.ObjectMap = .empty;
+    defer prev.deinit(std.heap.smp_allocator);
     try prev.put(std.heap.smp_allocator, "state", .{ .string = "standby" });
 
     var newm: std.json.ObjectMap = .empty;
+    defer newm.deinit(std.heap.smp_allocator);
     try newm.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
 
     try testing.expect(!checkResumed(prev, newm));
@@ -363,11 +358,13 @@ test "checkResumed not paused" {
 
 test "checkResumed shorter duration" {
     var prev: std.json.ObjectMap = .empty;
+    defer prev.deinit(std.heap.smp_allocator);
     try prev.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
     try prev.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     try prev.put(std.heap.smp_allocator, "total_duration", .{ .float = 150.0 });
 
     var newm: std.json.ObjectMap = .empty;
+    defer newm.deinit(std.heap.smp_allocator);
     try newm.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try newm.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     try newm.put(std.heap.smp_allocator, "total_duration", .{ .float = 100.0 });
@@ -389,10 +386,16 @@ test "statusUpdate idle to printing emits started" {
     defer js.deinit();
 
     // Initial state: standby (default).
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "standby" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "standby" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     // Build print_stats as std.json.Value
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     const ps_val = std.json.Value{ .object = ps_map };
@@ -415,7 +418,12 @@ test "isActive: true for printing/paused, false otherwise" {
         .{ .s = "complete", .active = false },
         .{ .s = "error", .active = false },
     }) |c| {
-        try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = c.s });
+        {
+            var initial: std.json.ObjectMap = .empty;
+            defer initial.deinit(testing.allocator);
+            try initial.put(testing.allocator, "state", .{ .string = c.s });
+            js.statusUpdate(.{ .object = initial });
+        }
         try testing.expectEqual(c.active, js.isActive());
         // isActiveErased must agree with isActive.
         try testing.expectEqual(js.isActive(), JobStateCtx.isActiveErased(&js));
@@ -430,7 +438,12 @@ test "fuzz isActive: arbitrary state string never crashes" {
             defer js.deinit();
             var sbuf: [16]u8 = undefined;
             smith.bytesWithHash(&sbuf, 0);
-            try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = &sbuf });
+            {
+                var initial: std.json.ObjectMap = .empty;
+                defer initial.deinit(testing.allocator);
+                try initial.put(testing.allocator, "state", .{ .string = &sbuf });
+                js.statusUpdate(.{ .object = initial });
+            }
             _ = js.isActive();
         }
     }.run, .{});
@@ -441,10 +454,21 @@ test "statusUpdate printing to complete" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
-    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "printing" });
+        js.statusUpdate(.{ .object = initial });
+    }
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "filename", .{ .string = "test.gcode" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "complete" });
     try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     const ps_val = std.json.Value{ .object = ps_map };
@@ -459,10 +483,21 @@ test "statusUpdate printing to paused" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
-    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "printing" });
+        js.statusUpdate(.{ .object = initial });
+    }
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "filename", .{ .string = "test.gcode" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
     try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     const ps_val = std.json.Value{ .object = ps_map };
@@ -477,11 +512,27 @@ test "statusUpdate paused to printing resumed" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
-    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
-    try js.last_print_stats.put(std.heap.smp_allocator, "total_duration", .{ .float = 100.0 });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "paused" });
+        js.statusUpdate(.{ .object = initial });
+    }
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "filename", .{ .string = "test.gcode" });
+        js.statusUpdate(.{ .object = initial });
+    }
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "total_duration", .{ .float = 100.0 });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = 150.0 });
@@ -497,9 +548,15 @@ test "statusUpdate no state change" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "printing" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     const ps_val = std.json.Value{ .object = ps_map };
 
@@ -523,7 +580,12 @@ test "getLastStats getLastEvent" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "filename", .{ .string = "test.gcode" });
+        js.statusUpdate(.{ .object = initial });
+    }
     js.last_event = .started;
 
     const stats = js.getLastStats();
@@ -536,8 +598,18 @@ test "handleDisconnect: printing to error" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
-    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "printing" });
+        js.statusUpdate(.{ .object = initial });
+    }
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "filename", .{ .string = "test.gcode" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     js.handleDisconnect();
 
@@ -550,8 +622,18 @@ test "handleDisconnect: paused to error" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "paused" });
-    try js.last_print_stats.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "paused" });
+        js.statusUpdate(.{ .object = initial });
+    }
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "filename", .{ .string = "test.gcode" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     js.handleDisconnect();
 
@@ -563,7 +645,12 @@ test "handleDisconnect: standby no-op" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "standby" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "standby" });
+        js.statusUpdate(.{ .object = initial });
+    }
     js.last_event = .standby;
 
     js.handleDisconnect();
@@ -576,7 +663,12 @@ test "handleDisconnect: complete no-op" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "complete" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "complete" });
+        js.statusUpdate(.{ .object = initial });
+    }
     js.last_event = .complete;
 
     js.handleDisconnect();
@@ -615,13 +707,20 @@ test "statusUpdate emits layer_changed when info.current_layer present" {
     test_layer_changed_total = -1;
     js.layer_changed = testLayerChangedCb;
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "printing" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var info_obj: std.json.ObjectMap = .empty;
+    defer info_obj.deinit(std.heap.smp_allocator);
     try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = 42 });
     try info_obj.put(std.heap.smp_allocator, "total_layer", .{ .integer = 200 });
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
     const ps_val = std.json.Value{ .object = ps_map };
@@ -637,12 +736,19 @@ test "statusUpdate layer_changed: no callback set, no crash" {
     var js = try JobStateCtx.init(testing.allocator, &bus);
     defer js.deinit();
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "printing" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var info_obj: std.json.ObjectMap = .empty;
+    defer info_obj.deinit(std.heap.smp_allocator);
     try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = 10 });
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
     const ps_val = std.json.Value{ .object = ps_map };
@@ -658,9 +764,15 @@ test "statusUpdate layer_changed: no info key, no callback" {
     test_layer_changed_cur = -1;
     js.layer_changed = testLayerChangedCb;
 
-    try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = "standby" });
+    {
+        var initial: std.json.ObjectMap = .empty;
+        defer initial.deinit(testing.allocator);
+        try initial.put(testing.allocator, "state", .{ .string = "standby" });
+        js.statusUpdate(.{ .object = initial });
+    }
 
     var ps_map: std.json.ObjectMap = .empty;
+    defer ps_map.deinit(std.heap.smp_allocator);
     try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
     try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
     try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = 1.0 });
@@ -679,15 +791,22 @@ test "fuzz job_state statusUpdate" {
     // Test all valid state transitions without crashing.
     const states = [_][]const u8{ "standby", "printing", "paused", "complete", "error", "cancelled" };
     for (states) |from| {
-        try js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = from });
+        {
+            var initial: std.json.ObjectMap = .empty;
+            defer initial.deinit(testing.allocator);
+            try initial.put(testing.allocator, "state", .{ .string = from });
+            js.statusUpdate(.{ .object = initial });
+        }
         for (states, 0..) |to, idx| {
             var ps_map: std.json.ObjectMap = .empty;
+            defer ps_map.deinit(std.heap.smp_allocator);
             try ps_map.put(std.heap.smp_allocator, "state", .{ .string = to });
             try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "fuzz.gcode" });
-            try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = @floatFromInt(@intFromEnum(js.last_event)) });
+            try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = @floatFromInt(@backingInt(js.last_event)) });
             // Exercise layer_changed path on even iterations.
+            var info_obj: std.json.ObjectMap = .empty;
+            defer info_obj.deinit(std.heap.smp_allocator);
             if (idx % 2 == 0) {
-                var info_obj: std.json.ObjectMap = .empty;
                 try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = @as(i64, @intCast(idx)) });
                 try info_obj.put(std.heap.smp_allocator, "total_layer", .{ .integer = 200 });
                 try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
@@ -725,11 +844,13 @@ test "fuzz checkResumed" {
                     for (durs) |pd| {
                         for (durs) |nd| {
                             var prev: std.json.ObjectMap = .empty;
+                            defer prev.deinit(std.heap.smp_allocator);
                             prev.put(std.heap.smp_allocator, "state", .{ .string = prev_state }) catch continue;
                             prev.put(std.heap.smp_allocator, "filename", .{ .string = pf }) catch continue;
                             prev.put(std.heap.smp_allocator, "total_duration", .{ .float = pd }) catch continue;
 
                             var newm: std.json.ObjectMap = .empty;
+                            defer newm.deinit(std.heap.smp_allocator);
                             newm.put(std.heap.smp_allocator, "state", .{ .string = new_state }) catch continue;
                             newm.put(std.heap.smp_allocator, "filename", .{ .string = nf }) catch continue;
                             newm.put(std.heap.smp_allocator, "total_duration", .{ .float = nd }) catch continue;
@@ -760,9 +881,10 @@ test "fuzz handleDisconnect" {
 
     const states = [_][]const u8{ "standby", "printing", "paused", "complete", "error", "cancelled", "unknown" };
     for (states) |s| {
-        js.last_print_stats.clearRetainingCapacity();
-        js.last_event = .standby;
-        js.last_print_stats.put(std.heap.smp_allocator, "state", .{ .string = s }) catch continue;
+        var ps: std.json.ObjectMap = .empty;
+        defer ps.deinit(testing.allocator);
+        try ps.put(testing.allocator, "state", .{ .string = s });
+        js.statusUpdate(.{ .object = ps });
         js.handleDisconnect();
         _ = js.getLastEvent();
         _ = js.getLastStats();
@@ -780,4 +902,49 @@ test "fuzz getLastStats/getLastEvent" {
         _ = js.getLastStats();
         _ = js.getLastEvent();
     }
+}
+
+test "print stats own partial updates after source is freed" {
+    const bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var js = try JobStateCtx.init(testing.allocator, &bus);
+    defer js.deinit();
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+            \\{"state":"printing","filename":"benchy.gcode","info":{"current_layer":1},"tags":["PLA"]}
+        , .{});
+        defer parsed.deinit();
+        js.statusUpdate(parsed.value);
+    }
+    for (0..100) |n| {
+        var partial: std.json.ObjectMap = .empty;
+        defer partial.deinit(testing.allocator);
+        try partial.put(testing.allocator, "total_duration", .{ .integer = @intCast(n) });
+        js.statusUpdate(.{ .object = partial });
+    }
+    try testing.expect(js.isActive());
+    try testing.expectEqualStrings("benchy.gcode", js.getLastStats().get("filename").?.string);
+    try testing.expectEqualStrings("PLA", js.getLastStats().get("tags").?.array.items[0].string);
+    try testing.expectEqual(@as(i64, 99), js.getLastStats().get("total_duration").?.integer);
+    js.handleDisconnect();
+    try testing.expect(!js.isActive());
+    try testing.expectEqualStrings("error", js.getLastStats().get("state").?.string);
+}
+
+test "fuzz print stats copy bounded arbitrary strings" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const bus: @import("../server/notify.zig").NotifyBus = undefined;
+            var js = try JobStateCtx.init(testing.allocator, &bus);
+            defer js.deinit();
+            var raw: [32]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            var ps: std.json.ObjectMap = .empty;
+            defer ps.deinit(testing.allocator);
+            try ps.put(testing.allocator, "filename", .{ .string = &raw });
+            js.statusUpdate(.{ .object = ps });
+            const expected = raw;
+            @memset(&raw, 0);
+            try testing.expectEqualSlices(u8, &expected, js.getLastStats().get("filename").?.string);
+        }
+    }.run, .{});
 }

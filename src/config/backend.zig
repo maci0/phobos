@@ -56,7 +56,9 @@ pub const ConfigBackend = struct {
     pub fn getFloat(self: ConfigBackend, section: []const u8, option: []const u8) Error!f64 {
         const raw = self.get(section, option) orelse return Error.NoOption;
         const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
-        return std.fmt.parseFloat(f64, trimmed) catch Error.InvalidValue;
+        const value = std.fmt.parseFloat(f64, trimmed) catch return Error.InvalidValue;
+        if (!std.math.isFinite(value)) return Error.InvalidValue;
+        return value;
     }
 
     /// Accepts: true/false/yes/no/1/0/on/off (case-insensitive) — same as
@@ -139,7 +141,7 @@ test "fuzz parseBool: never panics on arbitrary input" {
             var buf: [256]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             // Use only the first 32 bytes as the "value" to keep it sane-ish.
-            const val = buf[0 .. @min(32, buf.len)];
+            const val = buf[0..@min(32, buf.len)];
             _ = parseBool(val);
         }
     }.run, .{});

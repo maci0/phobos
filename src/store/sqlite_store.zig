@@ -25,55 +25,27 @@ const Error = ds.Error;
 
 pub const SqliteStore = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     db: *c.sqlite3,
     /// Serializes read-modify-write so concurrent inserts to one top-level
     /// record can't lose updates. SQLite's FULLMUTEX only serializes individual
     /// C-API calls — it does NOT make the load-decode-modify-encode-store
     /// sequence below atomic, so two writers racing on sub-keys of the same
     /// record would clobber each other without this. Mirrors FileStore.
-    ///
-    /// A backoff spinlock (not std.Io.Mutex) because SqliteStore opens with no io
-    /// handle (see app.zig). The RMW sections are short and writes are rare, so
-    /// the uncontended path is a single CAS. Under contention the waiter yields
-    /// the CPU rather than busy-spinning: the holder runs sqlite3_step (which can
-    /// block on disk, up to the 5s busy_timeout) and may be descheduled, so a
-    /// pure spin could burn a core for a long time on the 2-core embedded target.
-    rmw_lock: std.atomic.Value(bool) = .init(false),
+    rmw_lock: std.Io.Mutex = .init,
 
     fn lockRmw(self: *SqliteStore) void {
-        var spins: u8 = 0;
-        while (self.rmw_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
-            if (spins < 64) {
-                spins += 1;
-                std.atomic.spinLoopHint();
-            } else {
-                // Holder is taking a while (descheduled or blocked in sqlite I/O)
-                // — give up the CPU instead of spinning hot.
-                std.Thread.yield() catch std.atomic.spinLoopHint();
-            }
-        }
+        self.rmw_lock.lockUncancelable(self.io);
     }
     fn unlockRmw(self: *SqliteStore) void {
-        self.rmw_lock.store(false, .release);
+        self.rmw_lock.unlock(self.io);
     }
 
-    /// mkdir -p the parent of a database file. Moonraker creates
-    /// `<data>/database/` before opening `moonraker-sql.db`.
-    fn ensureParentDirs(path: []const u8) void {
-        var buf: [512]u8 = undefined;
-        if (path.len == 0 or path.len >= buf.len) return;
-        var i: usize = 1;
-        while (i < path.len) : (i += 1) {
-            if (path[i] != '/') continue;
-            @memcpy(buf[0..i], path[0..i]);
-            buf[i] = 0;
-            const rc = std.os.linux.mkdir(buf[0..i :0].ptr, 0o755);
-            _ = std.os.linux.errno(rc);
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, path: [:0]const u8) Error!SqliteStore {
+        if (std.fs.path.dirname(path)) |parent| {
+            var parent_dir = std.Io.Dir.cwd().createDirPathOpen(io, parent, .{}) catch return Error.BackendError;
+            parent_dir.close(io);
         }
-    }
-
-    pub fn open(gpa: std.mem.Allocator, path: [:0]const u8) Error!SqliteStore {
-        ensureParentDirs(path);
         _ = c.sqlite3_initialize();
         var db: ?*c.sqlite3 = null;
         const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_FULLMUTEX;
@@ -81,7 +53,8 @@ pub const SqliteStore = struct {
             if (db) |d| _ = c.sqlite3_close(d);
             return Error.BackendError;
         }
-        var self = SqliteStore{ .gpa = gpa, .db = db.? };
+        errdefer _ = c.sqlite3_close(db.?);
+        var self = SqliteStore{ .gpa = gpa, .io = io, .db = db.? };
         // WAL for crash-safety + concurrency; create the namespace table to match
         // Moonraker's schema (the `record` declared type drives no behaviour here
         // — we encode/decode the blobs ourselves — but keeps the schema identical).
@@ -504,7 +477,7 @@ test "SqliteStore.open creates missing database parents" {
     defer testing.allocator.free(root);
     var path_buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/missing/database/moonraker-sql.db", .{root}, 0);
-    var db = try SqliteStore.open(testing.allocator, path);
+    var db = try SqliteStore.open(testing.allocator, testing.io, path);
     defer db.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -512,7 +485,7 @@ test "SqliteStore.open creates missing database parents" {
     try db.insertItem(a, "test", "value", .{ .integer = 42 });
     const value = (try db.getItem(a, "test", "value")).?;
     try testing.expectEqual(@as(i64, 42), value.integer);
-    var again = try SqliteStore.open(testing.allocator, path);
+    var again = try SqliteStore.open(testing.allocator, testing.io, path);
     defer again.deinit();
     try testing.expectEqual(@as(i64, 42), (try again.getItem(a, "test", "value")).?.integer);
 }
@@ -532,7 +505,7 @@ test "fuzz SqliteStore.open creates bounded nested paths" {
             for (&name) |*ch| ch.* = 'a' + ch.* % 26;
             var path_buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}/database/db.sqlite", .{ root, name }, 0);
-            var db = try SqliteStore.open(testing.allocator, path);
+            var db = try SqliteStore.open(testing.allocator, testing.io, path);
             defer db.deinit();
             var file = try std.Io.Dir.cwd().openFile(io, path, .{});
             file.close(io);
@@ -579,7 +552,7 @@ test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
     for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
     defer for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
     {
-        var s = try SqliteStore.open(testing.allocator, path);
+        var s = try SqliteStore.open(testing.allocator, testing.io, path);
         defer s.deinit();
         try s.insertItem(a, "moonraker", "file_manager.metadata_version", .{ .integer = 3 });
         try testing.expectEqual(@as(i64, 3), (try s.getItem(a, "moonraker", "file_manager.metadata_version")).?.integer);
@@ -587,7 +560,7 @@ test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
         try s.insertItem(a, "moonraker", "instance_id", .{ .string = "abc" });
     }
     {
-        var s = try SqliteStore.open(testing.allocator, path);
+        var s = try SqliteStore.open(testing.allocator, testing.io, path);
         defer s.deinit();
         try testing.expectEqual(@as(i64, 4), (try s.getItem(a, "moonraker", "file_manager.metadata_version")).?.integer);
         const names = try s.listNamespaces(a);
@@ -613,7 +586,7 @@ test "SqliteStore: reads Moonraker job_history/job_totals tables (drop-in compat
     for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
     defer for ([_][]const u8{ path, wal, shm }) |p| cwd.deleteFile(io, p) catch {};
 
-    var s = try SqliteStore.open(testing.allocator, path);
+    var s = try SqliteStore.open(testing.allocator, testing.io, path);
     defer s.deinit();
     // Recreate Moonraker's dedicated history tables + a couple of rows.
     try s.execSql(

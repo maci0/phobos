@@ -81,7 +81,7 @@ pub const TestServer = struct {
         // The server runs on other threads. Zig 0.17's testing allocator is
         // SafeAllocator; sharing it with those threads deadlocks once a
         // handler notifies a connection while the test thread is allocating.
-        self.app.* = try app_mod.App.init(std.heap.smp_allocator);
+        self.app.* = try app_mod.App.init(std.heap.smp_allocator, self.io);
 
         // Prevent tests from accidentally running real systemctl/reboot/shutdown.
         self.app.setMachineRunCmdFn(mockRunCmd, @ptrCast(self));
@@ -102,7 +102,7 @@ pub const TestServer = struct {
         self.conns = self.app.conns;
 
         self.listener = try ioz.Listener.bind(self.io, "127.0.0.1", 0);
-        self.bound_port = try self.listener.port();
+        self.bound_port = self.listener.port();
 
         self.serve_fut = self.io.async(serveLoop, .{ &self.listener, self.io, @as(*anyopaque, @ptrCast(self.srv)) });
         return self;
@@ -146,7 +146,7 @@ pub const TestServer = struct {
 
         // Start the background Klippy bridge task so it connects to the
         // simulator and runs the handshake.
-        self.app.klippy_ctx.start();
+        try self.app.klippy_ctx.start();
 
         // Wait for the simulator handshake to complete.
         sim.waitReady();
@@ -159,9 +159,9 @@ pub const TestServer = struct {
     /// gated real-Klippy integration test. `socket_path` must outlive the bridge
     /// (pass a string literal). No simulator is created, so `stop()` tears down
     /// only the bridge task.
-    pub fn connectRealKlippy(self: *TestServer, socket_path: []const u8) void {
+    pub fn connectRealKlippy(self: *TestServer, socket_path: []const u8) !void {
         self.app.klippy_ctx.uds_path = socket_path;
-        self.app.klippy_ctx.start();
+        try self.app.klippy_ctx.start();
     }
 
     /// Stop the accept loop and free everything.
@@ -335,6 +335,47 @@ test "GET /server/info returns result with disconnected klippy state" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"result\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"api_version_string\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"klippy_connected\":false") != null);
+}
+
+test "Klippy task cancellation joins a stalled handshake" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try tmp.dir.realPathFileAlloc(ts.io, ".", alloc);
+    defer alloc.free(base);
+    const path = try std.fs.path.join(alloc, &.{ base, "klippy.sock" });
+    defer alloc.free(path);
+    var listener = try (try std.Io.net.UnixAddress.init(path)).listen(ts.io, .{});
+    defer listener.deinit(ts.io);
+    try ts.connectRealKlippy(path);
+    const peer = try listener.accept(ts.io);
+    defer peer.close(ts.io);
+    var buf: [1024]u8 = undefined;
+    var reader = peer.reader(ts.io, &buf);
+    _ = try reader.interface.takeByte();
+    const start = std.Io.Clock.Timestamp.now(ts.io, .awake);
+    ts.app.klippy_ctx.stop(ts.io);
+    try std.testing.expect(start.untilNow(ts.io).raw.toMilliseconds() < 1000);
+    try std.testing.expect(ts.app.klippy_ctx.task == null);
+    try std.testing.expect(ts.app.klippy_ctx.stream == null);
+}
+
+test "fuzz Klippy task start and stop owns each reconnect future" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const ts = try TestServer.init(std.testing.allocator);
+            defer ts.stop();
+            const count = smith.valueRangeAtMostWithHash(u8, 1, 3, 0);
+            for (0..count) |_| {
+                try ts.connectRealKlippy(".scratch/missing-klippy-task.sock");
+                ts.app.klippy_ctx.stop(ts.io);
+                try std.testing.expect(ts.app.klippy_ctx.task == null);
+                try std.testing.expect(ts.app.klippy_ctx.stream == null);
+            }
+        }
+    }.run, .{});
 }
 
 test "GET /server/config returns result" {
@@ -1865,7 +1906,7 @@ test "printer: real Klippy proxies info/objects.list/objects.query" {
     // Gate: only run when a real Klippy API socket is present.
     std.Io.Dir.cwd().access(ts.io, "/tmp/klippy_uds", .{}) catch return error.SkipZigTest;
 
-    ts.connectRealKlippy("/tmp/klippy_uds");
+    try ts.connectRealKlippy("/tmp/klippy_uds");
     try std.testing.expect(waitKlippyConnected(ts));
 
     // server.info reflects the real Klippy "ready" state.

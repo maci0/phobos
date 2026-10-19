@@ -18,6 +18,7 @@
 //! per render, so it costs nothing between renders and fits phobos's budget.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 const Value = std.json.Value;
 
 pub const RenderError = error{ ParseError, EvalError, OutOfMemory };
@@ -888,10 +889,10 @@ fn toFloat(v: Value) ?f64 {
 fn toInt(v: Value) ?i64 {
     return switch (v) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| jv.floatToInt(f),
         .number_string, .string => |s| std.fmt.parseInt(i64, std.mem.trim(u8, s, " \t\r\n"), 10) catch blk: {
             const f = std.fmt.parseFloat(f64, std.mem.trim(u8, s, " \t\r\n")) catch break :blk null;
-            break :blk @intFromFloat(f);
+            break :blk jv.floatToInt(f);
         },
         .bool => |b| if (b) 1 else 0,
         else => null,

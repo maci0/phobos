@@ -115,7 +115,7 @@ fn frame(alloc: std.mem.Allocator, ptype: PacketType, flags: u4, body: []const u
     var rl_buf: [4]u8 = undefined;
     const rl = try encodeVarInt(@intCast(body.len), &rl_buf);
     var out = try alloc.alloc(u8, 1 + rl.len + body.len);
-    out[0] = (@as(u8, @intFromEnum(ptype)) << 4) | flags;
+    out[0] = (@as(u8, @backingInt(ptype)) << 4) | flags;
     @memcpy(out[1 .. 1 + rl.len], rl);
     @memcpy(out[1 + rl.len ..], body);
     return out;
@@ -241,7 +241,7 @@ pub const Packet = struct {
 pub fn decode(data: []const u8) !?Packet {
     if (data.len < 1) return null;
     const b0 = data[0];
-    const ptype: PacketType = @enumFromInt(@as(u4, @intCast(b0 >> 4)));
+    const ptype: PacketType = @fromBackingInt(@intCast(@as(u4, @intCast(b0 >> 4))));
     const flags: u4 = @intCast(b0 & 0x0F);
 
     const vi = (try decodeVarInt(data[1..])) orelse return null;
@@ -290,7 +290,7 @@ pub fn parsePublish(pkt: Packet) !PublishView {
 pub fn parseConnack(pkt: Packet) !ConnackCode {
     if (pkt.ptype != .connack) return error.NotConnack;
     if (pkt.body.len < 2) return error.Truncated;
-    return @enumFromInt(pkt.body[1]);
+    return @fromBackingInt(@intCast(pkt.body[1]));
 }
 
 /// Extract the packet id from a PUBACK / SUBACK packet (first two body bytes).

@@ -39,7 +39,7 @@ pub const WsTestConn = struct {
     wbuf: []u8,
     alloc: std.mem.Allocator,
     /// Deterministic-but-nonzero mask source so each frame is masked.
-    mask_seed: u32 = 0x1234_5678,
+    mask_rng: std.Random.DefaultPrng = .init(0x1234_5678),
     /// When set, nextDataFrame uses poll() to bound each readFrame call.
     read_timeout_secs: ?u32 = null,
 
@@ -52,20 +52,16 @@ pub const WsTestConn = struct {
     }
 
     fn nextMask(self: *WsTestConn) [4]u8 {
-        // xorshift32 so successive frames use different masks.
-        var x = self.mask_seed;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.mask_seed = x;
-        return @bitCast(x);
+        var mask: [4]u8 = undefined;
+        self.mask_rng.random().bytes(&mask);
+        return mask;
     }
 
     /// Send a masked client frame with the given opcode and payload.
     pub fn sendFrame(self: *WsTestConn, op: Opcode, payload: []const u8) !void {
         const w = &self.writer.interface;
         // FIN=1, opcode.
-        try w.writeByte(0x80 | @as(u8, @intFromEnum(op)));
+        try w.writeByte(0x80 | @as(u8, @backingInt(op)));
         // MASK=1 plus length.
         const mask: [4]u8 = self.nextMask();
         if (payload.len < 126) {
@@ -89,13 +85,15 @@ pub const WsTestConn = struct {
         const r = &self.reader.interface;
         const b0 = try r.takeByte();
         const b1 = try r.takeByte();
-        const opcode: Opcode = @enumFromInt(@as(u4, @truncate(b0 & 0x0f)));
+        const opcode: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b0 & 0x0f))));
         const masked = (b1 & 0x80) != 0;
         var len: usize = b1 & 0x7f;
         if (len == 126) {
             len = try r.takeInt(u16, .big);
         } else if (len == 127) {
-            len = @intCast(try r.takeInt(u64, .big));
+            const wire_len = try r.takeInt(u64, .big);
+            if (wire_len > 8 * 1024 * 1024) return error.MessageOversize;
+            len = @intCast(wire_len);
         }
         var mask: [4]u8 = .{ 0, 0, 0, 0 };
         if (masked) {
@@ -104,11 +102,9 @@ pub const WsTestConn = struct {
         }
         const payload = try self.alloc.alloc(u8, len);
         errdefer self.alloc.free(payload);
-        const src = try r.take(len);
+        try r.readSliceAll(payload);
         if (masked) {
-            for (src, 0..) |b, i| payload[i] = b ^ mask[i % 4];
-        } else {
-            @memcpy(payload, src);
+            for (payload, 0..) |*b, i| b.* ^= mask[i % 4];
         }
         return .{ .opcode = opcode, .data = payload };
     }
@@ -169,17 +165,19 @@ pub fn connect(ts: *TestServer, alloc: std.mem.Allocator) !*WsTestConn {
 
     const self = try alloc.create(WsTestConn);
     errdefer alloc.destroy(self);
+    const rbuf = try alloc.alloc(u8, 64 * 1024);
+    errdefer alloc.free(rbuf);
+    const wbuf = try alloc.alloc(u8, 64 * 1024);
+    errdefer alloc.free(wbuf);
     self.* = .{
         .io = io,
         .stream = stream,
         .reader = undefined,
         .writer = undefined,
-        .rbuf = try alloc.alloc(u8, 64 * 1024),
-        .wbuf = try alloc.alloc(u8, 64 * 1024),
+        .rbuf = rbuf,
+        .wbuf = wbuf,
         .alloc = alloc,
     };
-    errdefer alloc.free(self.rbuf);
-    errdefer alloc.free(self.wbuf);
     self.reader = stream.reader(io, self.rbuf);
     self.writer = stream.writer(io, self.wbuf);
 
@@ -196,19 +194,9 @@ pub fn connect(ts: *TestServer, alloc: std.mem.Allocator) !*WsTestConn {
     try self.writer.interface.writeAll(handshake);
     try self.writer.interface.flush();
 
-    // Read the response head up to the blank line. Use the *inclusive*
-    // delimiter form so each call consumes the trailing '\n' as well; the
-    // exclusive form leaves the '\n' in the buffer, which would misalign the
-    // following reads (and cause the leftover header bytes to be parsed as a
-    // WebSocket frame). Each returned line still carries its trailing CRLF.
-    const r = &self.reader.interface;
-    const status_line = try r.takeDelimiterInclusive('\n');
-    if (std.mem.indexOf(u8, status_line, "101") == null) return error.HandshakeFailed;
-    while (true) {
-        const line = try r.takeDelimiterInclusive('\n');
-        // Header section ends at the blank line ("\r\n" -> len 2, or bare "\n").
-        if (line.len <= 2) break;
-    }
+    var http: std.http.Reader = .{ .in = &self.reader.interface, .interface = undefined, .state = .ready, .max_head_len = self.rbuf.len };
+    const head = try std.http.Client.Response.Head.parse(try http.receiveHead());
+    if (head.status != .switching_protocols) return error.HandshakeFailed;
     return self;
 }
 
@@ -229,6 +217,31 @@ test "WS: server.websocket.id returns the connection id" {
     defer parsed.deinit();
     const result = parsed.value.object.get("result").?.object;
     try std.testing.expect(result.get("websocket_id").?.integer > 0);
+}
+
+test "WS: test client streams responses larger than its input buffer" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    const message: [70 * 1024]u8 = @splat('x');
+    try ts.app.data_store_ctx.pushGcodeResponse(&message, 1);
+    const client = try connect(ts, std.testing.allocator);
+    defer client.close();
+    const bytes = try client.call(std.testing.allocator, "server.gcode_store", null);
+    defer std.testing.allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    const entries = parsed.value.object.get("result").?.object.get("gcode_store").?.array.items;
+    try std.testing.expectEqualStrings(&message, entries[0].object.get("message").?.string);
+}
+
+test "WS: test client frees partial buffer allocations" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    for (0..3) |index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        try std.testing.expectError(error.OutOfMemory, connect(ts, failing.allocator()));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 test "WS: two connections get distinct monotonic ids via identify" {
@@ -358,7 +371,8 @@ test "fuzz_ws_client: arbitrary text frames never crash the server, always JSON 
             // well-formed wrapper request whose params carry the fuzz bytes
             // base64-free (as a JSON string is unsafe), so instead embed length.
             var req_buf: [256]u8 = undefined;
-            const req = std.fmt.bufPrint(&req_buf,
+            const req = std.fmt.bufPrint(
+                &req_buf,
                 "{{\"jsonrpc\":\"2.0\",\"method\":\"server.info\",\"id\":{d}}}",
                 .{n},
             ) catch return;

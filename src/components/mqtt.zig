@@ -26,6 +26,7 @@
 //!                   timeout (float, optional)
 
 const std = @import("std");
+const sleep = @import("../util/sleep.zig");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const mqtt_client = @import("mqtt_client.zig");
@@ -140,9 +141,9 @@ pub const MqttCtx = struct {
     /// flush thread is started, so the single-threaded test path needs no lock).
     status_mutex: std.Io.Mutex = std.Io.Mutex.init,
     /// Atomic flag to signal the status-flush thread to stop.
-    status_flush_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    status_flush_stop: std.Io.Event = .unset,
     /// Background thread that periodically flushes the status cache.
-    status_flush_thread: ?std.Thread = null,
+    status_flush_thread: ?std.Io.Future(void) = null,
     /// Live Io handle (set once the server is serving). Required for a real
     /// broker connection; null in unit tests that exercise the in-memory store.
     io: ?Io = null,
@@ -150,12 +151,12 @@ pub const MqttCtx = struct {
     /// until `connectBroker` succeeds; back to null after `disconnectBroker`.
     client: ?*mqtt_client.MqttClient = null,
     /// Background reader thread draining inbound broker packets.
-    reader_thread: ?std.Thread = null,
+    reader_thread: ?std.Io.Future(void) = null,
     /// Background thread running the (possibly slow) broker connect. Tracked so
     /// disconnectBroker can join it before teardown — otherwise a deinit racing
     /// an in-flight connect frees the ctx while connectBroker still uses it.
-    connect_thread: ?std.Thread = null,
-    reader_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    connect_thread: ?std.Io.Future(void) = null,
+    reader_stop: std.Io.Event = .unset,
     /// Guards `client` lifetime against the reconnect supervisor freeing it while
     /// disconnectBroker reads it for shutdownRecv (io-guarded; null io = no
     /// concurrency / single-threaded path).
@@ -192,8 +193,8 @@ pub const MqttCtx = struct {
     pub fn deinit(self: *MqttCtx) void {
         if (self.deinitialized) return;
         self.deinitialized = true;
-        self.disconnectBroker();
         self.stopStatusFlushThread();
+        self.disconnectBroker();
         var it = self.messages.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -275,7 +276,6 @@ pub const MqttCtx = struct {
             self.state.store(.disconnected, .release);
             return e;
         };
-        client.rebind();
         // Route inbound PUBLISH frames (from the reader thread) to on_message.
         client.on_publish = mqttOnPublish;
         client.on_publish_ctx = self;
@@ -310,7 +310,7 @@ pub const MqttCtx = struct {
         // cannot be spawned, tear the connection down rather than leaving a
         // connected-but-unserviced client (no PINGRESP/keepalive → broker would
         // silently drop it); the caller can retry.
-        self.reader_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, runReader, .{self}) catch |e| {
+        self.reader_thread = io.concurrent(runReader, .{self}) catch |e| {
             client.disconnect();
             client.deinit();
             self.lockClient();
@@ -321,7 +321,7 @@ pub const MqttCtx = struct {
         };
         // If a stop/disconnect raced this (re)connect, self-interrupt the reader
         // we just spawned so the supervisor's join returns and it won't reconnect.
-        if (self.reader_stop.load(.acquire)) {
+        if (self.reader_stop.isSet()) {
             self.lockClient();
             if (self.client) |c| c.shutdownRecv();
             self.unlockClient();
@@ -370,10 +370,6 @@ pub const MqttCtx = struct {
         }
     }
 
-    fn sleepMs(io: std.Io, ms: u64) void {
-        io.sleep(std.Io.Duration.fromMilliseconds(@intCast(ms)), .awake) catch {};
-    }
-
     /// Static MqttClient.on_publish trampoline → MqttCtx.on_message.
     fn mqttOnPublish(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
         const self: *MqttCtx = @ptrCast(@alignCast(ctx));
@@ -405,30 +401,29 @@ pub const MqttCtx = struct {
     /// broker just keeps retrying; it never crashes the server.
     pub fn connectBrokerBg(self: *MqttCtx) void {
         const io = self.io orelse return; // no io → nothing the supervisor can do
-        self.reader_stop.store(false, .release);
         // Exponential reconnect backoff (phobos-specific; Moonraker/paho retries
         // on a fixed 1s loop). Start at 500ms, double on each failure, cap at 30s
         // so an unreachable broker is retried roughly twice a minute at steady state.
         const initial_backoff_ms: u64 = 500;
         const max_backoff: u64 = 30_000;
         var backoff_ms: u64 = initial_backoff_ms;
-        while (!self.reader_stop.load(.acquire)) {
+        while (!self.reader_stop.isSet()) {
             self.connectBroker() catch {
-                if (self.reader_stop.load(.acquire)) break;
-                sleepMs(io, backoff_ms);
+                if (self.reader_stop.isSet()) break;
+                if (sleep.untilStopped(io, .fromMilliseconds(@intCast(backoff_ms)), &self.reader_stop)) break;
                 backoff_ms = @min(backoff_ms * 2, max_backoff);
                 continue;
             };
             backoff_ms = initial_backoff_ms; // reset after a successful connect
             // Wait for the reader to end (broker drop or stop), then free.
-            if (self.reader_thread) |t| {
-                t.join();
+            if (self.reader_thread) |*t| {
+                t.await(io);
                 self.reader_thread = null;
             }
             self.freeClientLocked();
-            if (self.reader_stop.load(.acquire)) break;
+            if (self.reader_stop.isSet()) break;
             // Reconnect after an unexpected drop, with backoff.
-            sleepMs(io, backoff_ms);
+            if (sleep.untilStopped(io, .fromMilliseconds(@intCast(backoff_ms)), &self.reader_stop)) break;
             backoff_ms = @min(backoff_ms * 2, max_backoff);
         }
         if (self.state.load(.acquire) == .connected or self.state.load(.acquire) == .connecting) self.state.store(.disconnected, .release);
@@ -439,7 +434,7 @@ pub const MqttCtx = struct {
     /// PUBLISH dispatch are handled inside `client.readOne`.
     fn runReader(self: *MqttCtx) void {
         const client = self.client orelse return;
-        while (!self.reader_stop.load(.acquire)) {
+        while (!self.reader_stop.isSet()) {
             _ = client.readOne() catch break;
         }
     }
@@ -449,7 +444,7 @@ pub const MqttCtx = struct {
     pub fn disconnectBroker(self: *MqttCtx) void {
         // 1. Signal stop FIRST so the supervisor won't reconnect and the reader
         //    loop won't restart.
-        self.reader_stop.store(true, .release);
+        if (self.io) |stop_io| self.reader_stop.set(stop_io) else self.reader_stop = .is_set;
         // 2. Unblock the reader's blocking recv so the supervisor's reader.join
         //    returns. Done under client_mutex so we never shutdownRecv a client
         //    the supervisor is concurrently freeing (closes the UAF window).
@@ -458,16 +453,16 @@ pub const MqttCtx = struct {
         self.unlockClient();
         // 3. Join the supervisor; on exit it has freed the client + joined the
         //    reader (supervisor mode).
-        if (self.connect_thread) |t| {
-            t.join();
+        if (self.connect_thread) |*t| {
+            t.cancel(self.io.?);
             self.connect_thread = null;
         }
         // 4. Direct-mode fallback (no supervisor, e.g. a test that called
         //    connectBroker directly): tear down any remaining client/reader.
         if (self.client) |client| {
             client.shutdownRecv();
-            if (self.reader_thread) |t| {
-                t.join();
+            if (self.reader_thread) |*t| {
+                t.cancel(self.io.?);
                 self.reader_thread = null;
             }
             client.disconnect();
@@ -488,6 +483,9 @@ pub const MqttCtx = struct {
 
     /// True when a live broker connection is established.
     pub fn hasBrokerConnection(self: *const MqttCtx) bool {
+        const mutable = @constCast(self);
+        mutable.lockClient();
+        defer mutable.unlockClient();
         return self.client != null;
     }
 
@@ -520,6 +518,7 @@ pub const MqttCtx = struct {
 
     /// Set the optional MQTT instance name (replaces any previous value).
     pub fn setInstanceName(self: *MqttCtx, name: []const u8) !void {
+        if (self.config == null) return;
         const dup = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(dup);
         if (self.config) |*cfg| {
@@ -530,6 +529,7 @@ pub const MqttCtx = struct {
 
     /// Set the optional MQTT client ID (replaces any previous value).
     pub fn setClientId(self: *MqttCtx, id: []const u8) !void {
+        if (self.config == null) return;
         const dup = try self.gpa.dupe(u8, id);
         errdefer self.gpa.free(dup);
         if (self.config) |*cfg| {
@@ -566,10 +566,15 @@ pub const MqttCtx = struct {
     /// Set the Klipper state and message, then publish moonraker_status if
     /// connected. Both arguments are duplicated into ctx-owned memory.
     pub fn setKlipperState(self: *MqttCtx, state: []const u8, message: []const u8) void {
-        if (self.klipper_state.len > 0) self.gpa.free(self.klipper_state);
-        if (self.klipper_message.len > 0) self.gpa.free(self.klipper_message);
-        self.klipper_state = self.gpa.dupe(u8, state) catch self.klipper_state;
-        self.klipper_message = self.gpa.dupe(u8, message) catch self.klipper_message;
+        const state_copy = self.gpa.dupe(u8, state) catch return;
+        const message_copy = self.gpa.dupe(u8, message) catch {
+            self.gpa.free(state_copy);
+            return;
+        };
+        self.gpa.free(self.klipper_state);
+        self.gpa.free(self.klipper_message);
+        self.klipper_state = state_copy;
+        self.klipper_message = message_copy;
         if (self.state.load(.acquire) == .connected) {
             self.publishMoonrakerStatus();
         }
@@ -603,6 +608,7 @@ pub const MqttCtx = struct {
 
     /// Set the Last Will and Testament topic and payload. Takes ownership.
     pub fn setWill(self: *MqttCtx, topic: []const u8, payload: []const u8) !void {
+        if (self.config == null) return;
         const t = try self.gpa.dupe(u8, topic);
         errdefer self.gpa.free(t);
         const p = try self.gpa.dupe(u8, payload);
@@ -639,8 +645,9 @@ pub const MqttCtx = struct {
     /// The value is a comma-separated list of field names per object key.
     pub fn setStatusObjects(self: *MqttCtx, objects: ?[]const u8) !void {
         if (self.config) |*cfg| {
+            const copy = if (objects) |value| try self.gpa.dupe(u8, value) else null;
             if (cfg.status_objects) |old| self.gpa.free(old);
-            cfg.status_objects = if (objects) |o| try self.gpa.dupe(u8, o) else null;
+            cfg.status_objects = copy;
         }
     }
 
@@ -662,8 +669,9 @@ pub const MqttCtx = struct {
     /// Set the MQTT protocol version.
     pub fn setMqttProtocol(self: *MqttCtx, protocol: ?[]const u8) !void {
         if (self.config) |*cfg| {
+            const copy = if (protocol) |value| try self.gpa.dupe(u8, value) else null;
             if (cfg.mqtt_protocol) |old| self.gpa.free(old);
-            cfg.mqtt_protocol = if (protocol) |p| try self.gpa.dupe(u8, p) else null;
+            cfg.mqtt_protocol = copy;
         }
     }
 
@@ -801,18 +809,19 @@ pub const MqttCtx = struct {
         const interval = if (self.config) |cfg| cfg.status_interval else 0.0;
         if (interval <= 0.0) return;
 
-        self.status_flush_stop.store(false, .release);
-        self.status_flush_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, statusFlushWorker, .{self}) catch {
-            self.status_flush_stop.store(true, .release);
+        const io = self.io orelse return;
+        self.status_flush_stop.reset();
+        self.status_flush_thread = io.concurrent(statusFlushWorker, .{self}) catch {
+            if (self.io) |stop_io| self.status_flush_stop.set(stop_io) else self.status_flush_stop = .is_set;
             return;
         };
     }
 
     /// Signal the status-flush thread to stop and join it (max ~1 s).
     pub fn stopStatusFlushThread(self: *MqttCtx) void {
-        self.status_flush_stop.store(true, .release);
-        if (self.status_flush_thread) |handle| {
-            handle.join();
+        if (self.io) |stop_io| self.status_flush_stop.set(stop_io) else self.status_flush_stop = .is_set;
+        if (self.status_flush_thread) |*handle| {
+            handle.cancel(self.io.?);
             self.status_flush_thread = null;
         }
     }
@@ -870,15 +879,15 @@ pub const MqttCtx = struct {
 
     fn statusFlushWorker(self: *MqttCtx) void {
         const io = self.io orelse return;
-        while (!self.status_flush_stop.load(.acquire)) {
-            const interval_ns: u64 = @intFromFloat(
+        while (!self.status_flush_stop.isSet()) {
+            const interval_ns = std.math.lossyCast(
+                u64,
                 (if (self.config) |cfg| cfg.status_interval else 0.0) * 1e9,
             );
             if (interval_ns == 0) break;
             // Poll every ~1 s or at the interval, whichever is smaller.
             const sleep_ns: u64 = @min(interval_ns, 1_000_000_000);
-            io.sleep(std.Io.Duration.fromNanoseconds(@intCast(sleep_ns)), .awake) catch {};
-            if (self.status_flush_stop.load(.acquire)) break;
+            if (sleep.untilStopped(io, .fromNanoseconds(sleep_ns), &self.status_flush_stop)) break;
 
             // Flush on every interval tick. flushStatusCache snapshots the
             // cache under status_mutex and no-ops when empty, so no unlocked
@@ -945,11 +954,12 @@ pub const MqttCtx = struct {
         // Parse the incoming JSON-RPC payload.
         const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
         defer parsed.deinit();
+        if (parsed.value != .object or jv.exceedsDepth(parsed.value, jv.max_value_depth)) return error.InvalidParams;
         // Check for duplicate timestamp.
         if (parsed.value.object.get("mqtt_timestamp")) |ts_val| {
             const ts: ?i64 = switch (ts_val) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f),
                 else => null,
             };
             if (ts) |t| {
@@ -1011,30 +1021,7 @@ pub const MqttCtx = struct {
         try self.storeMessageRetain(topic, payload, false);
     }
 
-    /// Deep-copy a std.json.Value, duplicating all owned string data.
-
-    /// Free a deep-copied std.json.Value tree.
-    fn freeJsonValue(alloc: std.mem.Allocator, val: std.json.Value) void {
-        switch (val) {
-            .string => alloc.free(val.string),
-            .number_string => alloc.free(val.number_string),
-            .object => |obj| {
-                var mut_obj = obj;
-                var it = mut_obj.iterator();
-                while (it.next()) |kv| {
-                    alloc.free(kv.key_ptr.*);
-                    freeJsonValue(alloc, kv.value_ptr.*);
-                }
-                mut_obj.deinit(alloc);
-            },
-            .array => |arr| {
-                var mut_arr = arr;
-                for (mut_arr.items) |item| freeJsonValue(alloc, item);
-                mut_arr.deinit();
-            },
-            else => {},
-        }
-    }
+    const freeJsonValue = jv.free;
 
     /// Store a message with retain flag. Deep-copies the payload so
     /// the caller retains ownership of the original value.
@@ -1212,7 +1199,6 @@ pub const MqttCtx = struct {
         // and clearRetainingCapacity'd, leaking both the entries and the builder.
         self.flushStatusCache();
     }
-
 };
 
 /// A handle returned by subscribeTopic. Call unsubscribe() to remove
@@ -1255,7 +1241,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
             const v = obj.get(field) orelse return default_val;
             return switch (v) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f) orelse default_val,
                 .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
                 else => default_val,
             };
@@ -3412,14 +3398,12 @@ test "setKlipperState: stores and publishes moonraker_status when connected" {
 }
 
 test "startStatusFlushThread: starts and stops without error" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = testCtx(std.heap.smp_allocator);
     defer ctx.deinit();
     try ctx.setConfig("localhost", 1883, null, null);
     ctx.setStatusInterval(1.0);
 
+    ctx.io = testing.io;
     ctx.startStatusFlushThread();
     try testing.expect(ctx.status_flush_thread != null);
     ctx.stopStatusFlushThread();
@@ -3589,13 +3573,13 @@ test "fuzz handlePublishPrefixed: never panics on arbitrary params" {
 // ---------------------------------------------------------------------------
 
 test "mqtt: connectBroker connects; publishTopic reaches the broker live" {
-    const alloc = std.testing.allocator;
+    const alloc = std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var broker = try mqtt_client.TestBroker.bind(alloc, io);
-    const p = try broker.port();
+    var broker = try mqtt_client.TestBroker.bind(io);
+    const p = broker.port();
 
     // Broker services 3 client frames after the handshake:
     //   1) PUBLISH moonraker_status (emitted by setState(.connected))
@@ -3625,13 +3609,13 @@ test "mqtt: connectBroker connects; publishTopic reaches the broker live" {
 }
 
 test "connectBrokerBg supervisor: connects via the reconnect loop and shuts down cleanly" {
-    const alloc = std.testing.allocator;
+    const alloc = std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var broker = try mqtt_client.TestBroker.bind(alloc, io);
-    const p = try broker.port();
+    var broker = try mqtt_client.TestBroker.bind(io);
+    const p = broker.port();
     // Broker keeps reading client frames (status publish, subscribe, ...) until
     // the client drops on shutdown.
     var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 20) });
@@ -3642,7 +3626,7 @@ test "connectBrokerBg supervisor: connects via the reconnect loop and shuts down
     ctx.setIo(io);
 
     // Launch the reconnect supervisor (as App does).
-    ctx.connect_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, MqttCtx.connectBrokerBg, .{&ctx}) catch unreachable;
+    ctx.connect_thread = io.concurrent(MqttCtx.connectBrokerBg, .{&ctx}) catch unreachable;
 
     // Wait (bounded) until the supervisor establishes the connection.
     var tries: usize = 0;
@@ -3652,8 +3636,7 @@ test "connectBrokerBg supervisor: connects via the reconnect loop and shuts down
     try testing.expect(ctx.hasBrokerConnection());
 
     // Clean shutdown: disconnectBroker signals stop, unblocks the reader, and
-    // joins the supervisor (which frees the client). testing.allocator catches
-    // any leak/double-free; a deadlock would hang the suite (caught by timeout).
+    // joins the supervisor (which frees the client). a deadlock would hang the suite (caught by timeout).
     ctx.deinit();
     bf.await(io);
     broker.deinit();
@@ -3726,17 +3709,18 @@ test "fuzz processApiRequest: arbitrary payloads never crash the bridge" {
 }
 
 test "mqtt: inbound broker PUBLISH fires the on_message hook" {
-    const alloc = std.testing.allocator;
+    const alloc = std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var broker = try mqtt_client.TestBroker.bind(alloc, io);
-    const p = try broker.port();
+    var broker = try mqtt_client.TestBroker.bind(io);
+    const p = broker.port();
     // 2 frames after handshake: moonraker_status publish + api_request subscribe.
     var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 2) });
 
     const Cap = struct {
+        ready: std.atomic.Value(bool) = .init(false),
         topic: [128]u8 = undefined,
         topic_len: usize = 0,
         payload: [128]u8 = undefined,
@@ -3747,6 +3731,7 @@ test "mqtt: inbound broker PUBLISH fires the on_message hook" {
             self.topic_len = topic.len;
             @memcpy(self.payload[0..payload.len], payload);
             self.payload_len = payload.len;
+            self.ready.store(true, .release);
         }
     };
     var cap: Cap = .{};
@@ -3765,7 +3750,7 @@ test "mqtt: inbound broker PUBLISH fires the on_message hook" {
 
     // Wait for the background reader to dispatch the inbound publish.
     var spins: usize = 0;
-    while (cap.payload_len == 0 and spins < 200) : (spins += 1) {
+    while (!cap.ready.load(.acquire) and spins < 200) : (spins += 1) {
         std.Io.sleep(io, .{ .nanoseconds = 5_000_000 }, .real) catch {};
     }
 
@@ -3793,4 +3778,70 @@ test "connectBroker: failed connect frees client exactly once (no double-free)" 
     // a double-free would abort the test under testing.allocator.
     ctx.connectBroker() catch {};
     try std.testing.expect(!ctx.hasBrokerConnection());
+}
+
+test "MQTT API rejects non-object messages and overflowing timestamps" {
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setConfig("localhost", 1883, null, null);
+    for ([_][]const u8{ "[]", "null", "42", "\"x\"" }) |wire|
+        try testing.expectError(error.InvalidParams, ctx.processApiRequest(wire));
+    try ctx.processApiRequest("{\"mqtt_timestamp\":1e100}");
+    try testing.expectEqual(@as(usize, 0), ctx.api_timestamps.items.len);
+}
+
+test "disconnect cancels a broker stalled before CONNACK" {
+    const aio = testing.io;
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(aio, .{});
+    defer server.deinit(aio);
+    var accepted: std.Io.Event = .unset;
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, ready: *std.Io.Event, io: std.Io) void {
+            const stream = s.accept(io) catch return;
+            defer stream.close(io);
+            ready.set(io);
+            var buf: [512]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            while (true) _ = reader.interface.takeByte() catch break;
+        }
+    };
+    var peer = try aio.concurrent(Peer.run, .{ &server, &accepted, aio });
+    defer peer.cancel(aio);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig("127.0.0.1", server.socket.address.getPort(), null, null);
+    ctx.setIo(aio);
+    ctx.connect_thread = try aio.concurrent(MqttCtx.connectBrokerBg, .{&ctx});
+    try accepted.wait(aio);
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    ctx.disconnectBroker();
+    try testing.expect(start.untilNow(aio).raw.toMilliseconds() < 1000);
+    try testing.expect(ctx.connect_thread == null);
+    try testing.expect(!ctx.hasBrokerConnection());
+}
+
+test "MQTT setters preserve existing strings when allocation fails" {
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setInstanceName("unused");
+    try ctx.setClientId("unused");
+    try ctx.setWill("unused", "unused");
+    try ctx.setConfig("localhost", 1883, null, null);
+    try ctx.setStatusObjects("old objects");
+    try ctx.setMqttProtocol("old protocol");
+    ctx.setKlipperState("ready", "old message");
+    for (0..2) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        ctx.gpa = failing.allocator();
+        ctx.setKlipperState("shutdown", "new message");
+        try testing.expectEqualStrings("ready", ctx.klipper_state);
+        try testing.expectEqualStrings("old message", ctx.klipper_message);
+    }
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    ctx.gpa = failing.allocator();
+    try testing.expectError(error.OutOfMemory, ctx.setStatusObjects("new objects"));
+    try testing.expectError(error.OutOfMemory, ctx.setMqttProtocol("new protocol"));
+    try testing.expectEqualStrings("old objects", ctx.config.?.status_objects.?);
+    try testing.expectEqualStrings("old protocol", ctx.config.?.mqtt_protocol.?);
+    ctx.gpa = testing.allocator;
 }

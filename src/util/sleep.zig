@@ -1,80 +1,88 @@
-//! Interruptible timer sleep for background timer threads.
-//!
-//! Zig 0.16 removed the classic `std.Thread` sync primitives (`ResetEvent`,
-//! `Futex`, `Condition`); waiting now goes through `std.Io`. A background timer
-//! thread therefore can't block on a cancellable wait the way it used to. The
-//! workaround used across the components (button, td1, machine, announcements)
-//! is to sleep the tick in small chunks and poll an atomic stop flag between
-//! them, so `deinit`→`join` returns within one chunk instead of waiting out the
-//! full interval. Centralised here so every timer uses the same bound.
-
+//! Interruptible waits for owned background workers.
 const std = @import("std");
+const Io = std.Io;
 
-/// Default poll granularity: deinit→join latency is bounded by this.
-pub const chunk_ms: u64 = 100;
-
-/// Sleep approximately `total_ms`, split into `chunk_ms` slices, checking `stop`
-/// before each slice. Returns `true` as soon as `stop` is observed set (the
-/// caller should break out of its loop), or `false` after the full interval
-/// elapsed without a stop. Also returns `true` if `io.sleep` itself fails
-/// (e.g. cancellation), so the caller tears down rather than spins.
-pub fn chunked(io: std.Io, total_ms: u64, stop: *std.atomic.Value(bool)) bool {
-    var remaining = total_ms;
-    while (remaining > 0) {
-        if (stop.load(.acquire)) return true;
-        const this = @min(remaining, chunk_ms);
-        io.sleep(std.Io.Duration.fromMilliseconds(this), .awake) catch return true;
-        remaining -= this;
+/// Returns true on stop/cancellation, false when the interval expires.
+pub fn untilStopped(io: Io, duration: Io.Duration, stop: *Io.Event) bool {
+    if (stop.isSet()) return true;
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    const end = start.raw.nanoseconds +| @max(0, duration.nanoseconds);
+    while (!stop.isSet()) {
+        const now = Io.Clock.Timestamp.now(io, .awake);
+        if (now.raw.nanoseconds >= end) return false;
+        // Keep native timespec seconds representable on 32-bit targets.
+        const deadline: Io.Clock.Timestamp = .{
+            .raw = .{ .nanoseconds = @min(end, now.raw.nanoseconds +| std.time.ns_per_day) },
+            .clock = .awake,
+        };
+        stop.waitTimeout(io, .{ .deadline = deadline }) catch |err| switch (err) {
+            error.Timeout => continue,
+            error.Canceled => return true,
+        };
+        return true;
     }
-    return stop.load(.acquire);
+    return true;
 }
 
-test "chunked: returns true immediately when stop already set" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var stop = std.atomic.Value(bool).init(true);
-    try std.testing.expect(chunked(io, 1000, &stop));
+test "timer expires or returns immediately when stopped" {
+    var stop: Io.Event = .unset;
+    try std.testing.expect(!untilStopped(std.testing.io, .fromMilliseconds(1), &stop));
+    stop.set(std.testing.io);
+    try std.testing.expect(untilStopped(std.testing.io, .fromSeconds(3600), &stop));
 }
 
-test "chunked: returns false after the interval when never stopped" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+test "stop wakes an hour-long timer promptly" {
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var stop = std.atomic.Value(bool).init(false);
-    // Short total so the test stays fast; spans multiple chunks.
-    try std.testing.expect(!chunked(io, 250, &stop));
-}
-
-test "chunked: a stop set mid-sleep is observed within ~one chunk" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var stop = std.atomic.Value(bool).init(false);
+    var stop: Io.Event = .unset;
     const Setter = struct {
-        fn run(s: *std.atomic.Value(bool), i: std.Io) void {
-            i.sleep(std.Io.Duration.fromMilliseconds(120), .awake) catch {};
-            s.store(true, .release);
+        fn run(event: *Io.Event, aio: Io) void {
+            aio.sleep(.fromMilliseconds(10), .awake) catch return;
+            event.set(aio);
         }
     };
-    const th = try std.Thread.spawn(.{}, Setter.run, .{ &stop, io });
-    defer th.join();
-    // Would sleep ~5 s without interruption; must return early once stop flips.
-    try std.testing.expect(chunked(io, 5000, &stop));
+    const thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, Setter.run, .{ &stop, io });
+    defer thread.join();
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    try std.testing.expect(untilStopped(io, .fromSeconds(3600), &stop));
+    try std.testing.expect(start.untilNow(io).raw.toMilliseconds() < 1000);
 }
 
-test "fuzz chunked: arbitrary total_ms never hangs or crashes" {
+test "fuzz timer: arbitrary durations return immediately after stop" {
     try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
-            // Pre-set stop so the call returns immediately regardless of the
-            // (fuzz-chosen) interval — we exercise the arithmetic/bounds, not
-            // real wall-clock time.
-            var stop = std.atomic.Value(bool).init(true);
-            const total = smith.valueRangeAtMostWithHash(u64, 0, 1_000_000, 0);
-            _ = chunked(io, total, &stop);
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var stop: Io.Event = .is_set;
+            const ms = smith.valueRangeAtMostWithHash(i64, 0, 1_000_000, 0);
+            try std.testing.expect(untilStopped(std.testing.io, .fromMilliseconds(ms), &stop));
         }
     }.run, .{});
+}
+
+test "timer retries spurious wakes and bounds native deadlines" {
+    const Fake = struct {
+        now_ns: i96 = 1,
+        wakes: usize = 0,
+        fn now(raw: ?*anyopaque, _: Io.Clock) Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return .{ .nanoseconds = self.now_ns };
+        }
+        fn wait(raw: ?*anyopaque, _: *const u32, _: u32, timeout: Io.Timeout) Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.wakes += 1;
+            const deadline = timeout.deadline.raw.nanoseconds;
+            std.debug.assert(deadline - self.now_ns <= std.time.ns_per_day);
+            if (self.wakes > 1) self.now_ns = deadline;
+        }
+    };
+    var fake: Fake = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Fake.now;
+    vtable.futexWait = Fake.wait;
+    const aio: Io = .{ .userdata = &fake, .vtable = &vtable };
+    var stop: Io.Event = .unset;
+    try std.testing.expect(!untilStopped(aio, .fromMilliseconds(10), &stop));
+    try std.testing.expectEqual(@as(usize, 2), fake.wakes);
+    stop = .is_set;
+    try std.testing.expect(untilStopped(aio, .{ .nanoseconds = std.math.maxInt(i96) }, &stop));
 }

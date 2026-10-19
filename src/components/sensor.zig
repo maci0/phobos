@@ -112,10 +112,16 @@ pub const Sensor = struct {
     pub const store_size: usize = 1200;
 
     pub fn init(alloc: std.mem.Allocator, sensor_id: []const u8, sensor_type: []const u8) !Sensor {
+        const id = try alloc.dupe(u8, sensor_id);
+        errdefer alloc.free(id);
+        const type_str = try alloc.dupe(u8, sensor_type);
+        errdefer alloc.free(type_str);
+        const name = try alloc.dupe(u8, sensor_id);
+        errdefer alloc.free(name);
         return .{
-            .id = try alloc.dupe(u8, sensor_id),
-            .type_str = try alloc.dupe(u8, sensor_type),
-            .name = try alloc.dupe(u8, sensor_id),
+            .id = id,
+            .type_str = type_str,
+            .name = name,
             .last_measurements = std.StringHashMap(f64).init(alloc),
             .last_value = std.StringHashMap(f64).init(alloc),
             .history = std.StringHashMap(MeasurementRing).init(alloc),
@@ -181,7 +187,10 @@ pub const Sensor = struct {
 
         const lm = try self.last_measurements.getOrPut(param);
         if (!lm.found_existing) {
-            lm.key_ptr.* = try alloc.dupe(u8, param);
+            lm.key_ptr.* = alloc.dupe(u8, param) catch |err| {
+                _ = self.last_measurements.remove(param);
+                return err;
+            };
         }
         lm.value_ptr.* = value;
     }
@@ -296,8 +305,12 @@ pub const SensorCtx = struct {
         errdefer s.deinit(self.gpa);
         const key = try self.gpa.dupe(u8, sensor_id);
         errdefer self.gpa.free(key);
-        try self.sensors.put(key, s);
-        return self.sensors.getPtr(sensor_id).?;
+        if (try self.sensors.fetchPut(key, s)) |prior| {
+            self.gpa.free(key); // Replacements retain the map's existing key.
+            var old = prior.value;
+            old.deinit(self.gpa);
+        }
+        return self.sensors.getPtr(s.id).?;
     }
 
     /// Configure a sensor's MQTT state topic (gpa-owned; replaces any previous).
@@ -799,7 +812,7 @@ test "fuzz handleSensorInfo: arbitrary params never crash" {
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const strs = [_][]const u8{
-                "null", "{}", "{\"sensor\":\"s1\"}",
+                "null",                   "{}",                "{\"sensor\":\"s1\"}",
                 "{\"sensor\":\"ghost\"}", "{\"sensor\":\"\"}",
             };
             const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
@@ -821,7 +834,7 @@ test "fuzz handleSensorMeasurements: arbitrary params never crash" {
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const strs = [_][]const u8{
-                "null", "{}", "{\"sensor\":\"s1\"}",
+                "null",                   "{}",                "{\"sensor\":\"s1\"}",
                 "{\"sensor\":\"ghost\"}", "{\"sensor\":\"\"}",
             };
             const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
@@ -987,4 +1000,23 @@ test "ingestMqttMessage: last_value snapshot is gpa-stable across per-message ar
         ctx.ingestMqttMessage("t", "{\"temp\":2.0}", a2.allocator());
     }
     try testing.expectEqual(@as(f64, 2.0), ctx.findSensor("c").?.last_measurements.get("temp").?);
+}
+
+test "sensors free partial fields and replaced records on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var core = @import("../server/core.zig").Core.init();
+            var conns = @import("../server/connections.zig").Connections.init(alloc, &core);
+            defer conns.deinit(std.testing.io);
+            var bus = NotifyBus.init(&core, &conns);
+            var ctx = SensorCtx.init(alloc, &bus);
+            defer ctx.deinit();
+            const first = try ctx.addSensor("test", "mqtt");
+            try first.setMeasurement(alloc, "temperature", 20);
+            try first.snapshotValues(alloc);
+            try first.setMeasurement(alloc, "temperature", 21);
+            const second = try ctx.addSensor(first.id, first.type_str);
+            try std.testing.expectEqualStrings("test", second.id);
+        }
+    }.check, .{});
 }

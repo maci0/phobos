@@ -158,7 +158,6 @@ const state_intern_map = blk: {
 /// run_cmd_fn, when non-null, replaces std.process.run calls in handlers
 /// (services.*, reboot, shutdown) so integration tests can intercept systemctl
 /// invocations without touching the host.
-
 pub const MachineCtx = struct {
     pub const RunCmdResult = struct { stdout: []u8, stderr: []u8 };
     pub const RunCmdFn = *const fn (ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!RunCmdResult;
@@ -167,6 +166,9 @@ pub const MachineCtx = struct {
     pub const moonraker_stats_len = 30;
 
     gpa: std.mem.Allocator,
+    clock_io: std.Io,
+    proc_cpu_wall: f64 = 0,
+    proc_cpu_time: f64 = 0,
     io: ?std.Io = null,
     bus: ?*NotifyBus = null,
     /// Optional reference to the live connection registry for websocket_connections count.
@@ -188,7 +190,7 @@ pub const MachineCtx = struct {
     /// Cached result of the last sudo validation (via sudo -S -l).
     sudo_validated: ?bool = null,
     /// Proc stat timer stop flag. Set by deinit, polled by the timer thread.
-    proc_stat_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    proc_stat_stop: std.Io.Event = .unset,
     /// Handle for the proc_stat timer thread, joined in deinit.
     proc_stat_thread: ?std.Thread = null,
     /// Rolling sample buffer for moonraker_stats (length `moonraker_stats_len`).
@@ -267,11 +269,12 @@ pub const MachineCtx = struct {
         return state_intern_map.get(state) orelse "unknown";
     }
 
-    pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus, conns: ?*anyopaque) MachineCtx {
+    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io, bus: ?*NotifyBus, conns: ?*anyopaque) MachineCtx {
         return .{
             .gpa = alloc,
+            .clock_io = clock_io,
             .bus = bus,
-            .conns = @alignCast(@ptrCast(conns)),
+            .conns = @ptrCast(@alignCast(conns)),
             .services = std.StringHashMap(ServiceEntry).init(alloc),
         };
     }
@@ -297,7 +300,8 @@ pub const MachineCtx = struct {
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
         // Start the periodic proc_stat emission if a bus is wired.
-        if (self.bus != null and !self.no_proc_stat_timer) {
+        if (self.bus != null and !self.no_proc_stat_timer and self.proc_stat_thread == null) {
+            self.proc_stat_stop.reset();
             self.proc_stat_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, procStatTimerThread, .{self}) catch null;
         }
     }
@@ -323,17 +327,14 @@ pub const MachineCtx = struct {
     }
 
     pub fn deinit(self: *MachineCtx) void {
-        self.proc_stat_stop.store(true, .release);
-        // Clear io/conns/bus so the timer thread returns early even if it
-        // already passed the while-condition. This prevents use-after-free
-        // when App tears down connections before joining the machine thread.
-        self.io = null;
-        self.conns = null;
-        self.bus = null;
+        self.proc_stat_stop.set(self.clock_io);
         if (self.proc_stat_thread) |th| {
             th.join();
             self.proc_stat_thread = null;
         }
+        self.io = null;
+        self.conns = null;
+        self.bus = null;
         if (self.system_info_arena) |*ar| ar.deinit();
         if (self.sudo_password) |p| self.gpa.free(p);
         if (self.provider_owned) self.gpa.free(self.provider_name);
@@ -358,11 +359,11 @@ pub const MachineCtx = struct {
 fn procStatTimerThread(self: *MachineCtx) void {
     const io = self.io orelse return;
     var first: bool = true;
-    while (!self.proc_stat_stop.load(.acquire)) {
+    while (!self.proc_stat_stop.isSet()) {
         if (!first) {
             // Sleep the 1-second tick in 100 ms chunks so deinit→join returns
             // within ~100 ms instead of up to a full second (see util/sleep.zig).
-            if (sleep.chunked(io, 1000, &self.proc_stat_stop)) break;
+            if (sleep.untilStopped(io, .fromSeconds(1), &self.proc_stat_stop)) break;
         }
         first = false;
         emitProcStatUpdate(self, io) catch {};
@@ -396,7 +397,7 @@ fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
     // against the previous tick.
     if (readFile(io, alloc, NET_DEV_PATH)) |txt| {
         network = try parseNetDev(alloc, txt);
-        applyBandwidth(&self.net_prev, network, nowSeconds());
+        applyBandwidth(&self.net_prev, network, nowSeconds(io));
     }
 
     // Read system CPU usage.
@@ -415,10 +416,10 @@ fn emitProcStatUpdate(self: *MachineCtx, io: std.Io) !void {
     }
 
     // Process CPU usage since last tick (thread-local tracking).
-    const cpu_usage = procCpuUsage();
+    const cpu_usage = procCpuUsage(self, io);
 
     // Push the new sample into the ring buffer.
-    pushMoonrakerSample(self, io, .{ .time = nowSeconds(), .cpu_usage = cpu_usage, .memory = mem });
+    pushMoonrakerSample(self, io, .{ .time = nowSeconds(io), .cpu_usage = cpu_usage, .memory = mem });
 
     // Build the samples array from the ring buffer.
     const samples = buildMoonrakerStats(self, alloc, io);
@@ -452,25 +453,19 @@ fn parseProcMem(text: []const u8) i64 {
     return pages * 4; // 4 kB pages → kB
 }
 
-/// Process CPU usage since last call (thread-local state). Returns 0 on first
+/// Process CPU usage since last call for this context. Returns 0 on first
 /// call, then the percentage of one CPU core consumed between successive calls.
-fn procCpuUsage() f64 {
-    const proc_now = clock.processCpuSeconds();
-    const wall_now = nowSeconds();
-
-    const S = struct {
-        var last_wall: f64 = 0;
-        var last_proc: f64 = 0;
-    };
-
-    const usage: f64 = if (S.last_wall > 0 and wall_now > S.last_wall) blk: {
-        const wall_diff = wall_now - S.last_wall;
-        const proc_diff = proc_now - S.last_proc;
+fn procCpuUsage(self: *MachineCtx, io: std.Io) f64 {
+    const proc_now = clock.processCpuSeconds(io);
+    const wall_now = clock.monotonicSeconds(io);
+    const usage: f64 = if (self.proc_cpu_wall > 0 and wall_now > self.proc_cpu_wall) blk: {
+        const wall_diff = wall_now - self.proc_cpu_wall;
+        const proc_diff = proc_now - self.proc_cpu_time;
         break :blk if (wall_diff > 0) @round(100.0 * (proc_diff / wall_diff) * 100.0) / 100.0 else 0.0;
     } else 0.0;
 
-    S.last_wall = wall_now;
-    S.last_proc = proc_now;
+    self.proc_cpu_wall = wall_now;
+    self.proc_cpu_time = proc_now;
     return usage;
 }
 
@@ -856,10 +851,8 @@ fn buildSdInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
 fn hexDecodeAlloc(alloc: std.mem.Allocator, hex: []const u8) ![]u8 {
     if (hex.len % 2 != 0) return error.InvalidHex;
     const out = try alloc.alloc(u8, hex.len / 2);
-    for (out, 0..) |*b, i| {
-        b.* = try std.fmt.parseInt(u8, hex[2 * i .. 2 * i + 2], 16);
-    }
-    return out;
+    errdefer alloc.free(out);
+    return std.fmt.hexToBytes(out, hex);
 }
 
 /// Build the `distribution` object. Matches the key set Moonraker derives from
@@ -967,7 +960,7 @@ fn jsonInt(o: std.json.ObjectMap, key: []const u8) ?i64 {
     const v = o.get(key) orelse return null;
     return switch (v) {
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| jv.floatToInt(f),
         else => null,
     };
 }
@@ -1515,7 +1508,7 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
             // Fill per-interface bandwidth from the rx/tx delta since the last
             // sample (Moonraker reports this on the GET too, not just the push).
             // Uses the GET's OWN baseline so it never perturbs the timer's samples.
-            applyBandwidth(&ctx.net_prev_get, network, nowSeconds());
+            applyBandwidth(&ctx.net_prev_get, network, nowSeconds(ctx.clock_io));
         }
         if (readFile(io, alloc, CPU_STAT_PATH)) |txt| {
             sys_cpu = try parseCpuStat(alloc, txt);
@@ -1535,7 +1528,7 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
     try out.put(alloc, "cpu_temp", cpu_temp);
     try out.put(alloc, "network", network);
     try out.put(alloc, "system_cpu_usage", sys_cpu);
-    try out.put(alloc, "system_uptime", .{ .float = uptimeSeconds() });
+    try out.put(alloc, "system_uptime", .{ .float = uptimeSeconds(ctx.clock_io) });
     try out.put(alloc, "system_memory", sys_mem);
     const ws_count: i64 = if (ctx.conns) |c| blk: {
         const cio = ctx.io orelse break :blk 0;
@@ -1545,13 +1538,13 @@ pub fn handleProcStats(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Al
     return .{ .object = out };
 }
 
-fn nowSeconds() f64 {
-    return clock.wallSeconds();
+fn nowSeconds(io: std.Io) f64 {
+    return clock.wallSeconds(io);
 }
 
 /// System uptime from CLOCK_BOOTTIME (seconds). 0 on failure.
-fn uptimeSeconds() f64 {
-    return clock.bootSeconds();
+fn uptimeSeconds(io: std.Io) f64 {
+    return clock.bootSeconds(io);
 }
 
 // ===========================================================================
@@ -1722,7 +1715,9 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
         if (ctx.services.getPtr(name)) |existing| {
             existing.* = entry;
         } else {
-            try ctx.services.put(try ctx.gpa.dupe(u8, name), entry);
+            const key = try ctx.gpa.dupe(u8, name);
+            errdefer ctx.gpa.free(key);
+            try ctx.services.put(key, entry);
         }
 
         if (ctx.bus) |bus| {
@@ -1746,7 +1741,9 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
     if (ctx.services.getPtr(name)) |existing| {
         existing.* = entry;
     } else {
-        try ctx.services.put(try ctx.gpa.dupe(u8, name), entry);
+        const key = try ctx.gpa.dupe(u8, name);
+        errdefer ctx.gpa.free(key);
+        try ctx.services.put(key, entry);
     }
 
     if (ctx.bus != null and ctx.io != null) {
@@ -2302,7 +2299,7 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 }
 
 fn testCtx(alloc: std.mem.Allocator) MachineCtx {
-    return .{ .gpa = alloc, .io = null };
+    return .{ .clock_io = std.testing.io, .gpa = alloc, .io = null };
 }
 
 // ---- parseCpuinfo ----
@@ -2382,7 +2379,7 @@ test "simple provider virtualization is unknown outside a container" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var c = MachineCtx.init(a, null, null);
+    var c = MachineCtx.init(a, testing.io, null, null);
     defer c.deinit();
     try c.setProvider("simple");
     const v = try buildVirtualization(&c, a);
@@ -2394,7 +2391,7 @@ test "simple provider reports no discovered services" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var c = MachineCtx.init(a, null, null);
+    var c = MachineCtx.init(a, testing.io, null, null);
     defer c.deinit();
     try c.setProvider("simple");
     const listed = try buildAvailableServices(&c, a);
@@ -2536,9 +2533,9 @@ test "buildUsbDevice: emits ids + raw hex class/subclass/protocol" {
     try Dir.cwd().createDirPath(io, base);
     defer Dir.cwd().deleteTree(io, "/tmp/phobos_usb_test") catch {};
     inline for (.{
-        .{ "bDeviceClass", "00" },     .{ "bDeviceSubClass", "00" }, .{ "bDeviceProtocol", "00" },
-        .{ "devnum", "4" },            .{ "busnum", "1" },           .{ "idVendor", "1D50" },
-        .{ "idProduct", "614E" },      .{ "manufacturer", "Klipper" }, .{ "product", "stm32" },
+        .{ "bDeviceClass", "00" }, .{ "bDeviceSubClass", "00" },   .{ "bDeviceProtocol", "00" },
+        .{ "devnum", "4" },        .{ "busnum", "1" },             .{ "idVendor", "1D50" },
+        .{ "idProduct", "614E" },  .{ "manufacturer", "Klipper" }, .{ "product", "stm32" },
     }) |kv| {
         try Dir.cwd().writeFile(io, .{ .sub_path = base ++ "/" ++ kv[0], .data = kv[1] });
     }
@@ -2611,7 +2608,7 @@ test "buildNetworkInfo uses /usr/sbin/ip when ip is not on PATH" {
         }
     };
     var dummy: u8 = 0;
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
     c.setRunCmdFn(Mock.run, @ptrCast(&dummy));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2768,7 +2765,7 @@ test "fuzz computeBandwidth: never crashes, never negative" {
 // ---- applyBandwidth ----
 
 test "applyBandwidth: zero on first sight, real delta on second tick" {
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2794,7 +2791,7 @@ test "applyBandwidth: zero on first sight, real delta on second tick" {
 test "fuzz applyBandwidth: arbitrary net objects never crash" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var c = MachineCtx.init(testing.allocator, null, null);
+            var c = MachineCtx.init(testing.allocator, testing.io, null, null);
             defer c.deinit();
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
@@ -2877,7 +2874,7 @@ test "handleProcStats: full shape present" {
 // runs the tests. Do not add a flag, a provider, or a real path behind the
 // stub. A skipped or no-op assertion is the correct result.
 test "handleReboot/handleShutdown: ack ok (io null)" {
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2887,7 +2884,7 @@ test "handleReboot/handleShutdown: ack ok (io null)" {
 }
 
 test "service handlers: start/stop/restart update state; disallowed Forbidden" {
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2937,7 +2934,7 @@ test "runCmd: delegates to mock when set, returns empty when no io" {
         }
     };
     var mock = MockCtx{};
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
 
     // Without mock and without io → returns empty.
@@ -3010,7 +3007,7 @@ test "provider abstraction: service action dispatches to the right manager" {
     // Default provider → systemctl.
     {
         var mock = Mock{};
-        var c = MachineCtx.init(a, null, null);
+        var c = MachineCtx.init(a, testing.io, null, null);
         defer c.deinit();
         c.setRunCmdFn(Mock.run, @ptrCast(&mock));
         _ = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
@@ -3019,7 +3016,7 @@ test "provider abstraction: service action dispatches to the right manager" {
     // supervisord → supervisorctl, RUNNING → active/running.
     {
         var mock = Mock{};
-        var c = MachineCtx.init(a, null, null);
+        var c = MachineCtx.init(a, testing.io, null, null);
         defer c.deinit();
         try c.setProvider("supervisord_cli");
         c.setRunCmdFn(Mock.run, @ptrCast(&mock));
@@ -3030,7 +3027,7 @@ test "provider abstraction: service action dispatches to the right manager" {
     // none → no real command is ever run; state is in-memory only.
     {
         var mock = Mock{};
-        var c = MachineCtx.init(a, null, null);
+        var c = MachineCtx.init(a, testing.io, null, null);
         defer c.deinit();
         try c.setProvider("none");
         c.setRunCmdFn(Mock.run, @ptrCast(&mock));
@@ -3058,7 +3055,7 @@ test "provider abstraction: service action dispatches to the right manager" {
         var rec = Rec{ .alloc = testing.allocator };
         defer if (rec.path.len > 0) testing.allocator.free(rec.path);
         defer if (rec.action.len > 0) testing.allocator.free(rec.action);
-        var c = MachineCtx.init(a, null, null);
+        var c = MachineCtx.init(a, testing.io, null, null);
         defer c.deinit();
         try c.setProvider("simple");
         try c.setScriptPath("/no/such/scripts");
@@ -3087,7 +3084,7 @@ test "service handler with runCmd mock: uses mock output for state" {
         }
     };
     var mock = MockCtx{};
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
     c.setRunCmdFn(MockCtx.runCmd, @ptrCast(&mock));
 
@@ -3104,7 +3101,7 @@ test "service handler with runCmd mock: uses mock output for state" {
 }
 
 test "buildServiceState: reflects tracked service states" {
-    var c = MachineCtx.init(testing.allocator, null, null);
+    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -3215,12 +3212,13 @@ test "registerMachine: wires routes and JSON-RPC methods" {
     try registerMachine(&reg, &ctx);
 
     const routes = [_][]const u8{
-        "/machine/system_info", "/machine/proc_stats",
-        "/machine/reboot", "/machine/shutdown",
-        "/machine/services/restart", "/machine/services/stop", "/machine/services/start",
-        "/machine/sudo/info", "/machine/sudo/password",
-        "/machine/peripherals/usb", "/machine/peripherals/serial",
-        "/machine/peripherals/video", "/machine/peripherals/canbus",
+        "/machine/system_info",        "/machine/proc_stats",
+        "/machine/reboot",             "/machine/shutdown",
+        "/machine/services/restart",   "/machine/services/stop",
+        "/machine/services/start",     "/machine/sudo/info",
+        "/machine/sudo/password",      "/machine/peripherals/usb",
+        "/machine/peripherals/serial", "/machine/peripherals/video",
+        "/machine/peripherals/canbus",
     };
     for (routes) |path| {
         try testing.expect((reg.lookup(.GET, path) != null) or (reg.lookup(.POST, path) != null));
@@ -3275,7 +3273,7 @@ test "fuzz_machine_handlers: system_info/proc_stats never crash with arbitrary p
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var c = MachineCtx{ .gpa = a, .io = null };
+            var c = MachineCtx{ .clock_io = std.testing.io, .gpa = a, .io = null };
             // params irrelevant for these GET handlers; pass null.
             _ = handleSystemInfo(@ptrCast(&c), .null, a) catch {};
             _ = handleProcStats(@ptrCast(&c), .null, a) catch {};
@@ -3291,7 +3289,7 @@ test "fuzz_machine_handlers_reboot_shutdown: never crash" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var c = MachineCtx{ .gpa = a, .io = null };
+            var c = MachineCtx{ .clock_io = std.testing.io, .gpa = a, .io = null };
             _ = handleReboot(@ptrCast(&c), .null, a) catch {};
             _ = handleShutdown(@ptrCast(&c), .null, a) catch {};
         }
@@ -3304,7 +3302,7 @@ test "fuzz_machine_handlers_services: never crash" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var c = MachineCtx{ .gpa = a, .io = null };
+            var c = MachineCtx{ .clock_io = std.testing.io, .gpa = a, .io = null };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -3329,7 +3327,7 @@ test "fuzz_machine_handlers_sudo: never crash" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var c = MachineCtx{ .gpa = a, .io = null };
+            var c = MachineCtx{ .clock_io = std.testing.io, .gpa = a, .io = null };
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -3356,7 +3354,7 @@ test "fuzz_machine_handlers_peripherals: never crash" {
             var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var c = MachineCtx{ .gpa = a, .io = null };
+            var c = MachineCtx{ .clock_io = std.testing.io, .gpa = a, .io = null };
 
             var b: [8]u8 = undefined;
             smith.bytesWithHash(&b, 1);
@@ -3571,6 +3569,69 @@ test "fuzz_runSudoCmd: random passwords and commands never crash" {
             const cmd = cmd_buf[0..cmd_n];
 
             _ = runSudoCmd(io, pwd, cmd);
+        }
+    }.run, .{});
+}
+
+test "hex decoding frees invalid inputs and uses standard byte decoding" {
+    const alloc = std.testing.allocator;
+    for ([_][]const u8{ "xx", "00xy", "012" }) |raw| {
+        if (hexDecodeAlloc(alloc, raw)) |bytes| {
+            alloc.free(bytes);
+            return error.ExpectedInvalidHex;
+        } else |_| {}
+    }
+    const bytes = try hexDecodeAlloc(alloc, "00AbFF");
+    defer alloc.free(bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0xab, 0xff }, bytes);
+}
+
+test "fuzz hex decoding handles arbitrary bounded strings" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var raw: [32]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            const bytes = hexDecodeAlloc(std.testing.allocator, &raw) catch return;
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqual(@as(usize, 16), bytes.len);
+        }
+    }.run, .{});
+}
+
+test "process CPU samples belong to each machine context" {
+    const Clocks = struct {
+        wall: i96 = std.time.ns_per_s,
+        cpu: i96 = 0,
+        fn now(userdata: ?*anyopaque, kind: std.Io.Clock) std.Io.Timestamp {
+            const state: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .{ .nanoseconds = if (kind == .cpu_process) state.cpu else state.wall };
+        }
+    };
+    var state: Clocks = .{};
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clocks.now;
+    const io: std.Io = .{ .userdata = &state, .vtable = &vtable };
+    var first = MachineCtx.init(std.testing.allocator, io, null, null);
+    defer first.deinit();
+    var second = MachineCtx.init(std.testing.allocator, io, null, null);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(f64, 0), procCpuUsage(&first, io));
+    state.wall += std.time.ns_per_s;
+    state.cpu += std.time.ns_per_s / 4;
+    try std.testing.expectEqual(@as(f64, 25), procCpuUsage(&first, io));
+    try std.testing.expectEqual(@as(f64, 0), procCpuUsage(&second, io));
+}
+
+test "fuzz process CPU sample starts independently of other contexts" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var first = MachineCtx.init(std.testing.allocator, std.testing.io, null, null);
+            defer first.deinit();
+            first.proc_cpu_wall = @floatFromInt(smith.valueRangeAtMostWithHash(u32, 1, 1000, 0));
+            _ = procCpuUsage(&first, std.testing.io);
+            var second = MachineCtx.init(std.testing.allocator, std.testing.io, null, null);
+            defer second.deinit();
+            try std.testing.expectEqual(@as(f64, 0), procCpuUsage(&second, std.testing.io));
         }
     }.run, .{});
 }

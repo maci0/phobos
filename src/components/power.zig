@@ -78,6 +78,30 @@ pub const Device = struct {
     gpio_pin: ?u32 = null,
     /// Active-low line: "on" drives the physical level low (Moonraker "!pin").
     gpio_active_low: bool = false,
+
+    fn dupe(self: Device, alloc: std.mem.Allocator) !Device {
+        var owned = self;
+        inline for (comptime std.meta.fieldNames(Device)) |field| {
+            const T = @TypeOf(@field(owned, field));
+            if (T == []const u8) @field(owned, field) = "";
+            if (T == ?[]const u8) @field(owned, field) = null;
+        }
+        errdefer owned.deinit(alloc);
+        inline for (comptime std.meta.fieldNames(Device)) |field| {
+            const T = @TypeOf(@field(owned, field));
+            if (T == []const u8) @field(owned, field) = try alloc.dupe(u8, @field(self, field));
+            if (T == ?[]const u8) @field(owned, field) = if (@field(self, field)) |value| try alloc.dupe(u8, value) else null;
+        }
+        return owned;
+    }
+
+    fn deinit(self: *Device, alloc: std.mem.Allocator) void {
+        inline for (comptime std.meta.fieldNames(Device)) |field| {
+            const T = @TypeOf(@field(self, field));
+            if (T == []const u8) alloc.free(@field(self, field));
+            if (T == ?[]const u8) if (@field(self, field)) |value| alloc.free(value);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -112,15 +136,7 @@ pub const PowerCtx = struct {
         var it = self.devices.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
-            const dev = entry.value_ptr;
-            self.gpa.free(dev.name);
-            self.gpa.free(dev.type_str);
-            self.gpa.free(dev.state);
-            if (dev.bound_services) |bs| self.gpa.free(bs);
-            if (dev.initial_state) |is| self.gpa.free(is);
-            if (dev.on_url) |u| self.gpa.free(u);
-            if (dev.off_url) |u| self.gpa.free(u);
-            if (dev.status_url) |u| self.gpa.free(u);
+            entry.value_ptr.deinit(self.gpa);
         }
         self.devices.deinit();
     }
@@ -225,8 +241,9 @@ pub const PowerCtx = struct {
     /// Update a device's state in-place.
     pub fn setState(self: *PowerCtx, name: []const u8, new_state: []const u8) !void {
         const dev = self.devices.getPtr(name) orelse return error.NotFound;
+        const owned = try self.gpa.dupe(u8, new_state);
         self.gpa.free(dev.state);
-        dev.state = try self.gpa.dupe(u8, new_state);
+        dev.state = owned;
     }
 
     /// Set whether the printer is currently printing. When `true`, power
@@ -259,42 +276,17 @@ pub const PowerCtx = struct {
         });
     }
 
-    /// Add a device with full configuration (takes ownership of all slices).
+    /// Add or replace a device, copying all configuration strings.
     pub fn addDeviceFull(self: *PowerCtx, opts: Device) !void {
         const k = try self.gpa.dupe(u8, opts.name);
         errdefer self.gpa.free(k);
-        const dev: Device = .{
-            .name = try self.gpa.dupe(u8, opts.name),
-            .type_str = try self.gpa.dupe(u8, opts.type_str),
-            .state = try self.gpa.dupe(u8, opts.state),
-            .locked_while_printing = opts.locked_while_printing,
-            .is_shutdown = opts.is_shutdown,
-            .off_when_shutdown = opts.off_when_shutdown,
-            .off_when_shutdown_delay = opts.off_when_shutdown_delay,
-            .on_when_queued = opts.on_when_queued,
-            .klipper_restart = opts.klipper_restart,
-            .restart_delay = opts.restart_delay,
-            .bound_services = if (opts.bound_services) |bs| try self.gpa.dupe(u8, bs) else null,
-            .initial_state = if (opts.initial_state) |is| try self.gpa.dupe(u8, is) else null,
-            .restrict_actions = opts.restrict_actions,
-            .timer = opts.timer,
-            .on_url = if (opts.on_url) |u| try self.gpa.dupe(u8, u) else null,
-            .off_url = if (opts.off_url) |u| try self.gpa.dupe(u8, u) else null,
-            .status_url = if (opts.status_url) |u| try self.gpa.dupe(u8, u) else null,
-            .gpio_pin = opts.gpio_pin,
-            .gpio_active_low = opts.gpio_active_low,
-        };
-        errdefer {
-            self.gpa.free(dev.name);
-            self.gpa.free(dev.type_str);
-            self.gpa.free(dev.state);
-            if (dev.bound_services) |bs| self.gpa.free(bs);
-            if (dev.initial_state) |is| self.gpa.free(is);
-            if (dev.on_url) |u| self.gpa.free(u);
-            if (dev.off_url) |u| self.gpa.free(u);
-            if (dev.status_url) |u| self.gpa.free(u);
+        var dev = try opts.dupe(self.gpa);
+        errdefer dev.deinit(self.gpa);
+        if (try self.devices.fetchPut(k, dev)) |prior| {
+            self.gpa.free(k); // Replacements retain the map's existing key.
+            var old = prior.value;
+            old.deinit(self.gpa);
         }
-        try self.devices.put(k, dev);
     }
 
     /// Handle Klippy shutdown: power off all devices with off_when_shutdown=true.
@@ -1435,4 +1427,29 @@ test "driveGpio: no-op without pin or io (no crash)" {
     // No io, no pin → must not crash.
     try ctx.addDeviceFull(.{ .name = "d", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false });
     ctx.driveGpio(ctx.findDevice("d").?, true);
+}
+
+test "power devices preserve ownership on replacement and allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx = PowerCtx.init(alloc, null);
+            defer ctx.deinit();
+            const device: Device = .{
+                .name = "test",
+                .type_str = "mock",
+                .state = "off",
+                .locked_while_printing = false,
+                .is_shutdown = false,
+                .bound_services = "service",
+                .initial_state = "off",
+                .on_url = "on",
+                .off_url = "off",
+                .status_url = "status",
+            };
+            try ctx.addDeviceFull(device);
+            try ctx.addDeviceFull(ctx.findDevice("test").?.*);
+            try ctx.setState("test", ctx.findDevice("test").?.state);
+            try std.testing.expectEqualStrings("off", ctx.findDevice("test").?.state);
+        }
+    }.check, .{});
 }

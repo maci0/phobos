@@ -24,6 +24,8 @@
 //! exactly as Moonraker does.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
+const sleep = @import("../util/sleep.zig");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
@@ -60,17 +62,19 @@ pub const SpoolmanCtx = struct {
     /// Live WebSocket connection state (Moonraker's real spoolman_connected),
     /// maintained by the WS supervisor thread.
     ws_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    ws_thread: ?std.Thread = null,
+    ws_thread: ?std.Io.Future(void) = null,
     /// Atomic mirror of "a WS supervisor is running", read by `connected()` from
     /// request-handler / supervisor threads while `ws_thread` is written only by
     /// the control thread (start/stop). Reading `ws_thread` cross-thread would be
     /// a data race on a non-atomic optional, so this flag is the discriminator.
     ws_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    ws_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    ws_stop: std.Io.Event = .unset,
     ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
     ws: ?*ws_client_mod.WsClient = null,
     ws_host: ?[]const u8 = null,
     ws_port: u16 = 7912,
+    ws_path: ?[]const u8 = null,
+    ws_tls: bool = false,
     /// Callback invoked off the Core lock on a spool-deletion push; App wires it
     /// to clear the active spool under the Core lock.
     on_spool_deleted: ?*const fn (ctx: *anyopaque, spool_id: i64) void = null,
@@ -140,20 +144,28 @@ pub const SpoolmanCtx = struct {
         if (self.io) |io| self.ws_mutex.unlock(io);
     }
 
-    /// Parse "http(s)://host[:port]" into host (gpa-owned) + port (default 7912).
+    /// Parse and own the WebSocket host and path without changing a valid target on failure.
     fn parseWsTarget(self: *SpoolmanCtx, url: []const u8) !void {
-        var rest = url;
-        if (std.mem.indexOf(u8, rest, "://")) |i| rest = rest[i + 3 ..];
-        if (std.mem.indexOfScalar(u8, rest, '/')) |s| rest = rest[0..s];
-        var host = rest;
-        var port: u16 = 7912;
-        if (std.mem.lastIndexOfScalar(u8, rest, ':')) |c| {
-            host = rest[0..c];
-            port = std.fmt.parseInt(u16, rest[c + 1 ..], 10) catch 7912;
+        const uri = try std.Uri.parse(url);
+        const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https") or std.ascii.eqlIgnoreCase(uri.scheme, "wss");
+        if (!secure and !std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.InvalidUrl;
+        if (uri.user != null or uri.password != null or uri.query != null or uri.fragment != null) return error.InvalidUrl;
+        var buf: [512]u8 = undefined;
+        var host = try (uri.host orelse return error.InvalidUrl).toRaw(&buf);
+        if (std.mem.startsWith(u8, host, "[") and std.mem.endsWith(u8, host, "]")) host = host[1 .. host.len - 1];
+        const port = uri.port orelse if (secure) @as(u16, 443) else @as(u16, 7912);
+        if (std.Io.net.IpAddress.parse(host, port)) |_| {} else |_| {
+            _ = try std.Io.net.HostName.init(host);
         }
-        if (self.ws_host) |h| self.gpa.free(h);
-        self.ws_host = try self.gpa.dupe(u8, host);
+        const owned_host = try self.gpa.dupe(u8, host);
+        errdefer self.gpa.free(owned_host);
+        const path = try std.fmt.allocPrint(self.gpa, "{s}/api/v1/spool", .{std.mem.trimEnd(u8, uri.path.percent_encoded, "/")});
+        if (self.ws_host) |old| self.gpa.free(old);
+        if (self.ws_path) |old| self.gpa.free(old);
+        self.ws_host = owned_host;
+        self.ws_path = path;
         self.ws_port = port;
+        self.ws_tls = secure;
     }
 
     /// Start the Spoolman WebSocket supervisor (no-op without server_url/io or if
@@ -163,20 +175,24 @@ pub const SpoolmanCtx = struct {
         const url = self.server_url orelse return;
         if (self.io == null) return;
         self.parseWsTarget(url) catch return;
-        self.ws_stop.store(false, .release);
-        self.ws_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, wsSupervisor, .{self}) catch null;
+        self.ws_stop.reset();
+        self.ws_thread = self.io.?.concurrent(wsSupervisor, .{self}) catch null;
         if (self.ws_thread != null) self.ws_running.store(true, .release);
     }
 
     pub fn stopWs(self: *SpoolmanCtx) void {
         self.ws_running.store(false, .release);
-        self.ws_stop.store(true, .release);
+        if (self.io) |stop_io| self.ws_stop.set(stop_io) else self.ws_stop = .is_set;
         self.wsLock();
         if (self.ws) |w| w.shutdownRecv();
         self.wsUnlock();
-        if (self.ws_thread) |t| {
-            t.join();
+        if (self.ws_thread) |*t| {
+            t.cancel(self.io.?);
             self.ws_thread = null;
+        }
+        if (self.ws_path) |path| {
+            self.gpa.free(path);
+            self.ws_path = null;
         }
         if (self.ws_host) |h| {
             self.gpa.free(h);
@@ -199,22 +215,22 @@ pub const SpoolmanCtx = struct {
         const max_backoff: u64 = 30_000;
         const host = self.ws_host orelse return;
         const io = self.io orelse return;
-        while (!self.ws_stop.load(.acquire)) {
-            const w = ws_client_mod.WsClient.connect(self.gpa, io, host, self.ws_port, "/api/v1/spool") catch {
-                if (self.ws_stop.load(.acquire)) break;
-                sleepMs(io, backoff_ms);
+        while (!self.ws_stop.isSet()) {
+            const w = ws_client_mod.WsClient.connect(self.gpa, io, host, self.ws_port, self.ws_path.?, if (self.ws_tls) .{ .host = host } else null) catch {
+                if (self.ws_stop.isSet()) break;
+                if (sleep.untilStopped(io, .fromMilliseconds(@intCast(backoff_ms)), &self.ws_stop)) break;
                 backoff_ms = @min(backoff_ms * 2, max_backoff);
                 continue;
             };
             self.wsLock();
             self.ws = w;
             self.wsUnlock();
-            if (self.ws_stop.load(.acquire)) w.shutdownRecv();
+            if (self.ws_stop.isSet()) w.shutdownRecv();
             self.ws_connected.store(true, .release);
             self.emitStatus(false);
             backoff_ms = 500;
 
-            while (!self.ws_stop.load(.acquire)) {
+            while (!self.ws_stop.isSet()) {
                 var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
                 defer arena.deinit();
                 const msg = w.readMessage(arena.allocator()) catch break;
@@ -224,8 +240,8 @@ pub const SpoolmanCtx = struct {
             self.ws_connected.store(false, .release);
             self.emitStatus(false);
             self.freeWsLocked();
-            if (self.ws_stop.load(.acquire)) break;
-            sleepMs(io, backoff_ms);
+            if (self.ws_stop.isSet()) break;
+            if (sleep.untilStopped(io, .fromMilliseconds(@intCast(backoff_ms)), &self.ws_stop)) break;
             backoff_ms = @min(backoff_ms * 2, max_backoff);
         }
     }
@@ -247,16 +263,12 @@ pub const SpoolmanCtx = struct {
         const idv = pl.object.get("id") orelse return;
         const id: i64 = switch (idv) {
             .integer => |i| i,
-            .float => |f| @intFromFloat(f),
+            .float => |f| jv.floatToInt(f) orelse return,
             else => return,
         };
         if (self.on_spool_deleted) |cb| {
             if (self.on_spool_deleted_ctx) |c| cb(c, id);
         }
-    }
-
-    fn sleepMs(io: std.Io, ms: u64) void {
-        io.sleep(std.Io.Duration.fromMilliseconds(@intCast(ms)), .awake) catch {};
     }
 
     /// Clear the active spool if it matches `deleted_id` (Moonraker behaviour).
@@ -350,7 +362,7 @@ fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
             return switch (v) {
                 .integer => |i| i,
                 .null => null,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f),
                 .string => |s| std.fmt.parseInt(i64, s, 10) catch null,
                 else => null,
             };
@@ -512,7 +524,7 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
             // Surface Spoolman's own {"message": ...} from the error body when present.
             const msg = extractSpoolmanMessage(alloc, aw.written()) orelse "Spoolman request failed";
             var err_obj: std.json.ObjectMap = .empty;
-            try err_obj.put(alloc, "status_code", .{ .integer = @intFromEnum(result.status) });
+            try err_obj.put(alloc, "status_code", .{ .integer = @backingInt(result.status) });
             try err_obj.put(alloc, "message", .{ .string = msg });
             var obj: std.json.ObjectMap = .empty;
             try obj.put(alloc, "response", .null);
@@ -608,11 +620,11 @@ pub fn handleSetActiveSpool(ctx_ptr: *anyopaque, params: std.json.Value, alloc: 
     const sid: ?i64 = switch (params) {
         .object => |o| switch (o.get("spool_id") orelse .null) {
             .integer => |i| i,
-            .float => |f| @intFromFloat(f),
+            .float => |f| jv.floatToInt(f) orelse return error.InvalidParams,
             else => null,
         },
         .integer => |i| i,
-        .float => |f| @intFromFloat(f),
+        .float => |f| jv.floatToInt(f) orelse return error.InvalidParams,
         else => null,
     };
     c.setSpoolId(sid);
@@ -778,20 +790,19 @@ fn spoolmanTestWsServer(server: *std.Io.net.Server, io: std.Io, payload: []const
     var wbuf: [512]u8 = undefined;
     var r = stream.reader(io, &rbuf);
     var w = stream.writer(io, &wbuf);
-    while (true) {
-        const line = r.interface.takeDelimiterInclusive('\n') catch return;
-        if (std.mem.trimEnd(u8, line, "\r\n").len == 0) break;
-    }
-    w.interface.writeAll("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n") catch return;
-    w.interface.writeByte(0x81) catch return;
-    w.interface.writeByte(@intCast(payload.len)) catch return;
-    w.interface.writeAll(payload) catch return;
-    w.interface.flush() catch return;
+    var http = std.http.Server.init(&r.interface, &w.interface);
+    var request = http.receiveHead() catch return;
+    const key = switch (request.upgradeRequested()) {
+        .websocket => |key| key orelse return,
+        else => return,
+    };
+    var ws = request.respondWebSocket(.{ .key = key }) catch return;
+    ws.writeMessage(payload, .text) catch return;
     while (true) _ = r.interface.takeByte() catch break;
 }
 
 test "spoolman WS supervisor: connects, receives a deletion push, shuts down cleanly" {
-    const alloc = std.testing.allocator;
+    const alloc = std.heap.smp_allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -799,14 +810,10 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
     var ip = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
     var server = try ip.listen(io, .{ .reuse_address = true });
     defer server.deinit(io);
-    const port = blk: {
-        var sa: std.os.linux.sockaddr.in = undefined;
-        var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
-        _ = std.os.linux.getsockname(server.socket.handle, @ptrCast(&sa), &slen);
-        break :blk std.mem.bigToNative(u16, sa.port);
-    };
+    const port = server.socket.address.getPort();
     var sf = io.async(spoolmanTestWsServer, .{ &server, io, @as([]const u8, "{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{\"id\":5}}") });
 
+    defer sf.cancel(io);
     var mem = MemStore.init(alloc);
     defer mem.deinit();
     // Stable inline bus (NullBus.init returns by value with self-pointers that
@@ -816,6 +823,7 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
     var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &bus, null);
+    defer ctx.stopWs();
     var url_buf: [64]u8 = undefined;
     ctx.setServerUrl(try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{port}));
     ctx.io = io;
@@ -832,7 +840,7 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
     try testing.expect(ctx.connected());
     try testing.expect(ws_sup_deleted.load(.acquire));
 
-    ctx.stopWs(); // joins supervisor; testing.allocator catches leak/UAF
+    ctx.stopWs();
     sf.await(io);
     // After stop the WS is down; connected() falls back to HTTP (server_url set).
     try testing.expect(!ctx.ws_connected.load(.acquire));
@@ -1256,6 +1264,85 @@ test "fuzz handleStatus: never panics" {
             var buf: [4]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             _ = handleStatus(@ptrCast(&ctx), .null, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "stopWs cancels a peer stalled before the upgrade response" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    const aio = testing.io;
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(aio, .{});
+    defer server.deinit(aio);
+    var accepted: std.Io.Event = .unset;
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, ready: *std.Io.Event, io: std.Io) void {
+            const stream = s.accept(io) catch return;
+            defer stream.close(io);
+            ready.set(io);
+            var buf: [512]u8 = undefined;
+            var reader = stream.reader(io, &buf);
+            while (true) _ = reader.interface.takeByte() catch break;
+        }
+    };
+    var peer = try aio.concurrent(Peer.run, .{ &server, &accepted, aio });
+    defer peer.cancel(aio);
+    var ctx = SpoolmanCtx.init(std.heap.smp_allocator, mem.dataStore(), &nb.bus, null);
+    defer ctx.stopWs();
+    var url: [80]u8 = undefined;
+    ctx.server_url = try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
+    ctx.io = aio;
+    ctx.startWs();
+    try accepted.wait(aio);
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    ctx.stopWs();
+    try testing.expect(start.untilNow(aio).raw.toMilliseconds() < 1000);
+    try testing.expect(ctx.ws_thread == null);
+}
+
+test "Spoolman URI parsing preserves IPv6, TLS, and reverse-proxy paths" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var mem = MemStore.init(arena.allocator());
+    defer mem.deinit();
+    var nb = NullBus.init(arena.allocator());
+    var ctx = makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.stopWs();
+    try ctx.parseWsTarget("https://[::1]:7443/spools/");
+    try testing.expectEqualStrings("::1", ctx.ws_host.?);
+    try testing.expectEqualStrings("/spools/api/v1/spool", ctx.ws_path.?);
+    try testing.expectEqual(@as(u16, 7443), ctx.ws_port);
+    try testing.expect(ctx.ws_tls);
+    try testing.expectError(error.InvalidPort, ctx.parseWsTarget("http://localhost:bad"));
+    try testing.expectError(error.InvalidUrl, ctx.parseWsTarget("ftp://localhost"));
+    try testing.expectError(error.InvalidUrl, ctx.parseWsTarget("https://localhost?token=x"));
+    try testing.expectEqualStrings("::1", ctx.ws_host.?);
+    for (0..2) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        ctx.gpa = failing.allocator();
+        try testing.expectError(error.OutOfMemory, ctx.parseWsTarget("http://newhost:7912/new"));
+        try testing.expectEqualStrings("::1", ctx.ws_host.?);
+        ctx.gpa = testing.allocator;
+    }
+}
+
+test "fuzz Spoolman URI parser rejects malformed bounded targets" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var mem = MemStore.init(arena.allocator());
+            defer mem.deinit();
+            var nb = NullBus.init(arena.allocator());
+            var ctx = makeCtx(testing.allocator, &mem, &nb);
+            defer ctx.stopWs();
+            var raw: [96]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            ctx.parseWsTarget(&raw) catch {};
         }
     }.run, .{});
 }

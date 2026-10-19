@@ -30,6 +30,7 @@
 //! status → {"queued_jobs": [...], "queue_state": str}
 
 const std = @import("std");
+const sleep = @import("../util/sleep.zig");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const clock = @import("../util/clock.zig");
@@ -48,6 +49,7 @@ const NotifyBus = notify.NotifyBus;
 pub const DispatchFn = *const fn (ctx: *anyopaque, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value;
 
 pub const JobQueueCtx = struct {
+    clock_io: std.Io,
     store: DataStore,
     bus: *NotifyBus,
     /// io is set after the event loop starts (via setIo). Notifications are
@@ -87,9 +89,9 @@ pub const JobQueueCtx = struct {
     load_on_start: bool = false,
     /// Background thread for transition_delay timer (nil when delay is zero or
     /// no timer is active). Pattern follows proc_stat in machine.zig.
-    delay_thread: ?std.Thread = null,
+    delay_thread: ?std.Io.Future(void) = null,
     /// Atomic flag that cancels any running transition_delay timer.
-    delay_cancel: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    delay_cancel: std.Io.Event = .unset,
     /// Monotonic suffix for job ids — guarantees uniqueness even when two jobs
     /// are enqueued within the same clock nanosecond (a tight `post_job` loop).
     job_seq: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -114,8 +116,9 @@ pub const JobQueueCtx = struct {
         return f(c);
     }
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
+    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io, store: DataStore, bus: *NotifyBus) !JobQueueCtx {
         var ctx = JobQueueCtx{
+            .clock_io = clock_io,
             .store = store,
             .bus = bus,
             .io = null,
@@ -127,7 +130,7 @@ pub const JobQueueCtx = struct {
             .transition_gcode = null,
             .transition_delay = 0.0,
             .delay_thread = null,
-            .delay_cancel = std.atomic.Value(bool).init(false),
+            .delay_cancel = .unset,
         };
         // Load persisted queue on init
         ctx.loadFromStore() catch {};
@@ -171,9 +174,9 @@ pub const JobQueueCtx = struct {
         // already inside dispatchNextJob reads self.klippy/dispatchFn; nulling
         // those before the join would crash it with use-of-null. The cancel flag
         // breaks any in-progress transition-delay sleep so the join is prompt.
-        self.delay_cancel.store(true, .release);
-        if (self.delay_thread) |th| {
-            th.join();
+        self.delay_cancel.set(self.clock_io);
+        if (self.delay_thread) |*th| {
+            th.cancel(self.clock_io);
             self.delay_thread = null;
         }
         self.klippy = null;
@@ -185,10 +188,10 @@ pub const JobQueueCtx = struct {
     }
 
     /// Cancel a running transition_delay timer (no-op when no timer is active).
-    fn cancelDelayTimer(self: *JobQueueCtx) void {
-        self.delay_cancel.store(true, .release);
-        if (self.delay_thread) |th| {
-            th.join();
+    pub fn cancelDelayTimer(self: *JobQueueCtx) void {
+        self.delay_cancel.set(self.clock_io);
+        if (self.delay_thread) |*th| {
+            th.cancel(self.clock_io);
             self.delay_thread = null;
         }
     }
@@ -266,11 +269,11 @@ pub const JobQueueCtx = struct {
         // lock. The worker holds no Core and is not the reader, so requestOffCore
         // is safe. Tests using a non-Klippy capture dispatch can join the thread.
         self.cancelDelayTimer(); // join + clear any previous timer
-        self.delay_cancel.store(false, .release);
+        self.delay_cancel.reset();
         // "loading" only means "waiting out the transition delay"; for an
         // immediate (delay-0) dispatch leave the state as the caller set it.
         if (self.transition_delay > 0) self.setQueueState("loading");
-        self.delay_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, transitionDelayCallback, .{self}) catch |e| {
+        self.delay_thread = self.clock_io.concurrent(transitionDelayCallback, .{self}) catch |e| {
             self.delay_thread = null;
             return e;
         };
@@ -384,7 +387,7 @@ pub const JobQueueCtx = struct {
     /// (callers must NOT already hold it).
     fn saveToStore(self: *JobQueueCtx, arena: std.mem.Allocator) void {
         var arr: std.json.Array = .init(arena);
-        const cur_time = nowSecs();
+        const cur_time = nowSecs(self.clock_io);
         self.lockJobs();
         for (self.jobs.items) |*j| {
             const v = j.asJson(arena, cur_time) catch continue;
@@ -424,20 +427,23 @@ pub const JobQueueCtx = struct {
                         for (qj.array.items) |item| {
                             if (item != .object) continue;
                             const obj2 = item.object;
-                            const filename = (obj2.get("filename") orelse continue).string;
-                            const job_id = (obj2.get("job_id") orelse continue).string;
+                            const filename = obj2.get("filename") orelse continue;
+                            const job_id = obj2.get("job_id") orelse continue;
+                            if (filename != .string or job_id != .string) continue;
                             const time_added = switch (obj2.get("time_added") orelse .null) {
                                 .float => |f| f,
                                 .integer => |i| @as(f64, @floatFromInt(i)),
                                 else => 0.0,
                             };
-                            var j = QueuedJob{
-                                .filename = try self.gpa.dupe(u8, filename),
-                                .job_id = try self.gpa.dupe(u8, job_id),
+                            const owned_filename = try self.gpa.dupe(u8, filename.string);
+                            errdefer self.gpa.free(owned_filename);
+                            const owned_id = try self.gpa.dupe(u8, job_id.string);
+                            errdefer self.gpa.free(owned_id);
+                            try self.jobs.append(self.gpa, .{
+                                .filename = owned_filename,
+                                .job_id = owned_id,
                                 .time_added = time_added,
-                            };
-                            errdefer j.deinit(self.gpa);
-                            try self.jobs.append(self.gpa, j);
+                            });
                         }
                     }
                 }
@@ -459,20 +465,13 @@ fn transitionDelayCallback(self: *JobQueueCtx) void {
     // (cancelDelayTimer/deinit) clears it after join(), else a concurrent joiner
     // could read null, skip the join, and leak/UAF the still-running thread.
     if (self.io) |io| {
-        var remaining: f64 = self.transition_delay;
-        while (remaining > 0) : (remaining -= 1.0) {
-            const chunk_ns: i64 = if (remaining >= 1.0)
-                @as(i64, 1_000_000_000)
-            else
-                @intFromFloat(remaining * 1_000_000_000.0);
-            io.sleep(std.Io.Duration.fromNanoseconds(@intCast(chunk_ns)), .awake) catch {};
-            if (self.delay_cancel.load(.acquire)) return;
-        }
+        const ns = std.math.lossyCast(i96, self.transition_delay * std.time.ns_per_s);
+        if (sleep.untilStopped(io, .fromNanoseconds(ns), &self.delay_cancel)) return;
     }
     // Bail if cancelled or torn down. deinit nulls dispatchFn, so that check
     // alone detects teardown; io may be null in tests with a non-Klippy capture
     // dispatch (delay-0 dispatch itself needs no io — only the sleep does).
-    if (self.delay_cancel.load(.acquire) or self.dispatchFn == null) return;
+    if (self.delay_cancel.isSet() or self.dispatchFn == null) return;
     _ = self.dispatchNextJob() catch {};
 }
 
@@ -509,13 +508,13 @@ pub const QueuedJob = struct {
 };
 
 /// Get current time as float seconds (CLOCK_REALTIME).
-fn nowSecs() f64 {
-    return clock.wallSeconds();
+fn nowSecs(io: std.Io) f64 {
+    return clock.wallSeconds(io);
 }
 
 /// Generate a unique job_id using monotonic time + address.
-fn genJobId(alloc: std.mem.Allocator, seq: u32) ![]u8 {
-    const ns = clock.monotonicNanos();
+fn genJobId(io: std.Io, alloc: std.mem.Allocator, seq: u32) ![]u8 {
+    const ns = clock.monotonicNanos(io);
     // 16 hex ns + 4 hex seq → unique even within one nanosecond.
     var buf: [20]u8 = undefined;
     const s = try std.fmt.bufPrint(&buf, "{X:0>16}{X:0>4}", .{ ns, seq & 0xFFFF });
@@ -581,7 +580,7 @@ fn buildQueueObj(alloc: std.mem.Allocator, jobs_arr: std.json.Value, state: []co
 
 /// Build current queue response object (queued_jobs array + queue_state).
 fn buildResponse(c: *JobQueueCtx, alloc: std.mem.Allocator) !std.json.Value {
-    const cur_time = nowSecs();
+    const cur_time = nowSecs(c.clock_io);
     var arr: std.json.Array = .init(alloc);
     c.lockJobs();
     defer c.unlockJobs();
@@ -603,7 +602,7 @@ fn emitQueueChanged(c: *JobQueueCtx, alloc: std.mem.Allocator, action: []const u
     c.lockJobs();
     defer c.unlockJobs();
     if (include_queue) {
-        const cur_time = nowSecs();
+        const cur_time = nowSecs(c.clock_io);
         var arr: std.json.Array = .init(alloc);
         for (c.jobs.items) |*j| {
             const v = j.asJson(alloc, cur_time) catch continue;
@@ -664,11 +663,11 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
             // Reject files that don't exist under the gcodes root (Moonraker
             // queue_job → check_file_exists). No checker wired → accept.
             if (!c.fileExists(filename)) return error.InvalidParams;
-            const job_id = try genJobId(c.gpa, c.job_seq.fetchAdd(1, .monotonic));
+            const job_id = try genJobId(c.clock_io, c.gpa, c.job_seq.fetchAdd(1, .monotonic));
             errdefer c.gpa.free(job_id);
             const fname_owned = try c.gpa.dupe(u8, filename);
             errdefer c.gpa.free(fname_owned);
-            const time_added = nowSecs();
+            const time_added = nowSecs(c.clock_io);
             try c.jobs.append(c.gpa, .{
                 .filename = fname_owned,
                 .job_id = job_id,
@@ -981,7 +980,7 @@ fn mkCtx(alloc: std.mem.Allocator, mem: *MemStore) !JobQueueCtx {
     // NOTE: bus and conns are stack-allocated; tests must not call emit.
     // We build a minimal ctx that does not live-emit.
     var bus = NotifyBus.init(&core, &conns);
-    return JobQueueCtx.init(alloc, mem.dataStore(), &bus);
+    return JobQueueCtx.init(alloc, std.testing.io, mem.dataStore(), &bus);
 }
 
 fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
@@ -1004,7 +1003,7 @@ test "handleStatus: empty queue returns paused state" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const result = try handleStatus(@ptrCast(&ctx), .null, a);
@@ -1027,7 +1026,7 @@ test "handlePostJob: enqueues filenames" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"filenames\":[\"a.gcode\",\"b.gcode\"]}");
@@ -1053,7 +1052,7 @@ test "handlePostJob: reset=true clears existing queue" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p1 = try mkParams(a, "{\"filenames\":[\"a.gcode\"]}");
@@ -1081,7 +1080,7 @@ test "handleDeleteJob: all=true empties queue" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p1 = try mkParams(a, "{\"filenames\":[\"a.gcode\",\"b.gcode\"]}");
@@ -1107,7 +1106,7 @@ test "handleDeleteJob: by job_ids removes specific jobs" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p1 = try mkParams(a, "{\"filenames\":[\"a.gcode\",\"b.gcode\"]}");
@@ -1139,7 +1138,7 @@ test "handlePause: sets queue_state to paused" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     ctx.queue_state = "ready";
@@ -1162,7 +1161,7 @@ test "handleStart: transitions to ready when jobs queued" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p1 = try mkParams(a, "{\"filenames\":[\"a.gcode\"]}");
@@ -1187,7 +1186,7 @@ test "handleStart: empty queue stays paused" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const result = try handleStart(@ptrCast(&ctx), .null, a);
@@ -1209,7 +1208,7 @@ test "handleJump: moves job to front of queue" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p1 = try mkParams(a, "{\"filenames\":[\"a.gcode\",\"b.gcode\",\"c.gcode\"]}");
@@ -1240,7 +1239,7 @@ test "handleJump: unknown job_id → NotFound" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const p = try mkParams(a, "{\"job_id\":\"XXXXXXXXXXXXXXXX\"}");
@@ -1265,7 +1264,7 @@ test "registerJobQueue: wires expected routes and JSON-RPC methods" {
     var conns = NullConns.init(alloc, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(alloc, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(alloc, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     try registerJobQueue(&reg, &ctx);
@@ -1326,7 +1325,7 @@ test "stress: concurrent handlers + reader callback don't corrupt the queue" {
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
 
-    var ctx = try JobQueueCtx.init(alloc, NoopStore.store(), &bus);
+    var ctx = try JobQueueCtx.init(alloc, std.testing.io, NoopStore.store(), &bus);
     ctx.setIo(io); // enable locking (io non-null)
     defer ctx.deinit();
 
@@ -1342,7 +1341,7 @@ test "stress: concurrent handlers + reader callback don't corrupt the queue" {
             }
         }
     };
-    const th = try std.Thread.spawn(.{}, Worker.run, .{&ctx});
+    const th = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, Worker.run, .{&ctx});
 
     var n: usize = 0;
     while (n < 3000) : (n += 1) {
@@ -1376,7 +1375,7 @@ test "setTransitionConfig: stores delay and gcode" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     ctx.setTransitionConfig(null, 2.5);
@@ -1403,7 +1402,7 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
     ctx.setTransitionConfig(null, 0.0);
@@ -1417,8 +1416,8 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
 
     try ctx.scheduleNextJobDispatch();
     // Dispatch now runs on a worker thread (always-async); join it before asserting.
-    if (ctx.delay_thread) |th| {
-        th.join();
+    if (ctx.delay_thread) |*th| {
+        th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
     try testing.expect(cap.called);
@@ -1452,7 +1451,7 @@ test "handlePostJob: rejects nonexistent gcode file (G5)" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     var dummy: u8 = 0;
     ctx.file_check = jqFileCheckStub;
@@ -1481,7 +1480,7 @@ test "dispatchNextJob: pauses the queue when start-gcode dispatch fails (G6)" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     var dummy: u8 = 0;
     ctx.setKlippyDispatch(&dummy, &FailDispatch.handler);
@@ -1511,7 +1510,7 @@ test "handleStart: does not dispatch while a print is active (G5 can-print)" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
     var dummy: u8 = 0;
@@ -1548,7 +1547,7 @@ test "fuzz handlePostJob with file_check: never crashes" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(tio);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
             var dummy: u8 = 0;
             ctx.file_check = jqFileCheckStub;
@@ -1580,7 +1579,7 @@ test "cancelDelayTimer: safe no-op when no timer active" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // Safe to call when no timer was ever started.
@@ -1607,7 +1606,7 @@ test "transition_delay: handleStart respects delay config" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
     // delay=0 → immediate dispatch
@@ -1623,8 +1622,8 @@ test "transition_delay: handleStart respects delay config" {
     const result = try handleStart(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
     // Dispatch runs on a worker thread now (always-async); join before asserting.
-    if (ctx.delay_thread) |th| {
-        th.join();
+    if (ctx.delay_thread) |*th| {
+        th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
     try testing.expect(cap.called);
@@ -1645,7 +1644,7 @@ test "transition_delay: handlePause cancels running delay timer" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
     // Small delay so we can cancel mid-flight.
@@ -1682,7 +1681,7 @@ test "transition_delay: timer completes and dispatches" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.setIo(io);
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
@@ -1699,8 +1698,8 @@ test "transition_delay: timer completes and dispatches" {
     try ctx.scheduleNextJobDispatch();
 
     // Wait for the timer thread to complete.
-    if (ctx.delay_thread) |th| {
-        th.join();
+    if (ctx.delay_thread) |*th| {
+        th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
 
@@ -1724,7 +1723,7 @@ test "deinit: cancels delay timer gracefully" {
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
 
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
     ctx.setTransitionConfig(null, 0.2);
@@ -1766,7 +1765,7 @@ test "setKlippyDispatch: canDispatch reflects wiring" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     try testing.expect(!ctx.canDispatch());
@@ -1780,7 +1779,7 @@ test "dispatchNextJob: builds correct gcode and calls dispatcher" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // Add a job to the queue.
@@ -1801,7 +1800,7 @@ test "dispatchPause: calls pause_resume/pause" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     var cap = TestDispatchCapture{};
@@ -1816,7 +1815,7 @@ test "dispatchResume: calls pause_resume/resume" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     var cap = TestDispatchCapture{};
@@ -1831,7 +1830,7 @@ test "dispatchCancel: calls pause_resume/cancel" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     var cap = TestDispatchCapture{};
@@ -1851,7 +1850,7 @@ test "handleStart: dispatches next job when wired and queued" {
     defer mem.deinit();
 
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     try ctx.jobs.append(ctx.gpa, .{
@@ -1866,8 +1865,8 @@ test "handleStart: dispatches next job when wired and queued" {
     const result = try handleStart(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
     // Dispatch runs on a worker thread now (always-async); join before asserting.
-    if (ctx.delay_thread) |th| {
-        th.join();
+    if (ctx.delay_thread) |*th| {
+        th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
     try testing.expect(cap.called);
@@ -1883,7 +1882,7 @@ test "handlePause: dispatches pause when wired" {
     defer mem.deinit();
 
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     var cap = TestDispatchCapture{};
@@ -1904,7 +1903,7 @@ test "handleStart: does not dispatch when not wired" {
     defer mem.deinit();
 
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(a, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     try ctx.jobs.append(ctx.gpa, .{
@@ -1922,7 +1921,7 @@ test "setTransitionConfig: stores gcode and delay" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     try testing.expect(ctx.transition_gcode == null);
@@ -1941,7 +1940,7 @@ test "dispatchNextJob: injects transition gcode when configured" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const fname = try testing.allocator.dupe(u8, "job.gcode");
@@ -1966,7 +1965,7 @@ test "dispatchNextJob: no transition gcode when not configured" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const fname = try testing.allocator.dupe(u8, "job.gcode");
@@ -1987,7 +1986,7 @@ test "dispatchNextJob: transition with empty gcode string is no-op" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const fname = try testing.allocator.dupe(u8, "job.gcode");
@@ -2009,7 +2008,7 @@ test "onJobStateChanged complete: auto-advances and dispatches next" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     // Queue two jobs.
@@ -2030,8 +2029,8 @@ test "onJobStateChanged complete: auto-advances and dispatches next" {
 
     try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len); // front job removed
     // Auto-advance dispatch runs on a worker thread now; join before asserting.
-    if (ctx.delay_thread) |th| {
-        th.join();
+    if (ctx.delay_thread) |*th| {
+        th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
     try testing.expectEqualStrings("ready", ctx.queue_state);
@@ -2043,7 +2042,7 @@ test "onJobStateChanged complete: default (automatic off) does NOT auto-advance"
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const fname1 = try testing.allocator.dupe(u8, "job1.gcode");
@@ -2058,8 +2057,8 @@ test "onJobStateChanged complete: default (automatic off) does NOT auto-advance"
     // automatic_transition defaults to false → no dispatch on completion.
 
     ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
-    if (ctx.delay_thread) |th| {
-        th.join();
+    if (ctx.delay_thread) |*th| {
+        th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
     try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len); // front removed
@@ -2071,7 +2070,7 @@ test "onJobStateChanged complete: last job sets paused, no dispatch" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
     const fname = try testing.allocator.dupe(u8, "onlyjob.gcode");
@@ -2119,7 +2118,7 @@ test "fuzz dispatchNextJob/setKlippyDispatch/onJobStateChanged: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var cap = TestDispatchCapture{};
@@ -2161,7 +2160,7 @@ test "fuzz handlePostJob: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -2195,7 +2194,7 @@ test "fuzz handleDeleteJob: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -2228,7 +2227,7 @@ test "fuzz handleJump: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -2261,7 +2260,7 @@ test "fuzz handleStatus: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -2293,7 +2292,7 @@ test "fuzz handlePause: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
             ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
@@ -2324,7 +2323,7 @@ test "fuzz handleStart: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
             ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
@@ -2354,7 +2353,7 @@ test "fuzz handleJobDispatch: never panics" {
             var conns = NullConns.init(a, &core);
             defer conns.deinit(io);
             var bus = NotifyBus.init(&core, &conns);
-            var ctx = JobQueueCtx.init(a, mem.dataStore(), &bus) catch return;
+            var ctx = JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
 
             var buf: [8]u8 = undefined;
@@ -2377,10 +2376,34 @@ test "fuzz handleJobDispatch: never panics" {
 
 test "genJobId: same-nanosecond calls differ by seq suffix" {
     const a = std.testing.allocator;
-    const id0 = try genJobId(a, 0);
+    const id0 = try genJobId(std.testing.io, a, 0);
     defer a.free(id0);
-    const id1 = try genJobId(a, 1);
+    const id1 = try genJobId(std.testing.io, a, 1);
     defer a.free(id1);
     try std.testing.expectEqual(@as(usize, 20), id0.len);
     try std.testing.expect(!std.mem.eql(u8, id0, id1));
+}
+
+test "persisted queue loading cleans up partial jobs and rejects non-string fields" {
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    defer db.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, alloc,
+        \\{"queued_jobs":[{"filename":"benchy.gcode","job_id":"one"},{"filename":2,"job_id":"bad"},{"filename":"bad.gcode","job_id":3}]}
+    , .{});
+    try db.insertItem(alloc, ns_queue, queue_key, value);
+    var bus: NotifyBus = undefined;
+    var baseline = testing.FailingAllocator.init(testing.allocator, .{});
+    var complete = try JobQueueCtx.init(baseline.allocator(), testing.io, db.dataStore(), &bus);
+    const count = baseline.alloc_index;
+    try testing.expectEqual(@as(usize, 1), complete.jobs.items.len);
+    complete.deinit();
+    for (0..count) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        var ctx = try JobQueueCtx.init(failing.allocator(), testing.io, db.dataStore(), &bus);
+        ctx.deinit();
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }

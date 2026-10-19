@@ -362,7 +362,9 @@ pub const ConfigParser = struct {
 
     pub fn getFloat(self: *const ConfigParser, section: []const u8, option: []const u8) ConfigError!f64 {
         const raw = self.get(section, option) orelse return ConfigError.NoOption;
-        return std.fmt.parseFloat(f64, std.mem.trim(u8, raw, &std.ascii.whitespace)) catch ConfigError.InvalidValue;
+        const value = std.fmt.parseFloat(f64, std.mem.trim(u8, raw, &std.ascii.whitespace)) catch return ConfigError.InvalidValue;
+        if (!std.math.isFinite(value)) return ConfigError.InvalidValue;
+        return value;
     }
 
     pub fn getBoolean(self: *const ConfigParser, section: []const u8, option: []const u8) ConfigError!bool {
@@ -1043,4 +1045,15 @@ test "parse: value longer than the line stack buffer is not truncated" {
     const src = "[s]\nkey: " ++ big ++ "\n";
     try p.parseString(src, "");
     try std.testing.expectEqualStrings(&big, p.get("s", "key").?);
+}
+
+test "float options reject non-finite values through both interfaces" {
+    for ([_][]const u8{ "nan", "inf", "-inf", "1e999" }) |raw| {
+        var parser = ConfigParser.init(std.testing.allocator);
+        defer parser.deinit();
+        var buf: [80]u8 = undefined;
+        try parser.parseString(try std.fmt.bufPrint(&buf, "[s]\nv: {s}\n", .{raw}), "test");
+        try std.testing.expectError(ConfigError.InvalidValue, parser.getFloat("s", "v"));
+        try std.testing.expectError(backend.Error.InvalidValue, parser.asBackend().getFloat("s", "v"));
+    }
 }

@@ -380,57 +380,6 @@ fn buildConfigDefaults(alloc: std.mem.Allocator) !std.json.ObjectMap {
     return obj;
 }
 
-fn coerceToType(value: std.json.Value, comptime T: type) ?T {
-    return switch (@typeInfo(T)) {
-        .Bool => switch (value) {
-            .bool => |b| b,
-            else => null,
-        },
-        .Int, .ComptimeInt => switch (value) {
-            .integer => |i| @intCast(i),
-            .float => |f| @intFromFloat(f),
-            .number_string => |s| std.fmt.parseInt(T, s, 10) catch null,
-            else => null,
-        },
-        .Float, .ComptimeFloat => switch (value) {
-            .float => |f| f,
-            .integer => |i| @floatFromInt(i),
-            .number_string => |s| std.fmt.parseFloat(T, s) catch null,
-            else => null,
-        },
-        .Optional => |opt| switch (value) {
-            .null => null,
-            else => if (coerceToType(value, opt.child)) |v| v else null,
-        },
-        .Array => |arr| if (value == .array) {
-            const len = value.array.items.len;
-            if (len == 0) @compileError("coerceToType: empty array, cannot infer length for " ++ @typeName(T));
-            if (len != arr.len) return null;
-            var result: T = undefined;
-            for (value.array.items, 0..) |elem, idx| {
-                if (coerceToType(elem, arr.child)) |v| {
-                    result[idx] = v;
-                } else return null;
-            }
-            return result;
-        } else null,
-        .Struct => |s| if (value == .object) blk: {
-            var result: T = undefined;
-            for (s.fields) |field| {
-                if (value.object.get(field.name)) |fv| {
-                    if (coerceToType(fv, field.type)) |v| {
-                        @field(result, field.name) = v;
-                    } else break :blk null;
-                } else if (field.default_value) |def| {
-                    @field(result, field.name) = @as(*align(1) const field.type, @ptrCast(def)).*;
-                } else break :blk null;
-            }
-            break :blk result;
-        } else null,
-        else => @compileError("coerceToType: unsupported type " ++ @typeName(T)),
-    };
-}
-
 /// Coerce a string (parsed from config) to a JSON value matching the type of
 /// `default_val`. Mirrors Moonraker's per-component config coercion rules.
 fn coerceStringToValue(alloc: std.mem.Allocator, s: []const u8, default_val: std.json.Value) !std.json.Value {
@@ -619,11 +568,11 @@ test "buildServerConfig: shape" {
     // Verify all known sections are present in the null case.
     const config_obj = o.get("config").?.object;
     const known_sections = [_][]const u8{
-        "announcements", "authorization", "data_store", "database",
-        "dbus_manager", "extensions", "file_manager", "history",
-        "http_client", "job_queue", "job_state", "klippy_apis",
-        "machine", "proc_stats", "secrets", "server",
-        "shell_command", "template", "webcam",
+        "announcements", "authorization", "data_store",   "database",
+        "dbus_manager",  "extensions",    "file_manager", "history",
+        "http_client",   "job_queue",     "job_state",    "klippy_apis",
+        "machine",       "proc_stats",    "secrets",      "server",
+        "shell_command", "template",      "webcam",
     };
     for (known_sections) |sec| {
         try std.testing.expect(config_obj.get(sec) != null);

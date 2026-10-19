@@ -21,6 +21,7 @@
 //! Strip-specific requests return a not-found error.
 
 const std = @import("std");
+const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const serial_mod = @import("serial.zig");
 
@@ -57,6 +58,17 @@ pub const Strip = struct {
     serial_path: ?[]const u8 = null,
     /// Serial baud rate (Moonraker default 115200).
     serial_baud: u32 = 115200,
+
+    fn deinit(self: *Strip, alloc: std.mem.Allocator) void {
+        alloc.free(self.name);
+        alloc.free(self.status);
+        alloc.free(self.chain_data);
+        if (self.initial_colors) |value| alloc.free(value);
+        if (self.error_state) |value| alloc.free(value);
+        if (self.address) |value| alloc.free(value);
+        if (!std.mem.eql(u8, self.protocol, "http")) alloc.free(self.protocol);
+        if (self.serial_path) |value| alloc.free(value);
+    }
 
     /// Moonraker: wled_on(preset). Sets send_full_chain_data=true and
     /// resets brightness/intensity/speed to -1 (unknown until read back).
@@ -123,23 +135,18 @@ pub const Strip = struct {
         const b: u8 = @intFromFloat(@min(@max(blue * 255.0 + 0.5, 0), 255));
         const w: u8 = @intFromFloat(@min(@max(white * 255.0 + 0.5, 0), 255));
         const led_data = [_]u8{ r, g, b, w };
+        const count = @min(std.math.cast(usize, self.chain_count) orelse return, self.chain_data.len / color_size);
 
         if (index) |idx| {
-            if (idx >= 1 and idx <= @as(usize, @intCast(self.chain_count))) {
+            if (idx >= 1 and idx <= count) {
                 const start = (idx - 1) * color_size;
                 const end = idx * color_size;
-                if (end <= self.chain_data.len) {
-                    @memcpy(self.chain_data[start..end], &led_data);
-                }
+                @memcpy(self.chain_data[start..end], &led_data);
             }
         } else {
-            var i: usize = 0;
-            while (i < @as(usize, @intCast(self.chain_count))) : (i += 1) {
+            for (0..count) |i| {
                 const start = i * color_size;
-                const end = start + color_size;
-                if (end <= self.chain_data.len) {
-                    @memcpy(self.chain_data[start..end], &led_data);
-                }
+                @memcpy(self.chain_data[start..][0..color_size], &led_data);
             }
         }
     }
@@ -161,7 +168,6 @@ pub const Strip = struct {
         // If coming from a preset without wled_control, default brightness.
         if (self.brightness == -1) self.brightness = 255;
     }
-
 };
 
 // ---------------------------------------------------------------------------
@@ -184,14 +190,7 @@ pub const WledCtx = struct {
         var it = self.strips.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
-            self.gpa.free(entry.value_ptr.name);
-            self.gpa.free(entry.value_ptr.status);
-            self.gpa.free(entry.value_ptr.chain_data);
-            if (entry.value_ptr.initial_colors) |c| self.gpa.free(c);
-            if (entry.value_ptr.error_state) |e| self.gpa.free(e);
-            if (entry.value_ptr.address) |a| self.gpa.free(a);
-            if (!std.mem.eql(u8, entry.value_ptr.protocol, "http")) self.gpa.free(entry.value_ptr.protocol);
-            if (entry.value_ptr.serial_path) |sp| self.gpa.free(sp);
+            entry.value_ptr.deinit(self.gpa);
         }
         self.strips.deinit();
     }
@@ -301,41 +300,42 @@ pub const WledCtx = struct {
     ) !void {
         const k = try self.gpa.dupe(u8, name);
         errdefer self.gpa.free(k);
-        const cd = try self.gpa.dupe(u8, chain_data);
-        errdefer self.gpa.free(cd);
-        const proto = if (protocol) |p| p else "http";
-        const s: Strip = .{
-            .name = try self.gpa.dupe(u8, name),
-            .status = try self.gpa.dupe(u8, "off"),
+        var strip: Strip = .{
+            .name = "",
+            .status = "",
+            .chain_data = &.{},
             .chain_count = chain_count,
-            .chain_data = cd,
             .preset = preset,
             .initial_preset = initial_preset,
-            .initial_colors = if (initial_colors) |c| try self.gpa.dupe(u8, c) else null,
+            .initial_colors = null,
             .brightness = 255,
             .intensity = -1,
             .speed = -1,
             .error_state = null,
             .send_full_chain_data = send_full_chain_data,
-            .address = if (address) |a| try self.gpa.dupe(u8, a) else null,
             .port = port,
-            .protocol = if (protocol != null and !std.mem.eql(u8, proto, "http")) try self.gpa.dupe(u8, proto) else "http",
         };
-        errdefer {
-            self.gpa.free(s.name);
-            self.gpa.free(s.status);
-            self.gpa.free(s.chain_data);
-            if (s.initial_colors) |c| self.gpa.free(c);
-            if (s.address) |a| self.gpa.free(a);
-            if (!std.mem.eql(u8, s.protocol, "http")) self.gpa.free(s.protocol);
+        errdefer strip.deinit(self.gpa);
+        strip.name = try self.gpa.dupe(u8, name);
+        strip.status = try self.gpa.dupe(u8, "off");
+        strip.chain_data = try self.gpa.dupe(u8, chain_data);
+        if (initial_colors) |value| strip.initial_colors = try self.gpa.dupe(u8, value);
+        if (address) |value| strip.address = try self.gpa.dupe(u8, value);
+        if (protocol) |value| {
+            if (!std.mem.eql(u8, value, "http")) strip.protocol = try self.gpa.dupe(u8, value);
         }
-        try self.strips.put(k, s);
+        if (try self.strips.fetchPut(k, strip)) |prior| {
+            self.gpa.free(k); // Replacements retain the map's existing key.
+            var old = prior.value;
+            old.deinit(self.gpa);
+        }
     }
 
     pub fn setStatus(self: *WledCtx, name: []const u8, new_status: []const u8) !void {
         const s = self.strips.getPtr(name) orelse return error.NotFound;
+        const owned = try self.gpa.dupe(u8, new_status);
         self.gpa.free(s.status);
-        s.status = try self.gpa.dupe(u8, new_status);
+        s.status = owned;
     }
 
     /// Apply control parameters to a strip (brightness, preset, intensity,
@@ -351,8 +351,7 @@ pub const WledCtx = struct {
     ) !void {
         const s = self.strips.getPtr(name) orelse return error.NotFound;
         // Set status to "on" before wledControl so the off-guard passes.
-        self.gpa.free(s.status);
-        s.status = try self.gpa.dupe(u8, "on");
+        try self.setStatus(name, "on");
         _ = s.wledControl(brightness, intensity, speed);
         if (preset >= 0) s.preset = preset;
         // Send real HTTP POST to WLED device if address is configured.
@@ -366,13 +365,9 @@ pub const WledCtx = struct {
                 const tt: i64 = 0; // transition time: instant (matches Moonraker default)
                 // Simple: just send brightness/seg if preset is active.
                 if (s.preset != -1) {
-                    body = std.fmt.bufPrint(&body_buf,
-                        "{{\"tt\":{d},\"bri\":{d},\"seg\":{{\"bri\":{d}}}}}",
-                        .{ tt, @max(0, brightness), @max(0, brightness) }) catch "{}";
+                    body = std.fmt.bufPrint(&body_buf, "{{\"tt\":{d},\"bri\":{d},\"seg\":{{\"bri\":{d}}}}}", .{ tt, @max(0, brightness), @max(0, brightness) }) catch "{}";
                 } else {
-                    body = std.fmt.bufPrint(&body_buf,
-                        "{{\"tt\":{d},\"bri\":{d}}}",
-                        .{ tt, @max(0, brightness) }) catch "{}";
+                    body = std.fmt.bufPrint(&body_buf, "{{\"tt\":{d},\"bri\":{d}}}", .{ tt, @max(0, brightness) }) catch "{}";
                 }
             }
             self.sendWledBody(s, body);
@@ -407,7 +402,7 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
             const v = obj.get(field) orelse return default_val;
             return switch (v) {
                 .integer => |i| i,
-                .float => |f| @intFromFloat(f),
+                .float => |f| jv.floatToInt(f) orelse default_val,
                 .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
                 else => default_val,
             };
@@ -430,15 +425,10 @@ pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value
     try obj.put(alloc, "chain_count", .{ .integer = s.chain_count });
     // Match Moonraker: only include chain_data in strip info when
     // send_full_chain_data is true; otherwise emit an empty string.
-    const cd: []const u8 = if (s.send_full_chain_data and s.chain_data.len > 0) blk: {
-        const buf = try alloc.alloc(u8, s.chain_data.len * 2);
-        const hex_chars = "0123456789abcdef";
-        for (s.chain_data, 0..) |byte, i| {
-            buf[i * 2] = hex_chars[byte >> 4];
-            buf[i * 2 + 1] = hex_chars[byte & 0x0f];
-        }
-        break :blk buf;
-    } else "";
+    const cd: []const u8 = if (s.send_full_chain_data and s.chain_data.len > 0)
+        try std.fmt.allocPrint(alloc, "{x}", .{s.chain_data})
+    else
+        "";
     try obj.put(alloc, "chain_data", .{ .string = cd });
     try obj.put(alloc, "preset", .{ .integer = s.preset });
     try obj.put(alloc, "brightness", .{ .integer = s.brightness });
@@ -1267,7 +1257,7 @@ test "fuzz buildStripInfo: never panics, returns all keys" {
             defer arena.deinit();
             const a = arena.allocator();
 
-            var cd = [_]u8{buf[0], buf[1]};
+            var cd = [_]u8{ buf[0], buf[1] };
             const s: Strip = .{
                 .name = "t",
                 .status = if (buf[2] % 2 == 0) "on" else "off",
@@ -1738,4 +1728,29 @@ test "sendWledBody: serial strip writes newline-terminated JSON to the device" {
     var r = fh.reader(io, &buf);
     const n = try r.interface.readSliceShort(&buf);
     try std.testing.expectEqualStrings("{\"on\":true}\n", buf[0..n]);
+}
+
+test "WLED strips free partial and replaced records on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx = WledCtx.init(alloc);
+            defer ctx.deinit();
+            for (0..2) |_| try ctx.addStrip("led", 1, "abcd", 0, 0, "colors", true, "localhost", 80, "https");
+            try ctx.setStatus("led", ctx.strips.getPtr("led").?.status);
+            try ctx.setStripControl("led", 10, 0, 0, 0);
+            try std.testing.expectEqualStrings("on", ctx.strips.getPtr("led").?.status);
+        }
+    }.check, .{});
+}
+
+test "WLED color updates use the available pixel buffer" {
+    var ctx = WledCtx.init(std.testing.allocator);
+    defer ctx.deinit();
+    try ctx.addStrip("led", std.math.maxInt(i64), "abcd", 0, 0, null, false, null, 80, null);
+    const strip = ctx.strips.getPtr("led").?;
+    strip.updateColorData(1, 0, 0, 0, null);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0 }, strip.chain_data);
+    strip.chain_count = -1;
+    strip.updateColorData(0, 1, 0, 0, 1);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0 }, strip.chain_data);
 }

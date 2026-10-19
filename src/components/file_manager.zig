@@ -149,13 +149,16 @@ pub const FileCtx = struct {
         while (it.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
             if (line.len == 0) continue;
-            try list.append(self.gpa, try self.gpa.dupe(u8, line));
+            const name = try self.gpa.dupe(u8, line);
+            errdefer self.gpa.free(name);
+            try list.append(self.gpa, name);
         }
+        const owned = try list.toOwnedSlice(self.gpa);
         if (self.excludes_owned) {
             for (self.excludes) |s| self.gpa.free(s);
             self.gpa.free(self.excludes);
         }
-        self.excludes = try list.toOwnedSlice(self.gpa);
+        self.excludes = owned;
         self.excludes_owned = true;
     }
 
@@ -174,16 +177,18 @@ pub const FileCtx = struct {
 
     pub fn startObserver(self: *FileCtx) void {
         if (self.observer != .inotify or self.observer_thread != null) return;
+        if (self.io == null) return;
         if (self.roots.len == 0) return;
-        const fd_rc = std.os.linux.inotify_init1(0x80000 | 0x800);
+        const IN = std.os.linux.IN;
+        const fd_rc = std.os.linux.inotify_init1(IN.CLOEXEC | IN.NONBLOCK);
         if (std.os.linux.errno(fd_rc) != .SUCCESS) return;
         const fd: i32 = @intCast(fd_rc);
-        const mask: u32 = 0x8 | 0x40 | 0x80 | 0x100 | 0x200;
+        const mask: u32 = IN.CLOSE_WRITE | IN.MOVED_FROM | IN.MOVED_TO | IN.CREATE | IN.DELETE;
         var watched: usize = 0;
         for (self.roots) |root| {
             const path_z = self.gpa.dupeSentinel(u8, root.path, 0) catch continue;
             defer self.gpa.free(path_z);
-            const wd = std.os.linux.syscall3(.inotify_add_watch, @as(usize, @bitCast(@as(isize, fd))), @intFromPtr(path_z.ptr), mask);
+            const wd = std.os.linux.inotify_add_watch(fd, path_z.ptr, mask);
             if (std.os.linux.errno(wd) == .SUCCESS) watched += 1;
         }
         if (watched == 0) {
@@ -201,14 +206,14 @@ pub const FileCtx = struct {
     }
 
     fn observerThread(self: *FileCtx) void {
+        const io = self.io orelse return;
         const fd = self.observer_fd;
         var buf: [4096]u8 align(8) = undefined;
         while (!self.observer_stop.load(.acquire)) {
             const n = std.os.linux.read(fd, &buf, buf.len);
             const err = std.os.linux.errno(n);
             if (err == .AGAIN) {
-                var req = std.os.linux.timespec{ .sec = 0, .nsec = 20_000_000 };
-                _ = std.os.linux.nanosleep(&req, null);
+                io.sleep(.fromMilliseconds(20), .awake) catch return;
                 continue;
             }
             if (err != .SUCCESS or n == 0) break;
@@ -235,13 +240,13 @@ pub const FileCtx = struct {
 
     pub fn stopObserver(self: *FileCtx) void {
         self.observer_stop.store(true, .release);
-        if (self.observer_fd >= 0) {
-            _ = std.os.linux.close(self.observer_fd);
-            self.observer_fd = -1;
-        }
         if (self.observer_thread) |th| {
             th.join();
             self.observer_thread = null;
+        }
+        if (self.observer_fd >= 0) {
+            _ = std.os.linux.close(self.observer_fd);
+            self.observer_fd = -1;
         }
     }
 
@@ -2007,4 +2012,16 @@ test "fuzz handlers: arbitrary params never crash" {
             _ = handleZip(@ptrCast(&c), p.value, a) catch {};
         }
     }.run, .{});
+}
+
+test "file excludes preserve ownership on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx: FileCtx = .{ .gpa = alloc, .roots = &.{}, .bus = null };
+            defer ctx.deinit();
+            try ctx.setExcludes("gcodes/old");
+            try ctx.setExcludes("gcodes/new\nconfig/private");
+            try std.testing.expectEqual(@as(usize, 2), ctx.excludes.len);
+        }
+    }.check, .{});
 }

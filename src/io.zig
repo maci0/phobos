@@ -42,18 +42,14 @@ pub const Listener = struct {
     /// Bind a TCP listener to `host:port`. `port == 0` requests an
     /// ephemeral port (read back later via `port()`).
     pub fn bind(io: Io, host: []const u8, bind_port: u16) !Listener {
-        var addr = try net.IpAddress.parseIp4(host, bind_port);
+        var addr = try net.IpAddress.parse(host, bind_port);
         const server = try addr.listen(io, .{ .reuse_address = true });
         return .{ .server = server };
     }
 
     /// The actual bound port, resolving the ephemeral port when 0 was passed.
-    pub fn port(self: *Listener) !u16 {
-        var sa: std.os.linux.sockaddr.in = undefined;
-        var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
-        const rc = std.os.linux.getsockname(self.server.socket.handle, @ptrCast(&sa), &slen);
-        if (std.os.linux.errno(rc) != .SUCCESS) return error.GetSockNameFailed;
-        return std.mem.bigToNative(u16, sa.port);
+    pub fn port(self: *const Listener) u16 {
+        return self.server.socket.address.getPort();
     }
 
     /// Accept exactly one connection, run `handler`, close the stream, return.
@@ -168,7 +164,7 @@ test "listener accepts and a registered handler echoes a line" {
     var lst = try Listener.bind(io, "127.0.0.1", 0);
     defer lst.deinit(io);
 
-    const bound_port = try lst.port();
+    const bound_port = lst.port();
     try std.testing.expect(bound_port != 0);
 
     var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
@@ -182,6 +178,25 @@ test "listener accepts and a registered handler echoes a line" {
     try std.testing.expectEqualStrings("echo:hello", out[0..out_len]);
 }
 
+test "listener accepts IPv6 using the bound socket address" {
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try Listener.bind(io, "::1", 0);
+    defer listener.deinit(io);
+    var future = io.async(Listener.serveOnce, .{ &listener, io, @as(Handler, echoHandler) });
+    defer future.await(io) catch {};
+    const client = try (try net.IpAddress.parse("::1", listener.port())).connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    var wbuf: [128]u8 = undefined;
+    var writer = client.writer(io, &wbuf);
+    try writer.interface.writeAll("ipv6\n");
+    try writer.interface.flush();
+    var rbuf: [128]u8 = undefined;
+    var reader = client.reader(io, &rbuf);
+    try std.testing.expectEqualStrings("echo:ipv6", try reader.interface.takeDelimiterExclusive('\n'));
+}
+
 test "serve smoke: spawns per-connection task and echoes" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -189,7 +204,7 @@ test "serve smoke: spawns per-connection task and echoes" {
 
     var lst = try Listener.bind(io, "127.0.0.1", 0);
     defer lst.deinit(io);
-    const bound_port = try lst.port();
+    const bound_port = lst.port();
 
     // Run a single accept+handle through serveOnce (serve is the same body
     // looped); this exercises the per-connection close + handler path.
@@ -215,7 +230,7 @@ test "serve handles two connections concurrently" {
     const io = threaded.io();
 
     var lst = try Listener.bind(io, "127.0.0.1", 0);
-    const bound_port = try lst.port();
+    const bound_port = lst.port();
 
     // Serve in the background; deinit() below will shut the loop down.
     const serveIgnoringErrors = struct {
@@ -266,7 +281,7 @@ test "serveWith threads context to per-connection handler" {
     const io = threaded.io();
 
     var lst = try Listener.bind(io, "127.0.0.1", 0);
-    const bound_port = try lst.port();
+    const bound_port = lst.port();
 
     var ctx = TagCtx{ .tag = 'X' };
     const serveIgnoring = struct {
@@ -309,7 +324,7 @@ test "fuzz_listener: random payload round-trips through the echo path" {
 
             var lst = try Listener.bind(io, "127.0.0.1", 0);
             defer lst.deinit(io);
-            const bound_port = try lst.port();
+            const bound_port = lst.port();
 
             var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
 

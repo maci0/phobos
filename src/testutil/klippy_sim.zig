@@ -79,14 +79,13 @@ pub const KlippySim = struct {
     startup_polls: u32 = 2,
 
     /// Returns monotonic time in milliseconds (for eventtime).
-    fn nowMs() i64 {
-        var ts: std.os.linux.timespec = undefined;
-        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
-        return ts.sec * 1000 + @divFloor(ts.nsec, 1000000);
+    fn nowMs(io: Io) i64 {
+        return Io.Clock.awake.now(io).toMilliseconds();
     }
 
     pub fn init(alloc: std.mem.Allocator, socket_path: []const u8) !*Self {
         const self = try alloc.create(Self);
+        errdefer alloc.destroy(self);
         self.* = .{
             .alloc = alloc,
             .socket_path = try alloc.dupe(u8, socket_path),
@@ -120,7 +119,7 @@ pub const KlippySim = struct {
         const addr = try net.UnixAddress.init(self.socket_path);
         self.listener = try addr.listen(io, .{});
 
-        self.thread = std.Thread.spawn(.{}, runThread, .{self}) catch |e| {
+        self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, runThread, .{self}) catch |e| {
             self.listener.?.deinit(io);
             self.listener = null;
             std.Io.Dir.deleteFileAbsolute(io, self.socket_path) catch {};
@@ -252,7 +251,8 @@ pub const KlippySim = struct {
                 const state_str: []const u8 = if (is_ready) "ready" else "startup";
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [512]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"state\":\"{s}\",\"state_message\":\"Printer is ready\",\"software_version\":\"v0.12.0-sim\",\"hostname\":\"sim\"}}}}",
                     .{ id_str, state_str },
                 ) catch return false;
@@ -262,7 +262,8 @@ pub const KlippySim = struct {
             } else if (std.mem.eql(u8, method, "objects/subscribe")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [128]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"eventtime\":0.0,\"status\":{{}}}}}}",
                     .{id_str},
                 ) catch return false;
@@ -273,7 +274,8 @@ pub const KlippySim = struct {
                 // here: the client skips the second subscribe and stays ready.
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [256]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"eventtime\":1.0,\"status\":{{\"heaters\":{{\"available_sensors\":[],\"available_monitors\":[]}}}}}}}}",
                     .{id_str},
                 ) catch return false;
@@ -281,7 +283,8 @@ pub const KlippySim = struct {
             } else if (std.mem.eql(u8, method, "gcode/subscribe_output")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [128]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{}}}}",
                     .{id_str},
                 ) catch return false;
@@ -325,7 +328,8 @@ pub const KlippySim = struct {
             if (std.mem.eql(u8, method, "gcode/script")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [256]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":\"ok\"}}",
                     .{id_str},
                 ) catch continue;
@@ -333,7 +337,8 @@ pub const KlippySim = struct {
 
                 resp_id += 1;
                 var gr_buf: [256]u8 = undefined;
-                const gr = std.fmt.bufPrint(&gr_buf,
+                const gr = std.fmt.bufPrint(
+                    &gr_buf,
                     "{{\"jsonrpc\":\"2.0\",\"method\":\"process_gcode_response\",\"id\":\"{d}\",\"params\":\"ok\"}}",
                     .{resp_id},
                 ) catch continue;
@@ -358,7 +363,8 @@ pub const KlippySim = struct {
             } else if (std.mem.eql(u8, method, "emergency_stop")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [256]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":\"ok\"}}",
                     .{id_str},
                 ) catch continue;
@@ -366,7 +372,8 @@ pub const KlippySim = struct {
             } else if (std.mem.startsWith(u8, method, "pause_resume/")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [256]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":\"ok\"}}",
                     .{id_str},
                 ) catch continue;
@@ -374,7 +381,8 @@ pub const KlippySim = struct {
             } else if (std.mem.eql(u8, method, "server.info")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [512]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"state\":\"ready\",\"state_message\":\"sim\",\"version\":\"v0.12.0-sim\",\"hostname\":\"sim\"}}}}",
                     .{id_str},
                 ) catch continue;
@@ -385,7 +393,8 @@ pub const KlippySim = struct {
             {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [128]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf,
+                const resp = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}",
                     .{id_str},
                 ) catch continue;
@@ -408,9 +417,10 @@ pub const KlippySim = struct {
             .none => {},
             .shutdown => {
                 resp_id.* += 1;
-                const eventtime: f64 = @floatFromInt(nowMs());
+                const eventtime: f64 = @floatFromInt(nowMs(io));
                 var buf: [512]u8 = undefined;
-                const payload = std.fmt.bufPrint(&buf,
+                const payload = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"method\":\"process_status_update\",\"id\":\"{d}\",\"params\":[{d:.3},{{\"webhooks\":{{\"state\":\"shutdown\"}}}}]}}",
                     .{ resp_id.*, eventtime / 1000.0 },
                 ) catch return;
@@ -430,9 +440,10 @@ pub const KlippySim = struct {
                     .@"error" => "error",
                     .cancelled => "cancelled",
                 };
-                const eventtime: f64 = @floatFromInt(nowMs());
+                const eventtime: f64 = @floatFromInt(nowMs(io));
                 var buf: [1024]u8 = undefined;
-                const payload = std.fmt.bufPrint(&buf,
+                const payload = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"method\":\"process_status_update\",\"id\":\"{d}\",\"params\":[{d:.3},{{\"webhooks\":{{\"state\":\"ready\"}},\"print_stats\":{{\"state\":\"{s}\",\"filename\":\"{s}\",\"total_duration\":10.0,\"print_duration\":5.0,\"filament_used\":1.0}}}}]}}",
                     .{ resp_id.*, eventtime / 1000.0, state_str, s.filename },
                 ) catch return;
@@ -441,7 +452,8 @@ pub const KlippySim = struct {
             .gcode_response => |r| {
                 resp_id.* += 1;
                 var buf: [512]u8 = undefined;
-                const payload = std.fmt.bufPrint(&buf,
+                const payload = std.fmt.bufPrint(
+                    &buf,
                     "{{\"jsonrpc\":\"2.0\",\"method\":\"process_gcode_response\",\"id\":\"{d}\",\"params\":\"{s}\"}}",
                     .{ resp_id.*, r },
                 ) catch return;

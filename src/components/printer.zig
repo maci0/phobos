@@ -72,13 +72,16 @@ pub const PrinterCtx = struct {
         while (it.next()) |raw| {
             const line = std.mem.trim(u8, raw, " \t\r");
             if (line.len == 0) continue;
-            try list.append(alloc, try alloc.dupe(u8, line));
+            const name = try alloc.dupe(u8, line);
+            errdefer alloc.free(name);
+            try list.append(alloc, name);
         }
+        const owned = try list.toOwnedSlice(alloc);
         if (self.hidden_owned) {
             for (self.hidden_objects) |s| alloc.free(s);
             alloc.free(self.hidden_objects);
         }
-        self.hidden_objects = try list.toOwnedSlice(alloc);
+        self.hidden_objects = owned;
         self.hidden_owned = true;
     }
 
@@ -590,8 +593,8 @@ test "fuzz ProxyEndpoint.handle: arbitrary params never crash, always KlippyDisc
             var buf: [16]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const strs = [_][]const u8{
-                "null", "{}", "{\"_method\":\"POST\"}", "{\"objects\":{\"toolhead\":null}}",
-                "[1,2,3]", "\"raw\"", "42", "{\"_method\":\"GET\",\"a\":1}",
+                "null",    "{}",      "{\"_method\":\"POST\"}", "{\"objects\":{\"toolhead\":null}}",
+                "[1,2,3]", "\"raw\"", "42",                     "{\"_method\":\"GET\",\"a\":1}",
             };
             const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;
             try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), p.value, a));
@@ -652,7 +655,7 @@ test "fuzz sanitizePrintFilename: never crashes, every quote is escaped" {
             var buf: [256]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const len = @as(usize, buf[0]) % buf.len;
-            const input = buf[1..len + 1];
+            const input = buf[1 .. len + 1];
 
             const out = try sanitizePrintFilename(a, input);
 
@@ -667,4 +670,16 @@ test "fuzz sanitizePrintFilename: never crashes, every quote is escaped" {
             if (out.len > input.len * 2) return error.FuzzOversizedOutput;
         }
     }.run, .{});
+}
+
+test "hidden objects preserve ownership on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator) !void {
+            var ctx: PrinterCtx = .{};
+            defer ctx.deinit(alloc);
+            try ctx.setHiddenObjects(alloc, "old");
+            try ctx.setHiddenObjects(alloc, "one\ntwo");
+            try std.testing.expectEqual(@as(usize, 2), ctx.hidden_objects.len);
+        }
+    }.check, .{});
 }
