@@ -228,6 +228,8 @@ fn parseLayerCount(text: []const u8) ?i64 {
         "; layer_count:",
         "; layer_count :",
         ";Layer count:",
+        "; total layer number:",
+        "; total layers count =",
     };
     for (patterns) |prefix| {
         if (findIntAfterPrefix(text, prefix)) |v| return v;
@@ -246,7 +248,32 @@ fn parseLayerCount(text: []const u8) ?i64 {
 /// Scan for estimated print time in various formats.
 fn findEstimatedTime(text: []const u8) ?f64 {
     // "; estimated printing time (normal mode) = <float>s"  (PrusaSlicer)
-    if (findFloatAfterPrefix(text, "; estimated printing time (normal mode) =")) |v| return v;
+    const normal_prefix = "; estimated printing time (normal mode) =";
+    if (std.mem.indexOf(u8, text, normal_prefix)) |idx| {
+        const start = idx + normal_prefix.len;
+        const duration = std.mem.trim(u8, text[start..scanLineEnd(text, start)], " \t\r");
+        const scalar: ?f64 = std.fmt.parseFloat(f64, duration) catch null;
+        if (scalar) |value| return if (std.math.isFinite(value) and value >= 0) value else null;
+        var parts = std.mem.tokenizeAny(u8, duration, " \t\r");
+        var total: f64 = 0;
+        var found = false;
+        while (parts.next()) |part| {
+            if (part.len < 2) return null;
+            const scale: f64 = switch (part[part.len - 1]) {
+                'd' => 86400,
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                else => return null,
+            };
+            const value = std.fmt.parseFloat(f64, part[0 .. part.len - 1]) catch return null;
+            if (!std.math.isFinite(value) or value < 0) return null;
+            total += value * scale;
+            if (!std.math.isFinite(total)) return null;
+            found = true;
+        }
+        if (found) return total;
+    }
     // "; estimated printing time = <float>"  (Cura)
     if (findFloatAfterPrefix(text, "; estimated printing time =")) |v| return v;
     // "; TIME:<float>" (Simplify3D, Slic3r)
@@ -733,6 +760,11 @@ test "parseLayerCount: layer_count directive" {
     try testing.expectEqual(@as(?i64, 42), parseLayerCount(text));
 }
 
+test "parseLayerCount: OrcaSlicer total overrides partial layer changes" {
+    const text = "; total layer number: 240\n;LAYER_CHANGE\n;LAYER_CHANGE\n";
+    try testing.expectEqual(@as(?i64, 240), parseLayerCount(text));
+}
+
 test "parseLayerCount: fallback LAYER_CHANGE counting" {
     var buf: [1024]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -746,6 +778,34 @@ test "parseLayerCount: fallback LAYER_CHANGE counting" {
 test "findEstimatedTime: PrusaSlicer format" {
     const text = "; estimated printing time (normal mode) = 3600.5s\n";
     try testing.expectEqual(@as(?f64, 3600.5), findEstimatedTime(text).?);
+}
+
+test "findEstimatedTime: OrcaSlicer duration units" {
+    const text = "; estimated printing time (normal mode) = 1h 16m 59s\n";
+    try testing.expectEqual(@as(?f64, 4619), findEstimatedTime(text));
+    try testing.expectEqual(@as(?f64, 960), findEstimatedTime("; estimated printing time (normal mode) = 16m\n"));
+    try testing.expectEqual(@as(?f64, 3600), findEstimatedTime("; estimated printing time (normal mode) = 1h\n"));
+    try testing.expectEqual(@as(?f64, 90000), findEstimatedTime("; estimated printing time (normal mode) = 1d 1h\n"));
+    try testing.expectEqual(@as(?f64, null), findEstimatedTime("; estimated printing time (normal mode) = 1h nope\n"));
+    try testing.expectEqual(@as(?f64, null), findEstimatedTime("; estimated printing time (normal mode) = 1e309h\n"));
+}
+
+test "fuzz OrcaSlicer metadata fields preserve durations and total layers" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const hours = smith.valueRangeAtMostWithHash(u16, 0, 1000, 0);
+            const minutes = smith.valueRangeAtMostWithHash(u16, 0, 59, 1);
+            const seconds = smith.valueRangeAtMostWithHash(u16, 0, 59, 2);
+            const layers = smith.valueRangeAtMostWithHash(u16, 0, 65535, 3);
+            var buf: [192]u8 = undefined;
+            const text = try std.fmt.bufPrint(&buf, "; estimated printing time (normal mode) = {d}h {d}m {d}s\n; total layer number: {d}\n;LAYER_CHANGE\n", .{ hours, minutes, seconds, layers });
+            const expected: f64 = @floatFromInt(@as(u32, hours) * 3600 + @as(u32, minutes) * 60 + seconds);
+            try testing.expectEqual(@as(?f64, expected), findEstimatedTime(text));
+            try testing.expectEqual(@as(?i64, layers), parseLayerCount(text));
+            const minute_only = try std.fmt.bufPrint(&buf, "; estimated printing time (normal mode) = {d}m\n", .{minutes});
+            try testing.expectEqual(@as(?f64, @floatFromInt(@as(u32, minutes) * 60)), findEstimatedTime(minute_only));
+        }
+    }.run, .{});
 }
 
 test "findEstimatedTime: Cura format" {

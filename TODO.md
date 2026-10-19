@@ -76,6 +76,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   webcam (delete/test/validate), announcements (list_feeds/delete_feed/update/
   feed_dispatch_multi), power (devices), rss (parser).
 - **2026-10-19 live printer:** See [v0.1.1 release notes](docs/releases/v0.1.1.md) for verified fixes and retained identity/runtime differences. Public database access honors persisted namespace policies and hides auth records. Empty registered namespaces stay visible. OctoPrint uses live connection state and heater readings.
+- **2026-10-19 Fluidd:** [v0.1.2](docs/releases/v0.1.2.md) fixes the ARM directory crash, extended listings, large-file metadata reads, and OrcaSlicer durations/layer counts. Verified with Fluidd on the real printer and deployed to 7125 after a database backup and explicit approval.
 - **2026-10-19 temperature store:** The daemon samples cached Klippy readings at 1 Hz, rounds to two decimals, and preserves partial updates. Tests sample synchronously. `[data_store] temperature_store_size` caps each field at 1200 by default.
 - **2026-10-19 announcements and gcode store:** `[announcements] subscriptions` are added to the feed list (built-ins stay). `dev_mode` skips the Moonlight fetch. `[data_store] gcode_store_size` caps the gcode ring and keeps the newest entries.
 - **2026-10-19 qemu parity:** A missing database namespace is 404. Thumbnails without `filename` and a webcam get without `name` or `uid` are 400. HTTP on a websocket-only route is 404. WLED batch ignores the injected `_method` key. After the Klippy handshake, phobos queries `heaters` and subscribes `available_sensors` and `available_monitors`, then seeds `server.temperature_store`. Monitors stay hidden unless `include_monitors` is set. `server.info` `registered_directories` follows the live file roots. `machine.reboot` and `machine.shutdown` stay no-ops; the tests say not to implement them.
@@ -92,7 +93,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1350 pass / 1 skip / 0 fail**, with 223 fuzz tests discovered. The skip
+- Tests: **1358 pass / 1 skip / 0 fail**, with 226 fuzz tests discovered. The skip
   is the gated real-Klippy proxy test. Build with `zig build test-artifact` and run
   the newest standalone test binary to avoid the build runner's `--listen=-` hang.
 - All register functions now have unit tests verifying all expected routes are wired

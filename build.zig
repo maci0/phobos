@@ -38,6 +38,7 @@ pub fn build(b: *std.Build) void {
                 .omit_frame_pointer = strip,
             });
             addVendoredSqlite(bb, m);
+            m.addCSourceFile(.{ .file = bb.path("src/disk_usage.c"), .flags = &.{"-std=c11"} });
             m.addOptions("build_options", opts);
             return m;
         }
@@ -84,4 +85,3 @@ fn addVendoredSqlite(b: *std.Build, module: *std.Build.Module) void {
         },
     });
 }
-

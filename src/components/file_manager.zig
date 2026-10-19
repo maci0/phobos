@@ -39,13 +39,12 @@
 //!              "item": { "path", "root", "size", "modified", "permissions" },
 //!              "source_item"?: { "path", "root" } } ]
 //!
-//! Deep gcode-metadata parsing (slicer fields, thumbnails, layer heights) is
-//! NOT performed here — phobos returns the stat-based record shape with the
-//! Moonraker keys present (`size`, `modified`, `uuid`, `slicer`,
-//! `print_start_time`, `job_id`, `filename`, `thumbnails`). See `buildMetadata`.
+//! Gcode metadata includes parsed slicer fields, thumbnails, and layer heights.
+//! Extended gcodes directory listings reuse the same bounded metadata cache as
+//! individual metadata requests. See `buildMetadata`.
 //!
-//! All filesystem operations go through `std.Io.Dir` (Zig 0.16's Io-based fs
-//! API), so the component needs a live `io`. It is stored in `FileCtx.io` and
+//! File I/O uses `std.Io.Dir`; disk capacity uses musl's `statvfs`. The live
+//! `io` handle is stored in `FileCtx.io` and
 //! supplied after the App event loop starts (via `setIo`); handlers return
 //! `error.NotReady` if invoked before io is wired.
 
@@ -612,6 +611,7 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
     const path = getStrDefault(params, "path", "gcodes");
+    const extended = getBool(params, "extended", false);
     const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
 
     if (statKind(io, resolved.abs) != .dir) return error.NotFound;
@@ -635,6 +635,16 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
                 try dirs.append(info);
             },
             .file => {
+                if (extended and std.mem.eql(u8, resolved.root.name, "gcodes") and isGcodeExt(entry.name)) {
+                    var metadata_params: std.json.ObjectMap = .empty;
+                    try metadata_params.put(alloc, "filename", .{ .string = child_rel });
+                    const metadata = handleMetadata(ctx_ptr, .{ .object = metadata_params }, alloc) catch |err| switch (err) {
+                        error.NotFound => continue,
+                        else => return err,
+                    };
+                    var fields = metadata.object.iterator();
+                    while (fields.next()) |field| try info.object.put(alloc, field.key_ptr.*, field.value_ptr.*);
+                }
                 try info.object.put(alloc, "filename", .{ .string = try alloc.dupe(u8, entry.name) });
                 try files.append(info);
             },
@@ -655,47 +665,22 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     return .{ .object = out };
 }
 
-/// Linux `struct statfs` (x86_64 / generic 64-bit). We only read bsize, blocks
-/// and bavail; the trailing fields are padding we never touch.
-const LinuxStatfs = extern struct {
-    f_type: i64,
-    f_bsize: i64,
-    f_blocks: u64,
-    f_bfree: u64,
-    f_bavail: u64,
-    f_files: u64,
-    f_ffree: u64,
-    f_fsid: [2]i32,
-    f_namelen: i64,
-    f_frsize: i64,
-    f_flags: i64,
-    f_spare: [4]i64,
-};
-
 /// `{ "total", "used", "free" }` matching shutil.disk_usage._asdict().
 fn diskUsage(alloc: std.mem.Allocator, abs: []const u8) !std.json.Value {
+    const path_z = try alloc.dupeSentinel(u8, abs, 0);
+    defer alloc.free(path_z);
     var obj: std.json.ObjectMap = .empty;
     var total: u64 = 0;
+    var used: u64 = 0;
     var free: u64 = 0;
-    statfsInto(alloc, abs, &total, &free);
-    const used = if (total >= free) total - free else 0;
+    phobos_disk_usage(path_z, &total, &used, &free);
     try obj.put(alloc, "total", .{ .integer = @intCast(total) });
     try obj.put(alloc, "used", .{ .integer = @intCast(used) });
     try obj.put(alloc, "free", .{ .integer = @intCast(free) });
     return .{ .object = obj };
 }
 
-/// Fill total/free bytes via the statfs syscall; leaves them 0 on failure.
-fn statfsInto(alloc: std.mem.Allocator, abs: []const u8, total: *u64, free: *u64) void {
-    const path_z = alloc.dupeSentinel(u8, abs, 0) catch return;
-    defer alloc.free(path_z);
-    var sfs: LinuxStatfs = undefined;
-    const rc = std.os.linux.syscall2(.statfs, @intFromPtr(path_z.ptr), @intFromPtr(&sfs));
-    if (std.os.linux.errno(rc) != .SUCCESS) return;
-    const bsize: u64 = @intCast(sfs.f_bsize);
-    total.* = sfs.f_blocks * bsize;
-    free.* = sfs.f_bavail * bsize;
-}
+extern "c" fn phobos_disk_usage(path: [*:0]const u8, total: *u64, used: *u64, available: *u64) void;
 
 // ---------------------------------------------------------------------------
 // POST /server/files/directory (mkdir)
@@ -885,8 +870,7 @@ pub fn deleteFileImpl(ctx: *FileCtx, alloc: std.mem.Allocator, path: []const u8)
 // ---------------------------------------------------------------------------
 // GET /server/files/metadata → server.files.metadata
 // ---------------------------------------------------------------------------
-// Returns the gcode metadata record shape. Deep gcode parsing is NOT performed
-// (see module header); the stat-based record carries the Moonraker keys.
+// Returns cached stat-derived and parsed gcode metadata.
 
 pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -986,9 +970,10 @@ const footer_max_bytes = 32 * 1024;
 fn readFileHeader(io: std.Io, alloc: std.mem.Allocator, abs: []const u8) ![]u8 {
     const f = Dir.cwd().openFile(io, abs, .{}) catch return error.FileNotFound;
     defer f.close(io);
-    var rbuf: [8 * 1024]u8 = undefined;
-    var fr = f.reader(io, &rbuf);
-    return fr.interface.allocRemaining(alloc, .limited(header_max_bytes));
+    const st = try f.stat(io);
+    const buf = try alloc.alloc(u8, @intCast(@min(st.size, header_max_bytes)));
+    const got = try f.readPositionalAll(io, buf, 0);
+    return buf[0..got];
 }
 
 /// Read the last `footer_max_bytes` of the file (slicer config block for
@@ -1395,14 +1380,77 @@ test "handleGetDirectory: dirs/files/disk_usage/root_info shape" {
     try testing.expect(o.get("dirs").? == .array);
     try testing.expect(o.get("files").? == .array);
     const du = o.get("disk_usage").?.object;
-    try testing.expect(du.get("total") != null);
-    try testing.expect(du.get("used") != null);
-    try testing.expect(du.get("free") != null);
+    const total = du.get("total").?.integer;
+    const used = du.get("used").?.integer;
+    const free = du.get("free").?.integer;
+    try testing.expect(total > 0);
+    try testing.expect(used >= 0 and free >= 0);
+    try testing.expect(used + free <= total);
     const ri = o.get("root_info").?.object;
     try testing.expectEqualStrings("gcodes", ri.get("name").?.string);
     try testing.expectEqualStrings("rw", ri.get("permissions").?.string);
     try testing.expectEqual(@as(usize, 1), o.get("dirs").?.array.items.len);
     try testing.expectEqual(@as(usize, 1), o.get("files").?.array.items.len);
+}
+
+test "diskUsage: missing path returns zero byte counts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    const missing = try std.fs.path.join(a, &.{ tr.roots[0].path, "missing" });
+    const result = try diskUsage(a, missing);
+    inline for (.{ "total", "used", "free" }) |field| {
+        try testing.expectEqual(@as(i64, 0), result.object.get(field).?.integer);
+    }
+}
+
+test "handleGetDirectory: extended gcodes include metadata and preserve basenames" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    const gcode = "; generated by PrusaSlicer 2.7.4 on 2024-01-15 at 08:30:00 UTC\n; estimated printing time (normal mode) = 5025s\n";
+    try tr.writeFile("gcodes/sub/print.gcode", gcode);
+    try tr.writeFile("config/print.gcode", gcode);
+    var c = tr.ctx();
+    defer c.deinit();
+
+    const plain = try handleGetDirectory(@ptrCast(&c), try objParams(a, "{\"path\":\"gcodes/sub\"}"), a);
+    try testing.expect(plain.object.get("files").?.array.items[0].object.get("slicer") == null);
+    const extended = try handleGetDirectory(@ptrCast(&c), try objParams(a, "{\"path\":\"gcodes/sub\",\"extended\":true}"), a);
+    const file = extended.object.get("files").?.array.items[0].object;
+    try testing.expectEqualStrings("print.gcode", file.get("filename").?.string);
+    try testing.expectEqualStrings("rw", file.get("permissions").?.string);
+    try testing.expect(file.get("slicer") != null);
+    try testing.expectEqualStrings("PrusaSlicer", file.get("slicer").?.string);
+    try testing.expectEqual(@as(f64, 5025), file.get("estimated_time").?.float);
+    try testing.expectEqual(@as(usize, 1), c.metadata_cache.count());
+
+    const config = try handleGetDirectory(@ptrCast(&c), try objParams(a, "{\"path\":\"config\",\"extended\":\"true\"}"), a);
+    try testing.expect(config.object.get("files").?.array.items[0].object.get("slicer") == null);
+}
+
+test "fuzz diskUsage: filesystem paths return bounded byte counts" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var suffix: [32]u8 = undefined;
+            smith.bytesWithHash(&suffix, 0);
+            for (&suffix) |*byte| byte.* = 'a' + byte.* % 26;
+            const path = if (suffix[0] % 2 == 0) "." else try std.fmt.allocPrint(a, "./{s}/missing", .{suffix});
+            const result = try diskUsage(a, path);
+            const total = result.object.get("total").?.integer;
+            const used = result.object.get("used").?.integer;
+            const free = result.object.get("free").?.integer;
+            try testing.expect(total >= 0 and used >= 0 and free >= 0);
+            try testing.expect(used + free <= total);
+        }
+    }.run, .{});
 }
 
 test "handlePostDirectory: mkdir then notify info shape" {
@@ -1685,6 +1733,46 @@ test "handleMetadata: non-gcode file returns Unknown slicer" {
     try testing.expectEqualStrings("Unknown", result.object.get("slicer").?.string);
 }
 
+test "handleMetadata: large gcodes parse bounded header and footer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    const prefix = "; generated by PrusaSlicer 2.7.4 on 2024-01-15 at 08:30:00 UTC\n";
+    const footer = "; estimated printing time (normal mode) = 5025s\n";
+    const content = try a.alloc(u8, header_max_bytes + footer_max_bytes);
+    @memset(content, '\n');
+    @memcpy(content[0..prefix.len], prefix);
+    @memcpy(content[content.len - footer.len ..], footer);
+    try tr.writeFile("gcodes/large.gcode", content);
+    var c = tr.ctx();
+    defer c.deinit();
+
+    const result = try handleMetadata(@ptrCast(&c), try objParams(a, "{\"filename\":\"large.gcode\"}"), a);
+    try testing.expectEqualStrings("PrusaSlicer", result.object.get("slicer").?.string);
+    try testing.expectEqual(@as(f64, 5025), result.object.get("estimated_time").?.float);
+}
+
+test "fuzz readFileHeader: reads a bounded prefix of any file size" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var tr = try TestRoots.init(a);
+            defer tr.deinit();
+            const size: usize = smith.valueRangeAtMostWithHash(u32, 0, header_max_bytes + 32, 0);
+            const content = try a.alloc(u8, size);
+            @memset(content, 'G');
+            try tr.writeFile("gcodes/prefix.gcode", content);
+            const abs = try std.fs.path.join(a, &.{ tr.roots[0].path, "prefix.gcode" });
+            const header = try readFileHeader(tr.io, a, abs);
+            try testing.expectEqualSlices(u8, content[0..@min(size, header_max_bytes)], header);
+        }
+    }.run, .{});
+}
+
 test "handleMetascan: validates gcode ext" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1890,11 +1978,14 @@ test "fuzz handlers: arbitrary params never crash" {
 
             var tr = TestRoots.init(a) catch return;
             defer tr.deinit();
+            try tr.writeFile("gcodes/print.gcode", "; generated by PrusaSlicer 2.7.4\n");
             var c = tr.ctx();
+            defer c.deinit();
 
             const cases = [_][]const u8{
                 "{}",
                 "{\"root\":\"gcodes\"}",
+                "{\"path\":\"gcodes\",\"extended\":true}",
                 "{\"path\":\"gcodes/../etc\"}",
                 "{\"path\":\"gcodes/x\"}",
                 "{\"filename\":\"a.gcode\"}",
