@@ -603,6 +603,9 @@ pub const AuthCtx = struct {
     default_source: []const u8 = "moonraker",
     login_timeout_days: i64 = default_login_timeout_days,
     trusted: TrustedConfig = .{},
+    /// True when `trusted.ips` / `trusted.ranges` were allocated by
+    /// `setTrustedClients` and must be freed in `deinit`.
+    trusted_owned: bool = false,
     /// When true, a request whose remote IP could not be determined by the
     /// transport (the spine does not yet surface the socket peer address) is
     /// treated as a trusted local connection. This mirrors Moonraker's common
@@ -638,7 +641,38 @@ pub const AuthCtx = struct {
             self.gpa.free(t.username);
         }
         self.oneshot.deinit(self.gpa);
+        if (self.trusted_owned) {
+            self.gpa.free(self.trusted.ips);
+            self.gpa.free(self.trusted.ranges);
+        }
         std.crypto.secureZero(u8, &self.api_key);
+    }
+
+    /// Replace the trusted-client table from a Moonraker `trusted_clients`
+    /// list (whitespace or comma separated). `0.0.0.0/0` matches every IPv4
+    /// address. Domains are skipped (phobos does not resolve them).
+    pub fn setTrustedClients(self: *AuthCtx, raw: []const u8) !void {
+        var ips: std.ArrayList(IpAddress) = .empty;
+        errdefer ips.deinit(self.gpa);
+        var ranges: std.ArrayList(TrustedConfig.Cidr) = .empty;
+        errdefer ranges.deinit(self.gpa);
+        var it = std.mem.tokenizeAny(u8, raw, " \t\r\n,");
+        while (it.next()) |entry| {
+            switch (parseTrustedEntry(entry) catch continue) {
+                .ip => |ip| try ips.append(self.gpa, ip),
+                .cidr => |cidr| try ranges.append(self.gpa, cidr),
+                .domain => {},
+            }
+        }
+        const ip_slice = try ips.toOwnedSlice(self.gpa);
+        errdefer self.gpa.free(ip_slice);
+        const range_slice = try ranges.toOwnedSlice(self.gpa);
+        if (self.trusted_owned) {
+            self.gpa.free(self.trusted.ips);
+            self.gpa.free(self.trusted.ranges);
+        }
+        self.trusted = .{ .ips = ip_slice, .ranges = range_slice };
+        self.trusted_owned = true;
     }
 
     fn loadFromStore(self: *AuthCtx) !void {
@@ -1246,9 +1280,48 @@ pub const RequestCreds = struct {
     oneshot: ?[]const u8 = null,
     /// "X-Api-Key" header.
     api_key: ?[]const u8 = null,
-    /// Remote IP string.
+    /// Client IP used for trusted-client checks. When `use_xheaders` rewrites
+    /// the peer, this is the forwarded client, not the socket.
     remote_ip: ?[]const u8 = null,
+    /// Socket peer when it differs from `remote_ip` (the request was proxied).
+    /// Moonraker rejects the request unless this address is a trusted client.
+    proxy_ip: ?[]const u8 = null,
 };
+
+/// Result of applying Tornado's `xheaders` rewrite. `proxy` is the socket peer
+/// when the client address came from `X-Forwarded-For` or `X-Real-Ip`.
+pub const ClientAddr = struct {
+    client: []const u8,
+    proxy: ?[]const u8 = null,
+};
+
+fn lastForwardedHop(xff: []const u8) []const u8 {
+    var last: []const u8 = "";
+    var it = std.mem.splitScalar(u8, xff, ',');
+    while (it.next()) |part| {
+        const hop = std.mem.trim(u8, part, " \t");
+        if (hop.len > 0) last = hop;
+    }
+    return last;
+}
+
+/// `use_xheaders` false keeps the socket peer. True matches Tornado: the last
+/// `X-Forwarded-For` hop wins, then `X-Real-Ip` overwrites it. The socket peer
+/// is reported as the proxy only when the client address actually changed.
+pub fn resolveClientAddr(socket_peer: []const u8, x_real_ip: ?[]const u8, x_forwarded_for: ?[]const u8, use_xheaders: bool) ClientAddr {
+    if (!use_xheaders) return .{ .client = socket_peer };
+    var client = socket_peer;
+    if (x_forwarded_for) |xff| {
+        const hop = lastForwardedHop(xff);
+        if (hop.len > 0) client = hop;
+    }
+    if (x_real_ip) |rip| {
+        const trimmed = std.mem.trim(u8, rip, " \t");
+        if (trimmed.len > 0) client = trimmed;
+    }
+    if (std.mem.eql(u8, client, socket_peer)) return .{ .client = socket_peer };
+    return .{ .client = client, .proxy = socket_peer };
+}
 
 /// Authentication chain, mirroring authorization.py `authenticate_request`:
 /// JWT → oneshot → API key → trusted IP → fail. `transport == INTERNAL`
@@ -1293,12 +1366,14 @@ pub fn authenticateRequest(
         }
     }
 
-    // 3) API key header
-    if (c.enable_api_key) {
-        if (creds.api_key) |key| {
-            if (key.len > 0 and constEql(key, &c.api_key)) {
-                return .{ .user = api_user };
-            }
+    // 3) API key header. A non-empty wrong key is 401 and does not fall
+    // through to trusted-IP auth (Moonraker validate_api_key). A blank key,
+    // or a key sent while API-key auth is disabled, is ignored.
+    if (creds.api_key) |raw| {
+        const key = std.mem.trim(u8, raw, " \t");
+        if (key.len > 0 and c.enable_api_key) {
+            if (constEql(key, &c.api_key)) return .{ .user = api_user };
+            return .{ .unauthorized = {} };
         }
     }
 
@@ -1308,14 +1383,21 @@ pub fn authenticateRequest(
         return .{ .unauthorized = {} };
     }
 
-    // 4) Trusted IP
+    // 4) Trusted IP. A rewritten client is accepted only when the socket peer
+    // (the proxy) is itself a trusted client. Moonraker: `_check_trusted_proxy`.
     if (creds.remote_ip) |ip_s| {
         if (parseIp(ip_s)) |ip| {
-            if (c.trusted.isTrusted(ip)) return .{ .user = trusted_user };
-            // When trust_unknown_ip is set, treat any known IP as trusted
-            // (backward-compat during the transition from the trust_unknown_ip
-            // fallback to real peer-IP CIDR matching).
-            if (c.trust_unknown_ip) return .{ .user = trusted_user };
+            const client_ok = c.trusted.isTrusted(ip) or c.trust_unknown_ip;
+            if (client_ok) {
+                if (auth_required) {
+                    if (creds.proxy_ip) |pip| {
+                        if (parseIp(pip)) |proxy| {
+                            if (!c.trusted.isTrusted(proxy)) return .{ .unauthorized = {} };
+                        } else |_| return .{ .unauthorized = {} };
+                    }
+                }
+                return .{ .user = trusted_user };
+            }
         } else |_| {}
     } else if (c.trust_unknown_ip) {
         // Peer IP unavailable from the transport → treat as a trusted local
@@ -1492,7 +1574,7 @@ fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 
 test "hashPassword: matches Python hashlib pbkdf2_hmac vector" {
     var out: [64]u8 = undefined;
-    const salt = [_]u8{0} ** 32;
+    const salt: [32]u8 = @splat(0);
     const h = hashPassword(&out, "secret", &salt);
     try testing.expectEqualStrings(
         "f424449b70198c6d5478fff835b93ee602323ffd7a2d225b51e2b4ba08c0602c",
@@ -1518,7 +1600,7 @@ test "constEql: equal and unequal" {
 test "base32Encode: 20 bytes → 32 chars, matches RFC4648" {
     var out: [32]u8 = undefined;
     // base64.b32encode(b'\x00'*20) == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-    const zeros = [_]u8{0} ** 20;
+    const zeros: [20]u8 = @splat(0);
     const e = base32Encode(&out, &zeros);
     try testing.expectEqual(@as(usize, 32), e.len);
     try testing.expectEqualStrings("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", e);
@@ -1863,6 +1945,20 @@ test "trusted client: exact IP and CIDR match" {
     try testing.expect(!cfg.isTrusted(ip3));
 }
 
+test "setTrustedClients: 0.0.0.0/0 trusts every IPv4 address" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = try mkCtx(a, &mem);
+    defer ctx.deinit();
+    try ctx.setTrustedClients("127.0.0.1\n0.0.0.0/0\n");
+    try testing.expect(ctx.trusted.isTrusted(try parseIp("8.8.8.8")));
+    try testing.expect(ctx.trusted.isTrusted(try parseIp("192.168.0.150")));
+    try testing.expect(!ctx.trusted.isTrusted(try parseIp("::1")));
+}
+
 test "parseTrustedEntry: ip, cidr, domain" {
     const e1 = try parseTrustedEntry("192.168.0.1");
     try testing.expect(e1 == .ip);
@@ -1898,6 +1994,66 @@ test "authenticateRequest: chain order and INTERNAL bypass" {
     const out = authenticateRequest(&ctx, a, .HTTP, .{ .remote_ip = "127.0.0.1" }, true);
     try testing.expect(out == .user);
     try testing.expectEqualStrings(trusted_user, out.user);
+}
+
+test "authenticateRequest: invalid api key rejects even a trusted IP" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = try mkCtx(a, &mem);
+    defer ctx.deinit();
+    const tip = try parseIp("127.0.0.1");
+    const ips = [_]IpAddress{tip};
+    ctx.trusted = .{ .ips = &ips };
+    const bad = authenticateRequest(&ctx, a, .HTTP, .{ .api_key = "deadbeef", .remote_ip = "127.0.0.1" }, true);
+    try testing.expect(bad == .unauthorized);
+    const blank = authenticateRequest(&ctx, a, .HTTP, .{ .api_key = "  ", .remote_ip = "127.0.0.1" }, true);
+    try testing.expect(blank == .user);
+    try testing.expectEqualStrings(trusted_user, blank.user);
+}
+
+test "resolveClientAddr: xheaders rewrites the client and keeps the socket as proxy" {
+    const off = resolveClientAddr("10.0.0.8", "192.168.1.9", "1.1.1.1, 192.168.1.9", false);
+    try testing.expectEqualStrings("10.0.0.8", off.client);
+    try testing.expect(off.proxy == null);
+
+    const via_xff = resolveClientAddr("10.0.0.8", null, "1.1.1.1, 192.168.1.9", true);
+    try testing.expectEqualStrings("192.168.1.9", via_xff.client);
+    try testing.expectEqualStrings("10.0.0.8", via_xff.proxy.?);
+
+    const via_real = resolveClientAddr("10.0.0.8", "192.168.1.9", "1.1.1.1, 10.0.0.8", true);
+    try testing.expectEqualStrings("192.168.1.9", via_real.client);
+    try testing.expectEqualStrings("10.0.0.8", via_real.proxy.?);
+}
+
+test "authenticateRequest: untrusted proxy is rejected, trusted proxy is accepted" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = try mkCtx(a, &mem);
+    defer ctx.deinit();
+    const client = try parseIp("192.168.1.9");
+    const proxy = try parseIp("10.0.0.8");
+    const only_client = [_]IpAddress{client};
+    ctx.trusted = .{ .ips = &only_client };
+    const blocked = authenticateRequest(&ctx, a, .HTTP, .{
+        .remote_ip = "192.168.1.9",
+        .proxy_ip = "10.0.0.8",
+    }, true);
+    try testing.expect(blocked == .unauthorized);
+
+    const both = [_]IpAddress{ client, proxy };
+    ctx.trusted = .{ .ips = &both };
+    const allowed = authenticateRequest(&ctx, a, .HTTP, .{
+        .remote_ip = "192.168.1.9",
+        .proxy_ip = "10.0.0.8",
+    }, true);
+    try testing.expect(allowed == .user);
+    try testing.expectEqualStrings(trusted_user, allowed.user);
 }
 
 test "authenticateRequest: invalid api key → unauthorized" {

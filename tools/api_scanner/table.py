@@ -31,11 +31,11 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     # --- Deliberate host-safety no-ops -------------------------------------
     "machine.reboot": (S_NOOP, "Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box)."),
     "machine.shutdown": (S_NOOP, "Deliberate no-op: returns ok but never shuts the host down."),
-    "machine.update.system": (S_NOOP, "apt/pip system update is a no-op (emits the notification shape, never invokes the host package manager)."),
-    "machine.update.full": (S_PARTIAL, "Runs the real git-repo update paths; the system/package portion is a no-op (see machine.update.system)."),
+    "machine.update.system": (S_PARTIAL, "Builds apt-get commands for an injected shell. The default runner rejects apt/pip; no package manager runs by default."),
+    "machine.update.full": (S_PARTIAL, "Git-repo update paths run when configured. Package updates require an injected shell; web/zip installation remains unimplemented."),
     # --- External-tool integrations (stubbed; no binary/service in-tree) ----
-    "component:analysis": (S_PARTIAL, "klipper_estimator integration stubbed (no estimator binary); returns the documented shape."),
-    "component:notifier": (S_PARTIAL, "Notification dispatch stubbed (no apprise/Python); config + status shape match."),
+    "component:analysis": (S_PARTIAL, "Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence."),
+    "component:notifier": (S_PARTIAL, "List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked."),
     # --- Auth ---------------------------------------------------------------
     "component:authorization": (S_FULL, "JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity."),
     # --- Spoolman -----------------------------------------------------------

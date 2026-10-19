@@ -268,6 +268,16 @@ pub const KlippySim = struct {
                 ) catch return false;
                 self.writeFrame(io, stream, resp) catch return false;
                 sub_done = true;
+            } else if (std.mem.eql(u8, method, "objects/query")) {
+                // Handshake asks heaters for the temperature store. No sensors
+                // here: the client skips the second subscribe and stays ready.
+                const id_str: []const u8 = idStrVal(id);
+                var buf: [256]u8 = undefined;
+                const resp = std.fmt.bufPrint(&buf,
+                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{{\"eventtime\":1.0,\"status\":{{\"heaters\":{{\"available_sensors\":[],\"available_monitors\":[]}}}}}}}}",
+                    .{id_str},
+                ) catch return false;
+                self.writeFrame(io, stream, resp) catch return false;
             } else if (std.mem.eql(u8, method, "gcode/subscribe_output")) {
                 const id_str: []const u8 = idStrVal(id);
                 var buf: [128]u8 = undefined;
@@ -370,6 +380,7 @@ pub const KlippySim = struct {
                 ) catch continue;
                 self.writeFrame(io, stream, resp) catch return;
             } else if (std.mem.eql(u8, method, "objects/subscribe") or
+                std.mem.eql(u8, method, "objects/query") or
                 std.mem.eql(u8, method, "register_remote_method"))
             {
                 const id_str: []const u8 = idStrVal(id);

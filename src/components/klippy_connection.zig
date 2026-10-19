@@ -5,9 +5,9 @@
 //! relays method calls and status updates between Klippy and phobos transports.
 //!
 //! Wire protocol: JSON-RPC 2.0 messages delimited by `\x03` (ASCII ETX).
-//! Klippy sends JSON-RPC requests (with id) for registered remote methods;
-//! Moonraker/phobos sends JSON-RPC requests to Klippy's endpoint registry.
-//! Notifications are id-less in both directions.
+//! Klippy's `register_remote_method` stores `response_template` (the method
+//! name) plus `remote_method`. `call_remote_method` then sends that template
+//! merged with `params` and no id. Status and gcode pushes are the same shape.
 //!
 //! References:
 //!   vendor/moonraker/moonraker/components/klippy_connection.py (853 lines)
@@ -101,13 +101,15 @@ pub fn buildJsonRpcRequest(
 ) ![]const u8 {
     if (params_json) |p| {
         if (p.len > 0) {
-            return std.fmt.bufPrint(buf,
+            return std.fmt.bufPrint(
+                buf,
                 "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"id\":\"{s}\",\"params\":{s}}}",
                 .{ method, id, p },
             );
         }
     }
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"id\":\"{s}\"}}",
         .{ method, id },
     );
@@ -128,13 +130,15 @@ pub fn buildInfoRequest(
     buf: []u8,
 ) ![]const u8 {
     if (send_id) {
-        return std.fmt.bufPrint(buf,
+        return std.fmt.bufPrint(
+            buf,
             \\{{"jsonrpc":"2.0","method":"info","id":"{s}","params":{{"client_info":{{"program":"{s}","version":"{s}"}}}}}}
         ,
             .{ id, program, version },
         );
     }
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         \\{{"jsonrpc":"2.0","method":"info","id":"{s}","params":{{}}}}
     ,
         .{id},
@@ -146,10 +150,76 @@ pub fn buildInfoRequest(
 /// status update for this connection — without it Klippy returns the initial
 /// status only and pushes no further updates (klippy_connection.py:644).
 pub fn buildSubscribeRequest(objects: []const u8, id: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "{{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"{s}\",\"params\":{{\"objects\":{s},\"response_template\":{{\"method\":\"process_status_update\"}}}}}}",
         .{ id, objects },
     );
+}
+
+/// Copy `heaters.<field>` strings out of an `objects/query` result.
+/// `available_monitors: null` and a missing heaters object yield nothing.
+fn collectHeaterNames(result: std.json.Value, field: []const u8, alloc: std.mem.Allocator, out: *std.ArrayList([]const u8)) !void {
+    if (result != .object) return;
+    const status = result.object.get("status") orelse return;
+    if (status != .object) return;
+    const heaters = status.object.get("heaters") orelse return;
+    if (heaters != .object) return;
+    const arr_v = heaters.object.get(field) orelse return;
+    if (arr_v != .array) return;
+    for (arr_v.array.items) |item| {
+        if (item != .string) continue;
+        const name = item.string;
+        if (name.len == 0) continue;
+        var seen = false;
+        for (out.items) |n| if (std.mem.eql(u8, n, name)) {
+            seen = true;
+            break;
+        };
+        if (seen) continue;
+        try out.append(alloc, name);
+    }
+}
+
+fn frameIdMatches(payload: []const u8, id: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    const quoted = std.fmt.bufPrint(&buf, "\"id\":\"{s}\"", .{id}) catch return false;
+    return std.mem.indexOf(u8, payload, quoted) != null;
+}
+
+fn appendJsonNullField(w: *std.Io.Writer, name: []const u8) !void {
+    try w.writeAll("\"");
+    for (name) |ch| switch (ch) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        else => try w.writeByte(ch),
+    };
+    try w.writeAll("\":null");
+}
+
+test "collectHeaterNames reads sensors and ignores null monitors" {
+    const alloc = std.testing.allocator;
+    const raw =
+        \\{"eventtime":1,"status":{"heaters":{"available_sensors":["extruder","heater_bed","temperature_sensor weightValue"],"available_monitors":null}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+    defer parsed.deinit();
+    var sensors: std.ArrayList([]const u8) = .empty;
+    defer sensors.deinit(alloc);
+    var monitors: std.ArrayList([]const u8) = .empty;
+    defer monitors.deinit(alloc);
+    try collectHeaterNames(parsed.value, "available_sensors", alloc, &sensors);
+    try collectHeaterNames(parsed.value, "available_monitors", alloc, &monitors);
+    try std.testing.expectEqual(@as(usize, 3), sensors.items.len);
+    try std.testing.expectEqualStrings("temperature_sensor weightValue", sensors.items[2]);
+    try std.testing.expectEqual(@as(usize, 0), monitors.items.len);
+}
+
+test "frameIdMatches does not accept a longer id" {
+    try std.testing.expect(frameIdMatches("{\"id\":\"12\",\"result\":1}", "12"));
+    try std.testing.expect(!frameIdMatches("{\"id\":\"12\",\"result\":1}", "1"));
 }
 
 /// A JSON number (int or float) as f64; null for absent/non-numeric.
@@ -174,17 +244,21 @@ fn asF64(v: std.json.Value) f64 {
 /// Build a `gcode/subscribe_output` request. Carries the `response_template`
 /// naming `process_gcode_response` (klippy_apis.subscribe_gcode_output).
 pub fn buildSubscribeGcodeRequest(id: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buf,
+    return std.fmt.bufPrint(
+        buf,
         "{{\"jsonrpc\":\"2.0\",\"method\":\"gcode/subscribe_output\",\"id\":\"{s}\",\"params\":{{\"response_template\":{{\"method\":\"process_gcode_response\"}}}}}}",
         .{id},
     );
 }
 
 /// Build a `register_remote_method` request.
+/// Klippy requires `response_template.method` (klippy_apis.register_method).
+/// `call_remote_method` copies that template onto an id-less frame.
 pub fn buildRegisterMethodRequest(method_name: []const u8, id: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"register_remote_method\",\"id\":\"{s}\",\"params\":{{\"remote_method\":\"{s}\"}}}}",
-        .{ id, method_name },
+    return std.fmt.bufPrint(
+        buf,
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"register_remote_method\",\"id\":\"{s}\",\"params\":{{\"response_template\":{{\"method\":\"{s}\"}},\"remote_method\":\"{s}\"}}}}",
+        .{ id, method_name, method_name },
     );
 }
 
@@ -358,6 +432,9 @@ pub const BridgeWriteFn = *const fn (ctx: *anyopaque, payload: []const u8) anyer
 
 /// A registered bridge client. KlippyCtx forwards every received frame to all
 /// bridges so that /klippysocket WS clients see the raw Klippy stream.
+/// Feather and other components handle Klippy remote methods through this.
+pub const RemoteHandler = *const fn (*anyopaque, std.mem.Allocator, []const u8, std.json.Value) anyerror!void;
+
 pub const Bridge = struct {
     ctx: *anyopaque,
     write_fn: BridgeWriteFn,
@@ -445,6 +522,16 @@ pub const KlippyCtx = struct {
     /// Temperature store (set by App after init). Fed a sample per temperature
     /// object on each status update, for server.temperature_store.
     temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
+
+    /// Optional handler for remote methods other than status and gcode.
+    remote_handler: ?RemoteHandler = null,
+    remote_handler_ctx: ?*anyopaque = null,
+    /// Called with Klippy's `klipper_path` while the info JSON is still alive.
+    /// The slice is borrowed; the handler must copy it before returning.
+    on_klipper_path: ?*const fn (*anyopaque, []const u8) void = null,
+    on_klipper_path_ctx: ?*anyopaque = null,
+    /// Registered with Klippy after the handshake when non-empty.
+    remote_methods: []const []const u8 = &.{},
 
     /// Set by stop() to signal the background klippyTask to exit.
     stopping: bool = false,
@@ -651,6 +738,110 @@ pub const KlippyCtx = struct {
     // Connect + handshake
     // -----------------------------------------------------------------------
 
+    /// `objects/query` `heaters`, then subscribe `available_sensors` and
+    /// `available_monitors`. Moonraker does this on `klippy_ready` so
+    /// `server.temperature_store` has the same keys. A Klippy error result is
+    /// ignored (the frame was consumed). A socket error is returned so the
+    /// handshake reconnects instead of reading the next frame out of order.
+    fn subscribeTemperatureSensors(self: *KlippyCtx, io: std.Io) !void {
+        var rid_buf: [32]u8 = undefined;
+        var qbuf: [320]u8 = undefined;
+        const qid = self.nextReqId(&rid_buf);
+        const qframe = try std.fmt.bufPrint(
+            &qbuf,
+            "{{\"jsonrpc\":\"2.0\",\"method\":\"objects/query\",\"id\":\"{s}\",\"params\":{{\"objects\":{{\"heaters\":null}}}}}}",
+            .{qid},
+        );
+        try self.writeFrame(io, qframe);
+        const qresp = try self.readResponse(io, qid);
+        defer self.gpa.free(qresp);
+
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const result = parseKlippyResult(arena.allocator(), qresp) catch return;
+
+        var sensors: std.ArrayList([]const u8) = .empty;
+        defer sensors.deinit(self.gpa);
+        var monitors: std.ArrayList([]const u8) = .empty;
+        defer monitors.deinit(self.gpa);
+        try collectHeaterNames(result, "available_sensors", self.gpa, &sensors);
+        try collectHeaterNames(result, "available_monitors", self.gpa, &monitors);
+        if (sensors.items.len == 0 and monitors.items.len == 0) return;
+
+        var aw: std.Io.Writer.Allocating = .init(self.gpa);
+        defer aw.deinit();
+        try aw.writer.writeAll("{");
+        var first = true;
+        for (sensors.items) |name| {
+            if (!first) try aw.writer.writeAll(",");
+            first = false;
+            try appendJsonNullField(&aw.writer, name);
+        }
+        for (monitors.items) |name| {
+            var dup = false;
+            for (sensors.items) |s| if (std.mem.eql(u8, s, name)) {
+                dup = true;
+                break;
+            };
+            if (dup) continue;
+            if (!first) try aw.writer.writeAll(",");
+            first = false;
+            try appendJsonNullField(&aw.writer, name);
+        }
+        try aw.writer.writeAll("}");
+        if (first) return;
+        const objs = try self.gpa.dupe(u8, aw.written());
+        defer self.gpa.free(objs);
+
+        const fbuf = try self.gpa.alloc(u8, objs.len + 256);
+        defer self.gpa.free(fbuf);
+        const sid = self.nextReqId(&rid_buf);
+        const sub = buildSubscribeRequest(objs, sid, fbuf) catch return;
+        try self.writeFrame(io, sub);
+        const sresp = try self.readResponse(io, sid);
+        defer self.gpa.free(sresp);
+
+        if (self.temp_store) |ts| {
+            for (monitors.items) |n| ts.markTempMonitor(io, n);
+        }
+        const sresult = parseKlippyResult(arena.allocator(), sresp) catch return;
+        self.feedSubscribedTemps(io, sresult);
+    }
+
+    /// Read until the JSON-RPC response with this string id. Klippy may push
+    /// `process_status_update` between the request and the response; those
+    /// frames are dispatched and do not count as the reply.
+    fn readResponse(self: *KlippyCtx, io: std.Io, id: []const u8) ![]const u8 {
+        var n: u8 = 0;
+        while (n < 40) : (n += 1) {
+            const payload = try self.readFrame(io);
+            if (frameIdMatches(payload, id)) return payload;
+            if (std.mem.indexOf(u8, payload, "\"method\"") != null) {
+                self.dispatchFrame(io, payload) catch {};
+            }
+            self.gpa.free(payload);
+        }
+        return error.KlippyRequestFailed;
+    }
+
+    /// Seed the temperature store from an `objects/subscribe` result
+    /// (`result.status`, `result.eventtime`). Later pushes arrive as
+    /// `process_status_update` and take the same path in the reader.
+    fn feedSubscribedTemps(self: *KlippyCtx, io: std.Io, result: std.json.Value) void {
+        const ts = self.temp_store orelse return;
+        if (result != .object) return;
+        const status = result.object.get("status") orelse return;
+        if (status != .object) return;
+        var it = status.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .object) continue;
+            const od = entry.value_ptr.object;
+            if (numField(od, "temperature")) |temp| {
+                ts.pushTemp(io, entry.key_ptr.*, temp, numField(od, "target"), numField(od, "power"), numField(od, "speed"));
+            }
+        }
+    }
+
     /// Open the Unix socket and perform the real Klippy handshake:
     ///   1. `info` (with client_info) to identify, then poll `info` until
     ///      Klippy leaves the `startup` state (mirrors Moonraker's _check_ready).
@@ -688,6 +879,10 @@ pub const KlippyCtx = struct {
             self.gpa.free(sub_resp);
         }
 
+        // Phase 2b: temperature sensors. The base subscription does not include
+        // heaters, so the store stays empty until this query+subscribe.
+        try self.subscribeTemperatureSensors(io);
+
         // Phase 3: subscribe to gcode output.
         {
             const gc_id = self.nextReqId(&rid_buf);
@@ -695,6 +890,17 @@ pub const KlippyCtx = struct {
             try self.writeFrame(io, gc_frame);
             const gc_resp = try self.readFrame(io);
             self.gpa.free(gc_resp);
+        }
+
+        // Phase 4: register component remote methods (Feather update callbacks).
+        // A Klippy that rejects one does not abort the handshake.
+        for (self.remote_methods) |name| {
+            var reg_buf: [512]u8 = undefined;
+            const reg_id = self.nextReqId(&rid_buf);
+            const reg_frame = buildRegisterMethodRequest(name, reg_id, &reg_buf) catch continue;
+            self.writeFrame(io, reg_frame) catch continue;
+            const reg_resp = self.readFrame(io) catch continue;
+            self.gpa.free(reg_resp);
         }
 
         // Handshake fully complete — mark ready so isConnected() gates open.
@@ -719,6 +925,16 @@ pub const KlippyCtx = struct {
             defer parsed.deinit();
 
             const result = parsed.value.object.get("result") orelse return error.IdentifyFailed;
+            if (result == .object) {
+                if (result.object.get("klipper_path")) |kp| switch (kp) {
+                    .string => |p| if (p.len > 0) {
+                        if (self.on_klipper_path) |cb| {
+                            if (self.on_klipper_path_ctx) |c| cb(c, p);
+                        }
+                    },
+                    else => {},
+                };
+            }
             if (parseKlippyInfoResponse(result)) |info| {
                 self.klippy_info = info;
                 switch (info.state) {
@@ -751,12 +967,12 @@ pub const KlippyCtx = struct {
 
     /// Dispatch a received JSON-RPC frame from the persistent reader.
     /// Handles three kinds of frames:
-    /// 1. Notifications (method, no id) — Klippy pushes spontaneous data.
-    /// 2. Remote-method calls (method + id) — Klippy calls a Moonraker handler
-    ///    (process_status_update, process_gcode_response). We process and ack.
+    /// 1. Id-less method frames: Klippy `call_remote_method` and status/gcode
+    ///    pushes. No ack. Component handlers run from here.
+    /// 2. Remote-method calls (method + id): same handlers, then an ack.
     /// 3. Responses (result/error + id, no method) — consumed by `request()`,
     ///    which holds `stream_mutex`; they never reach here.
-    fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
+    pub fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
         const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
         defer parsed.deinit();
 
@@ -828,17 +1044,19 @@ pub const KlippyCtx = struct {
     fn sendAck(self: *KlippyCtx, io: std.Io, id: std.json.Value) !void {
         var ack_buf: [128]u8 = undefined;
         const id_str = if (id == .string) id.string else "0";
-        const ack = try std.fmt.bufPrint(&ack_buf,
-            "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}", .{id_str});
+        const ack = try std.fmt.bufPrint(&ack_buf, "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}", .{id_str});
         try self.writeFrame(io, ack);
     }
 
     /// Dispatch a Klippy-initiated remote method call (has both method and id).
-    fn dispatchRemoteMethod(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
+    pub fn dispatchRemoteMethod(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
         if (std.mem.eql(u8, method, "process_status_update")) {
             try self.processStatusUpdate(io, frame);
         } else if (std.mem.eql(u8, method, "process_gcode_response")) {
             try self.processGcodeResponse(io, frame);
+        } else if (self.remote_handler) |handler| {
+            const params = if (frame == .object) frame.object.get("params") orelse .null else .null;
+            try handler(self.remote_handler_ctx orelse return, std.heap.smp_allocator, method, params);
         }
     }
 
@@ -854,6 +1072,10 @@ pub const KlippyCtx = struct {
             try self.processStatusUpdate(io, frame);
         } else if (std.mem.eql(u8, method, "process_gcode_response") or std.mem.eql(u8, method, "notify_gcode_response")) {
             try self.processGcodeResponse(io, frame);
+        } else if (self.remote_handler) |handler| {
+            // Id-less `call_remote_method` frame: `{method, params}` and no id.
+            const params = if (frame == .object) frame.object.get("params") orelse .null else .null;
+            try handler(self.remote_handler_ctx orelse return, std.heap.smp_allocator, method, params);
         }
     }
 
@@ -868,6 +1090,9 @@ pub const KlippyCtx = struct {
             try self.processStatusUpdateLocked(io, frame);
         } else if (std.mem.eql(u8, method, "notify_gcode_response")) {
             try self.processGcodeResponseLocked(io, frame);
+        } else if (self.remote_handler) |handler| {
+            const params = if (frame == .object) frame.object.get("params") orelse .null else .null;
+            try handler(self.remote_handler_ctx orelse return, std.heap.smp_allocator, method, params);
         }
     }
 
@@ -956,9 +1181,7 @@ pub const KlippyCtx = struct {
             if (self.temp_store) |ts| {
                 if (entry.value_ptr.* == .object) {
                     const od = entry.value_ptr.object;
-                    if (numField(od, "temperature")) |temp| {
-                        ts.pushTemp(io, obj_name, asF64(eventtime), temp, numField(od, "target"), numField(od, "power"), numField(od, "speed"));
-                    }
+                    ts.pushTemp(io, obj_name, numField(od, "temperature"), numField(od, "target"), numField(od, "power"), numField(od, "speed"));
                 }
             }
         }
@@ -1112,6 +1335,29 @@ pub const KlippyCtx = struct {
     /// Send a JSON-RPC request to Klippy and return the result. Picks the path:
     /// the concurrent reader-correlated path when a Core lock is wired
     /// (production), else the legacy inline-drain path (bare unit tests).
+    /// Fire a Klippy JSON-RPC request without waiting for its response.
+    /// Used to deliver `feather/update_status` and `feather/update_progress`
+    /// from inside the reader, which cannot call `request()` without deadlocking.
+    pub fn postMethod(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) !void {
+        const io = self.io orelse return error.KlippyDisconnected;
+        if (self.stream == null) return error.KlippyDisconnected;
+        const params_json = try serializeParams(alloc, params);
+        defer if (params_json.len > 0) alloc.free(params_json);
+        self.next_id_mutex.lockUncancelable(io);
+        self.next_id += 1;
+        const id_num = self.next_id;
+        self.next_id_mutex.unlock(io);
+        const body = try std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{
+            id_num,
+            method,
+            if (params_json.len == 0) "{}" else params_json,
+        });
+        defer alloc.free(body);
+        self.write_mutex.lockUncancelable(io);
+        defer self.write_mutex.unlock(io);
+        try self.writeFrame(io, body);
+    }
+
     pub fn request(
         self: *KlippyCtx,
         method: []const u8,
@@ -1200,7 +1446,6 @@ pub const KlippyCtx = struct {
         const payload = waiter.payload orelse return error.KlippyDisconnected;
         return parseKlippyResult(alloc, payload);
     }
-
 
     /// Resubscribe Klippy to the current aggregate object set (base + everything
     /// added via `addSubscriptionObject`) WITH the `response_template`, and return
@@ -1669,10 +1914,10 @@ test "buildSubscribeRequest: includes objects and response_template" {
 }
 
 test "buildRegisterMethodRequest" {
-    var buf: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
     const got = try buildRegisterMethodRequest("process_status_update", "3", &buf);
     try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"register_remote_method\",\"id\":\"3\",\"params\":{\"remote_method\":\"process_status_update\"}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"register_remote_method\",\"id\":\"3\",\"params\":{\"response_template\":{\"method\":\"process_status_update\"},\"remote_method\":\"process_status_update\"}}",
         got,
     );
 }
@@ -1856,7 +2101,7 @@ test "ReadBuf: error.BufferOverflow" {
     var rb = try ReadBuf.init(alloc, 256);
     defer rb.deinit(alloc);
     // Fill buffer to cap - 1 using no-\x03 chunks.
-    const chunk: [64]u8 = [_]u8{0x41} ** 64;
+    const chunk: [64]u8 = @splat(0x41);
     const full_chunks = (rb.buf.len - 1) / chunk.len;
     for (0..full_chunks) |_| {
         _ = rb.append(&chunk) catch |err| switch (err) {

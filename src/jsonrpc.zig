@@ -178,10 +178,11 @@ pub const Dispatcher = struct {
             // connected", 503), so it surfaces as code 503 with that message.
             const code: i64 = switch (err) {
                 error.InvalidParams => -32602,
+                error.MissingFilename, error.MissingWebcamName => 400,
                 error.Forbidden => 403,
                 // Moonraker remaps a 404 ServerError to -32601 over JSON-RPC
                 // (JsonRPC.execute_method); only HTTP keeps the literal 404.
-                error.NotFound => -32601,
+                error.NotFound, error.UnknownDbNamespace, error.MissingDbKey => -32601,
                 error.KlippyDisconnected => 503,
                 error.MqttNotConfigured => 503,
                 error.ServiceUnavailable => 503,
@@ -197,6 +198,10 @@ pub const Dispatcher = struct {
             };
             const msg: []const u8 = switch (err) {
                 error.InvalidParams => "Invalid params",
+                error.MissingFilename => "No data for argument: filename",
+                error.MissingWebcamName => "No data for argument: name",
+                error.UnknownDbNamespace => try std.fmt.allocPrint(alloc, "Namespace {s} not found", .{params.object.get("namespace").?.string}),
+                error.MissingDbKey => try std.fmt.allocPrint(alloc, "Key '{s}' in namespace '{s}' not found", .{ params.object.get("key").?.string, params.object.get("namespace").?.string }),
                 error.Forbidden => "Forbidden",
                 error.NotFound => "Not Found",
                 error.KlippyDisconnected => "Klippy Host not connected",

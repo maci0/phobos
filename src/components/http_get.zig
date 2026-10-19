@@ -116,7 +116,7 @@ const EtagServer = struct {
         while (true) {
             const line = r.interface.takeDelimiterInclusive('\n') catch break;
             if (line.len <= 2) break; // blank line terminates headers
-            if (std.ascii.indexOfIgnoreCase(line, "if-none-match") != null and
+            if (line.len >= 13 and std.ascii.eqlIgnoreCase(line[0..13], "if-none-match") and
                 std.mem.indexOf(u8, line, "\"v1\"") != null) has_inm = true;
         }
         var wbuf: [512]u8 = undefined;

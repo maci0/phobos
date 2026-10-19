@@ -19,14 +19,14 @@ pub fn build(b: *std.Build) void {
     // `-Dprofile` keeps symbols in a release build so perf/flamegraphs resolve
     // function names (see tools/perf_harness).
     const profile = b.option(bool, "profile", "Keep symbols in release builds for profiling") orelse false;
-    const release = optimize != .Debug and !profile;
+    const release = optimize != .debug and !profile;
 
     // phobos's DataStore is backed by the vendored SQLite amalgamation
     // (Moonraker `moonraker-sql.db`-compatible), compiled in + linked against
     // Zig's bundled musl libc. The pure-Zig atomic-rename file backend
     // (`store/file_store.zig`) is the dependency-free alternative.
     const mkmod = struct {
-        fn f(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, opts: *std.Build.Step.Options, strip: bool) *std.Build.Module {
+        fn f(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.Optimize, opts: *std.Build.Step.Options, strip: bool) *std.Build.Module {
             const m = bb.createModule(.{
                 .root_source_file = bb.path("src/main.zig"),
                 .target = t,

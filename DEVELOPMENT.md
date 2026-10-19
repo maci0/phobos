@@ -19,7 +19,7 @@ and what's next; read this for *how* to work in the codebase.
 
 ## 1. Toolchain
 
-- **Zig 0.16.0** (pinned; this repo uses APIs specific to 0.16's "Io rewrite").
+- **Zig 0.17.0** (pinned; this repo uses APIs specific to 0.16's "Io rewrite", updated for 0.17).
 - Python 3 + `uv` for the `api_scanner` tooling.
 - Vendored Moonraker source is gitignored. Restore it:
   ```sh
@@ -46,6 +46,10 @@ file zig-out/bin/phobos   # -> ELF 32-bit ARM, statically linked
 ```
 
 Notes:
+- For the standalone runner, build with `zig build test-artifact -Doptimize=Debug`,
+  then run the newest `.zig-cache/o/*/test --cache-dir=./.zig-cache` under a timeout.
+  After an ARM build, restore `zig-out/bin/phobos` with `zig build -Doptimize=Debug`
+  before running the host suite.
 - Files under `src/components/`, `src/testutil/`, `src/transport/` use `../` imports and
   **only build via `zig build test`** (the module root is `src/main.zig`). Single-file
   `zig test` fails on them with "import of file outside module path".

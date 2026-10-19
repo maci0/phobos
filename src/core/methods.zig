@@ -45,6 +45,8 @@ pub const components = [_][]const u8{
     "template",
     "dbus_manager",
     "jsonrpc",
+    "update_manager",
+    "octoprint_compat",
 };
 
 /// Server-wide context shared by the core handlers. Owns the bits of state the
@@ -72,6 +74,12 @@ pub const ServerInfo = struct {
     /// Live io handle (set by App.httpServer). Needed to lock the
     /// Connections mutex for count queries.
     io: ?std.Io = null,
+    /// Extra component names loaded from config (for example `feather_updates`).
+    extra_components: []const []const u8 = &.{},
+    /// Live file-manager root names. Empty means the default config/logs/gcodes
+    /// list. Updated under `state_mutex` when Klippy registers more roots.
+    directory_names: [8][]const u8 = .{ "", "", "", "", "", "", "", "" },
+    directory_count: u8 = 0,
     /// Guards the runtime-mutated fields (klippy_connected, klippy_state) so the
     /// off-Core `server.info` handler reads a consistent snapshot while the Klippy
     /// reader updates them. A small leaf lock — not the global Core lock.
@@ -125,11 +133,16 @@ pub fn buildServerInfo(info: *const ServerInfo, raw: bool, alloc: std.mem.Alloca
 
     var comps: std.json.Array = .init(alloc);
     for (components) |c| try comps.append(.{ .string = c });
+    for (info.extra_components) |c| try comps.append(.{ .string = c });
     try obj.put(alloc, "components", .{ .array = comps });
 
     try obj.put(alloc, "failed_components", .{ .array = .init(alloc) });
     var dirs: std.json.Array = .init(alloc);
-    for ([_][]const u8{ "config", "logs", "gcodes" }) |d| try dirs.append(.{ .string = d });
+    if (info.directory_count > 0) {
+        for (info.directory_names[0..info.directory_count]) |d| try dirs.append(.{ .string = d });
+    } else {
+        for ([_][]const u8{ "config", "logs", "gcodes" }) |d| try dirs.append(.{ .string = d });
+    }
     try obj.put(alloc, "registered_directories", .{ .array = dirs });
 
     var warns: std.json.Array = .init(alloc);
@@ -470,17 +483,22 @@ pub fn serverInfoHandler(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
         .warnings = info.warnings,
         .cfg = info.cfg,
         .config_file_path = info.config_file_path,
+        .extra_components = info.extra_components,
     };
     if (info.io) |io| {
         info.state_mutex.lockUncancelable(io);
         snap.klippy_connected = info.klippy_connected;
         snap.klippy_state = info.klippy_state;
+        snap.directory_count = info.directory_count;
+        snap.directory_names = info.directory_names;
         info.state_mutex.unlock(io);
         if (info.conns) |c| snap.websocket_count = @intCast(c.count(io));
     } else {
         snap.klippy_connected = info.klippy_connected;
         snap.klippy_state = info.klippy_state;
         snap.websocket_count = info.websocket_count;
+        snap.directory_count = info.directory_count;
+        snap.directory_names = info.directory_names;
     }
     return buildServerInfo(&snap, getRawParam(params), alloc);
 }

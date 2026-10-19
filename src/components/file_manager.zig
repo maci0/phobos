@@ -123,12 +123,137 @@ pub const FileCtx = struct {
     /// Guards metadata_cache. metadata runs under Core today, but lock anyway so
     /// the cache stays correct if it ever moves off-Core. No-op when io unset.
     metadata_cache_mutex: std.Io.Mutex = .init,
+    /// `[file_manager] file_system_observer`. `none` does not watch. The
+    /// printer sets none. `inotify` watches the roots.
+    observer: enum { none, inotify } = .none,
+    /// `root/relative` paths omitted from listings. Forge-X `excludes`.
+    excludes: [][]const u8 = &.{},
+    excludes_owned: bool = false,
+    observer_stop: std.atomic.Value(bool) = .init(false),
+    observer_thread: ?std.Thread = null,
+    observer_fd: i32 = -1,
+    last_fs_name: [160]u8 = undefined,
+    last_fs_len: std.atomic.Value(usize) = .init(0),
 
     pub fn setIo(self: *FileCtx, io: std.Io) void {
         self.io = io;
     }
 
+    /// Replace the exclude list. Each entry is `root/relative`, one per line.
+    pub fn setExcludes(self: *FileCtx, text: []const u8) !void {
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (list.items) |s| self.gpa.free(s);
+            list.deinit(self.gpa);
+        }
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0) continue;
+            try list.append(self.gpa, try self.gpa.dupe(u8, line));
+        }
+        if (self.excludes_owned) {
+            for (self.excludes) |s| self.gpa.free(s);
+            self.gpa.free(self.excludes);
+        }
+        self.excludes = try list.toOwnedSlice(self.gpa);
+        self.excludes_owned = true;
+    }
+
+    /// True when `root/rel` is an exclude or sits under one.
+    pub fn pathExcluded(excludes: []const []const u8, root: []const u8, rel: []const u8) bool {
+        for (excludes) |ex| {
+            if (!std.mem.startsWith(u8, ex, root)) continue;
+            if (ex.len == root.len) return true;
+            if (ex[root.len] != '/') continue;
+            const rest = ex[root.len + 1 ..];
+            if (std.mem.eql(u8, rel, rest)) return true;
+            if (rel.len > rest.len and std.mem.startsWith(u8, rel, rest) and rel[rest.len] == '/') return true;
+        }
+        return false;
+    }
+
+    pub fn startObserver(self: *FileCtx) void {
+        if (self.observer != .inotify or self.observer_thread != null) return;
+        if (self.roots.len == 0) return;
+        const fd_rc = std.os.linux.inotify_init1(0x80000 | 0x800);
+        if (std.os.linux.errno(fd_rc) != .SUCCESS) return;
+        const fd: i32 = @intCast(fd_rc);
+        const mask: u32 = 0x8 | 0x40 | 0x80 | 0x100 | 0x200;
+        var watched: usize = 0;
+        for (self.roots) |root| {
+            const path_z = self.gpa.dupeSentinel(u8, root.path, 0) catch continue;
+            defer self.gpa.free(path_z);
+            const wd = std.os.linux.syscall3(.inotify_add_watch, @as(usize, @bitCast(@as(isize, fd))), @intFromPtr(path_z.ptr), mask);
+            if (std.os.linux.errno(wd) == .SUCCESS) watched += 1;
+        }
+        if (watched == 0) {
+            _ = std.os.linux.close(fd);
+            return;
+        }
+        self.observer_fd = fd;
+        self.observer_stop.store(false, .release);
+        self.last_fs_len.store(0, .release);
+        self.observer_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, observerThread, .{self}) catch {
+            _ = std.os.linux.close(fd);
+            self.observer_fd = -1;
+            return;
+        };
+    }
+
+    fn observerThread(self: *FileCtx) void {
+        const fd = self.observer_fd;
+        var buf: [4096]u8 align(8) = undefined;
+        while (!self.observer_stop.load(.acquire)) {
+            const n = std.os.linux.read(fd, &buf, buf.len);
+            const err = std.os.linux.errno(n);
+            if (err == .AGAIN) {
+                var req = std.os.linux.timespec{ .sec = 0, .nsec = 20_000_000 };
+                _ = std.os.linux.nanosleep(&req, null);
+                continue;
+            }
+            if (err != .SUCCESS or n == 0) break;
+            var off: usize = 0;
+            const hdr_size = @sizeOf(std.os.linux.inotify_event);
+            while (off + hdr_size <= n) {
+                var hdr: std.os.linux.inotify_event = undefined;
+                @memcpy(std.mem.asBytes(&hdr), buf[off..][0..hdr_size]);
+                if (hdr.len > 0 and off + hdr_size + hdr.len <= n) {
+                    const raw = buf[off + hdr_size ..][0..hdr.len];
+                    const end = std.mem.indexOfScalar(u8, raw, 0) orelse raw.len;
+                    const copy_len = @min(end, self.last_fs_name.len);
+                    if (copy_len > 0) {
+                        @memcpy(self.last_fs_name[0..copy_len], raw[0..copy_len]);
+                        self.last_fs_len.store(copy_len, .release);
+                    }
+                }
+                const step = hdr_size + hdr.len;
+                if (step == 0) break;
+                off += step;
+            }
+        }
+    }
+
+    pub fn stopObserver(self: *FileCtx) void {
+        self.observer_stop.store(true, .release);
+        if (self.observer_fd >= 0) {
+            _ = std.os.linux.close(self.observer_fd);
+            self.observer_fd = -1;
+        }
+        if (self.observer_thread) |th| {
+            th.join();
+            self.observer_thread = null;
+        }
+    }
+
     pub fn deinit(self: *FileCtx) void {
+        self.stopObserver();
+        if (self.excludes_owned) {
+            for (self.excludes) |s| self.gpa.free(s);
+            self.gpa.free(self.excludes);
+            self.excludes = &.{};
+            self.excludes_owned = false;
+        }
         var it = self.metadata_cache.iterator();
         while (it.next()) |e| {
             e.value_ptr.arena.deinit();
@@ -466,6 +591,7 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
+        if (FileCtx.pathExcluded(ctx.excludes, root_name, entry.path)) continue;
         const rel = try alloc.dupe(u8, entry.path);
         const abs = try std.fs.path.join(alloc, &.{ root.path, rel });
         var info = try buildPathInfo(io, alloc, abs, root);
@@ -499,6 +625,8 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
+        const child_rel = if (resolved.rel.len == 0) entry.name else try std.fmt.allocPrint(alloc, "{s}/{s}", .{ resolved.rel, entry.name });
+        if (FileCtx.pathExcluded(ctx.excludes, resolved.root.name, child_rel)) continue;
         const child_abs = try std.fs.path.join(alloc, &.{ resolved.abs, entry.name });
         var info = try buildPathInfo(io, alloc, child_abs, resolved.root);
         switch (entry.kind) {
@@ -559,7 +687,7 @@ fn diskUsage(alloc: std.mem.Allocator, abs: []const u8) !std.json.Value {
 
 /// Fill total/free bytes via the statfs syscall; leaves them 0 on failure.
 fn statfsInto(alloc: std.mem.Allocator, abs: []const u8, total: *u64, free: *u64) void {
-    const path_z = alloc.dupeZ(u8, abs) catch return;
+    const path_z = alloc.dupeSentinel(u8, abs, 0) catch return;
     defer alloc.free(path_z);
     var sfs: LinuxStatfs = undefined;
     const rc = std.os.linux.syscall2(.statfs, @intFromPtr(path_z.ptr), @intFromPtr(&sfs));
@@ -922,8 +1050,10 @@ pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    // Match Moonraker: empty/missing filename → empty list (not an error).
-    const filename = getOptStr(params, "filename") orelse return .{ .array = .init(alloc) };
+    // Moonraker get_str("filename") is 400 "No data for argument: filename"
+    // when the argument is absent. A present empty string looks up metadata
+    // and returns an empty list.
+    const filename = getOptStr(params, "filename") orelse return error.MissingFilename;
     if (filename.len == 0) return .{ .array = .init(alloc) };
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
@@ -1110,6 +1240,49 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 }
 
 // ---- normalizeRel / resolveRequestPath (path safety) ----
+
+test "excludes omit a directory from the file list" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tr = try TestRoots.init(arena.allocator());
+    defer tr.deinit();
+    try tr.writeFile("gcodes/keep.gcode", "G1\n");
+    try tr.writeFile("gcodes/.mod/secret.gcode", "G1\n");
+    var c = tr.ctx();
+    defer c.deinit();
+    try c.setExcludes("gcodes/.mod\n");
+    const listed = try handleList(@ptrCast(&c), try objParams(arena.allocator(), "{\"root\":\"gcodes\"}"), arena.allocator());
+    var saw_keep = false;
+    var saw_secret = false;
+    for (listed.array.items) |item| {
+        const path = item.object.get("path").?.string;
+        if (std.mem.eql(u8, path, "keep.gcode")) saw_keep = true;
+        if (std.mem.indexOf(u8, path, "secret.gcode") != null) saw_secret = true;
+    }
+    try testing.expect(saw_keep);
+    try testing.expect(!saw_secret);
+    try testing.expect(FileCtx.pathExcluded(c.excludes, "gcodes", ".mod/secret.gcode"));
+}
+
+test "inotify observer records a created file name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tr = try TestRoots.init(arena.allocator());
+    defer tr.deinit();
+    var c = tr.ctx();
+    defer c.deinit();
+    c.observer = .inotify;
+    c.startObserver();
+    try testing.expect(c.observer_thread != null);
+    try tr.writeFile("gcodes/watched.gcode", "G1\n");
+    var i: usize = 0;
+    while (i < 50 and c.last_fs_len.load(.acquire) == 0) : (i += 1) {
+        std.Io.sleep(tr.io, .{ .nanoseconds = 20_000_000 }, .real) catch {};
+    }
+    const n = c.last_fs_len.load(.acquire);
+    try testing.expect(n > 0);
+    try testing.expectEqualStrings("watched.gcode", c.last_fs_name[0..n]);
+}
 
 test "normalizeRel: collapses . and empty segments" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1553,12 +1726,11 @@ test "handleThumbnails: parses embedded thumbnails from gcode header" {
     try testing.expectEqual(@as(i64, 32), t.get("height").?.integer);
     try testing.expectEqualStrings("iVBORw0KGgoAAAANSUhEUg==", t.get("data").?.string);
 
-    // Missing/empty filename → empty list (matches Moonraker behavior).
-    {
-        const r = try handleThumbnails(@ptrCast(&c), .null, a);
-        try testing.expect(r == .array);
-        try testing.expectEqual(@as(usize, 0), r.array.items.len);
-    }
+    // Missing filename is 400. An empty string is a lookup that finds nothing.
+    try testing.expectError(error.MissingFilename, handleThumbnails(@ptrCast(&c), .null, a));
+    const empty = try handleThumbnails(@ptrCast(&c), try objParams(a, "{\"filename\":\"\"}"), a);
+    try testing.expect(empty == .array);
+    try testing.expectEqual(@as(usize, 0), empty.array.items.len);
 }
 
 test "handleThumbnails: non-gcode file returns empty list" {
@@ -1629,12 +1801,12 @@ test "registerFileManager: wires routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/server/files/zip") != null);
 
     const expected_methods = [_][]const u8{
-        "server.files.roots",            "server.files.list",
-        "server.files.metadata",         "server.files.metascan",
-        "server.files.thumbnails",       "server.files.get_directory",
-        "server.files.post_directory",   "server.files.delete_directory",
-        "server.files.move",             "server.files.copy",
-        "server.files.zip",              "server.files.delete_file",
+        "server.files.roots",          "server.files.list",
+        "server.files.metadata",       "server.files.metascan",
+        "server.files.thumbnails",     "server.files.get_directory",
+        "server.files.post_directory", "server.files.delete_directory",
+        "server.files.move",           "server.files.copy",
+        "server.files.zip",            "server.files.delete_file",
     };
     for (expected_methods) |m| {
         try testing.expect(d.methods.get(m) != null);

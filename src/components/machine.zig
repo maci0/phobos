@@ -19,9 +19,9 @@
 //!   GET  /machine/peripherals/canbus → machine.peripherals.canbus
 //!
 //! Reboot/shutdown are DELIBERATE NO-OPs: they return Moonraker's "ok" shape
-//! but never touch the host. Firing `systemctl reboot` rebooted the dev host,
-//! and target printer boards lack systemd anyway, so real host power control is
-//! left to an opt-in platform driver (see handleReboot/handleShutdown).
+//! but never touch the host. AGENT: do not implement them, not behind a flag
+//! and not as a provider. `systemctl reboot` rebooted the dev host. See
+//! handleReboot/handleShutdown.
 //! Service actions (start/stop/restart) run real `systemctl` commands when io is
 //! wired; they fall back to optimistic in-memory state in unit tests (io == null).
 //!
@@ -91,13 +91,15 @@ pub const default_allowed_services = [_][]const u8{
 /// System provider kind — which init/service manager drives machine.services.*
 /// (Moonraker's `provider` config). phobos collapses systemd_cli/systemd_dbus to
 /// one `systemd` path (both shell out to `systemctl`); `supervisord*` uses
-/// `supervisorctl`; `none` keeps service state in-memory only. reboot/shutdown
-/// stay deliberate no-ops for every provider (host safety).
-pub const Provider = enum { systemd, supervisord, none };
+/// `supervisorctl`; Forge-X `simple` runs `<script_path>/<service> <action>`.
+/// `none` keeps service state in-memory only. reboot/shutdown stay deliberate
+/// no-ops for every provider, including `simple` (host safety).
+pub const Provider = enum { systemd, supervisord, simple, none };
 
 /// Map a Moonraker `provider` config string to phobos's provider kind.
 pub fn providerKind(name: []const u8) Provider {
     if (std.mem.startsWith(u8, name, "supervisord")) return .supervisord;
+    if (std.mem.eql(u8, name, "simple")) return .simple;
     if (std.mem.eql(u8, name, "none")) return .none;
     return .systemd; // systemd_dbus (default), systemd_cli, or unknown → systemd
 }
@@ -175,6 +177,12 @@ pub const MachineCtx = struct {
     /// duped a config value (so deinit frees it; the default literal is not).
     provider_name: []const u8 = "systemd_dbus",
     provider_owned: bool = false,
+    /// Forge-X `[machine] script_path`. `simple` runs `<script_path>/<service> <action>`.
+    /// Empty means the action stays in-memory and no script is spawned.
+    script_path: []const u8 = "",
+    script_path_owned: bool = false,
+    /// `[machine] script_timeout` seconds. Stored for the simple provider.
+    script_timeout_s: f64 = 30,
     /// Set when a sudo password has been supplied. Owned by the ctx allocator.
     sudo_password: ?[]const u8 = null,
     /// Cached result of the last sudo validation (via sudo -S -l).
@@ -184,7 +192,7 @@ pub const MachineCtx = struct {
     /// Handle for the proc_stat timer thread, joined in deinit.
     proc_stat_thread: ?std.Thread = null,
     /// Rolling sample buffer for moonraker_stats (length `moonraker_stats_len`).
-    moonraker_stats: [moonraker_stats_len]MoonrakerSample = [_]MoonrakerSample{.{}} ** moonraker_stats_len,
+    moonraker_stats: [moonraker_stats_len]MoonrakerSample = @splat(.{}),
     moonraker_stats_head: usize = 0,
     moonraker_stats_count: usize = 0,
     moonraker_stats_mutex: std.Io.Mutex = .init,
@@ -230,11 +238,11 @@ pub const MachineCtx = struct {
     /// Previous-tick per-interface byte totals for computing proc_stats network
     /// bandwidth (bytes/sec). Inline + fixed-size (no heap); touched only by the
     /// single proc_stat timer thread, so no lock.
-    net_prev: [max_net_ifaces]NetSample = [_]NetSample{.{}} ** max_net_ifaces,
+    net_prev: [max_net_ifaces]NetSample = @splat(.{}),
     /// Separate baseline for the GET /machine/proc_stats handler so a GET can't
     /// perturb the timer's `net_prev` (which would spike the pushed samples). GETs
     /// are Core-serialised, so this needs no lock either.
-    net_prev_get: [max_net_ifaces]NetSample = [_]NetSample{.{}} ** max_net_ifaces,
+    net_prev_get: [max_net_ifaces]NetSample = @splat(.{}),
 
     pub const ServiceEntry = struct {
         active_state: []const u8,
@@ -275,6 +283,15 @@ pub const MachineCtx = struct {
         if (self.provider_owned) self.gpa.free(self.provider_name);
         self.provider_name = dup;
         self.provider_owned = true;
+    }
+
+    /// Directory of Forge-X init scripts. A trailing slash is kept as given;
+    /// `std.fs.path.join` builds `<dir>/<service>`.
+    pub fn setScriptPath(self: *MachineCtx, path: []const u8) !void {
+        const dup = try self.gpa.dupe(u8, path);
+        if (self.script_path_owned) self.gpa.free(self.script_path);
+        self.script_path = dup;
+        self.script_path_owned = true;
     }
 
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
@@ -320,6 +337,7 @@ pub const MachineCtx = struct {
         if (self.system_info_arena) |*ar| ar.deinit();
         if (self.sudo_password) |p| self.gpa.free(p);
         if (self.provider_owned) self.gpa.free(self.provider_name);
+        if (self.script_path_owned) self.gpa.free(self.script_path);
         self.sudo_password = null;
         // Free service entry keys (StringHashMap stores slices, not owned copies).
         var it = self.services.iterator();
@@ -590,8 +608,9 @@ pub fn parseCpuinfo(text: []const u8) CpuParse {
     out.hardware_desc = matchKeyColon(text, "Hardware") orelse "";
     out.model = matchKeyColon(text, "Model") orelse "";
     if (matchKeyColon(text, "Serial")) |sn| {
-        // Strip leading zeros like Moonraker's `0*` regex group.
-        out.serial_number = std.mem.trimStart(u8, sn, "0");
+        // Moonraker's `0*(.+)` leaves a single 0 when the serial is all zeros.
+        const stripped = std.mem.trimStart(u8, sn, "0");
+        out.serial_number = if (stripped.len == 0) "0" else stripped;
     }
     return out;
 }
@@ -665,7 +684,7 @@ fn buildCpuInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "cpu_count", .{ .integer = cpu_count });
     try obj.put(alloc, "bits", .{ .string = if (@bitSizeOf(usize) == 64) "64bit" else "32bit" });
-    try obj.put(alloc, "processor", .{ .string = @tagName(@import("builtin").cpu.arch) });
+    try obj.put(alloc, "processor", .{ .string = unameField(.machine, alloc) });
     try obj.put(alloc, "cpu_desc", .{ .string = cpu.cpu_desc });
     try obj.put(alloc, "serial_number", .{ .string = cpu.serial_number });
     try obj.put(alloc, "hardware_desc", .{ .string = cpu.hardware_desc });
@@ -694,6 +713,25 @@ pub const DistroParse = struct {
 /// Pure parser for os-release syntax (KEY=VALUE, value optionally quoted).
 /// Robust against missing keys / malformed lines. Returned slices borrow
 /// `text`.
+/// `distro.version_parts()`: the first three numeric dot fields of VERSION_ID.
+/// `1.4.2-6966333` is major 1, minor 4, build_number 2. A version with no
+/// digits yields empty strings. The slices borrow `version`.
+pub fn parseVersionParts(version: []const u8) struct { major: []const u8 = "", minor: []const u8 = "", build_number: []const u8 = "" } {
+    var out: [3][]const u8 = .{ "", "", "" };
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < version.len and n < 3) {
+        while (i < version.len and !std.ascii.isDigit(version[i])) i += 1;
+        if (i >= version.len) break;
+        const start = i;
+        while (i < version.len and std.ascii.isDigit(version[i])) i += 1;
+        out[n] = version[start..i];
+        n += 1;
+        if (i < version.len and version[i] == '.') i += 1;
+    }
+    return .{ .major = out[0], .minor = out[1], .build_number = out[2] };
+}
+
 pub fn parseOsRelease(text: []const u8) DistroParse {
     var out: DistroParse = .{};
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -839,6 +877,12 @@ fn buildDistribution(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value
     try obj.put(alloc, "name", .{ .string = d.name });
     try obj.put(alloc, "id", .{ .string = d.id });
     try obj.put(alloc, "version", .{ .string = d.version });
+    const parts = parseVersionParts(d.version);
+    var version_parts: std.json.ObjectMap = .empty;
+    try version_parts.put(alloc, "major", .{ .string = parts.major });
+    try version_parts.put(alloc, "minor", .{ .string = parts.minor });
+    try version_parts.put(alloc, "build_number", .{ .string = parts.build_number });
+    try obj.put(alloc, "version_parts", .{ .object = version_parts });
     try obj.put(alloc, "codename", .{ .string = d.version_codename });
     // release_info: distro.distro_release_info() — empty dict on os-release
     // based distros.
@@ -848,12 +892,24 @@ fn buildDistribution(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value
     return .{ .object = obj };
 }
 
+const UnameField = enum { release, machine };
+
+/// `release` is the kernel version. `machine` is `uname -m` (`armv7l` on the
+/// printer), which is what Moonraker uses for `processor` when
+/// `platform.processor()` is empty.
+fn unameField(which: UnameField, alloc: std.mem.Allocator) []const u8 {
+    const uts = std.posix.uname();
+    const raw = switch (which) {
+        .release => std.mem.sliceTo(&uts.release, 0),
+        .machine => std.mem.sliceTo(&uts.machine, 0),
+    };
+    return alloc.dupe(u8, raw) catch "";
+}
+
 /// Kernel release string from uname(2). Empty string on failure.
 fn readKernelVersion(ctx: *MachineCtx, alloc: std.mem.Allocator) []const u8 {
     _ = ctx;
-    const uts = std.posix.uname();
-    const rel = std.mem.sliceTo(&uts.release, 0);
-    return alloc.dupe(u8, rel) catch "";
+    return unameField(.release, alloc);
 }
 
 // ===========================================================================
@@ -1005,9 +1061,18 @@ fn parseIpAddrJson(alloc: std.mem.Allocator, text: []const u8) NetInfo {
 /// absent or `ip` is unavailable/failed.
 fn buildNetworkInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) NetInfo {
     const empty: NetInfo = .{ .network = .{ .object = .empty }, .canbus = .{ .object = .empty } };
-    const res = ctx.runCmd(alloc, &.{ "ip", "-json", "-det", "address" }) catch return empty;
-    if (res.stdout.len == 0) return empty;
-    return parseIpAddrJson(alloc, res.stdout);
+    // Forge-X keeps `ip` in /usr/sbin, which is not on a chroot daemon PATH.
+    const tries = [_][]const []const u8{
+        &.{ "ip", "-json", "-det", "address" },
+        &.{ "/usr/sbin/ip", "-json", "-det", "address" },
+        &.{ "/sbin/ip", "-json", "-det", "address" },
+    };
+    for (tries) |argv| {
+        const res = ctx.runCmd(alloc, argv) catch continue;
+        if (res.stdout.len == 0) continue;
+        return parseIpAddrJson(alloc, res.stdout);
+    }
+    return empty;
 }
 
 fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
@@ -1029,6 +1094,14 @@ fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Val
             }
         }
     }
+    // Moonraker's simple/none provider replaces a bare-metal "none" with
+    // unknown/unknown (BaseProvider.check_virt_status). A detected container
+    // is kept. The live Forge-X printer reports unknown/unknown.
+    const kind = providerKind(ctx.provider_name);
+    if ((kind == .simple or kind == .none) and std.mem.eql(u8, v.virt_type, "none")) {
+        v.virt_type = "unknown";
+        v.virt_identifier = "unknown";
+    }
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "virt_type", .{ .string = v.virt_type });
     try obj.put(alloc, "virt_identifier", .{ .string = v.virt_identifier });
@@ -1043,12 +1116,14 @@ fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Val
 /// phobos registers or stubs. Mirrors the `available_services` key in
 /// Moonraker's machine._handle_info():
 ///   sorted([name for name, comp in self.server.components.items() if comp])
-pub fn buildAvailableServices(_: *const MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
-    const list = &available_services;
+pub fn buildAvailableServices(ctx: *const MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
     var arr: std.json.Array = .init(alloc);
-    for (list) |s| {
-        try arr.append(.{ .string = s });
-    }
+    // Forge-X `simple` (and `none`) do not discover units. Moonraker's
+    // SimpleProvider leaves available_services empty, which is what the
+    // printer reports. systemd and supervisord keep the known list.
+    const kind = providerKind(ctx.provider_name);
+    if (kind == .simple or kind == .none) return .{ .array = arr };
+    for (available_services) |s| try arr.append(.{ .string = s });
     return .{ .array = arr };
 }
 
@@ -1056,6 +1131,8 @@ pub fn buildAvailableServices(_: *const MachineCtx, alloc: std.mem.Allocator) !s
 /// `refreshServiceStates` when io is available so the response reflects
 /// live systemd data. Falls back to in-memory tracking when io is absent.
 pub fn buildServiceState(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
+    const kind = providerKind(ctx.provider_name);
+    if (kind == .simple or kind == .none) return .{ .object = .empty };
     if (ctx.io != null) refreshServiceStates(ctx, alloc);
     const list = &available_services;
     var obj: std.json.ObjectMap = .empty;
@@ -1095,6 +1172,9 @@ fn errorOut() std.json.Value {
 ///
 /// Must only be called when ctx.io is available.
 fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
+    // Only the systemd provider queries systemctl. `simple` and `none` must
+    // not spawn it; a GET of system_info would otherwise hit the host.
+    if (providerKind(ctx.provider_name) != .systemd) return;
     const io = ctx.io orelse return;
 
     // Build argv: systemctl show -p ActiveState,SubState --value <svc1> <svc2> ...
@@ -1480,16 +1560,13 @@ fn uptimeSeconds() f64 {
 
 /// POST /machine/reboot → "ok".
 ///
-/// NOTE: deliberately a NO-OP. Real host control is intentionally disabled.
-/// Reasons:
-///   1. Firing `sudo systemctl reboot` here rebooted the developer host during
-///      testing. A stray API call (or a UI probe) must never take the box down.
-///   2. The target appliances (printer mainboards) generally have no systemd /
-///      `systemctl`, so the systemctl path is wrong for the real deployment too.
-/// We return the same "ok" shape Moonraker returns so API/behaviour parity holds
-/// for callers; actual reboot wiring is left to a platform-specific driver that
-/// is opt-in and cannot point at a dev machine. See `runSudoCmd` (kept for
-/// services/sudo paths) — it is intentionally NOT called from here.
+/// AGENT: NEVER implement this. It stays a no-op that returns "ok".
+/// Do not call systemctl reboot, systemctl poweroff, shutdown, reboot,
+/// poweroff, or a guest/host halt. Do not add a flag or a provider that
+/// runs those commands. Doing so reboots the machine that runs the tests.
+/// `sudo systemctl reboot` already rebooted the developer host once.
+/// The "ok" string is Moonraker's response shape and nothing else.
+/// `runSudoCmd` is intentionally not called from here.
 pub fn handleReboot(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     _ = ctx_ptr;
     return .{ .string = "ok" };
@@ -1497,10 +1574,9 @@ pub fn handleReboot(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator
 
 /// POST /machine/shutdown → "ok".
 ///
-/// NOTE: deliberately a NO-OP — same rationale as `handleReboot` above
-/// (host-reboot hazard + printers lack systemctl). Returns Moonraker's "ok"
-/// shape without touching the host. Real power-off is left to an opt-in
-/// platform driver.
+/// AGENT: NEVER implement this. Same rule as `handleReboot`. It returns
+/// "ok" and must not power off, shut down, or halt the host or the guest.
+/// Do not wire systemctl, shutdown, poweroff, or reboot behind a flag.
 pub fn handleShutdown(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     _ = ctx_ptr;
     return .{ .string = "ok" };
@@ -1538,6 +1614,10 @@ fn prefixWithOptIndex(name: []const u8, base: []const u8) bool {
         if (!std.ascii.isDigit(c)) return false;
     }
     return true;
+}
+
+fn hostPowerWord(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "reboot") or std.mem.eql(u8, arg, "shutdown") or std.mem.eql(u8, arg, "poweroff");
 }
 
 /// Optimistic post-action state for a service when the manager can't be queried
@@ -1617,6 +1697,24 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
                     new_active, new_sub = optimisticState(action);
                 }
             },
+            .simple => {
+                // Forge-X SimpleProvider: `<script_path>/<service> <action>`.
+                // No shell. reboot/shutdown/poweroff are refused. An empty
+                // script_path does not spawn anything.
+                new_active, new_sub = optimisticState(action);
+                if (!hostPowerWord(action_str) and !hostPowerWord(name) and ctx.script_path.len != 0) {
+                    if (std.fs.path.join(alloc, &.{ ctx.script_path, name })) |script| {
+                        defer alloc.free(script);
+                        if (!hostPowerWord(script)) {
+                            var argv: [2][]const u8 = .{ script, action_str };
+                            if (ctx.runCmd(alloc, &argv)) |ar| {
+                                alloc.free(ar.stdout);
+                                alloc.free(ar.stderr);
+                            } else |_| {}
+                        }
+                    } else |_| {}
+                }
+            },
             .none => unreachable,
         }
 
@@ -1628,12 +1726,14 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
         }
 
         if (ctx.bus) |bus| {
-            var svc_obj: std.json.ObjectMap = .empty;
-            svc_obj.put(alloc, "active_state", .{ .string = new_active }) catch {};
-            svc_obj.put(alloc, "sub_state", .{ .string = new_sub }) catch {};
-            var outer: std.json.ObjectMap = .empty;
-            outer.put(alloc, name, .{ .object = svc_obj }) catch {};
-            _ = bus.emitLocked(ctx.io.?, notify.names.service_state_changed, .{ .object = outer }) catch {};
+            if (ctx.io) |io| {
+                var svc_obj: std.json.ObjectMap = .empty;
+                svc_obj.put(alloc, "active_state", .{ .string = new_active }) catch {};
+                svc_obj.put(alloc, "sub_state", .{ .string = new_sub }) catch {};
+                var outer: std.json.ObjectMap = .empty;
+                outer.put(alloc, name, .{ .object = svc_obj }) catch {};
+                _ = bus.emitLocked(io, notify.names.service_state_changed, .{ .object = outer }) catch {};
+            }
         }
 
         return .{ .string = "ok" };
@@ -2092,7 +2192,7 @@ fn formatV4l2Version(alloc: std.mem.Allocator, v: u32) []const u8 {
 fn queryV4l2Cap(io: std.Io, alloc: std.mem.Allocator, dev_path: []const u8) ?V4l2Cap {
     const f = Dir.cwd().openFile(io, dev_path, .{}) catch return null;
     defer f.close(io);
-    var buf: [104]u8 align(8) = [_]u8{0} ** 104;
+    var buf: [104]u8 align(8) = @splat(0);
     const rc = std.os.linux.ioctl(f.handle, VIDIOC_QUERYCAP, @intFromPtr(&buf));
     // Raw linux syscalls return -errno (a large usize) on failure.
     const signed: isize = @bitCast(rc);
@@ -2220,6 +2320,8 @@ test "parseCpuinfo: ARM Hardware/Serial/Model fields" {
     const r = parseCpuinfo(txt);
     try testing.expectEqualStrings("BCM2835", r.hardware_desc);
     try testing.expectEqualStrings("12345678", r.serial_number); // leading zeros stripped
+    const zero = parseCpuinfo("Serial\t\t: 0000000000000000\n");
+    try testing.expectEqualStrings("0", zero.serial_number);
     try testing.expectEqualStrings("Raspberry Pi 4 Model B Rev 1.4", r.model);
 }
 
@@ -2250,6 +2352,56 @@ test "parseMemTotal: missing/garbage yields zero" {
 }
 
 // ---- parseOsRelease ----
+
+test "parseVersionParts: Forge-X VERSION_ID 1.4.2-6966333" {
+    const p = parseVersionParts("1.4.2-6966333");
+    try testing.expectEqualStrings("1", p.major);
+    try testing.expectEqualStrings("4", p.minor);
+    try testing.expectEqualStrings("2", p.build_number);
+    const partial = parseVersionParts("7.2");
+    try testing.expectEqualStrings("7", partial.major);
+    try testing.expectEqualStrings("2", partial.minor);
+    try testing.expectEqualStrings("", partial.build_number);
+    const empty = parseVersionParts("");
+    try testing.expectEqualStrings("", empty.major);
+    try testing.expectEqualStrings("", empty.build_number);
+}
+
+test "buildDistribution includes version_parts" {
+    var c = testCtx(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const v = try buildDistribution(&c, arena.allocator());
+    const parts = v.object.get("version_parts").?.object;
+    try testing.expect(parts.get("major") != null);
+    try testing.expect(parts.get("minor") != null);
+    try testing.expect(parts.get("build_number") != null);
+}
+
+test "simple provider virtualization is unknown outside a container" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = MachineCtx.init(a, null, null);
+    defer c.deinit();
+    try c.setProvider("simple");
+    const v = try buildVirtualization(&c, a);
+    try testing.expectEqualStrings("unknown", v.object.get("virt_type").?.string);
+    try testing.expectEqualStrings("unknown", v.object.get("virt_identifier").?.string);
+}
+
+test "simple provider reports no discovered services" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = MachineCtx.init(a, null, null);
+    defer c.deinit();
+    try c.setProvider("simple");
+    const listed = try buildAvailableServices(&c, a);
+    try testing.expectEqual(@as(usize, 0), listed.array.items.len);
+    const state = try buildServiceState(&c, a);
+    try testing.expectEqual(@as(usize, 0), state.object.count());
+}
 
 test "parseOsRelease: quoted PRETTY_NAME and ID" {
     const txt =
@@ -2444,6 +2596,28 @@ test "parseIpAddrJson: UP ethernet + CAN interfaces" {
     try testing.expectEqual(@as(i64, 10), can0.get("tx_queue_len").?.integer);
     try testing.expectEqual(@as(i64, 500000), can0.get("bitrate").?.integer);
     try testing.expectEqualStrings("mcp251xfd", can0.get("driver").?.string);
+}
+
+test "buildNetworkInfo uses /usr/sbin/ip when ip is not on PATH" {
+    const Mock = struct {
+        fn run(_: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+            if (argv.len > 0 and std.mem.eql(u8, argv[0], "/usr/sbin/ip")) {
+                const out = try gpa.dupe(u8,
+                    \\[{"ifname":"wlan0","link_type":"ether","operstate":"UP","address":"dc:84:03:6d:ea:6a","addr_info":[{"family":"inet","local":"192.168.0.150","scope":"global"}]}]
+                );
+                return .{ .stdout = out, .stderr = &.{} };
+            }
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    var dummy: u8 = 0;
+    var c = MachineCtx.init(testing.allocator, null, null);
+    defer c.deinit();
+    c.setRunCmdFn(Mock.run, @ptrCast(&dummy));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const net = buildNetworkInfo(&c, arena.allocator());
+    try testing.expect(net.network.object.get("wlan0") != null);
 }
 
 test "parseIpAddrJson: garbage/empty yields empty maps" {
@@ -2697,6 +2871,11 @@ test "handleProcStats: full shape present" {
     try testing.expectEqual(@as(usize, 1), o.get("moonraker_stats").?.array.items.len);
 }
 
+// AGENT: NEVER implement this test for real. machine.reboot and
+// machine.shutdown stay no-ops that return "ok". Running systemctl reboot,
+// systemctl poweroff, shutdown, reboot, or poweroff halts the machine that
+// runs the tests. Do not add a flag, a provider, or a real path behind the
+// stub. A skipped or no-op assertion is the correct result.
 test "handleReboot/handleShutdown: ack ok (io null)" {
     var c = MachineCtx.init(testing.allocator, null, null);
     defer c.deinit();
@@ -2789,6 +2968,7 @@ test "providerKind + supervisorState parsing" {
     try testing.expectEqual(Provider.systemd, providerKind("systemd_cli"));
     try testing.expectEqual(Provider.systemd, providerKind("anything_else"));
     try testing.expectEqual(Provider.supervisord, providerKind("supervisord_cli"));
+    try testing.expectEqual(Provider.simple, providerKind("simple"));
     try testing.expectEqual(Provider.none, providerKind("none"));
     const run = supervisorState("klipper                          RUNNING   pid 1, uptime 0:00:05");
     try testing.expectEqualStrings("active", run[0]);
@@ -2857,6 +3037,39 @@ test "provider abstraction: service action dispatches to the right manager" {
         _ = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
         try testing.expectEqual(@as(usize, 0), mock.calls);
         try testing.expectEqualStrings("active", c.services.get("klipper").?.active_state);
+    }
+    // simple → <script_path>/<service> <action>, never systemctl.
+    // The mock records the path; the test does not spawn the script.
+    {
+        const Rec = struct {
+            path: []const u8 = "",
+            action: []const u8 = "",
+            calls: usize = 0,
+            alloc: std.mem.Allocator,
+            fn run(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+                const self: *@This() = @ptrCast(@alignCast(ctx));
+                self.calls += 1;
+                if (argv.len >= 1) self.path = try self.alloc.dupe(u8, argv[0]);
+                if (argv.len >= 2) self.action = try self.alloc.dupe(u8, argv[1]);
+                _ = gpa;
+                return .{ .stdout = &.{}, .stderr = &.{} };
+            }
+        };
+        var rec = Rec{ .alloc = testing.allocator };
+        defer if (rec.path.len > 0) testing.allocator.free(rec.path);
+        defer if (rec.action.len > 0) testing.allocator.free(rec.action);
+        var c = MachineCtx.init(a, null, null);
+        defer c.deinit();
+        try c.setProvider("simple");
+        try c.setScriptPath("/no/such/scripts");
+        c.setRunCmdFn(Rec.run, @ptrCast(&rec));
+        _ = try handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+        try testing.expectEqual(@as(usize, 1), rec.calls);
+        try testing.expectEqualStrings("/no/such/scripts/klipper", rec.path);
+        try testing.expectEqualStrings("restart", rec.action);
+        _ = try handleReboot(@ptrCast(&c), .null, a);
+        _ = try handleShutdown(@ptrCast(&c), .null, a);
+        try testing.expectEqual(@as(usize, 1), rec.calls);
     }
 }
 
@@ -3273,7 +3486,8 @@ test "runSudoCheck: returns a valid ?bool, never crashes" {
     _ = result2;
 
     // Long password with special chars.
-    const result3 = runSudoCheck(io, testing.allocator, "a" ** 4096);
+    const long_pw: [4096]u8 = @splat('a');
+    const result3 = runSudoCheck(io, testing.allocator, &long_pw);
     _ = result3;
 }
 

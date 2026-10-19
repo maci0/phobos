@@ -73,6 +73,11 @@ pub const AnnouncementsCtx = struct {
     /// Per-feed ETag from the last successful fetch, for `If-None-Match`
     /// conditional GETs (keyed by feed name; both key and value gpa-owned).
     etags: std.StringHashMap([]u8) = undefined,
+    /// `[announcements] enable_moonlight`. Moonraker default is true. When
+    /// false, remote Moonlight fetches return no XML.
+    moonlight_enabled: bool = true,
+    /// `[announcements] dev_mode`. When set, feeds are not fetched from Moonlight.
+    dev_mode: bool = false,
 
     pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
         self.io = io;
@@ -257,7 +262,22 @@ pub const AnnouncementsCtx = struct {
     /// Fetch RSS feed from Moonlight and store new entries.
     /// Returns true if any entries were added or removed.
     /// Skips fetch when io is null (no network, e.g. tests or dump-api).
+    /// Add a configured subscription. Built-in and existing names are left as they are.
+    /// Does not fetch the feed.
+    pub fn addSubscription(self: *AnnouncementsCtx, name: []const u8) !void {
+        if (name.len == 0) return;
+        const owned = try self.gpa.alloc(u8, name.len);
+        errdefer self.gpa.free(owned);
+        for (name, 0..) |ch, i| owned[i] = std.ascii.toLower(ch);
+        if (self.hasFeed(owned)) {
+            self.gpa.free(owned);
+            return;
+        }
+        try self.feeds.append(self.gpa, owned);
+    }
+
     pub fn fetchAndUpdateFeed(self: *AnnouncementsCtx, alloc: std.mem.Allocator, feed_name: []const u8) !bool {
+        if (!self.moonlight_enabled or self.dev_mode) return false;
         const io = self.io orelse return false;
 
         // Build URL: https://arksine.github.io/moonlight/assets/{feed}.xml
@@ -493,7 +513,7 @@ fn checkWakes(self: *AnnouncementsCtx, alloc: std.mem.Allocator) void {
         ne.put(alloc, "dismissed", .{ .bool = false }) catch {};
         ne.put(alloc, "date_dismissed", .null) catch {};
         ne.put(alloc, "dismiss_wake", .null) catch {};
-        const key_z = alloc.dupeZ(u8, kv.key_ptr.*) catch continue;
+        const key_z = alloc.dupeSentinel(u8, kv.key_ptr.*, 0) catch continue;
         self.store.insertItem(alloc, ns_entries, key_z, .{ .object = ne }) catch |err| {
             std.debug.print("phobos: warning: failed to persist announcement '{s}': {} — dismiss state lost on restart\n", .{ kv.key_ptr.*, err });
         };
@@ -734,7 +754,7 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
         try new_entry.put(alloc, "dismiss_wake", .null);
     }
 
-    const key_z = try alloc.dupeZ(u8, key);
+    const key_z = try alloc.dupeSentinel(u8, key, 0);
     c.store.insertItem(alloc, ns_entries, key_z, .{ .object = new_entry }) catch |err| {
         std.debug.print("phobos: warning: failed to persist dismissed announcement '{s}': {} — dismiss state lost on restart\n", .{ key, err });
     };
@@ -848,7 +868,7 @@ fn pruneEntriesByFeed(c: *AnnouncementsCtx, alloc: std.mem.Allocator, feed_name:
                     else => continue,
                 };
                 if (!std.ascii.eqlIgnoreCase(efeed, feed_name)) continue;
-                const key_z = alloc.dupeZ(u8, kv.key_ptr.*) catch continue;
+                const key_z = alloc.dupeSentinel(u8, kv.key_ptr.*, 0) catch continue;
                 _ = c.store.deleteItem(alloc, ns_entries, key_z) catch .null;
             }
         },
@@ -1101,6 +1121,34 @@ test "handleListFeeds: returns built-in feeds" {
     }
     try testing.expect(found_mr);
     try testing.expect(found_kl);
+}
+
+test "addSubscription: configured feed is listed and dev_mode skips fetch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try AnnouncementsCtx.init(a, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    ctx.dev_mode = true;
+    try ctx.addSubscription("Fluidd");
+    try ctx.addSubscription("moonraker");
+    const result = try handleListFeeds(@ptrCast(&ctx), .null, a);
+    var found = false;
+    for (result.object.get("feeds").?.array.items) |f| {
+        if (std.mem.eql(u8, f.string, "fluidd")) found = true;
+    }
+    try testing.expect(found);
+    try testing.expectEqual(@as(usize, 3), result.object.get("feeds").?.array.items.len);
+    try testing.expect(!(try ctx.fetchAndUpdateFeed(a, "fluidd")));
 }
 
 test "handleList: empty store returns empty entries and built-in feeds" {

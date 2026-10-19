@@ -41,8 +41,11 @@
 //! via `setIo`; emission is a no-op until then (pure unit tests).
 
 const std = @import("std");
+const clock = @import("../util/clock.zig");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
+const config_helper = @import("../config/confighelper.zig");
+const DataStore = @import("../store/datastore.zig").DataStore;
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 
 const Registry = registry.Registry;
@@ -76,6 +79,21 @@ pub const Source = struct {
     /// repo is not present on this host. When non-empty AND io is available,
     /// buildGitStatus runs real git commands to populate version/hash/branch.
     repo_path: []const u8 = "",
+    /// Python requirements file. When set, a git update also runs
+    /// `pip install -r <path>` (Moonraker `_update_python_requirements`).
+    requirements: []const u8 = "",
+    /// Moonraker `channel` (`dev` / `stable`). Empty means the type default.
+    channel: []const u8 = "",
+    /// Explicit git remote. Empty means `https://github.com/<owner>/<repo>.git`.
+    origin: []const u8 = "",
+    /// Versions used when the repo is not on disk. Empty keeps the "?" default.
+    pinned_version: []const u8 = "",
+    pinned_remote_version: []const u8 = "",
+    pinned_hash: []const u8 = "",
+    pinned_remote_hash: []const u8 = "",
+    pinned_behind: i64 = 0,
+    /// Commit `rollback` resets to. Empty means rollback is not performed.
+    rollback_ref: []const u8 = "",
     /// Whether this source is a git repository eligible for recover/rollback.
     pub fn isGit(self: Source) bool {
         return self.type == .git_repo;
@@ -90,6 +108,213 @@ pub const default_sources = [_]Source{
     .{ .name = "klipper", .type = .git_repo, .owner = "Klipper3d", .repo_name = "klipper", .branch = "master" },
 };
 
+fn dupeField(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    return alloc.dupe(u8, s);
+}
+
+fn ownSource(alloc: std.mem.Allocator, src: Source) !Source {
+    return .{
+        .name = try dupeField(alloc, src.name),
+        .type = src.type,
+        .owner = try dupeField(alloc, src.owner),
+        .repo_name = try dupeField(alloc, src.repo_name),
+        .branch = try dupeField(alloc, src.branch),
+        .repo_path = try dupeField(alloc, src.repo_path),
+        .requirements = try dupeField(alloc, src.requirements),
+        .channel = try dupeField(alloc, src.channel),
+        .origin = try dupeField(alloc, src.origin),
+        .pinned_version = try dupeField(alloc, src.pinned_version),
+        .pinned_remote_version = try dupeField(alloc, src.pinned_remote_version),
+        .pinned_hash = try dupeField(alloc, src.pinned_hash),
+        .pinned_remote_hash = try dupeField(alloc, src.pinned_remote_hash),
+        .pinned_behind = src.pinned_behind,
+        .rollback_ref = try dupeField(alloc, src.rollback_ref),
+    };
+}
+
+pub fn freeSources(alloc: std.mem.Allocator, sources: []const Source) void {
+    for (sources) |s| {
+        alloc.free(s.name);
+        alloc.free(s.owner);
+        alloc.free(s.repo_name);
+        alloc.free(s.branch);
+        alloc.free(s.repo_path);
+        alloc.free(s.requirements);
+        alloc.free(s.channel);
+        alloc.free(s.origin);
+        alloc.free(s.pinned_version);
+        alloc.free(s.pinned_remote_version);
+        alloc.free(s.pinned_hash);
+        alloc.free(s.pinned_remote_hash);
+        alloc.free(s.rollback_ref);
+    }
+    alloc.free(sources);
+}
+
+/// `github.com/<owner>/<repo>` from an origin URL. Slices borrow `origin`.
+fn githubOwnerRepo(origin: []const u8) struct { owner: []const u8, repo: []const u8 } {
+    const marker = "github.com/";
+    const at = std.mem.indexOf(u8, origin, marker) orelse return .{ .owner = "?", .repo = "?" };
+    var rest = origin[at + marker.len ..];
+    if (std.mem.endsWith(u8, rest, ".git")) rest = rest[0 .. rest.len - 4];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return .{ .owner = "?", .repo = "?" };
+    if (slash + 1 >= rest.len) return .{ .owner = "?", .repo = "?" };
+    return .{ .owner = rest[0..slash], .repo = rest[slash + 1 ..] };
+}
+
+/// Moonraker's updater set: `system` only when `enable_system_updates` is true
+/// (default true), plus moonraker, klipper, and each `[update_manager <name>]`.
+/// Every string in the result is owned by `alloc`.
+pub fn sourcesFromConfig(alloc: std.mem.Allocator, cfg: *const config_helper.ConfigParser) ![]Source {
+    var list: std.ArrayList(Source) = .empty;
+    errdefer {
+        for (list.items) |s| {
+            alloc.free(s.name);
+            alloc.free(s.owner);
+            alloc.free(s.repo_name);
+            alloc.free(s.branch);
+            alloc.free(s.repo_path);
+            alloc.free(s.requirements);
+            alloc.free(s.channel);
+            alloc.free(s.origin);
+            alloc.free(s.pinned_version);
+            alloc.free(s.pinned_remote_version);
+            alloc.free(s.pinned_hash);
+            alloc.free(s.pinned_remote_hash);
+            alloc.free(s.rollback_ref);
+        }
+        list.deinit(alloc);
+    }
+    const system_on = cfg.getBoolean("update_manager", "enable_system_updates") catch true;
+    if (system_on) try list.append(alloc, try ownSource(alloc, default_sources[0]));
+    try list.append(alloc, try ownSource(alloc, default_sources[1]));
+    try list.append(alloc, try ownSource(alloc, default_sources[2]));
+
+    const names = cfg.sectionNames(alloc) catch return list.toOwnedSlice(alloc);
+    defer alloc.free(names);
+    const prefix = "update_manager ";
+    for (names) |sect| {
+        if (!std.mem.startsWith(u8, sect, prefix)) continue;
+        const name = sect[prefix.len..];
+        if (name.len == 0) continue;
+        if (std.mem.eql(u8, name, "moonraker") or std.mem.eql(u8, name, "klipper")) continue;
+        const typ_raw = cfg.get(sect, "type") orelse "git_repo";
+        const stype: SourceType = if (std.mem.eql(u8, typ_raw, "web"))
+            .web
+        else if (std.mem.eql(u8, typ_raw, "zip"))
+            .zip
+        else if (std.mem.eql(u8, typ_raw, "git_repo"))
+            .git_repo
+        else
+            continue;
+        const repo = cfg.get(sect, "repo") orelse "";
+        const origin = cfg.get(sect, "origin") orelse "";
+        var owner: []const u8 = "?";
+        var repo_name: []const u8 = "?";
+        if (std.mem.indexOfScalar(u8, repo, '/')) |slash| {
+            owner = repo[0..slash];
+            repo_name = repo[slash + 1 ..];
+        } else if (origin.len > 0) {
+            const parsed = githubOwnerRepo(origin);
+            owner = parsed.owner;
+            repo_name = parsed.repo;
+        }
+        const branch = cfg.get(sect, "primary_branch") orelse if (stype == .git_repo) "master" else "";
+        const channel = cfg.get(sect, "channel") orelse if (stype == .git_repo) "dev" else "stable";
+        const path = cfg.get(sect, "path") orelse "";
+        try list.append(alloc, .{
+            .name = try dupeField(alloc, name),
+            .type = stype,
+            .owner = try dupeField(alloc, owner),
+            .repo_name = try dupeField(alloc, repo_name),
+            .branch = try dupeField(alloc, branch),
+            .repo_path = try dupeField(alloc, path),
+            .requirements = try dupeField(alloc, ""),
+            .channel = try dupeField(alloc, channel),
+            .origin = try dupeField(alloc, origin),
+            .pinned_version = try dupeField(alloc, ""),
+            .pinned_remote_version = try dupeField(alloc, ""),
+            .pinned_hash = try dupeField(alloc, ""),
+            .pinned_remote_hash = try dupeField(alloc, ""),
+            .rollback_ref = try dupeField(alloc, ""),
+        });
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+test "sourcesFromConfig: forge-x clients and system updates off" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-update-sources-test.cfg";
+    const body =
+        \\[update_manager]
+        \\enable_system_updates: False
+        \\
+        \\[update_manager forge-x]
+        \\type: git_repo
+        \\channel: dev
+        \\path: /no/such/forge-x
+        \\origin: https://github.com/DrA1ex/ff5m.git
+        \\primary_branch: 1.4.2
+        \\
+        \\[update_manager fluidd]
+        \\type: web
+        \\repo: fluidd-core/fluidd
+        \\path: /no/such/fluidd
+        \\
+        \\[update_manager guppyscreen]
+        \\type: zip
+        \\channel: stable
+        \\repo: DrA1ex/guppyscreen
+        \\path: /no/such/guppy
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var cfg = config_helper.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseFile(io, cfg_path);
+    const sources = try sourcesFromConfig(alloc, &cfg);
+    defer freeSources(alloc, sources);
+
+    var saw_system = false;
+    var forge: ?Source = null;
+    var fluidd: ?Source = null;
+    var guppy: ?Source = null;
+    for (sources) |s| {
+        if (std.mem.eql(u8, s.name, "system")) saw_system = true;
+        if (std.mem.eql(u8, s.name, "forge-x")) forge = s;
+        if (std.mem.eql(u8, s.name, "fluidd")) fluidd = s;
+        if (std.mem.eql(u8, s.name, "guppyscreen")) guppy = s;
+    }
+    try std.testing.expect(!saw_system);
+    try std.testing.expectEqualStrings("DrA1ex", forge.?.owner);
+    try std.testing.expectEqualStrings("ff5m", forge.?.repo_name);
+    try std.testing.expectEqualStrings("1.4.2", forge.?.branch);
+    try std.testing.expectEqualStrings("dev", forge.?.channel);
+    try std.testing.expectEqualStrings("https://github.com/DrA1ex/ff5m.git", forge.?.origin);
+    try std.testing.expect(fluidd.?.type == .web);
+    try std.testing.expectEqualStrings("fluidd-core", fluidd.?.owner);
+    try std.testing.expect(guppy.?.type == .zip);
+    try std.testing.expectEqualStrings("stable", guppy.?.channel);
+
+    var ctx = UpdateCtx{ .gpa = alloc, .sources = sources, .bus = null, .io = null };
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const status = try handleStatus(@ptrCast(&ctx), .null, arena.allocator());
+    const info = status.object.get("version_info").?.object;
+    try std.testing.expect(info.get("system") == null);
+    try std.testing.expectEqualStrings("git_repo", info.get("forge-x").?.object.get("configured_type").?.string);
+    try std.testing.expectEqualStrings("dev", info.get("forge-x").?.object.get("channel").?.string);
+    try std.testing.expectEqualStrings("1.4.2", info.get("forge-x").?.object.get("branch").?.string);
+    try std.testing.expectEqualStrings("https://github.com/DrA1ex/ff5m.git", info.get("forge-x").?.object.get("remote_url").?.string);
+    try std.testing.expectEqualStrings("web", info.get("fluidd").?.object.get("configured_type").?.string);
+    try std.testing.expectEqualStrings("zip", info.get("guppyscreen").?.object.get("configured_type").?.string);
+}
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -98,6 +323,7 @@ pub const UpdateCtx = struct {
     gpa: std.mem.Allocator,
     /// Configured sources. Borrowed; owned by the App (or a test).
     sources: []const Source,
+    store: ?DataStore = null,
     bus: ?*NotifyBus,
     /// Live io for notification emission. Set after the event loop starts (via
     /// setIo). Emission is a no-op while absent.
@@ -111,6 +337,83 @@ pub const UpdateCtx = struct {
     /// printing"). Wired by App to job_state.isActiveErased.
     printing_check: ?*const fn (*anyopaque) bool = null,
     printing_ctx: ?*anyopaque = null,
+    /// Runs one shell command. System updates use Moonraker's apt-get lines;
+    /// git sources with `requirements` set run `pip install -r`. Null means
+    /// no package provider (Moonraker: "Cannot upgrade packages, no provider set").
+    shell: ?ShellFn = null,
+    shell_ctx: ?*anyopaque = null,
+    /// `[update_manager] enable_auto_refresh`. False does not start a timer
+    /// and `tickAutoRefresh` does not refresh. The printer sets this false.
+    auto_refresh: bool = false,
+    /// Hours between refreshes. Moonraker default 168.
+    refresh_interval_hours: i64 = 168,
+    /// Inclusive start hour and exclusive end hour, local time. Default 0-5.
+    refresh_window_start: i64 = 0,
+    refresh_window_end: i64 = 5,
+    /// Moonraker's first auto-refresh ignores the window. Later ones do not.
+    initial_refresh_done: bool = false,
+    /// Unix seconds of the last auto-refresh. 0 means never.
+    last_auto_refresh_s: i64 = 0,
+    /// Tests install this so a due refresh does not call `handleRefresh`
+    /// (which runs git when a repo path and io are set).
+    refresh_hook: ?*const fn (*anyopaque) void = null,
+    refresh_hook_ctx: ?*anyopaque = null,
+    refresh_stop: std.atomic.Value(bool) = .init(false),
+    refresh_thread: ?std.Thread = null,
+
+    pub const ShellFn = *const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void;
+
+    /// Moonraker `_is_within_refresh_window`. A window that wraps midnight
+    /// (start > end) matches `hour >= start` or `hour < end`.
+    pub fn inRefreshWindow(start: i64, end: i64, hour: i64) bool {
+        if (start < end) return hour >= start and hour < end;
+        return hour >= start or hour < end;
+    }
+
+    /// True when an enabled auto-refresh should run at `hour`.
+    /// Disabled stays false. The first due check ignores the window.
+    /// Later checks refuse while printing, outside the window, or before
+    /// `refresh_interval_hours` have passed.
+    pub fn autoRefreshDue(self: *const UpdateCtx, hour: i64, printing: bool) bool {
+        if (!self.auto_refresh) return false;
+        if (!self.initial_refresh_done) return true;
+        if (printing) return false;
+        if (!inRefreshWindow(self.refresh_window_start, self.refresh_window_end, hour)) return false;
+        const now = clock.wallSecondsInt();
+        const wait_s = self.refresh_interval_hours * 3600;
+        if (wait_s > 0 and self.last_auto_refresh_s > 0 and now < self.last_auto_refresh_s + wait_s) return false;
+        return true;
+    }
+
+    /// One scheduler tick. Returns whether a refresh ran. A hook records the
+    /// run. Without a hook, `handleRefresh` runs; git fetch happens only when
+    /// a source has a repo path and io is set.
+    pub fn tickAutoRefresh(self: *UpdateCtx, alloc: std.mem.Allocator, hour: i64) bool {
+        if (!self.autoRefreshDue(hour, self.isPrinting())) return false;
+        self.initial_refresh_done = true;
+        self.last_auto_refresh_s = clock.wallSecondsInt();
+        if (self.refresh_hook) |hook| {
+            const ctx = self.refresh_hook_ctx orelse return true;
+            hook(ctx);
+            return true;
+        }
+        _ = handleRefresh(@ptrCast(self), .null, alloc) catch {};
+        return true;
+    }
+
+    pub fn startAutoRefresh(self: *UpdateCtx) void {
+        if (!self.auto_refresh or self.refresh_thread != null) return;
+        self.refresh_stop.store(false, .release);
+        self.refresh_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, autoRefreshThread, .{self}) catch null;
+    }
+
+    pub fn stopAutoRefresh(self: *UpdateCtx) void {
+        self.refresh_stop.store(true, .release);
+        if (self.refresh_thread) |th| {
+            th.join();
+            self.refresh_thread = null;
+        }
+    }
 
     pub fn setIo(self: *UpdateCtx, io: std.Io) void {
         self.io = io;
@@ -130,6 +433,26 @@ pub const UpdateCtx = struct {
         return null;
     }
 };
+
+fn autoRefreshThread(ctx: *UpdateCtx) void {
+    const io = ctx.io orelse return;
+    const bus = ctx.bus orelse return;
+    // Wait out the check interval before the first refresh so process
+    // startup does not fetch. Tests call `tickAutoRefresh` directly.
+    while (!ctx.refresh_stop.load(.acquire)) {
+        var i: u32 = 0;
+        while (i < 3600 and !ctx.refresh_stop.load(.acquire)) : (i += 1) {
+            var req = std.os.linux.timespec{ .sec = 1, .nsec = 0 };
+            _ = std.os.linux.nanosleep(&req, null);
+        }
+        if (ctx.refresh_stop.load(.acquire)) break;
+        const now = clock.wallSecondsInt();
+        const hour: i64 = @mod(@divFloor(now, 3600), 24);
+        var request_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer request_arena.deinit();
+        _ = bus.core.run(io, UpdateCtx.tickAutoRefresh, .{ ctx, request_arena.allocator(), hour });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Param helpers
@@ -178,10 +501,16 @@ fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: 
 
     var arg_buf: [8][]const u8 = undefined;
     var n: usize = 0;
-    arg_buf[n] = "git"; n += 1;
-    arg_buf[n] = "-C"; n += 1;
-    arg_buf[n] = repo_path; n += 1;
-    for (argv) |a| { arg_buf[n] = a; n += 1; }
+    arg_buf[n] = "git";
+    n += 1;
+    arg_buf[n] = "-C";
+    n += 1;
+    arg_buf[n] = repo_path;
+    n += 1;
+    for (argv) |a| {
+        arg_buf[n] = a;
+        n += 1;
+    }
 
     const result = std.process.run(alloc, io, .{
         .argv = arg_buf[0..n],
@@ -219,10 +548,16 @@ fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: [
 
     var arg_buf: [8][]const u8 = undefined;
     var n: usize = 0;
-    arg_buf[n] = "git"; n += 1;
-    arg_buf[n] = "-C"; n += 1;
-    arg_buf[n] = repo_path; n += 1;
-    for (argv) |a| { arg_buf[n] = a; n += 1; }
+    arg_buf[n] = "git";
+    n += 1;
+    arg_buf[n] = "-C";
+    n += 1;
+    arg_buf[n] = repo_path;
+    n += 1;
+    for (argv) |a| {
+        arg_buf[n] = a;
+        n += 1;
+    }
 
     const result = std.process.run(alloc, io, .{
         .argv = arg_buf[0..n],
@@ -263,7 +598,8 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
     var obj: std.json.ObjectMap = .empty;
 
     // --- AppDeploy.get_update_status base keys ---
-    try obj.put(alloc, "channel", .{ .string = "dev" });
+    const channel = if (src.channel.len > 0) src.channel else "dev";
+    try obj.put(alloc, "channel", .{ .string = channel });
     try obj.put(alloc, "debug_enabled", .{ .bool = false });
     try obj.put(alloc, "channel_invalid", .{ .bool = false });
     try obj.put(alloc, "is_valid", .{ .bool = true });
@@ -274,20 +610,23 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
     try obj.put(alloc, "detected_type", .{ .string = "git_repo" });
     try obj.put(alloc, "remote_alias", .{ .string = "origin" });
 
-    const remote_url = try std.fmt.allocPrint(alloc, "https://github.com/{s}/{s}.git", .{ src.owner, src.repo_name });
+    const remote_url = if (src.origin.len > 0)
+        src.origin
+    else
+        try std.fmt.allocPrint(alloc, "https://github.com/{s}/{s}.git", .{ src.owner, src.repo_name });
     try obj.put(alloc, "remote_url", .{ .string = remote_url });
     try obj.put(alloc, "recovery_url", .{ .string = remote_url });
     try obj.put(alloc, "owner", .{ .string = src.owner });
     try obj.put(alloc, "repo_name", .{ .string = src.repo_name });
 
     var branch: []const u8 = src.branch;
-    var version: []const u8 = "?";
-    var remote_version: []const u8 = "?";
-    var current_hash: []const u8 = "?";
-    var remote_hash: []const u8 = "?";
+    var version: []const u8 = if (src.pinned_version.len > 0) src.pinned_version else "?";
+    var remote_version: []const u8 = if (src.pinned_remote_version.len > 0) src.pinned_remote_version else "?";
+    var current_hash: []const u8 = if (src.pinned_hash.len > 0) src.pinned_hash else "?";
+    var remote_hash: []const u8 = if (src.pinned_remote_hash.len > 0) src.pinned_remote_hash else "?";
     var is_dirty: bool = false;
     var detached: bool = false;
-    var commits_behind_count: i64 = 0;
+    var commits_behind_count: i64 = src.pinned_behind;
     var commits_behind: std.json.Array = .init(alloc);
 
     if (io) |live_io| {
@@ -351,9 +690,9 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
                                     // Moonraker returns date as a string (unix timestamp).
                                     try commit_obj.put(alloc, key, .{ .string = try alloc.dupe(u8, val) });
                                 } else if (std.mem.eql(u8, key, "subject") or
-                                           std.mem.eql(u8, key, "message") or
-                                           std.mem.eql(u8, key, "sha") or
-                                           std.mem.eql(u8, key, "author"))
+                                    std.mem.eql(u8, key, "message") or
+                                    std.mem.eql(u8, key, "sha") or
+                                    std.mem.eql(u8, key, "author"))
                                 {
                                     try commit_obj.put(alloc, key, .{ .string = try alloc.dupe(u8, val) });
                                 }
@@ -412,7 +751,8 @@ fn buildSystemStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
 fn buildWebStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     // AppDeploy base keys.
-    try obj.put(alloc, "channel", .{ .string = "stable" });
+    const channel = if (src.channel.len > 0) src.channel else "stable";
+    try obj.put(alloc, "channel", .{ .string = channel });
     try obj.put(alloc, "debug_enabled", .{ .bool = false });
     try obj.put(alloc, "channel_invalid", .{ .bool = false });
     try obj.put(alloc, "is_valid", .{ .bool = true });
@@ -439,6 +779,54 @@ fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.js
     };
 }
 
+/// Cached git-describe versions retain the tag and commit count in API output.
+fn shortGitVersion(version: []const u8) []const u8 {
+    const hash_at = std.mem.lastIndexOf(u8, version, "-g") orelse return version;
+    const suffix = version[hash_at + 2 ..];
+    const hash = if (std.mem.indexOfScalar(u8, suffix, '-')) |end| suffix[0..end] else suffix;
+    if (hash.len == 0) return "?";
+    for (hash) |ch| if (!std.ascii.isHex(ch)) return "?";
+    return version[0..hash_at];
+}
+
+/// Restore Moonraker's update_manager namespace without contacting remotes.
+fn buildCachedStatus(alloc: std.mem.Allocator, src: Source, cache: std.json.Value) !std.json.Value {
+    var result = try buildSourceStatus(null, alloc, src);
+    if (cache != .object) return result;
+    const fields = if (src.type == .git_repo) &[_][2][]const u8{
+        .{ "is_valid", "is_valid" },                   .{ "owner", "git_owner" },
+        .{ "repo_name", "git_repo_name" },             .{ "remote_alias", "git_remote" },
+        .{ "branch", "git_branch" },                   .{ "remote_url", "upstream_url" },
+        .{ "recovery_url", "recovery_url" },           .{ "current_hash", "current_commit" },
+        .{ "remote_hash", "upstream_commit" },         .{ "detached", "head_detached" },
+        .{ "commits_behind", "commits_behind" },       .{ "commits_behind_count", "cbh_count" },
+        .{ "git_messages", "git_messages" },           .{ "corrupt", "corrupt" },
+        .{ "full_version_string", "current_version" }, .{ "full_version_string", "full_version_string" },
+        .{ "version", "current_version" },             .{ "version", "full_version_string" },
+        .{ "remote_version", "upstream_version" },     .{ "rollback_version", "rollback_version" },
+    } else &[_][2][]const u8{
+        .{ "is_valid", "is_valid" },             .{ "version", "version" },
+        .{ "remote_version", "remote_version" }, .{ "rollback_version", "rollback_version" },
+        .{ "last_error", "last_error" },
+    };
+    for (fields) |field| {
+        var value = cache.object.get(field[1]) orelse continue;
+        const default = result.object.get(field[0]) orelse continue;
+        if (std.meta.activeTag(value) != std.meta.activeTag(default)) continue;
+        if (src.type == .git_repo and
+            (std.mem.eql(u8, field[0], "version") or std.mem.eql(u8, field[0], "remote_version") or std.mem.eql(u8, field[0], "rollback_version")))
+            value = .{ .string = shortGitVersion(value.string) };
+        try result.object.put(alloc, field[0], value);
+    }
+    if (src.type == .git_repo) {
+        const dirty = std.mem.endsWith(u8, result.object.get("full_version_string").?.string, "-dirty");
+        const untracked = cache.object.get("untracked_files") orelse .null;
+        try result.object.put(alloc, "is_dirty", .{ .bool = dirty });
+        try result.object.put(alloc, "pristine", .{ .bool = !dirty and (untracked != .array or untracked.array.items.len == 0) });
+    }
+    return result;
+}
+
 /// Build the full status payload Moonraker returns from `_handle_status_request`
 /// and `_handle_refresh_request`:
 ///   { github_rate_limit, github_requests_remaining, github_limit_reset_time,
@@ -448,9 +836,17 @@ fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.js
 /// (it never does in the spine), matching HttpClient.github_api_stats on a fresh
 /// process.
 fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value {
+    const cached = if (ctx.store) |store| try store.getNamespace(alloc, "update_manager") else .null;
     var version_info: std.json.ObjectMap = .empty;
     for (ctx.sources) |src| {
-        try version_info.put(alloc, src.name, try buildSourceStatus(ctx.io, alloc, src));
+        const entry = if (cached == .object) cached.object.get(src.name) else null;
+        const status = if (entry) |value|
+            try buildCachedStatus(alloc, src, value)
+        else if (ctx.store != null and src.type == .git_repo and src.repo_path.len == 0)
+            std.json.Value{ .object = .empty }
+        else
+            try buildSourceStatus(ctx.io, alloc, src);
+        try version_info.put(alloc, src.name, status);
     }
 
     var out: std.json.ObjectMap = .empty;
@@ -575,12 +971,11 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 
 /// Run a single-target update for `app`. For git_repo sources with a configured
 /// repo_path, runs `git fetch origin --prune` + `git reset --hard origin/<branch>`.
-/// For non-git sources (system, web, zip), emits notifications but performs no
-/// real installation (apt/pip are not invoked — phobos does not touch the host
-/// package manager).
+/// System sources run apt-get. Git sources with a requirements file run pip.
 fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerror!std.json.Value {
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const src = ctx.findSource(app) orelse return error.NotFound;
+    if (src.type == .system and ctx.shell == null) return error.NoPackageProvider;
     const proc_id = nextProcId();
     ctx.busy = true;
     defer ctx.busy = false;
@@ -588,7 +983,9 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
     const start_msg = try std.fmt.allocPrint(alloc, "Updating {s}...", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, start_msg, false));
 
-    if (src.type == .git_repo and src.repo_path.len > 0) {
+    if (src.type == .system) {
+        try upgradePackages(ctx, alloc);
+    } else if (src.type == .git_repo and src.repo_path.len > 0) {
         if (ctx.io) |io| {
             // Fetch latest remotes, then hard-reset to origin/<branch>.
             _ = gitFetch(ctx.io, alloc, src.repo_path);
@@ -597,6 +994,7 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
             _ = gitReset(io, alloc, src.repo_path, ref);
         }
     }
+    if (src.requirements.len > 0) try pipInstallRequirements(ctx, alloc, src.requirements);
 
     const done_msg = try std.fmt.allocPrint(alloc, "{s} update finished", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done_msg, true));
@@ -615,8 +1013,25 @@ pub fn handleUpdateKlipper(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.me
     return runUpdate(ctx, alloc, "klipper");
 }
 
-/// POST /machine/update/system → "ok". Emits notification but performs no
-/// real package-manager operation (phobos does not touch apt/pip).
+/// Moonraker `AptCliProvider`: `apt-get update` then `apt-get upgrade --yes`,
+/// both under `sudo DEBIAN_FRONTEND=noninteractive`.
+pub fn upgradePackages(ctx: *UpdateCtx, alloc: std.mem.Allocator) !void {
+    const sh = ctx.shell orelse return error.NoPackageProvider;
+    const shell_ctx = ctx.shell_ctx orelse return error.NoPackageProvider;
+    try sh(shell_ctx, alloc, "sudo DEBIAN_FRONTEND=noninteractive apt-get update");
+    try sh(shell_ctx, alloc, "sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes");
+}
+
+/// Moonraker `AsyncPipExecutor.install_packages` for a requirements file:
+/// `pip install -r <path>`.
+pub fn pipInstallRequirements(ctx: *UpdateCtx, alloc: std.mem.Allocator, requirements: []const u8) !void {
+    const sh = ctx.shell orelse return error.NoPackageProvider;
+    const shell_ctx = ctx.shell_ctx orelse return error.NoPackageProvider;
+    const cmd = try std.fmt.allocPrint(alloc, "pip install -r {s}", .{requirements});
+    try sh(shell_ctx, alloc, cmd);
+}
+
+/// POST /machine/update/system → "ok" after apt-get update and upgrade.
 pub fn handleUpdateSystem(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     return runUpdate(ctx, alloc, "system");
@@ -639,23 +1054,23 @@ pub fn handleUpgrade(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     return runUpdate(ctx, alloc, name);
 }
 
-/// Run a stubbed full update across every source, emitting the Moonraker
-/// progress sequence ("Preparing full software update..." → per-source →
-/// "Full Update Complete"). STUB: does not run real updates; phobos never
-/// invokes apt/pip.
+/// Full update across every source. The system source runs apt-get; other
+/// sources emit the same progress lines Moonraker does.
 fn runFullUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+    for (ctx.sources) |src| {
+        if (src.type == .system and ctx.shell == null) return error.NoPackageProvider;
+    }
     const proc_id = nextProcId();
     ctx.busy = true;
     defer ctx.busy = false;
 
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, "full", proc_id, "Preparing full software update...", false));
-    // STUB: phobos performs no real updates. We still walk the sources so the
-    // notification sequence matches Moonraker (system, then clients, then
-    // klipper/moonraker).
     for (ctx.sources) |src| {
         const msg = try std.fmt.allocPrint(alloc, "Updating {s}...", .{src.name});
         emitResponse(ctx, alloc, try buildResponseNotification(alloc, "full", proc_id, msg, false));
+        if (src.type == .system) try upgradePackages(ctx, alloc);
+        if (src.requirements.len > 0) try pipInstallRequirements(ctx, alloc, src.requirements);
     }
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, "full", proc_id, "Full Update Complete", true));
     return .{ .string = "ok" };
@@ -679,8 +1094,8 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const app = try getStr(params, "name");
-    _ = getBool(params, "hard", false); // accepted, unused (stub)
-    _ = getBool(params, "update_deps", false); // accepted, unused (stub)
+    const hard = getBool(params, "hard", false);
+    _ = getBool(params, "update_deps", false);
     const src = ctx.findSource(app) orelse return error.NotFound;
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
@@ -690,7 +1105,19 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 
     const msg = try std.fmt.allocPrint(alloc, "Recovering {s}...", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, msg, false));
-    // STUB: no real git recovery performed.
+    // Git runs only when io and a repo path are set. Unit tests leave io null.
+    if (ctx.io) |io| {
+        if (src.repo_path.len > 0) {
+            if (hard) {
+                if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" })) return error.GitFailed;
+                if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" })) return error.GitFailed;
+            } else {
+                const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
+                if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch })) return error.GitFailed;
+                if (!gitReset(io, alloc, src.repo_path, ref)) return error.GitFailed;
+            }
+        }
+    }
     const done = try std.fmt.allocPrint(alloc, "{s} recovery finished", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done, true));
     return .{ .string = "ok" };
@@ -716,7 +1143,15 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 
     const msg = try std.fmt.allocPrint(alloc, "Rolling Back {s}...", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, msg, false));
-    // STUB: no real rollback performed.
+    if (src.rollback_ref.len == 0) {
+        emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, "Rollback not performed", true));
+        return .{ .string = "ok" };
+    }
+    if (ctx.io) |io| {
+        if (src.repo_path.len > 0) {
+            if (!gitReset(io, alloc, src.repo_path, src.rollback_ref)) return error.GitFailed;
+        }
+    }
     const done = try std.fmt.allocPrint(alloc, "{s} rollback finished", .{app});
     emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done, true));
     return .{ .string = "ok" };
@@ -762,6 +1197,77 @@ fn testCtx() UpdateCtx {
     return .{ .gpa = testing.allocator, .sources = &default_sources, .bus = null, .io = null };
 }
 
+test "status reads persistent git and web versions without refreshing" {
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, ":memory:");
+    defer db.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const store = db.dataStore();
+    try store.insertItem(a, "update_manager", "forge-x", try objParams(a,
+        \\{"is_valid":true,"git_owner":"DrA1ex","git_repo_name":"ff5m","git_remote":"origin","git_branch":"1.4.2","current_version":"1.4.2-beta-4-16-g69663338","upstream_version":"1.4.2-beta-4-16-g69663338","rollback_version":"1.4.2-beta-4-0-g95d1771d","current_commit":"69663338","upstream_commit":"69663338","head_detached":false,"modified_files":[],"untracked_files":[],"commits_behind":[],"cbh_count":0,"git_messages":[],"corrupt":false}
+    ));
+    try store.insertItem(a, "update_manager", "fluidd", try objParams(a,
+        \\{"is_valid":true,"version":"v1.37.7","remote_version":"1.37.7","rollback_version":"v1.37.6","last_error":""}
+    ));
+    const sources = [_]Source{
+        default_sources[1],
+        .{ .name = "forge-x", .type = .git_repo, .owner = "DrA1ex", .repo_name = "ff5m", .repo_path = "/no/such/repo", .branch = "1.4.2" },
+        .{ .name = "fluidd", .type = .web, .owner = "fluidd-core", .repo_name = "fluidd" },
+    };
+    var ctx = UpdateCtx{ .gpa = testing.allocator, .sources = &sources, .store = store, .bus = null };
+    const result = try handleStatus(&ctx, .null, a);
+    const info = result.object.get("version_info").?.object;
+    const git = info.get("forge-x").?.object;
+    try testing.expectEqualStrings("1.4.2-beta-4-16-g69663338", git.get("full_version_string").?.string);
+    try testing.expectEqualStrings("1.4.2-beta-4-16", git.get("version").?.string);
+    try testing.expectEqualStrings("1.4.2-beta-4-16", git.get("remote_version").?.string);
+    try testing.expectEqualStrings("1.4.2-beta-4-0", git.get("rollback_version").?.string);
+    try testing.expectEqualStrings("69663338", git.get("current_hash").?.string);
+    try testing.expect(git.get("repo_detected") == null);
+    const web = info.get("fluidd").?.object;
+    try testing.expectEqualStrings("v1.37.7", web.get("version").?.string);
+    try testing.expectEqualStrings("1.37.7", web.get("remote_version").?.string);
+    try testing.expectEqualStrings("v1.37.6", web.get("rollback_version").?.string);
+    try testing.expectEqual(@as(usize, 0), info.get("moonraker").?.object.count());
+    try testing.expect(!ctx.initial_refresh_done);
+}
+
+test "cached git versions keep the tag count and full hash separately" {
+    try testing.expectEqualStrings("v0.10.1-20", shortGitVersion("v0.10.1-20-g900848584374"));
+    try testing.expectEqualStrings("v1.0-0", shortGitVersion("v1.0-0-gabcdef-dirty"));
+    try testing.expectEqualStrings("?", shortGitVersion("v1.0-0-g"));
+    try testing.expectEqualStrings("?", shortGitVersion("v1.0-0-gxyz"));
+    try testing.expectEqualStrings("?", shortGitVersion("?"));
+}
+
+test "fuzz cached update status: malformed fields keep their declared types" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            _ = shortGitVersion(&buf);
+            var cache: std.json.ObjectMap = .empty;
+            try cache.put(a, "current_version", .{ .string = &buf });
+            try cache.put(a, "upstream_version", .{ .integer = 42 });
+            try cache.put(a, "head_detached", .{ .string = "wrong" });
+            try cache.put(a, "untracked_files", .{ .integer = 1 });
+            for ([_]SourceType{ .git_repo, .web, .zip }) |kind| {
+                var src = default_sources[1];
+                src.type = kind;
+                const result = try buildCachedStatus(a, src, .{ .object = cache });
+                try testing.expect(result.object.get("version").? == .string);
+                try testing.expect(result.object.get("remote_version").? == .string);
+                if (kind == .git_repo) try testing.expect(result.object.get("detached").? == .bool);
+                _ = try buildCachedStatus(a, src, .null);
+            }
+        }
+    }.run, .{});
+}
+
 var test_printing_flag: bool = false;
 fn testPrintingCheck(_: *anyopaque) bool {
     return test_printing_flag;
@@ -773,6 +1279,9 @@ test "update refused while printing (U1): 503-mapped error, allowed otherwise" {
     const a = arena.allocator();
     var dummy: u8 = 0;
     var ctx = testCtx();
+    var sink: u8 = 0;
+    ctx.shell = okShell;
+    ctx.shell_ctx = &sink;
     ctx.printing_check = testPrintingCheck;
     ctx.printing_ctx = &dummy;
 
@@ -823,13 +1332,13 @@ test "buildGitStatus: full git_repo key set present" {
     const v = try buildGitStatus(null, a, default_sources[1]); // moonraker
     const o = v.object;
     for ([_][]const u8{
-        "channel",          "debug_enabled",   "channel_invalid",      "is_valid",
-        "configured_type",  "info_tags",       "detected_type",        "remote_alias",
-        "branch",           "owner",           "repo_name",            "remote_url",
-        "recovery_url",     "version",         "remote_version",       "rollback_version",
-        "current_hash",     "remote_hash",     "is_dirty",             "detached",
-        "commits_behind",   "commits_behind_count", "git_messages",    "full_version_string",
-        "pristine",         "corrupt",         "warnings",             "anomalies",
+        "channel",         "debug_enabled",        "channel_invalid", "is_valid",
+        "configured_type", "info_tags",            "detected_type",   "remote_alias",
+        "branch",          "owner",                "repo_name",       "remote_url",
+        "recovery_url",    "version",              "remote_version",  "rollback_version",
+        "current_hash",    "remote_hash",          "is_dirty",        "detached",
+        "commits_behind",  "commits_behind_count", "git_messages",    "full_version_string",
+        "pristine",        "corrupt",              "warnings",        "anomalies",
         "name",
     }) |k| {
         try testing.expect(o.get(k) != null);
@@ -920,14 +1429,62 @@ test "handleRefresh: named source ok; unknown source InvalidParams" {
 
 // ---- update handlers ----
 
-test "handleUpdateMoonraker/Klipper/System: return ok ack" {
+fn okShell(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!void {}
+
+const CmdLog = struct {
+    cmds: [4][]const u8 = .{ "", "", "", "" },
+    n: usize = 0,
+    fn run(ctx: *anyopaque, alloc: std.mem.Allocator, cmd: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.n >= self.cmds.len) return error.TooManyCommands;
+        self.cmds[self.n] = try alloc.dupe(u8, cmd);
+        self.n += 1;
+    }
+};
+
+test "handleUpdateMoonraker/Klipper: return ok ack; system needs a package provider" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = testCtx();
     try testing.expectEqualStrings("ok", (try handleUpdateMoonraker(@ptrCast(&ctx), .null, a)).string);
     try testing.expectEqualStrings("ok", (try handleUpdateKlipper(@ptrCast(&ctx), .null, a)).string);
+    try testing.expectError(error.NoPackageProvider, handleUpdateSystem(@ptrCast(&ctx), .null, a));
+}
+
+test "handleUpdateSystem: runs apt-get update then apt-get upgrade" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var log = CmdLog{};
+    var ctx = testCtx();
+    ctx.shell = CmdLog.run;
+    ctx.shell_ctx = &log;
     try testing.expectEqualStrings("ok", (try handleUpdateSystem(@ptrCast(&ctx), .null, a)).string);
+    try testing.expectEqual(@as(usize, 2), log.n);
+    try testing.expectEqualStrings("sudo DEBIAN_FRONTEND=noninteractive apt-get update", log.cmds[0]);
+    try testing.expectEqualStrings("sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes", log.cmds[1]);
+}
+
+test "git update with requirements runs pip install -r" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sources = [_]Source{.{
+        .name = "moonraker",
+        .type = .git_repo,
+        .owner = "Arksine",
+        .repo_name = "moonraker",
+        .requirements = "scripts/moonraker-requirements.txt",
+    }};
+    var log = CmdLog{};
+    var ctx = testCtx();
+    ctx.sources = &sources;
+    ctx.shell = CmdLog.run;
+    ctx.shell_ctx = &log;
+    try testing.expectEqualStrings("ok", (try handleUpdateMoonraker(@ptrCast(&ctx), .null, a)).string);
+    try testing.expectEqual(@as(usize, 1), log.n);
+    try testing.expectEqualStrings("pip install -r scripts/moonraker-requirements.txt", log.cmds[0]);
 }
 
 test "handleUpgrade/Client: name=source ok; no name → full update ok" {
@@ -935,6 +1492,9 @@ test "handleUpgrade/Client: name=source ok; no name → full update ok" {
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = testCtx();
+    var sink: u8 = 0;
+    ctx.shell = okShell;
+    ctx.shell_ctx = &sink;
     try testing.expectEqualStrings("ok", (try handleUpgrade(@ptrCast(&ctx), try objParams(a, "{\"name\":\"moonraker\"}"), a)).string);
     try testing.expectEqualStrings("ok", (try handleUpgrade(@ptrCast(&ctx), .null, a)).string);
     try testing.expectEqualStrings("ok", (try handleUpdateClient(@ptrCast(&ctx), .null, a)).string);
@@ -946,6 +1506,9 @@ test "handleFull: returns ok ack" {
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = testCtx();
+    var sink: u8 = 0;
+    ctx.shell = okShell;
+    ctx.shell_ctx = &sink;
     try testing.expectEqualStrings("ok", (try handleFull(@ptrCast(&ctx), .null, a)).string);
 }
 
@@ -1038,6 +1601,7 @@ test "buildGitStatus: empty repo_path with null io returns defaults" {
     try testing.expectEqualStrings("?", o.get("current_hash").?.string);
     try testing.expectEqual(false, o.get("is_dirty").?.bool);
     try testing.expectEqual(false, o.get("detached").?.bool);
+    try testing.expect(o.get("repo_detected") == null);
 }
 
 test "buildGitStatus: empty repo_path with non-null io still returns defaults" {
@@ -1047,14 +1611,19 @@ test "buildGitStatus: empty repo_path with non-null io still returns defaults" {
     defer arena.deinit();
     const a = arena.allocator();
     const src_no_path: Source = .{
-        .name = "test_git", .type = .git_repo,
-        .owner = "test", .repo_name = "test", .branch = "main", .repo_path = "",
+        .name = "test_git",
+        .type = .git_repo,
+        .owner = "test",
+        .repo_name = "test",
+        .branch = "main",
+        .repo_path = "",
     };
     const v = try buildGitStatus(null, a, src_no_path);
     const o = v.object;
     try testing.expectEqualStrings("?", o.get("version").?.string);
     try testing.expectEqualStrings("?", o.get("current_hash").?.string);
     try testing.expectEqual(false, o.get("is_dirty").?.bool);
+    try testing.expect(o.get("repo_detected") == null);
 }
 
 test "buildGitStatus: with repo_path set honors defaults when io is null" {
@@ -1062,8 +1631,12 @@ test "buildGitStatus: with repo_path set honors defaults when io is null" {
     defer arena.deinit();
     const a = arena.allocator();
     const src_with_path: Source = .{
-        .name = "test_git", .type = .git_repo,
-        .owner = "test", .repo_name = "test", .branch = "main", .repo_path = "/nonexistent",
+        .name = "test_git",
+        .type = .git_repo,
+        .owner = "test",
+        .repo_name = "test",
+        .branch = "main",
+        .repo_path = "/nonexistent",
     };
     // io is null, so git commands are never run; "?" defaults are used.
     const v = try buildGitStatus(null, a, src_with_path);
@@ -1071,6 +1644,7 @@ test "buildGitStatus: with repo_path set honors defaults when io is null" {
     try testing.expectEqualStrings("?", o.get("version").?.string);
     try testing.expectEqualStrings("?", o.get("current_hash").?.string);
     try testing.expectEqual(false, o.get("is_dirty").?.bool);
+    try testing.expect(o.get("repo_detected") == null);
 }
 
 // ---- gitFetch ----
@@ -1231,9 +1805,12 @@ test "fuzz_buildGitStatus: arbitrary source fields never crash" {
 
             const rpath_len = @as(usize, buf[48]) % rpath.len;
             const src: Source = .{
-                .name = &name, .type = .git_repo,
-                .owner = &owner, .repo_name = &repo,
-                .branch = "main", .repo_path = rpath[0..rpath_len],
+                .name = &name,
+                .type = .git_repo,
+                .owner = &owner,
+                .repo_name = &repo,
+                .branch = "main",
+                .repo_path = rpath[0..rpath_len],
             };
             // io is always null → never runs real git; must not crash.
             _ = try buildGitStatus(null, a, src);
@@ -1253,7 +1830,7 @@ test "gitOutput: returns null for nonexistent path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const result = gitOutput(io, testing.allocator, "/nonexistent/path/repo", &.{"rev-parse", "HEAD"});
+    const result = gitOutput(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" });
     try testing.expect(result == null);
 }
 
@@ -1261,14 +1838,14 @@ test "gitCheck: returns false for empty repo_path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expectEqual(false, gitCheck(io, testing.allocator, "", &.{"rev-parse", "HEAD"}));
+    try testing.expectEqual(false, gitCheck(io, testing.allocator, "", &.{ "rev-parse", "HEAD" }));
 }
 
 test "gitCheck: returns false for nonexistent path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expectEqual(false, gitCheck(io, testing.allocator, "/nonexistent/path/repo", &.{"rev-parse", "HEAD"}));
+    try testing.expectEqual(false, gitCheck(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" }));
 }
 
 test "gitOutput: special characters in repo_path safe" {
@@ -1387,7 +1964,7 @@ test "fuzz buildSourceStatus: dispatches correctly by source type" {
             defer arena.deinit();
             const a = arena.allocator();
 
-            const st: SourceType = @enumFromInt(@as(u2, @intCast(source_type_val)));
+            const st: SourceType = @fromBackingInt(@intCast(@as(u2, @intCast(source_type_val))));
             const s: Source = switch (st) {
                 .git_repo => .{ .name = "moonraker", .type = .git_repo, .owner = "Arksine", .repo_name = "moonraker" },
                 .system => .{ .name = "system", .type = .system },
@@ -1464,4 +2041,44 @@ test "fuzz nextProcId: monotonic, never wraps" {
             }
         }
     }.run, .{});
+}
+
+test "tickAutoRefresh: disabled and out of window do not refresh" {
+    const Count = struct {
+        n: usize = 0,
+        fn hook(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.n += 1;
+        }
+    };
+    var count = Count{};
+    var ctx = testCtx();
+    ctx.refresh_hook = Count.hook;
+    ctx.refresh_hook_ctx = &count;
+    ctx.io = null;
+    try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
+    try testing.expectEqual(@as(usize, 0), count.n);
+
+    ctx.auto_refresh = true;
+    try testing.expect(ctx.tickAutoRefresh(testing.allocator, 23));
+    try testing.expectEqual(@as(usize, 1), count.n);
+    try testing.expect(ctx.initial_refresh_done);
+
+    ctx.last_auto_refresh_s = clock.wallSecondsInt();
+    try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
+    try testing.expectEqual(@as(usize, 1), count.n);
+
+    ctx.last_auto_refresh_s = 0;
+    try testing.expect(ctx.tickAutoRefresh(testing.allocator, 2));
+    try testing.expectEqual(@as(usize, 2), count.n);
+
+    ctx.last_auto_refresh_s = 0;
+    ctx.printing_check = testPrintingCheck;
+    ctx.printing_ctx = &count;
+    test_printing_flag = true;
+    defer test_printing_flag = false;
+    try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
+    try testing.expect(!UpdateCtx.inRefreshWindow(0, 5, 12));
+    try testing.expect(UpdateCtx.inRefreshWindow(0, 5, 0));
+    try testing.expect(UpdateCtx.inRefreshWindow(22, 5, 23));
 }

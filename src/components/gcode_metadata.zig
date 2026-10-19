@@ -448,7 +448,7 @@ fn findObjectHeight(text: []const u8) ?f64 {
         const start = idx + ";Bounding Box:".len;
         const line_end = scanLineEnd(text, start);
         const line = text[start..line_end];
-        var floats: [3]f64 = [_]f64{0} ** 3;
+        var floats: [3]f64 = @splat(0);
         var fi: usize = 0;
         var tok_it = std.mem.tokenizeScalar(u8, line, ' ');
         while (tok_it.next()) |tok| {

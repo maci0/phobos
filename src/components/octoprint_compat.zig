@@ -36,6 +36,8 @@ const octo_version = "1.5.0";
 const software_version = "1.5.0";
 
 pub const OctoPrintCtx = struct {
+    server_info: ?*@import("../core/methods.zig").ServerInfo = null,
+    temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
     /// Latest print_stats state field from Klippy. Updated by statusUpdate()
     /// called from klippy_connection's status processing.
     last_state: []const u8 = "standby",
@@ -44,12 +46,23 @@ pub const OctoPrintCtx = struct {
     klippy_started: bool = false,
     /// True once Klippy is fully connected and ready.
     klippy_ready: bool = false,
+    /// `[octoprint_compat]` options. Defaults match Moonraker.
+    enable_ufp: bool = true,
+    flip_h: bool = false,
+    flip_v: bool = false,
+    rotate_90: bool = false,
+    stream_url: []const u8 = "/webcam/?action=stream",
+    webcam_enabled: bool = true,
+    /// True when `stream_url` was duped from config and must be freed.
+    stream_url_owned: bool = false,
 
     pub fn init() OctoPrintCtx {
         return .{};
     }
 
-    pub fn deinit(_: *OctoPrintCtx) void {}
+    pub fn deinit(self: *OctoPrintCtx, alloc: std.mem.Allocator) void {
+        if (self.stream_url_owned) alloc.free(self.stream_url);
+    }
 
     /// Called by klippy_connection when a status update contains print_stats.
     /// Extracts the state field for printer_state() queries.
@@ -75,9 +88,23 @@ pub const OctoPrintCtx = struct {
 
     /// Maps Klippy + print_stats state to OctoPrint printer state string.
     /// Matches octoprint_compat.py printer_state().
+    fn connectionState(self: *const OctoPrintCtx) enum { offline, failed, ready } {
+        if (self.server_info) |info| {
+            if (info.io) |io| info.state_mutex.lockUncancelable(io);
+            defer if (info.io) |io| info.state_mutex.unlock(io);
+            if (!info.klippy_connected) return .offline;
+            return if (std.mem.eql(u8, info.klippy_state, "ready")) .ready else .failed;
+        }
+        if (!self.klippy_started) return .offline;
+        return if (self.klippy_ready) .ready else .failed;
+    }
+
     fn printerState(self: *const OctoPrintCtx) []const u8 {
-        if (!self.klippy_started) return "Offline";
-        if (!self.klippy_ready) return "Error";
+        switch (self.connectionState()) {
+            .offline => return "Offline",
+            .failed => return "Error",
+            .ready => {},
+        }
         return switch (std.meta.stringToEnum(enum {
             standby,
             printing,
@@ -119,7 +146,7 @@ pub fn handleServer(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
     var o = obj(alloc);
     try o.put(alloc, "server", .{ .string = octo_version });
-    try o.put(alloc, "safemode", if (ctx.klippy_ready) std.json.Value.null else .{ .string = "settings" });
+    try o.put(alloc, "safemode", if (ctx.connectionState() == .ready) std.json.Value.null else .{ .string = "settings" });
     return .{ .object = o };
 }
 
@@ -141,22 +168,24 @@ pub fn handleLoginUser(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
     return .{ .object = o };
 }
 
-/// GET /api/settings → capabilities (UFP plugin enabled by default).
-pub fn handleSettings(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+/// GET /api/settings → capabilities from `[octoprint_compat]`.
+pub fn handleSettings(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
     var o = obj(alloc);
 
-    // plugins.UltimakerFormatPackage (enable_ufp defaults to true).
-    var ufp = obj(alloc);
-    try ufp.put(alloc, "align_inline_thumbnail", .{ .bool = false });
-    try ufp.put(alloc, "inline_thumbnail", .{ .bool = false });
-    try ufp.put(alloc, "inline_thumbnail_align_value", .{ .string = "left" });
-    try ufp.put(alloc, "inline_thumbnail_scale_value", .{ .string = "50" });
-    try ufp.put(alloc, "installed", .{ .bool = true });
-    try ufp.put(alloc, "installed_version", .{ .string = "0.2.2" });
-    try ufp.put(alloc, "scale_inline_thumbnail", .{ .bool = false });
-    try ufp.put(alloc, "state_panel_thumbnail", .{ .bool = true });
     var plugins = obj(alloc);
-    try plugins.put(alloc, "UltimakerFormatPackage", .{ .object = ufp });
+    if (ctx.enable_ufp) {
+        var ufp = obj(alloc);
+        try ufp.put(alloc, "align_inline_thumbnail", .{ .bool = false });
+        try ufp.put(alloc, "inline_thumbnail", .{ .bool = false });
+        try ufp.put(alloc, "inline_thumbnail_align_value", .{ .string = "left" });
+        try ufp.put(alloc, "inline_thumbnail_scale_value", .{ .string = "50" });
+        try ufp.put(alloc, "installed", .{ .bool = true });
+        try ufp.put(alloc, "installed_version", .{ .string = "0.2.2" });
+        try ufp.put(alloc, "scale_inline_thumbnail", .{ .bool = false });
+        try ufp.put(alloc, "state_panel_thumbnail", .{ .bool = true });
+        try plugins.put(alloc, "UltimakerFormatPackage", .{ .object = ufp });
+    }
     try o.put(alloc, "plugins", .{ .object = plugins });
 
     var feature = obj(alloc);
@@ -165,11 +194,11 @@ pub fn handleSettings(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator
     try o.put(alloc, "feature", .{ .object = feature });
 
     var webcam = obj(alloc);
-    try webcam.put(alloc, "flipH", .{ .bool = false });
-    try webcam.put(alloc, "flipV", .{ .bool = false });
-    try webcam.put(alloc, "rotate90", .{ .bool = false });
-    try webcam.put(alloc, "streamUrl", .{ .string = "/webcam/?action=stream" });
-    try webcam.put(alloc, "webcamEnabled", .{ .bool = true });
+    try webcam.put(alloc, "flipH", .{ .bool = ctx.flip_h });
+    try webcam.put(alloc, "flipV", .{ .bool = ctx.flip_v });
+    try webcam.put(alloc, "rotate90", .{ .bool = ctx.rotate_90 });
+    try webcam.put(alloc, "streamUrl", .{ .string = ctx.stream_url });
+    try webcam.put(alloc, "webcamEnabled", .{ .bool = ctx.webcam_enabled });
     try o.put(alloc, "webcam", .{ .object = webcam });
 
     return .{ .object = o };
@@ -207,8 +236,27 @@ pub fn handleJob(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
 pub fn handlePrinter(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
     var o = obj(alloc);
-    // No heaters without Klippy API → empty temperature map.
-    try o.put(alloc, "temperature", .{ .object = obj(alloc) });
+    var temperatures: std.json.ObjectMap = .empty;
+    if (ctx.temp_store) |store| {
+        if (store.io) |io| {
+            store.temp_mutex.lockUncancelable(io);
+            defer store.temp_mutex.unlock(io);
+            var it = store.sensors.iterator();
+            while (it.next()) |entry| {
+                const heater = entry.key_ptr.*;
+                const name = if (std.mem.eql(u8, heater, "heater_bed")) "bed" else if (std.mem.startsWith(u8, heater, "extruder")) blk: {
+                    const tool = std.fmt.parseInt(u32, heater[8..], 10) catch 0;
+                    break :blk try std.fmt.allocPrint(alloc, "tool{d}", .{tool});
+                } else continue;
+                var data: std.json.ObjectMap = .empty;
+                try data.put(alloc, "actual", .{ .float = entry.value_ptr.temperature });
+                try data.put(alloc, "offset", .{ .integer = 0 });
+                try data.put(alloc, "target", .{ .float = entry.value_ptr.target });
+                try temperatures.put(alloc, name, .{ .object = data });
+            }
+        }
+    }
+    try o.put(alloc, "temperature", .{ .object = temperatures });
 
     const state_str = ctx.printerState();
 
@@ -354,6 +402,39 @@ test "handleServer: klippy ready → safemode null" {
     try testing.expect(r.object.get("safemode").? == .null);
 }
 
+test "OctoPrint reads live connection state and cached heater temperatures" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var temps = try @import("data_store.zig").DataStoreCtx.init(testing.allocator);
+    defer temps.deinit();
+    temps.setIo(io);
+    temps.pushTemp(io, "heater_bed", 30.567, 0, 0, null);
+    temps.pushTemp(io, "extruder", 31.123, 0, 0, null);
+    temps.pushTemp(io, "extruder1", 32, 0, 0, null);
+    temps.pushTemp(io, "temperature_sensor chamber", 25, null, null, null);
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "ready" };
+    var ctx = OctoPrintCtx{ .server_info = &info, .temp_store = &temps };
+    const server = try handleServer(&ctx, .null, a);
+    try testing.expect(server.object.get("safemode").? == .null);
+    const printer = try handlePrinter(&ctx, .null, a);
+    try testing.expectEqualStrings("Operational", printer.object.get("state").?.object.get("text").?.string);
+    const heaters = printer.object.get("temperature").?.object;
+    try testing.expectEqual(@as(usize, 3), heaters.count());
+    try testing.expectEqual(@as(f64, 30.57), heaters.get("bed").?.object.get("actual").?.float);
+    try testing.expectEqual(@as(f64, 31.12), heaters.get("tool0").?.object.get("actual").?.float);
+    try testing.expectEqual(@as(f64, 0), heaters.get("tool1").?.object.get("target").?.float);
+    info.klippy_state = "shutdown";
+    const failed = try handlePrinter(&ctx, .null, a);
+    try testing.expectEqualStrings("Error", failed.object.get("state").?.object.get("text").?.string);
+    info.klippy_connected = false;
+    const disconnected = try handlePrinter(&ctx, .null, a);
+    try testing.expectEqualStrings("Offline", disconnected.object.get("state").?.object.get("text").?.string);
+}
+
 test "handleLoginUser returns _api user with admin groups" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -361,6 +442,25 @@ test "handleLoginUser returns _api user with admin groups" {
     const r = try handleLoginUser(@ptrCast(&ctx), .null, arena.allocator());
     try testing.expectEqualStrings("_api", r.object.get("name").?.string);
     try testing.expectEqual(@as(usize, 2), r.object.get("groups").?.array.items.len);
+}
+
+test "handleSettings reads octoprint_compat webcam and ufp flags" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = OctoPrintCtx{
+        .enable_ufp = false,
+        .flip_h = true,
+        .rotate_90 = true,
+        .stream_url = "http://cam/stream",
+        .webcam_enabled = false,
+    };
+    const r = try handleSettings(@ptrCast(&ctx), .null, arena.allocator());
+    try testing.expect(r.object.get("plugins").?.object.get("UltimakerFormatPackage") == null);
+    const webcam = r.object.get("webcam").?.object;
+    try testing.expect(webcam.get("flipH").?.bool);
+    try testing.expect(webcam.get("rotate90").?.bool);
+    try testing.expect(!webcam.get("webcamEnabled").?.bool);
+    try testing.expectEqualStrings("http://cam/stream", webcam.get("streamUrl").?.string);
 }
 
 test "handleSettings includes webcam and UFP plugin" {
@@ -581,10 +681,27 @@ test "fuzz octoprint handlers: arbitrary params never crash, always serializable
             var buf: [16]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
 
+            var info = @import("../core/methods.zig").ServerInfo{
+                .klippy_connected = buf[2] % 2 == 0,
+                .klippy_state = if (buf[3] % 2 == 0) "ready" else "shutdown",
+            };
+            ctx.server_info = &info;
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            var temps = try @import("data_store.zig").DataStoreCtx.init(testing.allocator);
+            defer temps.deinit();
+            try temps.setTemperatureStoreSize(1);
+            temps.setIo(threaded.io());
+            const names = [_][]const u8{ "extruder", "extruder1", "extruder_invalid", "heater_bed", "temperature_sensor chamber" };
+            temps.pushTemp(threaded.io(), names[buf[4] % names.len], @floatFromInt(buf[5]), 0, null, null);
+            ctx.temp_store = &temps;
+            _ = ctx.connectionState();
+            _ = try handlePrinter(&ctx, .null, a);
+
             const handlers = [_]registry.HandlerFn{
-                handleVersion,   handleServer,         handleLoginUser,
-                handleSettings,  handleJob,            handlePrinter,
-                handleCommand,   handlePrinterProfiles, handleSelectFile,
+                handleVersion,  handleServer,          handleLoginUser,
+                handleSettings, handleJob,             handlePrinter,
+                handleCommand,  handlePrinterProfiles, handleSelectFile,
             };
             const strs = [_][]const u8{ "null", "{}", "{\"commands\":[\"G28\"]}", "[1]", "5" };
             const p = std.json.parseFromSlice(std.json.Value, a, strs[buf[0] % strs.len], .{}) catch return;

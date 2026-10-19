@@ -1039,8 +1039,8 @@ test "parse: value longer than the line stack buffer is not truncated" {
     var p = ConfigParser.init(std.testing.allocator);
     defer p.deinit();
     // 5000-byte value exceeds the 4096 per-line stack buffer → heap fallback.
-    const big = "x" ** 5000;
+    const big: [5000]u8 = @splat('x');
     const src = "[s]\nkey: " ++ big ++ "\n";
     try p.parseString(src, "");
-    try std.testing.expectEqualStrings(big, p.get("s", "key").?);
+    try std.testing.expectEqualStrings(&big, p.get("s", "key").?);
 }

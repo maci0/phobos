@@ -569,6 +569,8 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
             var it = obj.iterator();
             while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
+                // HTTP injects `_method` into every route. It is not a strip.
+                if (name.len == 0 or name[0] == '_') continue;
                 if (ctx.findStrip(name)) |strip| {
                     _ = processRequest(ctx, strip, action) catch {};
                     const updated = ctx.findStrip(name) orelse strip;
@@ -1031,6 +1033,15 @@ test "handleBatchToggle: toggles strip status" {
     try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
     _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
     try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
+}
+
+test "handleBatchStatus: injected _method is not a strip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    try testing.expectError(error.InvalidParams, handleBatchStatus(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"GET\"}"), a));
 }
 
 test "handleBatchStatus: unknown strip returns strip_not_found shape" {

@@ -137,6 +137,88 @@ const cam_fields = [_]CamFieldMapping{
 // Context
 // ---------------------------------------------------------------------------
 
+/// Moonraker `uuid.uuid5(instance_uuid, "moonraker.webcam.<name>")`.
+/// `instance_uuid` is 32 hex chars or a dashed UUID. The result is the
+/// dashed form Klipper frontends store.
+pub fn configWebcamUid(instance_uuid: []const u8, name: []const u8, buf: *[36]u8) ![]const u8 {
+    var ns: [16]u8 = undefined;
+    try parseUuid(instance_uuid, &ns);
+    var labeled: [192]u8 = undefined;
+    const prefix = "moonraker.webcam.";
+    if (prefix.len + name.len > labeled.len) return error.InvalidParams;
+    @memcpy(labeled[0..prefix.len], prefix);
+    @memcpy(labeled[prefix.len..][0..name.len], name);
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(&ns);
+    hasher.update(labeled[0 .. prefix.len + name.len]);
+    var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    var bytes: [16]u8 = undefined;
+    @memcpy(bytes[0..16], digest[0..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    return formatUuid(&bytes, buf);
+}
+
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+fn parseUuid(text: []const u8, out: *[16]u8) !void {
+    const s = std.mem.trim(u8, text, " \t\r\n");
+    var hex: [32]u8 = undefined;
+    if (s.len == 32) {
+        @memcpy(hex[0..32], s[0..32]);
+    } else if (s.len == 36 and s[8] == '-' and s[13] == '-' and s[18] == '-' and s[23] == '-') {
+        var n: usize = 0;
+        for (s) |c| {
+            if (c == '-') continue;
+            if (n >= 32) return error.InvalidUuid;
+            hex[n] = c;
+            n += 1;
+        }
+        if (n != 32) return error.InvalidUuid;
+    } else return error.InvalidUuid;
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const hi = hexNibble(hex[i * 2]) orelse return error.InvalidUuid;
+        const lo = hexNibble(hex[i * 2 + 1]) orelse return error.InvalidUuid;
+        out[i] = (hi << 4) | lo;
+    }
+}
+
+/// Lowercase 32-hex form of an instance UUID. Accepts dashed or bare hex.
+pub fn canonicalInstanceHex(text: []const u8, out: *[32]u8) bool {
+    var bytes: [16]u8 = undefined;
+    parseUuid(text, &bytes) catch return false;
+    const hexd = "0123456789abcdef";
+    for (bytes, 0..) |b, i| {
+        out[i * 2] = hexd[b >> 4];
+        out[i * 2 + 1] = hexd[b & 0xf];
+    }
+    return true;
+}
+
+fn formatUuid(bytes: *const [16]u8, buf: *[36]u8) []const u8 {
+    const hexd = "0123456789abcdef";
+    var o: usize = 0;
+    for (bytes, 0..) |b, i| {
+        if (i == 4 or i == 6 or i == 8 or i == 10) {
+            buf[o] = '-';
+            o += 1;
+        }
+        buf[o] = hexd[b >> 4];
+        buf[o + 1] = hexd[b & 0xf];
+        o += 2;
+    }
+    return buf;
+}
+
 pub const WebcamCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
@@ -145,6 +227,10 @@ pub const WebcamCtx = struct {
     gpa: std.mem.Allocator,
     /// In-memory map: uid → Webcam (persisted to DataStore on writes)
     cams: std.StringHashMapUnmanaged(Webcam),
+    /// Insertion order of uids. Moonraker's webcam dict keeps config order.
+    order: std.ArrayList([]const u8) = .empty,
+    /// Datadir `.moonraker.uuid`. Empty uses the nil UUID.
+    instance_uuid: []const u8 = "",
 
     const ns: [:0]const u8 = "webcams";
 
@@ -186,6 +272,37 @@ pub const WebcamCtx = struct {
             self.gpa.free(e.key_ptr.*);
         }
         self.cams.deinit(self.gpa);
+        self.order.deinit(self.gpa);
+    }
+
+    fn track(self: *WebcamCtx, uid: []const u8) !void {
+        try self.order.append(self.gpa, uid);
+    }
+
+    fn untrack(self: *WebcamCtx, uid: []const u8) void {
+        var i: usize = 0;
+        while (i < self.order.items.len) {
+            if (std.mem.eql(u8, self.order.items[i], uid)) {
+                _ = self.order.orderedRemove(i);
+                return;
+            }
+            i += 1;
+        }
+    }
+
+    fn dropByName(self: *WebcamCtx, name: []const u8) void {
+        const existing = self.findByName(name) orelse return;
+        var uid_buf: [80]u8 = undefined;
+        if (existing.uid.len > uid_buf.len) return;
+        @memcpy(uid_buf[0..existing.uid.len], existing.uid);
+        const uid_tmp = uid_buf[0..existing.uid.len];
+        self.untrack(uid_tmp);
+        if (self.cams.fetchRemove(uid_tmp)) |kv| {
+            var val = kv.value;
+            freeWebcam(self.gpa, &val);
+            self.gpa.free(kv.key);
+        }
+        self.deleteFromStore(uid_tmp);
     }
 
     /// Load persisted webcams from the DataStore on startup.
@@ -207,6 +324,7 @@ pub const WebcamCtx = struct {
             const uid_owned = try self.gpa.dupe(u8, uid);
             errdefer self.gpa.free(uid_owned);
             try self.cams.put(self.gpa, uid_owned, cam);
+            try self.track(uid_owned);
         }
     }
 
@@ -217,7 +335,7 @@ pub const WebcamCtx = struct {
         const a = arena.allocator();
 
         const db_val = toDbValue(a, cam) catch return;
-        const uid_z = a.dupeZ(u8, cam.uid) catch return;
+        const uid_z = a.dupeSentinel(u8, cam.uid, 0) catch return;
         self.store.insertItem(a, ns, uid_z, db_val) catch |err| {
             std.debug.print("phobos: warning: failed to persist webcam '{s}': {} — change will be lost on restart\n", .{ cam.uid, err });
         };
@@ -228,11 +346,70 @@ pub const WebcamCtx = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const uid_z = a.dupeZ(u8, uid) catch return;
+        const uid_z = a.dupeSentinel(u8, uid, 0) catch return;
         _ = self.store.deleteItem(a, ns, uid_z) catch |err| switch (err) {
             error.KeyNotFound => {}, // idempotent delete — nothing persisted
             else => std.debug.print("phobos: warning: failed to delete webcam '{s}' from store: {} — may reappear on restart\n", .{ uid, err }),
         };
+    }
+
+    /// One `[webcam <name>]` section. `stream_url` is required. Strings are
+    /// borrowed for the call and copied into the webcam table.
+    pub const ConfigCam = struct {
+        name: []const u8,
+        enabled: bool = true,
+        icon: []const u8 = "mdiWebcam",
+        aspect_ratio: []const u8 = "4:3",
+        target_fps: i64 = 15,
+        target_fps_idle: i64 = 5,
+        location: []const u8 = "printer",
+        service: []const u8 = "mjpegstreamer",
+        stream_url: []const u8,
+        snapshot_url: []const u8 = "",
+        flip_horizontal: bool = false,
+        flip_vertical: bool = false,
+        rotation: i64 = 0,
+    };
+
+    /// Load a config-sourced webcam. Moonraker `WebCam.from_config`: source is
+    /// `config`, so later POST/DELETE of this name is forbidden. The uid is
+    /// `uuid5(instance_uuid, "moonraker.webcam.<name>")`. A second add of the
+    /// same name keeps the first record when that uid already matches.
+    /// A stored cam with a different uid is replaced.
+    pub fn addFromConfig(self: *WebcamCtx, spec: ConfigCam) !void {
+        if (spec.name.len == 0 or spec.stream_url.len == 0) return error.InvalidParams;
+        const gpa = self.gpa;
+        var uid_buf: [36]u8 = undefined;
+        const namespace = if (self.instance_uuid.len == 0) "00000000000000000000000000000000" else self.instance_uuid;
+        const uid_tmp = try configWebcamUid(namespace, spec.name, &uid_buf);
+        if (self.findByName(spec.name)) |existing| {
+            if (std.mem.eql(u8, existing.uid, uid_tmp)) return;
+            self.dropByName(spec.name);
+        }
+        var cam = Webcam{
+            .name = try gpa.dupe(u8, spec.name),
+            .enabled = spec.enabled,
+            .icon = try gpa.dupe(u8, spec.icon),
+            .aspect_ratio = try gpa.dupe(u8, spec.aspect_ratio),
+            .target_fps = spec.target_fps,
+            .target_fps_idle = spec.target_fps_idle,
+            .location = try gpa.dupe(u8, spec.location),
+            .service = try gpa.dupe(u8, spec.service),
+            .stream_url = try gpa.dupe(u8, spec.stream_url),
+            .snapshot_url = try gpa.dupe(u8, spec.snapshot_url),
+            .flip_horizontal = spec.flip_horizontal,
+            .flip_vertical = spec.flip_vertical,
+            .rotation = spec.rotation,
+            .source = try gpa.dupe(u8, "config"),
+            .extra_data = .empty,
+            .uid = try gpa.dupe(u8, uid_tmp),
+        };
+        errdefer freeWebcam(gpa, &cam);
+        try cam.validate();
+        const key = try gpa.dupe(u8, cam.uid);
+        errdefer gpa.free(key);
+        try self.cams.put(gpa, key, cam);
+        try self.track(key);
     }
 
     /// Find cam by name (caller must hold mutex).
@@ -271,9 +448,9 @@ pub const WebcamCtx = struct {
     /// Return a JSON array of all webcam dicts (for notifications and list).
     pub fn listJson(self: *WebcamCtx, alloc: std.mem.Allocator) !std.json.Value {
         var arr: std.json.Array = .init(alloc);
-        var it = self.cams.iterator();
-        while (it.next()) |e| {
-            const v = try e.value_ptr.asJson(alloc);
+        for (self.order.items) |uid| {
+            const cam = self.cams.getPtr(uid) orelse continue;
+            const v = try cam.asJson(alloc);
             try arr.append(v);
         }
         return .{ .array = arr };
@@ -461,6 +638,9 @@ pub fn handleWebcamList(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
 /// GET /server/webcams/item → {"webcam": {...}}
 pub fn handleWebcamGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
+    // Moonraker get_str("name") when neither uid nor name was sent:
+    // 400 "No data for argument: name". An unknown name stays 404.
+    if (getOptStr(params, "uid") == null and getOptStr(params, "name") == null) return error.MissingWebcamName;
     const cam = lookupCamera(c, params, true) orelse return error.NotFound;
     const cam_json = try cam.asJson(alloc);
     var result: std.json.ObjectMap = .empty;
@@ -502,6 +682,7 @@ pub fn handleWebcamPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
         alloc.free(uid); // we duped it
 
         try c.cams.put(c.gpa, uid_owned, new_cam);
+        try c.track(uid_owned);
         const stored_cam = c.cams.getPtr(uid_owned).?;
         c.saveToStore(stored_cam);
     }
@@ -530,6 +711,7 @@ pub fn handleWebcamDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.me
     const uid_copy = try alloc.dupe(u8, cam.uid);
     defer alloc.free(uid_copy);
 
+    c.untrack(uid_copy);
     // Remove from in-memory map and persist deletion
     if (c.cams.fetchRemove(uid_copy)) |kv| {
         var val = kv.value;
@@ -795,6 +977,52 @@ fn makeCtx(alloc: std.mem.Allocator, nb: *NullBus) !WebcamCtx {
     return WebcamCtx.init(alloc, NullDS.dataStore(), &nb.bus);
 }
 
+test "configWebcamUid matches Moonraker uuid5 for the printer instance" {
+    var buf: [36]u8 = undefined;
+    const ns = "a48b28888e484d4fac9b7bc09e068dea";
+    const cam = try configWebcamUid(ns, "cam", &buf);
+    try testing.expectEqualStrings("1616e509-4515-53e4-8cd8-74875fb859c9", cam);
+    const example = try configWebcamUid("a48b2888-8e48-4d4f-ac9b-7bc09e068dea", "Example", &buf);
+    try testing.expectEqualStrings("e98363d4-af2e-5f41-8515-e84af7baf3c2", example);
+}
+
+test "addFromConfig: config webcam is listed and cannot be overwritten" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, ":memory:");
+    defer db.deinit();
+    var nb = NullBus.init(a);
+    var ctx = try WebcamCtx.init(a, db.dataStore(), &nb.bus);
+    defer ctx.deinit();
+
+    try ctx.addFromConfig(.{
+        .name = "cam",
+        .enabled = true,
+        .service = "mjpegstreamer-adaptive",
+        .stream_url = "/webcam/?action=stream",
+        .snapshot_url = "/webcam/?action=snapshot",
+    });
+    try ctx.addFromConfig(.{
+        .name = "cam",
+        .enabled = false,
+        .service = "other",
+        .stream_url = "http://replaced",
+    });
+
+    const result = try handleWebcamList(@ptrCast(&ctx), .null, a);
+    const webcams = result.object.get("webcams").?.array;
+    try testing.expectEqual(@as(usize, 1), webcams.items.len);
+    const cam = webcams.items[0].object;
+    try testing.expectEqualStrings("cam", cam.get("name").?.string);
+    try testing.expectEqualStrings("config", cam.get("source").?.string);
+    try testing.expectEqualStrings("mjpegstreamer-adaptive", cam.get("service").?.string);
+    try testing.expectEqualStrings("/webcam/?action=stream", cam.get("stream_url").?.string);
+    try testing.expect(cam.get("enabled").?.bool);
+    const stored = try ctx.store.getNamespace(a, "webcams");
+    try testing.expectEqual(@as(usize, 0), stored.object.count());
+}
+
 test "handleWebcamList: empty store returns empty array" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -859,6 +1087,8 @@ test "webcam: get non-existent cam → NotFound" {
 
     const params = try mkParams(a, "{\"name\":\"nonexistent\"}");
     try testing.expectError(error.NotFound, handleWebcamGet(@ptrCast(&ctx), params, a));
+    try testing.expectError(error.MissingWebcamName, handleWebcamGet(@ptrCast(&ctx), .null, a));
+    try testing.expectError(error.MissingWebcamName, handleWebcamGet(@ptrCast(&ctx), try mkParams(a, "{}"), a));
 }
 
 test "webcam: invalid rotation → InvalidParams on create" {

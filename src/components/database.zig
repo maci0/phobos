@@ -47,7 +47,7 @@ const DataStore = ds.DataStore;
 
 /// Namespaces with NO API access whatsoever (read or write). Not configurable
 /// through the public API. Mirrors database.py `forbidden_namespaces`.
-pub const default_forbidden_namespaces = [_][]const u8{"database"};
+pub const default_forbidden_namespaces = [_][]const u8{ "database", "authorized_users" };
 
 /// Namespaces with read-only public API access. Mirrors database.py
 /// `protected_namespaces`.
@@ -73,7 +73,17 @@ pub fn isProtected(namespace: []const u8) bool {
 
 pub const DbCtx = struct {
     store: DataStore,
+    registered_namespaces: []const []const u8 = &.{},
 };
+
+fn namespaceListed(c: *DbCtx, alloc: std.mem.Allocator, policy: []const u8, namespace: []const u8) !bool {
+    const names = (try c.store.getItem(alloc, "database", policy)) orelse return false;
+    if (names != .array) return false;
+    for (names.array.items) |name| {
+        if (name == .string and std.mem.eql(u8, name.string, namespace)) return true;
+    }
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // Parameter extraction helpers
@@ -180,8 +190,17 @@ fn handleListImpl(
 
     var visible: std.ArrayList([]const u8) = .empty;
     for (all_ns) |ns| {
-        if (!is_debug and isForbidden(ns)) continue;
+        if (!is_debug and (isForbidden(ns) or try namespaceListed(c, alloc, "forbidden_namespaces", ns))) continue;
         try visible.append(alloc, ns);
+    }
+    for (c.registered_namespaces) |ns| {
+        if (!is_debug and (isForbidden(ns) or try namespaceListed(c, alloc, "forbidden_namespaces", ns))) continue;
+        var exists = false;
+        for (visible.items) |name| if (std.mem.eql(u8, name, ns)) {
+            exists = true;
+            break;
+        };
+        if (!exists) try visible.append(alloc, ns);
     }
 
     // Backups: stub (no SQLite backup dir in phobos).
@@ -211,19 +230,32 @@ fn handleItemGet(
     is_debug: bool,
 ) anyerror!std.json.Value {
     const namespace = try getStr(params, "namespace");
-    if (!is_debug and isForbidden(namespace)) return error.Forbidden;
+    if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
 
     const key_opt = try getOptStr(params, "key");
-    const ns_z = try alloc.dupeZ(u8, namespace);
+    const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
     const value: std.json.Value = if (key_opt) |key| blk: {
         const v = try c.store.getItem(alloc, ns_z, key);
-        break :blk v orelse return error.NotFound;
+        break :blk v orelse return error.MissingDbKey;
     } else blk: {
+        if (!try namespaceKnown(c, alloc, namespace)) return error.UnknownDbNamespace;
         break :blk try c.store.getNamespace(alloc, ns_z);
     };
 
     return buildItemResponse(alloc, namespace, key_opt, value);
+}
+
+fn namespaceKnown(c: *DbCtx, alloc: std.mem.Allocator, namespace: []const u8) !bool {
+    for (c.registered_namespaces) |name| if (std.mem.eql(u8, name, namespace)) return true;
+    if (std.mem.eql(u8, namespace, "history") or std.mem.eql(u8, namespace, "history_totals")) {
+        return true;
+    }
+    const names = try c.store.listNamespaces(alloc);
+    for (names) |n| {
+        if (std.mem.eql(u8, n, namespace)) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,8 +280,8 @@ fn handleItemPost(
     is_debug: bool,
 ) anyerror!std.json.Value {
     const namespace = try getStr(params, "namespace");
-    if (!is_debug and isForbidden(namespace)) return error.Forbidden;
-    if (!is_debug and isProtected(namespace)) return error.Forbidden;
+    if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
+    if (!is_debug and (isProtected(namespace) or try namespaceListed(c, alloc, "protected_namespaces", namespace))) return error.Forbidden;
 
     const key = try getStr(params, "key");
     const value = try getValue(params);
@@ -257,7 +289,7 @@ fn handleItemPost(
     // serialize it through std.json.Stringify's fixed 256-level nesting stack,
     // which panics / corrupts memory past its limit. Real data is shallow.
     if (jv.exceedsDepth(value, jv.max_value_depth)) return error.InvalidParams;
-    const ns_z = try alloc.dupeZ(u8, namespace);
+    const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
     try c.store.insertItem(alloc, ns_z, key, value);
     return buildItemResponse(alloc, namespace, key, value);
@@ -285,11 +317,11 @@ fn handleItemDelete(
     is_debug: bool,
 ) anyerror!std.json.Value {
     const namespace = try getStr(params, "namespace");
-    if (!is_debug and isForbidden(namespace)) return error.Forbidden;
-    if (!is_debug and isProtected(namespace)) return error.Forbidden;
+    if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
+    if (!is_debug and (isProtected(namespace) or try namespaceListed(c, alloc, "protected_namespaces", namespace))) return error.Forbidden;
 
     const key = try getStr(params, "key");
-    const ns_z = try alloc.dupeZ(u8, namespace);
+    const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
     const removed = c.store.deleteItem(alloc, ns_z, key) catch |err| switch (err) {
         ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
@@ -598,6 +630,33 @@ test "handleList: filters forbidden namespaces" {
     try testing.expect(result.object.get("backups") != null);
 }
 
+test "database policies hide auth records and honor persisted namespace access" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = makeCtx(a, &mem);
+    ctx.registered_namespaces = &.{"announcements"};
+    try ctx.store.insertItem(a, "authorized_users", "user", .{ .string = "private" });
+    try ctx.store.insertItem(a, "secret", "key", .null);
+    try ctx.store.insertItem(a, "database", "forbidden_namespaces", try mkParams(a, "[\"secret\"]"));
+    try ctx.store.insertItem(a, "database", "protected_namespaces", try mkParams(a, "[\"announcements\"]"));
+    const listed = try handleList(&ctx, .null, a);
+    const names = listed.object.get("namespaces").?.array.items;
+    try testing.expectEqual(@as(usize, 1), names.len);
+    try testing.expectEqualStrings("announcements", names[0].string);
+    const empty = try handleGetItem(&ctx, try mkParams(a, "{\"namespace\":\"announcements\"}"), a);
+    try testing.expectEqual(@as(usize, 0), empty.object.get("value").?.object.count());
+    try testing.expectError(error.Forbidden, handleGetItem(&ctx, try mkParams(a, "{\"namespace\":\"authorized_users\"}"), a));
+    try testing.expectError(error.Forbidden, handleGetItem(&ctx, try mkParams(a, "{\"namespace\":\"secret\"}"), a));
+    const params = try mkParams(a, "{\"namespace\":\"announcements\",\"key\":\"one\",\"value\":1}");
+    try testing.expectError(error.Forbidden, handlePostItem(&ctx, params, a));
+    try testing.expectError(error.Forbidden, handleDeleteItem(&ctx, params, a));
+    _ = try handlePostItemDebug(&ctx, params, a);
+    _ = try handleGetItemDebug(&ctx, try mkParams(a, "{\"namespace\":\"secret\"}"), a);
+}
+
 test "handleListDebug: includes forbidden namespaces" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -686,10 +745,24 @@ test "handleDeleteItem: removes key and returns removed value" {
 
     // GET after DELETE → NotFound.
     const get_params = try mkParams(a, "{\"namespace\":\"delns\",\"key\":\"k\"}");
-    try testing.expectError(error.NotFound, handleGetItem(@ptrCast(&ctx), get_params, a));
+    try testing.expectError(error.MissingDbKey, handleGetItem(@ptrCast(&ctx), get_params, a));
 }
 
-test "handleGetItem: missing key → NotFound" {
+test "handleGetItem: missing key has its own error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = makeCtx(a, &mem);
+    _ = try mem.getOrCreateNs("empty");
+
+    const params = try mkParams(a, "{\"namespace\":\"empty\",\"key\":\"nope\"}");
+    try testing.expectError(error.MissingDbKey, handleGetItem(@ptrCast(&ctx), params, a));
+}
+
+test "handleGetItem: missing namespace has its own error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -698,8 +771,23 @@ test "handleGetItem: missing key → NotFound" {
     defer mem.deinit();
     var ctx = makeCtx(a, &mem);
 
-    const params = try mkParams(a, "{\"namespace\":\"empty\",\"key\":\"nope\"}");
-    try testing.expectError(error.NotFound, handleGetItem(@ptrCast(&ctx), params, a));
+    const params = try mkParams(a, "{\"namespace\":\"parity_no_such\"}");
+    try testing.expectError(error.UnknownDbNamespace, handleGetItem(@ptrCast(&ctx), params, a));
+}
+
+test "handleGetItem: empty existing namespace is returned" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var ctx = makeCtx(a, &mem);
+    _ = try mem.getOrCreateNs("empty_ns");
+
+    const params = try mkParams(a, "{\"namespace\":\"empty_ns\"}");
+    const result = try handleGetItem(@ptrCast(&ctx), params, a);
+    try testing.expectEqual(@as(usize, 0), result.object.get("value").?.object.count());
 }
 
 test "handleGetItem: forbidden namespace → Forbidden" {
@@ -927,6 +1015,11 @@ test "fuzz handleList: never panics" {
             var ctx = makeCtx(a, &mem);
             var buf: [4]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
+            ctx.registered_namespaces = &.{"announcements"};
+            const policies = [_][]const u8{ "null", "42", "{}", "[null,1,\"n1\"]", "[\"announcements\"]" };
+            const policy = try mkParams(a, policies[buf[0] % policies.len]);
+            try ctx.store.insertItem(a, "database", "forbidden_namespaces", policy);
+            _ = try namespaceListed(&ctx, a, "forbidden_namespaces", "n1");
             _ = handleList(@ptrCast(&ctx), .null, a) catch {};
         }
     }.run, .{});

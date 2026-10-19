@@ -15,9 +15,8 @@
 //!
 //! Temperature Store:
 //!   Per-sensor ring-buffer of temperature/target/power/speed readings, fed a
-//!   ~1 Hz-throttled sample from the Klippy status stream (DataStoreCtx.pushTemp,
-//!   called from klippy_connection on each status update). Empty until Klippy
-//!   sends temperatures.
+//!   once-per-second sample of cached Klippy readings. Status updates replace
+//!   readings without adding samples. Empty until Klippy sends temperatures.
 //!   GET param: include_monitors (bool, false) — include temperature monitors
 //!   Response: {"<sensor_name>": {"temperatures": [...], "targets": [...], ...}}
 //!   (field names are pluralised: "temperature" → "temperatures", etc.)
@@ -121,17 +120,34 @@ pub const GcodeRingBuffer = struct {
 /// at 1 Hz).
 pub const temp_store_size = 1200;
 
-/// Fixed ring buffer of f64 samples keeping the most recent `temp_store_size`.
+/// Ring buffer of f64 samples. Empty until `ensure` allocates `capacity`.
 pub const FieldRing = struct {
-    buf: [temp_store_size]f64 = undefined,
+    buf: []f64 = &.{},
     head: usize = 0,
     count: usize = 0,
 
+    pub fn ensure(self: *FieldRing, alloc: std.mem.Allocator, capacity: usize) !void {
+        if (capacity == 0) return error.InvalidCapacity;
+        if (self.buf.len == capacity) return;
+        const buf = try alloc.alloc(f64, capacity);
+        if (self.buf.len > 0) alloc.free(self.buf);
+        self.buf = buf;
+        self.head = 0;
+        self.count = 0;
+    }
+
+    pub fn deinit(self: *FieldRing, alloc: std.mem.Allocator) void {
+        if (self.buf.len > 0) alloc.free(self.buf);
+        self.* = .{};
+    }
+
     pub fn push(self: *FieldRing, v: f64) void {
-        const slot = (self.head + self.count) % temp_store_size;
+        const capacity = self.buf.len;
+        if (capacity == 0) return;
+        const slot = (self.head + self.count) % capacity;
         self.buf[slot] = v;
-        if (self.count == temp_store_size) {
-            self.head = (self.head + 1) % temp_store_size;
+        if (self.count == capacity) {
+            self.head = (self.head + 1) % capacity;
         } else {
             self.count += 1;
         }
@@ -139,8 +155,10 @@ pub const FieldRing = struct {
 
     /// Append samples in chronological order into `out` (len ≥ count). Returns count.
     pub fn snapshot(self: *const FieldRing, out: []f64) usize {
+        const capacity = self.buf.len;
+        if (capacity == 0) return 0;
         var i: usize = 0;
-        while (i < self.count) : (i += 1) out[i] = self.buf[(self.head + i) % temp_store_size];
+        while (i < self.count) : (i += 1) out[i] = self.buf[(self.head + i) % capacity];
         return self.count;
     }
 };
@@ -155,7 +173,10 @@ pub const SensorStore = struct {
     has_target: bool = false,
     has_power: bool = false,
     has_speed: bool = false,
-    last_time: f64 = -1,
+    temperature: f64 = 0,
+    target: f64 = 0,
+    power: f64 = 0,
+    speed: f64 = 0,
 };
 
 pub const DataStoreCtx = struct {
@@ -163,11 +184,18 @@ pub const DataStoreCtx = struct {
     /// Per-sensor temperature history, fed from the Klippy status stream and
     /// returned by server.temperature_store. Keys are owned (duped on insert).
     sensors: std.StringHashMapUnmanaged(SensorStore) = .empty,
+    /// `heaters.available_monitors`. Hidden unless `include_monitors` is set.
+    /// Keys are owned.
+    monitors: std.StringHashMapUnmanaged(void) = .empty,
     temp_mutex: std.Io.Mutex = .init,
     /// Live io handle (set via setIo); the temperature-store handler needs it to
     /// lock `temp_mutex`, since JSON-RPC handlers are not passed an io.
     io: ?std.Io = null,
     gpa: std.mem.Allocator,
+    /// `[data_store] temperature_store_size`. Default 1200.
+    temp_capacity: usize = temp_store_size,
+    sampler_stop: std.atomic.Value(bool) = .init(false),
+    sampler_thread: ?std.Thread = null,
 
     pub fn setIo(self: *DataStoreCtx, io: std.Io) void {
         self.io = io;
@@ -180,20 +208,74 @@ pub const DataStoreCtx = struct {
         };
     }
 
-    pub fn deinit(self: *DataStoreCtx) void {
+    /// `[data_store] gcode_store_size`. Keeps the newest entries that fit.
+    pub fn setGcodeStoreSize(self: *DataStoreCtx, capacity: usize) !void {
+        if (capacity == 0 or capacity == self.gcode_ring.capacity) return;
+        var next = try GcodeRingBuffer.init(self.gpa, capacity);
+        errdefer next.deinit();
+        const tmp = try self.gpa.alloc(GcodeEntry, self.gcode_ring.count);
+        defer self.gpa.free(tmp);
+        const n = self.gcode_ring.copyLast(capacity, tmp);
+        for (tmp[0..n]) |entry| try next.push(entry.message, entry.time, entry.type);
         self.gcode_ring.deinit();
-        var it = self.sensors.keyIterator();
-        while (it.next()) |k| self.gpa.free(k.*);
-        self.sensors.deinit(self.gpa);
+        self.gcode_ring = next;
     }
 
-    /// Append a ~1 Hz-throttled sample for a temperature object. `eventtime` is
-    /// Klippy's clock; samples closer than ~1 s for the same sensor are dropped
-    /// so the series matches Moonraker's once-per-second cadence. Thread-safe
-    /// (called from the Klippy reader; read under the Core lock by the handler).
-    pub fn pushTemp(self: *DataStoreCtx, io: std.Io, name: []const u8, eventtime: f64, temperature: f64, target: ?f64, power: ?f64, speed: ?f64) void {
+    /// `[data_store] temperature_store_size`. Drops samples already stored.
+    pub fn setTemperatureStoreSize(self: *DataStoreCtx, capacity: usize) !void {
+        if (capacity == 0) return error.InvalidCapacity;
+        if (capacity == self.temp_capacity) return;
+        var it = self.sensors.valueIterator();
+        while (it.next()) |sensor| {
+            sensor.temperatures.deinit(self.gpa);
+            sensor.targets.deinit(self.gpa);
+            sensor.powers.deinit(self.gpa);
+            sensor.speeds.deinit(self.gpa);
+        }
+        self.temp_capacity = capacity;
+    }
+
+    fn ensureSensor(self: *DataStoreCtx, sensor: *SensorStore) !void {
+        try sensor.temperatures.ensure(self.gpa, self.temp_capacity);
+        try sensor.targets.ensure(self.gpa, self.temp_capacity);
+        try sensor.powers.ensure(self.gpa, self.temp_capacity);
+        try sensor.speeds.ensure(self.gpa, self.temp_capacity);
+    }
+
+    pub fn deinit(self: *DataStoreCtx) void {
+        self.stopSampler();
+        self.gcode_ring.deinit();
+        var it = self.sensors.iterator();
+        while (it.next()) |e| {
+            e.value_ptr.temperatures.deinit(self.gpa);
+            e.value_ptr.targets.deinit(self.gpa);
+            e.value_ptr.powers.deinit(self.gpa);
+            e.value_ptr.speeds.deinit(self.gpa);
+            self.gpa.free(e.key_ptr.*);
+        }
+        self.sensors.deinit(self.gpa);
+        var mit = self.monitors.keyIterator();
+        while (mit.next()) |k| self.gpa.free(k.*);
+        self.monitors.deinit(self.gpa);
+    }
+
+    /// Record a heater monitor name. `server.temperature_store` omits it
+    /// unless the request sets `include_monitors`.
+    pub fn markTempMonitor(self: *DataStoreCtx, io: std.Io, name: []const u8) void {
         self.temp_mutex.lockUncancelable(io);
         defer self.temp_mutex.unlock(io);
+        if (self.monitors.contains(name)) return;
+        const key = self.gpa.dupe(u8, name) catch return;
+        self.monitors.put(self.gpa, key, {}) catch {
+            self.gpa.free(key);
+        };
+    }
+
+    /// Cache partial status updates, seeding each field with its first sample.
+    pub fn pushTemp(self: *DataStoreCtx, io: std.Io, name: []const u8, temperature: ?f64, target: ?f64, power: ?f64, speed: ?f64) void {
+        self.temp_mutex.lockUncancelable(io);
+        defer self.temp_mutex.unlock(io);
+        if (temperature == null and !self.sensors.contains(name)) return;
         const gop = self.sensors.getOrPut(self.gpa, name) catch return;
         if (!gop.found_existing) {
             const key = self.gpa.dupe(u8, name) catch {
@@ -204,20 +286,60 @@ pub const DataStoreCtx = struct {
             gop.value_ptr.* = .{};
         }
         const s = gop.value_ptr;
-        if (s.last_time >= 0 and (eventtime - s.last_time) < 0.95) return;
-        s.last_time = eventtime;
-        s.temperatures.push(temperature);
+        self.ensureSensor(s) catch return;
+        if (temperature) |t| s.temperature = @round(t * 100) / 100;
+        if (s.temperatures.count == 0) s.temperatures.push(s.temperature);
         if (target) |t| {
-            s.targets.push(t);
+            s.target = @round(t * 100) / 100;
+            if (!s.has_target) s.targets.push(s.target);
             s.has_target = true;
         }
         if (power) |p| {
-            s.powers.push(p);
+            s.power = @round(p * 100) / 100;
+            if (!s.has_power) s.powers.push(s.power);
             s.has_power = true;
         }
         if (speed) |sp| {
-            s.speeds.push(sp);
+            s.speed = @round(sp * 100) / 100;
+            if (!s.has_speed) s.speeds.push(s.speed);
             s.has_speed = true;
+        }
+    }
+
+    pub fn sampleTemperatures(self: *DataStoreCtx, io: std.Io) void {
+        self.temp_mutex.lockUncancelable(io);
+        defer self.temp_mutex.unlock(io);
+        var it = self.sensors.valueIterator();
+        while (it.next()) |s| {
+            s.temperatures.push(s.temperature);
+            if (s.has_target) s.targets.push(s.target);
+            if (s.has_power) s.powers.push(s.power);
+            if (s.has_speed) s.speeds.push(s.speed);
+        }
+    }
+
+    /// Only the daemon starts this worker; tests sample synchronously.
+    pub fn startSampler(self: *DataStoreCtx) !void {
+        if (self.sampler_thread != null) return;
+        if (self.io == null) return error.IoNotSet;
+        self.sampler_stop.store(false, .release);
+        self.sampler_thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, samplerThread, .{self});
+    }
+
+    pub fn stopSampler(self: *DataStoreCtx) void {
+        self.sampler_stop.store(true, .release);
+        if (self.sampler_thread) |thread| {
+            thread.join();
+            self.sampler_thread = null;
+        }
+    }
+
+    fn samplerThread(self: *DataStoreCtx) void {
+        const io = self.io.?;
+        while (!self.sampler_stop.load(.acquire)) {
+            std.Io.sleep(io, .fromSeconds(1), .awake) catch return;
+            if (self.sampler_stop.load(.acquire)) break;
+            self.sampleTemperatures(io);
         }
     }
 
@@ -309,22 +431,24 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// only temperatures — matching Moonraker's data_store.
 pub fn handleTempStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *DataStoreCtx = @ptrCast(@alignCast(ctx));
-    _ = getOptBool(params, "include_monitors", false); // parameter accepted, no-op
+    const include_monitors = getOptBool(params, "include_monitors", false);
 
     const io = c.io orelse return .{ .object = .empty };
-    var scratch: [temp_store_size]f64 = undefined;
+    const scratch = try alloc.alloc(f64, @max(c.temp_capacity, 1));
+    defer alloc.free(scratch);
     var result: std.json.ObjectMap = .empty;
 
     c.temp_mutex.lockUncancelable(io);
     defer c.temp_mutex.unlock(io);
     var it = c.sensors.iterator();
     while (it.next()) |entry| {
+        if (!include_monitors and c.monitors.contains(entry.key_ptr.*)) continue;
         const s = entry.value_ptr;
         var obj: std.json.ObjectMap = .empty;
-        try putRing(alloc, &obj, "temperatures", &s.temperatures, &scratch);
-        if (s.has_target) try putRing(alloc, &obj, "targets", &s.targets, &scratch);
-        if (s.has_power) try putRing(alloc, &obj, "powers", &s.powers, &scratch);
-        if (s.has_speed) try putRing(alloc, &obj, "speeds", &s.speeds, &scratch);
+        try putRing(alloc, &obj, "temperatures", &s.temperatures, scratch);
+        if (s.has_target) try putRing(alloc, &obj, "targets", &s.targets, scratch);
+        if (s.has_power) try putRing(alloc, &obj, "powers", &s.powers, scratch);
+        if (s.has_speed) try putRing(alloc, &obj, "speeds", &s.speeds, scratch);
         try result.put(alloc, try alloc.dupe(u8, entry.key_ptr.*), .{ .object = obj });
     }
     return .{ .object = result };
@@ -487,6 +611,23 @@ test "handleGcodeStore: empty store returns empty array" {
     const result = try handleGcodeStore(@ptrCast(&ctx), .null, a);
     const arr = result.object.get("gcode_store").?.array;
     try testing.expectEqual(@as(usize, 0), arr.items.len);
+}
+
+test "setGcodeStoreSize: keeps only the newest entries that fit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = try DataStoreCtx.init(a);
+    defer ctx.deinit();
+    try ctx.setGcodeStoreSize(2);
+    try ctx.pushGcodeCommand("one", 1);
+    try ctx.pushGcodeCommand("two", 2);
+    try ctx.pushGcodeCommand("three", 3);
+    const result = try handleGcodeStore(@ptrCast(&ctx), .null, a);
+    const arr = result.object.get("gcode_store").?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len);
+    try testing.expectEqualStrings("two", arr.items[0].object.get("message").?.string);
+    try testing.expectEqualStrings("three", arr.items[1].object.get("message").?.string);
 }
 
 test "handleGcodeStore: entries appear with correct shape" {
@@ -658,7 +799,56 @@ test "fuzz handleGcodeStore: arbitrary params never crash" {
     }.run, .{});
 }
 
-test "temperature store: buffers heater + sensor, 1Hz throttle, correct shape" {
+test "setTemperatureStoreSize: keeps only the newest samples" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var ctx = try DataStoreCtx.init(a);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    try ctx.setTemperatureStoreSize(2);
+    ctx.pushTemp(io, "heater_bed", 10.0, null, null, null);
+    ctx.pushTemp(io, "heater_bed", 11.0, null, null, null);
+    ctx.sampleTemperatures(io);
+    ctx.pushTemp(io, "heater_bed", 12.0, null, null, null);
+    ctx.sampleTemperatures(io);
+    const result = try handleTempStore(@ptrCast(&ctx), .null, a);
+    const temps = result.object.get("heater_bed").?.object.get("temperatures").?.array;
+    try testing.expectEqual(@as(usize, 2), temps.items.len);
+    try testing.expectEqual(@as(f64, 11.0), temps.items[0].float);
+    try testing.expectEqual(@as(f64, 12.0), temps.items[1].float);
+}
+
+test "temperature updates cache readings without appending another sample" {
+    var req_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer req_arena.deinit();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var ctx = try DataStoreCtx.init(testing.allocator);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.pushTemp(io, "extruder", 30, 0, 0, null);
+    ctx.pushTemp(io, "extruder", 31.234, null, null, null);
+    const result = try handleTempStore(&ctx, .null, req_arena.allocator());
+    const heater = result.object.get("extruder").?.object;
+    try testing.expectEqual(@as(usize, 1), heater.get("temperatures").?.array.items.len);
+    try testing.expectEqual(@as(usize, 1), heater.get("targets").?.array.items.len);
+    ctx.pushTemp(io, "extruder", null, 20, 0.1234, null);
+    ctx.sampleTemperatures(io);
+    ctx.sampleTemperatures(io);
+    const sampled = (try handleTempStore(&ctx, .null, req_arena.allocator())).object.get("extruder").?.object;
+    try testing.expectEqual(@as(usize, 3), sampled.get("temperatures").?.array.items.len);
+    try testing.expectEqual(@as(f64, 31.23), sampled.get("temperatures").?.array.items[2].float);
+    try testing.expectEqual(@as(f64, 20), sampled.get("targets").?.array.items[2].float);
+    try testing.expectEqual(@as(f64, 0.12), sampled.get("powers").?.array.items[2].float);
+    try testing.expect(ctx.sampler_thread == null);
+}
+
+test "temperature store: buffers heater and sensor at sampler cadence" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -670,17 +860,17 @@ test "temperature store: buffers heater + sensor, 1Hz throttle, correct shape" {
     defer ctx.deinit();
     ctx.setIo(io);
 
-    // Heater: temperature + target + power. Two samples 1s apart + one too soon.
-    ctx.pushTemp(io, "heater_bed", 100.0, 30.0, 60.0, 0.5, null);
-    ctx.pushTemp(io, "heater_bed", 100.3, 31.0, 60.0, 0.6, null); // throttled (<0.95s)
-    ctx.pushTemp(io, "heater_bed", 101.1, 32.0, 60.0, 0.7, null);
+    ctx.pushTemp(io, "heater_bed", 30.0, 60.0, 0.5, null);
+    ctx.pushTemp(io, "heater_bed", 31.0, 60.0, 0.6, null);
+    ctx.pushTemp(io, "heater_bed", 32.0, 60.0, 0.7, null);
+    ctx.sampleTemperatures(io);
     // Plain sensor: temperature only.
-    ctx.pushTemp(io, "temperature_sensor chamber", 100.0, 25.0, null, null, null);
+    ctx.pushTemp(io, "temperature_sensor chamber", 25.0, null, null, null);
 
     const r = try handleTempStore(@ptrCast(&ctx), .null, a);
     const obj = r.object;
     const bed = obj.get("heater_bed").?.object;
-    try testing.expectEqual(@as(usize, 2), bed.get("temperatures").?.array.items.len); // 3rd throttled out
+    try testing.expectEqual(@as(usize, 2), bed.get("temperatures").?.array.items.len);
     try testing.expectEqual(@as(f64, 30.0), bed.get("temperatures").?.array.items[0].float);
     try testing.expectEqual(@as(f64, 32.0), bed.get("temperatures").?.array.items[1].float);
     try testing.expect(bed.get("targets") != null);
@@ -689,6 +879,40 @@ test "temperature store: buffers heater + sensor, 1Hz throttle, correct shape" {
     const cham = obj.get("temperature_sensor chamber").?.object;
     try testing.expectEqual(@as(usize, 1), cham.get("temperatures").?.array.items.len);
     try testing.expect(cham.get("targets") == null); // plain sensor: temperature only
+
+    ctx.markTempMonitor(io, "temperature_fan exhaust");
+    ctx.pushTemp(io, "temperature_fan exhaust", 40.0, null, null, null);
+    const hidden = try handleTempStore(@ptrCast(&ctx), .null, a);
+    try testing.expect(hidden.object.get("temperature_fan exhaust") == null);
+    const shown_params = try mkParams(a, "{\"include_monitors\":true}");
+    const shown = try handleTempStore(@ptrCast(&ctx), shown_params, a);
+    try testing.expect(shown.object.get("temperature_fan exhaust") != null);
+}
+
+test "fuzz temperature sampling: bounded rings retain cached fields" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var ctx = try DataStoreCtx.init(testing.allocator);
+            defer ctx.deinit();
+            const capacity = smith.valueRangeAtMostWithHash(u8, 1, 8, 0);
+            try ctx.setTemperatureStoreSize(capacity);
+            ctx.pushTemp(io, "sensor", 25, 0, 0, null);
+            const ticks = smith.valueRangeAtMostWithHash(u8, 0, 20, 1);
+            for (0..ticks) |i| {
+                ctx.pushTemp(io, "sensor", null, @floatFromInt(i), null, null);
+                ctx.sampleTemperatures(io);
+            }
+            const s = ctx.sensors.get("sensor").?;
+            try testing.expectEqual(@min(@as(usize, ticks) + 1, capacity), s.temperatures.count);
+            try testing.expectEqual(s.temperatures.count, s.targets.count);
+            try testing.expectEqual(s.temperatures.count, s.powers.count);
+            try testing.expect(ctx.sampler_thread == null);
+            try testing.expectError(error.IoNotSet, ctx.startSampler());
+        }
+    }.run, .{});
 }
 
 test "fuzz handleTempStore: arbitrary params never crash" {

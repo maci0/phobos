@@ -1,6 +1,6 @@
 # phobos — Status & Handoff TODO
 
-phobos is a memory-efficient **Zig 0.16** reimplementation of **Moonraker** (Klipper's
+phobos is a memory-efficient **Zig 0.17** reimplementation of **Moonraker** (Klipper's
 API server) intended to behave 100% identically. Target: ARM **Cortex-A7** (32-bit),
 static musl binary.
 
@@ -75,6 +75,16 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   peripherals), update_manager (update_moonraker/klipper/system/full), wled (strips),
   webcam (delete/test/validate), announcements (list_feeds/delete_feed/update/
   feed_dispatch_multi), power (devices), rss (parser).
+- **2026-10-19 live printer:** See [v0.1.1 release notes](docs/releases/v0.1.1.md) for verified fixes and retained identity/runtime differences. Public database access honors persisted namespace policies and hides auth records. Empty registered namespaces stay visible. OctoPrint uses live connection state and heater readings.
+- **2026-10-19 temperature store:** The daemon samples cached Klippy readings at 1 Hz, rounds to two decimals, and preserves partial updates. Tests sample synchronously. `[data_store] temperature_store_size` caps each field at 1200 by default.
+- **2026-10-19 announcements and gcode store:** `[announcements] subscriptions` are added to the feed list (built-ins stay). `dev_mode` skips the Moonlight fetch. `[data_store] gcode_store_size` caps the gcode ring and keeps the newest entries.
+- **2026-10-19 qemu parity:** A missing database namespace is 404. Thumbnails without `filename` and a webcam get without `name` or `uid` are 400. HTTP on a websocket-only route is 404. WLED batch ignores the injected `_method` key. After the Klippy handshake, phobos queries `heaters` and subscribes `available_sensors` and `available_monitors`, then seeds `server.temperature_store`. Monitors stay hidden unless `include_monitors` is set. `server.info` `registered_directories` follows the live file roots. `machine.reboot` and `machine.shutdown` stay no-ops; the tests say not to implement them.
+- **2026-10-19 remaining behavior:** Analysis status, process, and dump_config run through the injected estimator shell. A missing binary stays `EstimatorNotAvailable`. `[analysis]` records the platform binary under the datadir and does not download it. `[notifier <name>]` fills `server.notifiers.list`; the test endpoint still returns `AppriseNotAvailable`. `hidden_objects` are dropped from `objects/query` and `objects/subscribe` as well as `objects/list`. Recover and rollback run git only when `io` and `repo_path` are set: soft recover is checkout plus `reset --hard origin/<branch>`, hard recover is `reset --hard HEAD` plus `clean -fd`, and an empty rollback ref does not run git. There is no reclone and no service restart. `machine.reboot` and `machine.shutdown` stay no-ops. PanelDue `feedBytes` splits serial chunks on newlines and does not open a device. `klipper_path` registers read-only `config_examples` and `docs` roots when those directories exist.
+- **2026-10-19 parity flags:** `enable_auto_refresh` false does not refresh. A due tick uses a hook in tests and does not spawn git. `file_system_observer: none` does not watch; `inotify` watches the roots. `excludes` drop `root/relative` paths from file listings. `hidden_objects` are removed from `objects/list`.
+- **2026-10-19 machine provider:** Forge-X `[machine] provider: simple` runs `<script_path>/<service> <action>` through the command runner. `reboot` and `shutdown` stay no-ops. An empty `script_path` does not spawn. `systemctl` is not used for this provider.
+- **2026-10-19 webcams:** `[webcam <name>]` sections load as `source: config` cameras (`stream_url` required). A second load of the same name does not overwrite. The uid is Moonraker's `uuid5(instance_uuid, "moonraker.webcam.<name>")`, and the instance uuid is `<datadir>/.moonraker.uuid`. The list keeps config order.
+- **2026-10-19 printer gaps:** `[authorization] trusted_clients` (including `0.0.0.0/0`) is loaded into the auth table. `[update_manager]` `enable_system_updates: False` omits the system source. `[update_manager <name>]` git/web/zip clients show up in `machine.update.status`. `server.info` lists `update_manager` and `octoprint_compat`, and `feather_updates` when that section is present. Feather status/update/reset refuse unless Klippy is idle. They do not reboot the host. `register_remote_method` sends `response_template`, and an id-less Klippy frame reaches the handler. The daemon runner executes `git -C <repo>` for reset and `machine.update.client` through `handleUpdateClient`. Tests install a recorder and do not spawn git. `[server] klippy_uds_address` is applied.
+- **2026-10-19 parity:** Update status restores the persisted cache without fetching; git status omits `repo_detected`. `[server] use_xheaders` (default on) is read in `setConfig` and copied by `httpServer`. When it is on, `X-Forwarded-For` / `X-Real-Ip` rewrite the client and the socket peer must be trusted; when it is off, the socket peer stays the client. `[paneldue]` lines enter through `App.processPanelDueLine`: the checksummed script is stripped, and file commands (`M23`/`M30`/`M32`/`M36`/`M37`/`M98`) keep one filename only when it is non-empty. Package commands are built for an injected shell; the default daemon runner rejects apt and pip. Web/zip installation remains unimplemented. `server.analysis.estimate` runs `klipper_estimator --config_file … estimate -f json` and returns `sequences[0]`; no binary is `EstimatorNotAvailable`. A configured notifier test is `AppriseNotAvailable` (apprise is not linked); an unknown name is 404.
 - **API surface coverage: 100%** — methods 130/130, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
 - **Conformance oracle: 54/54 events pass normalized equality** (conformance/replay.py
@@ -82,12 +92,11 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
-- Tests: **1239 pass / 2 skip / 0 fail** (~225 fuzz). The 2 skips are
-  update_manager git tests (need a real repo). Note: `zig build test` uses `--listen=-` which may hang on this
-  machine (Zig 0.16 build-runner quirk); always verify via the direct test binary.
+- Tests: **1350 pass / 1 skip / 0 fail**, with 223 fuzz tests discovered. The skip
+  is the gated real-Klippy proxy test. Build with `zig build test-artifact` and run
+  the newest standalone test binary to avoid the build runner's `--listen=-` hang.
 - All register functions now have unit tests verifying all expected routes are wired
   in the Registry (machine, update_manager, power, wled, td1, button).
-- Peak RSS for the full test run ≈ 12–18 MB.
 
 ### Build / test / run — IMPORTANT host quirks
 - This host's **system glibc cannot be linked** by Zig 0.16 (GCC 16 `.sframe` reloc).

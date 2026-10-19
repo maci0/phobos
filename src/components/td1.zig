@@ -396,10 +396,12 @@ pub fn handleGetData(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 // ---------------------------------------------------------------------------
 
 /// Reboot a TD-1 device by serial number.
-/// Looks up the serial in the connection map. If found, removes it and returns
-/// `{ "status": "ok" }` (in a real implementation the device would then be
-/// re-discovered by the hotplug watcher within 5s). If not found, returns
-/// `{ "status": "serial_error" }`.
+///
+/// AGENT: this is an in-memory device map, not a host reboot and not a
+/// serial-port reboot. Unknown serial → `serial_error`. Known serial →
+/// remove the map entry and return `status: ok`. NEVER open a USB/serial
+/// device here, and NEVER call systemctl, reboot, shutdown, or poweroff.
+/// Doing so halts the machine that runs the tests.
 pub fn handleReboot(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *Td1Ctx = @ptrCast(@alignCast(ctx_ptr));
     const serial = try getStr(params, "serial");

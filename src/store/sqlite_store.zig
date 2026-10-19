@@ -57,7 +57,23 @@ pub const SqliteStore = struct {
         self.rmw_lock.store(false, .release);
     }
 
+    /// mkdir -p the parent of a database file. Moonraker creates
+    /// `<data>/database/` before opening `moonraker-sql.db`.
+    fn ensureParentDirs(path: []const u8) void {
+        var buf: [512]u8 = undefined;
+        if (path.len == 0 or path.len >= buf.len) return;
+        var i: usize = 1;
+        while (i < path.len) : (i += 1) {
+            if (path[i] != '/') continue;
+            @memcpy(buf[0..i], path[0..i]);
+            buf[i] = 0;
+            const rc = std.os.linux.mkdir(buf[0..i :0].ptr, 0o755);
+            _ = std.os.linux.errno(rc);
+        }
+    }
+
     pub fn open(gpa: std.mem.Allocator, path: [:0]const u8) Error!SqliteStore {
+        ensureParentDirs(path);
         _ = c.sqlite3_initialize();
         var db: ?*c.sqlite3 = null;
         const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_FULLMUTEX;
@@ -477,6 +493,52 @@ fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!MappedJob {
 }
 
 const testing = std.testing;
+
+test "SqliteStore.open creates missing database parents" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    var path_buf: [512]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/missing/database/moonraker-sql.db", .{root}, 0);
+    var db = try SqliteStore.open(testing.allocator, path);
+    defer db.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try db.insertItem(a, "test", "value", .{ .integer = 42 });
+    const value = (try db.getItem(a, "test", "value")).?;
+    try testing.expectEqual(@as(i64, 42), value.integer);
+    var again = try SqliteStore.open(testing.allocator, path);
+    defer again.deinit();
+    try testing.expectEqual(@as(i64, 42), (try again.getItem(a, "test", "value")).?.integer);
+}
+
+test "fuzz SqliteStore.open creates bounded nested paths" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+            defer testing.allocator.free(root);
+            var name: [12]u8 = undefined;
+            smith.bytesWithHash(&name, 0);
+            for (&name) |*ch| ch.* = 'a' + ch.* % 26;
+            var path_buf: [512]u8 = undefined;
+            const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}/database/db.sqlite", .{ root, name }, 0);
+            var db = try SqliteStore.open(testing.allocator, path);
+            defer db.deinit();
+            var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+            file.close(io);
+        }
+    }.run, .{});
+}
 
 test "SqliteStore: record encode/decode round-trips every type" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

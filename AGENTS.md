@@ -1,6 +1,6 @@
 # AGENTS.md — coding conventions for phobos
 
-Phobos is a memory-efficient Zig 0.16 reimplementation of Moonraker. See
+Phobos is a memory-efficient Zig 0.17 reimplementation of Moonraker. See
 `TODO.md`, `DEVELOPMENT.md`, and `docs/` for status and architecture.
 
 ## Project goals (weigh every change against these)
@@ -27,7 +27,7 @@ Phobos is a memory-efficient Zig 0.16 reimplementation of Moonraker. See
   error sets and `try`/`errdefer`; slices over pointers; `defer` for cleanup.
   Push work to compile time wherever it removes runtime cost or branches.
 
-## Stay on Zig 0.16.0
+## Stay on Zig 0.17.0
 
 Avoid writing code that assumes older `std.fs`, `std.net`, or `std.Thread`
 synchronization APIs. This Zig build is stripped: `std.fs.cwd`,
@@ -45,7 +45,7 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 
 - Prefer Zig builtins and comptime — push work to compile time:
     - `@typeInfo`, `@TypeOf`, `@import("builtin")`
-    - `@intCast`, `@enumFromInt`, `@intFromEnum`
+    - `@intCast`, `@fromBackingInt`, `@backingInt`
     - `@memcpy`, `@memset`
     - `@atomicLoad`, `@atomicStore`
     - use `comptime` to build lookup tables, derive enum↔string maps, and
@@ -60,7 +60,7 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 - Avoid low-level OS work by default:
     - no direct syscalls
     - no new fork/exec code
-    - avoid `std.os`, `std.posix`, raw libc unless there is no Zig 0.16 API
+    - avoid `std.os`, `std.posix`, raw libc unless there is no Zig 0.17 API
     - keep any unavoidable low-level code behind a local wrapper
     - sanctioned exceptions already in use (no `std.Io` equivalent — reuse these
       patterns, don't invent new ones): termios in `serial.zig`, the bound-port
@@ -146,13 +146,15 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
       JSON/TLS/HTTP work) to keep VmSize small.
 
 - For process spawning:
-    - use `std.process` only where Zig 0.16 environment handling is safe
+    - use `std.process` only where Zig 0.17 environment handling is safe
     - prefer a mockable command-runner (see `machine.zig` `RunCmdFn`) so logic is
       unit-testable without touching the host
     - NEVER run host-mutating commands (reboot/shutdown/apt/pip) by default —
       those are deliberate no-ops
 
 - For tests:
+    - Temperature sampling and automatic update refresh start only in the daemon
+      entry point. Tests tick them synchronously; no sampler uses the testing allocator.
     - keep tests at the bottom of modules (`test { ... }` blocks)
     - every function gets a unit test AND a fuzz test (project rule)
     - add pure tests for parsers/builders/helpers
@@ -189,8 +191,8 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
 - Full suite: `timeout 220 zig build test --summary all`
 - `schema` prints a CLI Spec 0.3 document and does not load config or bind a socket. `-o`/`--output` accept `auto`, `text`, or `json`. `auto` stays text on a pipe. `--dump-api` stdout stays the API document. `--version` stays the Moonraker compatibility string; `-o json --version` prints the package version.
 - Coverage gate (must stay 100%):
-  `zig build && zig-out/bin/phobos --dump-api > /tmp/d.json &&
-   PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json`
+  `mkdir -p .scratch && zig build && zig-out/bin/phobos --dump-api > .scratch/api-dump.json &&
+   PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/api-dump.json`
 - Release (LTO + stripped): add `-Doptimize=ReleaseSmall`.
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
 - Conformance oracle (normalized equality vs vendored Moonraker): see

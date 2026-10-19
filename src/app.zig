@@ -44,8 +44,107 @@ const klippy_connection_component = @import("components/klippy_connection.zig");
 const octoprint_component = @import("components/octoprint_compat.zig");
 const button_component = @import("components/button.zig");
 const zeroconf_component = @import("components/zeroconf.zig");
+const paneldue_component = @import("components/paneldue.zig");
+const feather_updates_component = @import("components/feather_updates.zig");
 const ds = @import("store/datastore.zig");
 const config_helper = @import("config/confighelper.zig");
+
+const feather_component_name = [_][]const u8{"feather_updates"};
+
+fn featherPrinterIdle(ctx: *anyopaque) bool {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    if (!app.info.klippy_connected) return false;
+    if (!std.mem.eql(u8, app.info.klippy_state, "ready")) return false;
+    return !app.job_state_ctx.isActive();
+}
+
+fn hostPowerArg(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "reboot") or std.mem.eql(u8, arg, "shutdown") or std.mem.eql(u8, arg, "poweroff");
+}
+
+const GitSpawnFn = *const fn (*anyopaque, std.mem.Allocator, []const []const u8) anyerror!void;
+
+/// Production Feather runner. Git argv runs as `git -C <configured repo>`.
+/// `machine.update.client` goes through `handleUpdateClient`. Reboot,
+/// shutdown, and poweroff are refused. A null `git_spawn` runs git only when
+/// the update manager has a live io; tests install `git_spawn` and never
+/// spawn git. Apt and pip strings are not executed here.
+fn daemonFeatherRun(app: *App, alloc: std.mem.Allocator, argv: []const []const u8) anyerror!void {
+    for (argv) |arg| {
+        if (hostPowerArg(arg)) return error.Refused;
+    }
+    if (argv.len >= 1 and std.mem.eql(u8, argv[0], "machine.update.client")) {
+        if (argv.len < 2 or argv[1].len == 0) return error.UpdateFailed;
+        var arena_state = std.heap.ArenaAllocator.init(alloc);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+        var params: std.json.ObjectMap = .empty;
+        try params.put(a, "name", .{ .string = argv[1] });
+        const result = update_manager_component.handleUpdateClient(app.update_ctx, .{ .object = params }, a) catch return error.UpdateFailed;
+        if (result != .string or !std.mem.eql(u8, result.string, "ok")) return error.UpdateFailed;
+        return;
+    }
+    if (argv.len >= 1 and std.mem.eql(u8, argv[0], "git")) {
+        const src = app.update_ctx.findSource(app.feather.update_key) orelse return error.NoCommandRunner;
+        if (src.repo_path.len == 0) return error.NoCommandRunner;
+        var full: std.ArrayList([]const u8) = .empty;
+        defer full.deinit(alloc);
+        try full.append(alloc, "git");
+        try full.append(alloc, "-C");
+        try full.append(alloc, src.repo_path);
+        for (argv[1..]) |arg| try full.append(alloc, arg);
+        if (app.git_spawn) |spawn| {
+            const sctx = app.git_spawn_ctx orelse return error.NoCommandRunner;
+            try spawn(sctx, alloc, full.items);
+            return;
+        }
+        const io = app.update_ctx.io orelse return error.NoCommandRunner;
+        const result = std.process.run(alloc, io, .{ .argv = full.items }) catch return error.GitFailed;
+        defer alloc.free(result.stdout);
+        defer alloc.free(result.stderr);
+        if (!(result.term == .exited and result.term.exited == 0)) return error.GitFailed;
+        return;
+    }
+    return error.NoCommandRunner;
+}
+
+fn daemonShell(ctx: *anyopaque, alloc: std.mem.Allocator, cmdline: []const u8) anyerror!void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    var args: std.ArrayList([]const u8) = .empty;
+    defer args.deinit(alloc);
+    var it = std.mem.tokenizeAny(u8, cmdline, " \t");
+    while (it.next()) |arg| try args.append(alloc, arg);
+    try daemonFeatherRun(app, alloc, args.items);
+}
+
+fn featherCmd(ctx: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) anyerror!void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    for (argv) |arg| {
+        if (hostPowerArg(arg)) return error.Refused;
+    }
+    // TestServer installs a no-op shell so HTTP update tests do not spawn
+    // git, apt, or pip. The daemon shell is the production runner.
+    if (app.update_ctx.shell) |sh| {
+        if (sh != daemonShell) {
+            const shell_ctx = app.update_ctx.shell_ctx orelse return error.NoCommandRunner;
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(alloc);
+            for (argv, 0..) |arg, i| {
+                if (i != 0) try buf.append(alloc, ' ');
+                try buf.appendSlice(alloc, arg);
+            }
+            try sh(shell_ctx, alloc, buf.items);
+            return;
+        }
+    }
+    try daemonFeatherRun(app, alloc, argv);
+}
+
+fn featherKlippySend(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror!void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    if (!app.klippy_ctx.isConnected()) return;
+    app.klippy_ctx.postMethod(method, params, alloc) catch {};
+}
 
 const Registry = registry.Registry;
 const Dispatcher = jsonrpc.Dispatcher;
@@ -81,10 +180,24 @@ const KlippyConnectionCtx = klippy_connection_component.KlippyCtx;
 const OctoPrintCtx = octoprint_component.OctoPrintCtx;
 const ZeroconfCtx = zeroconf_component.ZeroconfCtx;
 
-
 /// Create a directory via the raw mkdir syscall (App.init has no live io yet).
 /// Ignores already-exists; other failures are non-fatal (the file_manager
 /// handlers will surface I/O errors at request time).
+/// Replace `path` with its realpath when the directory is a symlink.
+/// `path` is owned. The returned slice is owned. A missing path is unchanged.
+fn canonicalPath(alloc: std.mem.Allocator, path: []u8) []u8 {
+    if (path.len == 0 or path.len >= 4096) return path;
+    const z = alloc.dupeSentinel(u8, path, 0) catch return path;
+    defer alloc.free(z);
+    var buf: [4096]u8 = undefined;
+    const resolved = std.c.realpath(z.ptr, &buf) orelse return path;
+    const slice = std.mem.span(resolved);
+    if (std.mem.eql(u8, slice, path)) return path;
+    const duped = alloc.dupe(u8, slice) catch return path;
+    alloc.free(path);
+    return duped;
+}
+
 fn mkdirRaw(path_z: [:0]const u8) void {
     const rc = std.os.linux.mkdir(path_z.ptr, 0o755);
     const e = std.os.linux.errno(rc);
@@ -198,6 +311,9 @@ pub const App = struct {
     /// freed in deinit. The root paths in `file_roots` point into the joined
     /// strings owned alongside it.
     datadir: []u8,
+    /// Moonraker `.moonraker.uuid` (32 hex chars). Owned when `instance_uuid_owned`.
+    instance_uuid: []u8 = &.{},
+    instance_uuid_owned: bool = false,
     file_roots: []FileRoot,
     /// Owns the active DataStore backend (SQLite or atomic-rename file).
     db_store: StoreHolder,
@@ -207,6 +323,22 @@ pub const App = struct {
     /// Allowed CORS origins from `[authorization] cors_domains`. Each slice + the
     /// outer array are gpa-owned; freed in deinit. Passed to the HTTP server.
     cors_domains: [][]const u8 = &.{},
+    /// `[server] use_xheaders`, Moonraker default true. Copied onto the HTTP
+    /// server in `httpServer`.
+    use_xheaders: bool = true,
+    /// PanelDue serial-line processor. `processPanelDueLine` is the reader
+    /// entry: it strips the line and calls `parseLine`.
+    paneldue: paneldue_component.PanelDue = .{},
+    /// Forge-X Feather update adapter. Enabled when `[feather_updates]` exists.
+    feather: feather_updates_component.FeatherCtx = .{},
+    /// Records `git -C <repo>` argv in tests. Production leaves this null and
+    /// `daemonFeatherRun` spawns git only when update io is set.
+    git_spawn: ?GitSpawnFn = null,
+    git_spawn_ctx: ?*anyopaque = null,
+    /// True when `update_ctx.sources` is an owned `sourcesFromConfig` result.
+    update_sources_owned: bool = false,
+    /// True when `klippy_ctx.uds_path` was duped from config and must be freed.
+    klippy_uds_owned: bool = false,
 
     /// Default entry point: SQLite backend, no io needed at init time.
     pub fn init(alloc: std.mem.Allocator) !App {
@@ -263,9 +395,9 @@ pub const App = struct {
                     const store_ptr = try alloc.create(SqliteStore);
                     errdefer alloc.destroy(store_ptr);
                     const path_z = if (db_path) |p|
-                        try std.fmt.bufPrintZ(&path_buf, "{s}", .{p})
+                        try std.fmt.bufPrintSentinel(&path_buf, "{s}", .{p}, 0)
                     else
-                        try std.fmt.bufPrintZ(&path_buf, "/tmp/phobos-db-{x}.db", .{@intFromPtr(db_ctx)});
+                        try std.fmt.bufPrintSentinel(&path_buf, "/tmp/phobos-db-{x}.db", .{@intFromPtr(db_ctx)}, 0);
                     store_ptr.* = try SqliteStore.open(alloc, path_z);
                     break :blk .{ .sqlite = store_ptr };
                 },
@@ -394,28 +526,30 @@ pub const App = struct {
             break :dd try alloc.dupe(u8, dp);
         } else dd: {
             // No datadir given (tests / --dump-api): per-instance temp dir.
-            const dd_tmp = try std.fmt.bufPrintZ(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(analysis_ctx)});
+            const dd_tmp = try std.fmt.bufPrintSentinel(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(analysis_ctx)}, 0);
             mkdirRaw(dd_tmp);
             break :dd try alloc.dupe(u8, dd_tmp);
         };
         errdefer alloc.free(datadir);
 
         const root_specs = [_]struct { name: []const u8, full: bool }{
-            .{ .name = "gcodes", .full = true },
             .{ .name = "config", .full = true },
             .{ .name = "logs", .full = false },
+            .{ .name = "gcodes", .full = true },
         };
         const file_roots = try alloc.alloc(FileRoot, root_specs.len);
         errdefer alloc.free(file_roots);
         for (root_specs, 0..) |spec, i| {
             const p = try std.fs.path.join(alloc, &.{ datadir, spec.name });
-            const pz = try alloc.dupeZ(u8, p);
+            const pz = try alloc.dupeSentinel(u8, p, 0);
             defer alloc.free(pz);
             // For an explicitly configured datadir, a root we can't create means
             // the daemon can't serve files — fail-fast. For the temp default,
             // stay lenient (tests / --dump-api may run read-only).
             if (data_path != null) try mkdirChecked(pz) else mkdirRaw(pz);
-            file_roots[i] = .{ .name = spec.name, .path = p, .full_access = spec.full };
+            // Forge-x points printer_data/{config,logs,gcodes} at /opt/config,
+            // /data/logFiles, and /data. Moonraker reports the symlink target.
+            file_roots[i] = .{ .name = spec.name, .path = canonicalPath(alloc, p), .full_access = spec.full };
         }
 
         const file_ctx = try alloc.create(FileCtx);
@@ -436,6 +570,7 @@ pub const App = struct {
         errdefer alloc.destroy(update_ctx);
         update_ctx.* = .{
             .gpa = alloc,
+            .store = db_ctx.store,
             .sources = &update_manager_component.default_sources,
             .bus = bus,
             // Refuse update operations while a print is active (Moonraker 503).
@@ -505,8 +640,11 @@ pub const App = struct {
         const octoprint_ctx = try alloc.create(OctoPrintCtx);
         errdefer alloc.destroy(octoprint_ctx);
         octoprint_ctx.* = OctoPrintCtx.init();
+        octoprint_ctx.server_info = info;
+        octoprint_ctx.temp_store = data_store_ctx;
         klippy_ctx.octoprint = octoprint_ctx;
         klippy_ctx.temp_store = data_store_ctx;
+        db_ctx.registered_namespaces = &.{ "moonraker", "announcements", "update_manager" };
 
         // --- Zeroconf/SSDP context (/server/zeroconf/ssdp) ---
         const zeroconf_ctx = try alloc.create(ZeroconfCtx);
@@ -552,8 +690,22 @@ pub const App = struct {
             .db_store = db_store,
         };
 
+        app.syncRegisteredDirectories();
         try app.registerAll();
         return app;
+    }
+
+    /// Copy file-root names into `server.info` `registered_directories`.
+    /// Names are stable literals. The fixed array is updated under the same
+    /// lock the info handler uses, so a root added during handshake is visible
+    /// without reallocating a slice the handler might be reading.
+    fn syncRegisteredDirectories(self: *App) void {
+        const io = self.file_ctx.io;
+        if (io) |i| self.info.state_mutex.lockUncancelable(i);
+        defer if (io) |i| self.info.state_mutex.unlock(i);
+        const n = @min(self.file_roots.len, self.info.directory_names.len);
+        for (self.file_roots[0..n], 0..) |r, i| self.info.directory_names[i] = r.name;
+        self.info.directory_count = @intCast(n);
     }
 
     /// Parse a config file and wire it into server.config responses. Safe to
@@ -571,6 +723,35 @@ pub const App = struct {
         self.cfg = cfg;
         self.info.cfg = cfg;
         self.info.config_file_path = config_path;
+        self.ensureInstanceUuid(aio);
+
+        // [server] use_xheaders defaults true. False keeps the socket peer
+        // even when X-Forwarded-For / X-Real-Ip are present.
+        if (cfg.getBoolean("server", "use_xheaders")) |v| {
+            self.use_xheaders = v;
+        } else |_| {}
+
+        if (cfg.get("server", "klippy_uds_address")) |uds| {
+            if (uds.len > 0) {
+                if (self.alloc.dupe(u8, uds)) |duped| {
+                    if (self.klippy_uds_owned) self.alloc.free(self.klippy_ctx.uds_path);
+                    self.klippy_ctx.uds_path = duped;
+                    self.klippy_uds_owned = true;
+                } else |_| {}
+            }
+        }
+
+        // [paneldue] enable_checksum defaults true, matching Moonraker. The
+        // serial reader calls processPanelDueLine, which strips the line and
+        // parses it. Absent section leaves the processor idle (checksum off).
+        if (cfg.hasSection("paneldue")) {
+            self.paneldue.enable_checksum = cfg.getBoolean("paneldue", "enable_checksum") catch true;
+        }
+
+        // [analysis] points at klipper_estimator under the datadir. The binary
+        // is not downloaded. Status reports it missing until the file exists.
+        self.analysis_ctx.io = aio;
+        if (cfg.hasSection("analysis")) self.applyAnalysisConfig(cfg);
 
         // Wire spoolman server URL from [spoolman] server key.
         if (cfg.get("spoolman", "server")) |url| {
@@ -584,6 +765,16 @@ pub const App = struct {
                 std.debug.print("phobos: warning: failed to set machine provider '{s}': {}\n", .{ p, err });
             };
         }
+        // Forge-X `[machine] script_path` is the directory SimpleProvider runs.
+        // reboot and shutdown stay no-ops; this path is only a service script.
+        if (cfg.get("machine", "script_path")) |p| {
+            self.machine_ctx.setScriptPath(p) catch |err| {
+                std.debug.print("phobos: warning: failed to set machine script_path: {}\n", .{err});
+            };
+        }
+        if (cfg.getFloat("machine", "script_timeout")) |t| {
+            if (t > 0) self.machine_ctx.script_timeout_s = t;
+        } else |_| {}
 
         // CORS allow-list ([authorization] cors_domains): a whitespace/newline
         // separated list of origins (`*`, `*.dom`, or exact). Enables a
@@ -616,6 +807,134 @@ pub const App = struct {
             if (cfg.getInt("authorization", "login_timeout")) |days| {
                 if (days > 0) self.auth_ctx.login_timeout_days = days;
             } else |_| {}
+            if (cfg.get("authorization", "trusted_clients")) |raw| {
+                self.auth_ctx.setTrustedClients(raw) catch |err| {
+                    std.debug.print("phobos: warning: trusted_clients not applied: {}\n", .{err});
+                };
+            }
+        }
+
+        // [update_manager] and [update_manager <name>] clients. System is
+        // omitted when enable_system_updates is false. Paths are recorded
+        // only; status does not fetch unless a later refresh asks it to.
+        if (update_manager_component.sourcesFromConfig(self.alloc, cfg)) |srcs| {
+            if (self.update_sources_owned) update_manager_component.freeSources(self.alloc, self.update_ctx.sources);
+            self.update_ctx.sources = srcs;
+            self.update_sources_owned = true;
+        } else |err| {
+            std.debug.print("phobos: warning: update sources not applied: {}\n", .{err});
+        }
+
+        self.bindFeather();
+        if (cfg.hasSection("announcements")) {
+            if (cfg.getBoolean("announcements", "dev_mode")) |v| {
+                self.announcements_ctx.dev_mode = v;
+            } else |_| {}
+            if (cfg.getBoolean("announcements", "enable_moonlight")) |v| {
+                self.announcements_ctx.moonlight_enabled = v;
+            } else |_| {}
+            if (cfg.get("announcements", "subscriptions")) |raw| {
+                var it = std.mem.tokenizeAny(u8, raw, " \t\r\n,");
+                while (it.next()) |name| {
+                    self.announcements_ctx.addSubscription(name) catch |err| {
+                        std.debug.print("phobos: warning: announcement subscription '{s}' not added: {}\n", .{ name, err });
+                    };
+                }
+            }
+        }
+
+        if (cfg.hasSection("data_store")) {
+            if (cfg.getInt("data_store", "gcode_store_size")) |n| {
+                if (n > 0) self.data_store_ctx.setGcodeStoreSize(@intCast(n)) catch |err| {
+                    std.debug.print("phobos: warning: gcode_store_size not applied: {}\n", .{err});
+                };
+            } else |_| {}
+            if (cfg.getInt("data_store", "temperature_store_size")) |n| {
+                if (n > 0) self.data_store_ctx.setTemperatureStoreSize(@intCast(n)) catch |err| {
+                    std.debug.print("phobos: warning: temperature_store_size not applied: {}\n", .{err});
+                };
+            } else |_| {}
+        }
+
+        if (cfg.hasSection("update_manager")) {
+            if (cfg.getBoolean("update_manager", "enable_auto_refresh")) |v| {
+                self.update_ctx.auto_refresh = v;
+            } else |_| {}
+            if (cfg.getInt("update_manager", "refresh_interval")) |hours| {
+                if (hours > 0) self.update_ctx.refresh_interval_hours = hours;
+            } else |_| {}
+            if (cfg.get("update_manager", "refresh_window")) |raw| {
+                var nums: [2]i64 = .{ 0, 5 };
+                var n: usize = 0;
+                var it = std.mem.tokenizeAny(u8, raw, "-,\n\t ");
+                while (it.next()) |tok| {
+                    if (n >= 2) break;
+                    nums[n] = std.fmt.parseInt(i64, tok, 10) catch break;
+                    n += 1;
+                }
+                if (n == 2 and nums[0] != nums[1] and nums[0] >= 0 and nums[0] <= 23 and nums[1] >= 0 and nums[1] <= 23) {
+                    self.update_ctx.refresh_window_start = nums[0];
+                    self.update_ctx.refresh_window_end = nums[1];
+                }
+            }
+        }
+
+        if (cfg.hasSection("file_manager")) {
+            if (cfg.get("file_manager", "file_system_observer")) |raw| {
+                if (std.ascii.eqlIgnoreCase(raw, "inotify")) {
+                    self.file_ctx.observer = .inotify;
+                } else {
+                    self.file_ctx.observer = .none;
+                }
+            } else {
+                // Moonraker's default when the section exists and the key does not.
+                self.file_ctx.observer = .inotify;
+            }
+            if (cfg.get("file_manager", "excludes")) |raw| {
+                self.file_ctx.setExcludes(raw) catch |err| {
+                    std.debug.print("phobos: warning: file excludes not applied: {}\n", .{err});
+                };
+            }
+        }
+
+        if (cfg.get("klippy_apis", "hidden_objects")) |raw| {
+            self.printer_ctx.setHiddenObjects(self.alloc, raw) catch |err| {
+                std.debug.print("phobos: warning: hidden_objects not applied: {}\n", .{err});
+            };
+        }
+
+        if (cfg.hasSection("octoprint_compat")) {
+            if (cfg.getBoolean("octoprint_compat", "enable_ufp")) |v| {
+                self.octoprint_ctx.enable_ufp = v;
+            } else |_| {}
+            if (cfg.getBoolean("octoprint_compat", "flip_h")) |v| {
+                self.octoprint_ctx.flip_h = v;
+            } else |_| {}
+            if (cfg.getBoolean("octoprint_compat", "flip_v")) |v| {
+                self.octoprint_ctx.flip_v = v;
+            } else |_| {}
+            if (cfg.getBoolean("octoprint_compat", "rotate_90")) |v| {
+                self.octoprint_ctx.rotate_90 = v;
+            } else |_| {}
+            if (cfg.getBoolean("octoprint_compat", "webcam_enabled")) |v| {
+                self.octoprint_ctx.webcam_enabled = v;
+            } else |_| {}
+            if (cfg.get("octoprint_compat", "stream_url")) |url| {
+                if (self.alloc.dupe(u8, url)) |duped| {
+                    if (self.octoprint_ctx.stream_url_owned) self.alloc.free(self.octoprint_ctx.stream_url);
+                    self.octoprint_ctx.stream_url = duped;
+                    self.octoprint_ctx.stream_url_owned = true;
+                } else |_| {}
+            }
+        }
+
+        if (cfg.hasSection("feather_updates")) {
+            self.klippy_ctx.remote_methods = &feather_updates_component.remote_methods;
+            self.feather.enabled = true;
+            if (cfg.get("feather_updates", "update_key")) |key| {
+                if (key.len > 0 and key.len <= 64) self.feather.update_key = key;
+            }
+            self.info.extra_components = &feather_component_name;
         }
 
         // Wire job_queue transition gcode/delay + behaviour flags from the
@@ -744,10 +1063,49 @@ pub const App = struct {
             };
         }
 
-        // Wire WLED strips from [wled <name>] sections.
+        // Wire WLED strips, webcams, and notifiers from prefixed sections.
+        self.notifier_ctx.deinit(self.alloc);
         if (cfg.sectionNames(self.alloc)) |names| {
             defer self.alloc.free(names);
             for (names) |sect| {
+                if (std.mem.startsWith(u8, sect, "notifier ")) {
+                    const nname = sect["notifier ".len..];
+                    if (nname.len == 0) continue;
+                    const url = cfg.get(sect, "url") orelse continue;
+                    self.notifier_ctx.addNotifier(self.alloc, .{
+                        .name = nname,
+                        .url = url,
+                        .title = cfg.get(sect, "title") orelse "",
+                        .body = cfg.get(sect, "body") orelse "",
+                        .body_format = cfg.get(sect, "body_format") orelse "text",
+                    }) catch |err| {
+                        std.debug.print("phobos: warning: failed to add notifier '{s}': {}\n", .{ nname, err });
+                    };
+                    continue;
+                }
+                if (std.mem.startsWith(u8, sect, "webcam ")) {
+                    const cam_name = sect["webcam ".len..];
+                    if (cam_name.len == 0) continue;
+                    const stream = cfg.get(sect, "stream_url") orelse continue;
+                    self.webcam_ctx.addFromConfig(.{
+                        .name = cam_name,
+                        .enabled = cfg.getBoolean(sect, "enabled") catch true,
+                        .icon = cfg.get(sect, "icon") orelse "mdiWebcam",
+                        .aspect_ratio = cfg.get(sect, "aspect_ratio") orelse "4:3",
+                        .target_fps = cfg.getInt(sect, "target_fps") catch 15,
+                        .target_fps_idle = cfg.getInt(sect, "target_fps_idle") catch 5,
+                        .location = cfg.get(sect, "location") orelse "printer",
+                        .service = cfg.get(sect, "service") orelse "mjpegstreamer",
+                        .stream_url = stream,
+                        .snapshot_url = cfg.get(sect, "snapshot_url") orelse "",
+                        .flip_horizontal = cfg.getBoolean(sect, "flip_horizontal") catch false,
+                        .flip_vertical = cfg.getBoolean(sect, "flip_vertical") catch false,
+                        .rotation = cfg.getInt(sect, "rotation") catch 0,
+                    }) catch |err| {
+                        std.debug.print("phobos: warning: failed to add webcam '{s}': {}\n", .{ cam_name, err });
+                    };
+                    continue;
+                }
                 if (!std.mem.startsWith(u8, sect, "wled ")) continue;
                 const strip_name = sect["wled ".len..];
                 if (strip_name.len == 0) continue;
@@ -816,6 +1174,8 @@ pub const App = struct {
     /// registry teardown which needs an Io-aware mutex; pass a threaded io or
     /// use `deinitNoIo` in pure unit tests where no event loop is running.
     pub fn deinit(self: *App, io: std.Io) void {
+        self.update_ctx.stopAutoRefresh();
+        self.data_store_ctx.stopSampler();
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
         // Stop the Spoolman WS supervisor (uses io) before io/conns teardown.
         self.spoolman_ctx.stopWs();
@@ -836,9 +1196,11 @@ pub const App = struct {
         self.alloc.destroy(self.extensions_ctx);
         for (self.file_roots) |r| self.alloc.free(r.path);
         self.alloc.free(self.file_roots);
+        if (self.instance_uuid_owned) self.alloc.free(self.instance_uuid);
         self.alloc.free(self.datadir);
         self.file_ctx.deinit(); // frees the metadata cache
         self.alloc.destroy(self.file_ctx);
+        if (self.update_sources_owned) update_manager_component.freeSources(self.alloc, self.update_ctx.sources);
         self.alloc.destroy(self.update_ctx);
         self.power_ctx.deinit();
         self.alloc.destroy(self.power_ctx);
@@ -848,11 +1210,15 @@ pub const App = struct {
         self.alloc.destroy(self.td1_ctx);
         self.button_ctx.deinit();
         self.alloc.destroy(self.button_ctx);
+        self.printer_ctx.deinit(self.alloc);
         self.alloc.destroy(self.printer_ctx);
         self.klippy_ctx.deinit();
+        if (self.klippy_uds_owned) self.alloc.free(self.klippy_ctx.uds_path);
         self.alloc.destroy(self.klippy_ctx);
+        self.octoprint_ctx.deinit(self.alloc);
         self.alloc.destroy(self.octoprint_ctx);
         self.alloc.destroy(self.zeroconf_ctx);
+        self.analysis_ctx.deinit(self.alloc);
         self.alloc.destroy(self.analysis_ctx);
         self.mqtt_ctx.deinit();
         self.alloc.destroy(self.mqtt_ctx);
@@ -864,7 +1230,7 @@ pub const App = struct {
         self.alloc.destroy(self.sensor_ctx);
         self.webcam_ctx.deinit();
         self.alloc.destroy(self.webcam_ctx);
-        self.notifier_ctx.* = .{};
+        self.notifier_ctx.deinit(self.alloc);
         self.alloc.destroy(self.notifier_ctx);
         self.server_misc_ctx.* = .{};
         self.alloc.destroy(self.server_misc_ctx);
@@ -993,12 +1359,181 @@ pub const App = struct {
             std.debug.assert(std.mem.eql(u8, ws.identify_method, "server.connection.identify"));
             std.debug.assert(std.mem.eql(u8, ws.websocket_id_method, "server.websocket.id"));
         }
+
+        // Forge-X Feather callbacks. The three remote method names are
+        // installed on the heap KlippyCtx here. httpServer/setConfig rebind
+        // the handler pointer once App is at its final address.
+        self.klippy_ctx.remote_methods = &feather_updates_component.remote_methods;
+        self.bindFeather();
+    }
+
+    /// Read or create `<datadir>/.moonraker.uuid` and point webcam config uids
+    /// at it. Moonraker writes `uuid4().hex` once and keeps that file.
+    fn ensureInstanceUuid(self: *App, io: std.Io) void {
+        if (self.instance_uuid.len != 0) {
+            self.webcam_ctx.instance_uuid = self.instance_uuid;
+            return;
+        }
+        const path = std.fs.path.join(self.alloc, &.{ self.datadir, ".moonraker.uuid" }) catch return;
+        defer self.alloc.free(path);
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, self.alloc, .limited(80))) |raw| {
+            defer self.alloc.free(raw);
+            var canon: [32]u8 = undefined;
+            if (webcam_component.canonicalInstanceHex(raw, &canon)) {
+                const owned = self.alloc.dupe(u8, &canon) catch return;
+                self.instance_uuid = owned;
+                self.instance_uuid_owned = true;
+                self.webcam_ctx.instance_uuid = owned;
+                return;
+            }
+        } else |_| {}
+        var bytes: [16]u8 = undefined;
+        const n = std.os.linux.getrandom(&bytes, bytes.len, 0);
+        if (std.os.linux.errno(n) != .SUCCESS or n != bytes.len) return;
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        var hex: [32]u8 = undefined;
+        const hexd = "0123456789abcdef";
+        for (bytes, 0..) |b, i| {
+            hex[i * 2] = hexd[b >> 4];
+            hex[i * 2 + 1] = hexd[b & 0xf];
+        }
+        const owned = self.alloc.dupe(u8, &hex) catch return;
+        self.instance_uuid = owned;
+        self.instance_uuid_owned = true;
+        self.webcam_ctx.instance_uuid = owned;
+        const file = std.Io.Dir.cwd().createFile(io, path, .{}) catch return;
+        defer file.close(io);
+        var wbuf: [64]u8 = undefined;
+        var w = file.writer(io, &wbuf);
+        w.interface.writeAll(&hex) catch return;
+        w.interface.flush() catch return;
+    }
+
+    /// Point Klippy's remote-method hook at this App's Feather adapter.
+    fn bindFeather(self: *App) void {
+        self.feather.updates = self.update_ctx;
+        self.feather.idle = featherPrinterIdle;
+        self.feather.idle_ctx = self;
+        self.feather.cmd = featherCmd;
+        self.feather.cmd_ctx = self;
+        self.feather.klippy_send = featherKlippySend;
+        self.feather.klippy_send_ctx = self;
+        self.klippy_ctx.remote_handler = feather_updates_component.onKlippyMethod;
+        self.klippy_ctx.remote_handler_ctx = &self.feather;
+        // Keep a test-installed shell (TestServer's no-op). Otherwise the
+        // daemon runner is what live reset/update calls.
+        if (self.update_ctx.shell == null or self.update_ctx.shell == daemonShell) {
+            self.update_ctx.shell = daemonShell;
+            self.update_ctx.shell_ctx = self;
+        }
+    }
+
+    /// Feed one PanelDue serial line. Strips it, treats M112 as emergency stop,
+    /// and otherwise parses through `parseLine` (checksummed file commands keep
+    /// a single filename only when it is non-empty).
+    pub fn processPanelDueLine(self: *App, line: []const u8) paneldue_component.ParseError!void {
+        return self.paneldue.processLine(line);
+    }
+
+    /// Moonraker registers `config_examples` and `docs` only after Klippy
+    /// reports `klipper_path` and those directories exist. A missing directory
+    /// is skipped. `..` in the path is rejected. The callback must copy; this
+    /// joins new owned paths onto `file_roots`.
+    pub fn registerKlipperRoots(self: *App, klipper_path: []const u8) void {
+        if (klipper_path.len < 2 or klipper_path[0] != '/') return;
+        if (std.mem.eql(u8, klipper_path, "/")) return;
+        if (std.mem.indexOf(u8, klipper_path, "..") != null) return;
+        const io = self.file_ctx.io orelse return;
+        self.addReadRoot(io, "config_examples", klipper_path, "config");
+        self.addReadRoot(io, "docs", klipper_path, "docs");
+    }
+
+    fn onKlipperPath(ctx: *anyopaque, klipper_path: []const u8) void {
+        const self: *App = @ptrCast(@alignCast(ctx));
+        const io = self.file_ctx.io orelse return;
+        self.core.run(io, App.registerKlipperRoots, .{ self, klipper_path });
+    }
+
+    fn addReadRoot(self: *App, io: std.Io, name: []const u8, parent: []const u8, child: []const u8) void {
+        const path = std.fs.path.join(self.alloc, &.{ parent, child }) catch return;
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch {
+            self.alloc.free(path);
+            return;
+        };
+        dir.close(io);
+        for (self.file_roots) |*r| {
+            if (!std.mem.eql(u8, r.name, name)) continue;
+            if (std.mem.eql(u8, r.path, path)) {
+                self.alloc.free(path);
+                return;
+            }
+            self.alloc.free(r.path);
+            r.path = path;
+            r.full_access = false;
+            self.file_ctx.roots = self.file_roots;
+            return;
+        }
+        const grown = self.alloc.realloc(self.file_roots, self.file_roots.len + 1) catch {
+            self.alloc.free(path);
+            return;
+        };
+        grown[grown.len - 1] = .{ .name = name, .path = path, .full_access = false };
+        self.file_roots = grown;
+        self.file_ctx.roots = grown;
+        self.syncRegisteredDirectories();
+    }
+
+    fn applyAnalysisConfig(self: *App, cfg: *const config_helper.ConfigParser) void {
+        const configured = cfg.get("analysis", "platform") orelse "auto";
+        const plat: []const u8 = if (std.mem.eql(u8, configured, "linux") or std.mem.eql(u8, configured, "rpi") or std.mem.eql(u8, configured, "osx"))
+            configured
+        else if (@import("builtin").cpu.arch == .arm or @import("builtin").cpu.arch == .aarch64)
+            "rpi"
+        else
+            "linux";
+        const bin = std.fmt.allocPrint(self.alloc, "{s}/tools/klipper_estimator/klipper_estimator_{s}", .{ self.datadir, plat }) catch return;
+        var cfg_path = std.fmt.allocPrint(self.alloc, "{s}/tools/klipper_estimator/default_estimator_cfg.json", .{self.datadir}) catch {
+            self.alloc.free(bin);
+            return;
+        };
+        if (cfg.get("analysis", "estimator_config")) |rel| {
+            const trimmed = std.mem.trim(u8, rel, " \t/");
+            if (trimmed.len > 0 and std.mem.indexOf(u8, trimmed, "..") == null) {
+                if (std.fs.path.join(self.alloc, &.{ self.datadir, "config", trimmed })) |custom| {
+                    var use_custom = false;
+                    if (self.analysis_ctx.io) |io| {
+                        if (std.Io.Dir.cwd().openFile(io, custom, .{})) |f| {
+                            f.close(io);
+                            use_custom = true;
+                        } else |_| {}
+                    }
+                    if (use_custom) {
+                        self.alloc.free(cfg_path);
+                        cfg_path = custom;
+                    } else {
+                        self.alloc.free(custom);
+                        std.debug.print("phobos: warning: estimator_config '{s}' is not in the config root\n", .{trimmed});
+                    }
+                } else |_| {}
+            }
+        }
+        if (self.analysis_ctx.paths_owned) {
+            self.alloc.free(self.analysis_ctx.estimator_path);
+            self.alloc.free(self.analysis_ctx.estimator_config);
+        }
+        self.analysis_ctx.estimator_path = bin;
+        self.analysis_ctx.estimator_config = cfg_path;
+        self.analysis_ctx.paths_owned = true;
     }
 
     /// Returns the HTTP transport Server configured with this App's components.
     /// The caller must supply a live `io` (from a threaded event loop). The
     /// returned Server borrows all App-owned pointers; the App must outlive it.
     pub fn httpServer(self: *App, io: std.Io) http_transport.Server {
+        // Rebind after App is at its final address (init returned it by value).
+        self.bindFeather();
+        self.ensureInstanceUuid(io);
         // Temperature store needs io to lock its buffer from the RPC handler.
         // Wire Core+io into the dispatcher so it takes the Core lock per-method
         // (read-only `off_core` methods skip it). Without this every JSON-RPC
@@ -1018,6 +1553,10 @@ pub const App = struct {
         self.td1_ctx.startPolling();
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
+        if (self.file_ctx.observer == .inotify) self.file_ctx.startObserver();
+        self.analysis_ctx.io = io;
+        self.klippy_ctx.on_klipper_path = onKlipperPath;
+        self.klippy_ctx.on_klipper_path_ctx = self;
         // Wire io into the machine component for /proc & /sys reads.
         self.machine_ctx.setIo(io);
         // Wire io into the update manager so it can emit notify_update_response /
@@ -1075,6 +1614,7 @@ pub const App = struct {
             .datadir = self.datadir,
             .klippy_ctx = self.klippy_ctx,
             .cors_domains = self.cors_domains,
+            .use_xheaders = self.use_xheaders,
         };
     }
 };
@@ -1164,6 +1704,587 @@ test "App.init registers server.info and server.config" {
     try std.testing.expect(app.dispatcher.methods.get("server.config") != null);
 }
 
+test "setConfig [server] use_xheaders false is what httpServer serves" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg_path = ".zig-cache/phobos-use-xheaders-test.cfg";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[server]\nuse_xheaders: false\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    const before = app.httpServer(io);
+    try std.testing.expect(before.use_xheaders);
+    app.setConfig(io, cfg_path);
+    const after = app.httpServer(io);
+    try std.testing.expect(!after.use_xheaders);
+}
+
+test "setConfig loads trusted clients, update sources, and feather_updates" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg_path = ".zig-cache/phobos-printer-gap-test.cfg";
+    const body =
+        \\[server]
+        \\klippy_uds_address: /no/such/klippy.sock
+        \\
+        \\[authorization]
+        \\trusted_clients:
+        \\    0.0.0.0/0
+        \\
+        \\[update_manager]
+        \\enable_system_updates: False
+        \\
+        \\[feather_updates]
+        \\update_key: forge-x
+        \\
+        \\[update_manager forge-x]
+        \\type: git_repo
+        \\channel: dev
+        \\path: /no/such/forge-x
+        \\origin: https://github.com/DrA1ex/ff5m.git
+        \\primary_branch: 1.4.2
+        \\
+        \\[update_manager fluidd]
+        \\type: web
+        \\repo: fluidd-core/fluidd
+        \\path: /no/such/fluidd
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+
+    const addr = try std.Io.net.IpAddress.parse("8.8.8.8", 0);
+    try std.testing.expect(app.auth_ctx.trusted.isTrusted(addr));
+    try std.testing.expectEqualStrings("/no/such/klippy.sock", app.klippy_ctx.uds_path);
+    try std.testing.expect(app.feather.enabled);
+    try std.testing.expectEqualStrings("forge-x", app.feather.update_key);
+    try std.testing.expectEqual(@as(usize, 3), app.klippy_ctx.remote_methods.len);
+    try std.testing.expect(app.klippy_ctx.remote_handler != null);
+
+    var saw_system = false;
+    var saw_forge = false;
+    for (app.update_ctx.sources) |s| {
+        if (std.mem.eql(u8, s.name, "system")) saw_system = true;
+        if (std.mem.eql(u8, s.name, "forge-x")) {
+            saw_forge = true;
+            try std.testing.expectEqualStrings("ff5m", s.repo_name);
+            try std.testing.expectEqualStrings("1.4.2", s.branch);
+        }
+    }
+    try std.testing.expect(!saw_system);
+    try std.testing.expect(saw_forge);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const built = try methods.serverInfoHandler(app.info, .null, arena.allocator());
+    var found_update = false;
+    var found_octo = false;
+    var found_feather = false;
+    for (built.object.get("components").?.array.items) |c| {
+        if (std.mem.eql(u8, c.string, "update_manager")) found_update = true;
+        if (std.mem.eql(u8, c.string, "octoprint_compat")) found_octo = true;
+        if (std.mem.eql(u8, c.string, "feather_updates")) found_feather = true;
+    }
+    try std.testing.expect(found_update);
+    try std.testing.expect(found_octo);
+    try std.testing.expect(found_feather);
+
+    const status = try feather_updates_component.statusResponse(&app.feather, arena.allocator(), 3);
+    try std.testing.expectEqual(@as(i64, 3), status.object.get("token").?.integer);
+    try std.testing.expect(status.object.get("error").?.string.len > 0 or status.object.get("installed_version") != null);
+
+    const Rec = struct {
+        method: []const u8 = "",
+        fn send(ctx: *anyopaque, _: std.mem.Allocator, method: []const u8, _: std.json.Value) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.method = method;
+        }
+    };
+    var rec = Rec{};
+    app.feather.klippy_send = Rec.send;
+    app.feather.klippy_send_ctx = &rec;
+    var params: std.json.ObjectMap = .empty;
+    try params.put(arena.allocator(), "token", .{ .integer = 1 });
+    var frame: std.json.ObjectMap = .empty;
+    try frame.put(arena.allocator(), "params", .{ .object = params });
+    try app.klippy_ctx.dispatchRemoteMethod(io, "feather_request_forge_x_update_status", .{ .object = frame });
+    try std.testing.expectEqualStrings("feather/update_status", rec.method);
+    try std.testing.expectEqualStrings("feather_request_forge_x_update_status", app.klippy_ctx.remote_methods[0]);
+    try std.testing.expectEqualStrings("feather_start_forge_x_update", app.klippy_ctx.remote_methods[1]);
+    try std.testing.expectEqualStrings("feather_reset_forge_x_update", app.klippy_ctx.remote_methods[2]);
+}
+
+test "dispatchFrame: id-less reset uses the daemon runner and does not spawn git" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-feather-daemon-test.cfg";
+    const body =
+        \\[feather_updates]
+        \\update_key: forge-x
+        \\
+        \\[update_manager forge-x]
+        \\type: git_repo
+        \\channel: dev
+        \\path: /no/such/feather-repo
+        \\origin: https://github.com/DrA1ex/ff5m.git
+        \\primary_branch: 1.4.2
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    app.bindFeather();
+    try std.testing.expect(app.update_ctx.shell == daemonShell);
+    try std.testing.expect(app.update_ctx.io == null);
+    app.info.klippy_connected = true;
+    app.info.klippy_state = "ready";
+
+    const SpawnRec = struct {
+        alloc: std.mem.Allocator,
+        cmds: std.ArrayList([]const u8),
+        fn spawn(ctx: *anyopaque, call_alloc: std.mem.Allocator, argv: []const []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(call_alloc);
+            for (argv, 0..) |arg, i| {
+                if (i != 0) try buf.append(call_alloc, ' ');
+                try buf.appendSlice(call_alloc, arg);
+            }
+            try self.cmds.append(self.alloc, try self.alloc.dupe(u8, buf.items));
+        }
+    };
+    var rec = SpawnRec{ .alloc = alloc, .cmds = .empty };
+    defer {
+        for (rec.cmds.items) |s| alloc.free(s);
+        rec.cmds.deinit(alloc);
+    }
+    app.git_spawn = SpawnRec.spawn;
+    app.git_spawn_ctx = &rec;
+
+    try std.testing.expectError(error.Refused, featherCmd(&app, alloc, &.{ "git", "reboot" }));
+    try std.testing.expectError(error.Refused, featherCmd(&app, alloc, &.{"shutdown"}));
+    try std.testing.expectError(error.Refused, featherCmd(&app, alloc, &.{"poweroff"}));
+    try std.testing.expectEqual(@as(usize, 0), rec.cmds.items.len);
+
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    try featherCmd(&app, arena_state.allocator(), &.{ "machine.update.client", "forge-x" });
+    try std.testing.expectEqual(@as(usize, 0), rec.cmds.items.len);
+    try std.testing.expectError(error.UpdateFailed, featherCmd(&app, arena_state.allocator(), &.{ "machine.update.client", "missing-source" }));
+
+    const Prog = struct {
+        alloc: std.mem.Allocator,
+        methods: std.ArrayList([]const u8),
+        states: std.ArrayList([]const u8),
+        fn send(ctx: *anyopaque, _: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try self.methods.append(self.alloc, try self.alloc.dupe(u8, method));
+            if (params == .object) {
+                if (params.object.get("state")) |st| {
+                    if (st == .string) try self.states.append(self.alloc, try self.alloc.dupe(u8, st.string));
+                }
+            }
+        }
+    };
+    var prog = Prog{ .alloc = alloc, .methods = .empty, .states = .empty };
+    defer {
+        for (prog.methods.items) |s| alloc.free(s);
+        prog.methods.deinit(alloc);
+        for (prog.states.items) |s| alloc.free(s);
+        prog.states.deinit(alloc);
+    }
+    app.feather.klippy_send = Prog.send;
+    app.feather.klippy_send_ctx = &prog;
+
+    const payload = "{\"method\":\"feather_reset_forge_x_update\",\"params\":{\"token\":8}}";
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"id\"") == null);
+    try app.klippy_ctx.dispatchFrame(io, payload);
+    try std.testing.expectEqual(@as(usize, 2), rec.cmds.items.len);
+    try std.testing.expectEqualStrings("git -C /no/such/feather-repo reset --hard HEAD", rec.cmds.items[0]);
+    try std.testing.expectEqualStrings("git -C /no/such/feather-repo clean -fd", rec.cmds.items[1]);
+    try std.testing.expectEqualStrings("feather/update_progress", prog.methods.items[0]);
+    try std.testing.expectEqualStrings("reset_complete", prog.states.items[0]);
+}
+
+test "setConfig loads announcement subscriptions and gcode store size" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-announce-store-test.cfg";
+    const body =
+        \\[announcements]
+        \\dev_mode: True
+        \\subscriptions:
+        \\    fluidd
+        \\
+        \\[data_store]
+        \\gcode_store_size: 2
+        \\temperature_store_size: 3
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    try std.testing.expect(app.announcements_ctx.dev_mode);
+    try std.testing.expectEqual(@as(usize, 2), app.data_store_ctx.gcode_ring.capacity);
+    try std.testing.expectEqual(@as(usize, 3), app.data_store_ctx.temp_capacity);
+    try app.data_store_ctx.pushGcodeCommand("one", 1);
+    try app.data_store_ctx.pushGcodeCommand("two", 2);
+    try app.data_store_ctx.pushGcodeCommand("three", 3);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const feeds = try announcements_component.handleListFeeds(@ptrCast(app.announcements_ctx), .null, arena.allocator());
+    var found = false;
+    for (feeds.object.get("feeds").?.array.items) |f| {
+        if (std.mem.eql(u8, f.string, "fluidd")) found = true;
+    }
+    try std.testing.expect(found);
+    const store = try data_store_component.handleGcodeStore(@ptrCast(app.data_store_ctx), .null, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 2), store.object.get("gcode_store").?.array.items.len);
+}
+
+test "setConfig [octoprint_compat] is what /api/settings returns" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-octo-config-test.cfg";
+    const body =
+        \\[octoprint_compat]
+        \\enable_ufp: false
+        \\flip_h: true
+        \\rotate_90: true
+        \\webcam_enabled: false
+        \\stream_url: http://cam/stream
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const settings = try octoprint_component.handleSettings(@ptrCast(app.octoprint_ctx), .null, arena.allocator());
+    try std.testing.expect(settings.object.get("plugins").?.object.get("UltimakerFormatPackage") == null);
+    const webcam = settings.object.get("webcam").?.object;
+    try std.testing.expect(webcam.get("flipH").?.bool);
+    try std.testing.expect(webcam.get("rotate90").?.bool);
+    try std.testing.expect(!webcam.get("webcamEnabled").?.bool);
+    try std.testing.expectEqualStrings("http://cam/stream", webcam.get("streamUrl").?.string);
+}
+
+test "setConfig loads [webcam name] cameras into the list" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-webcam-config-test.cfg";
+    const body =
+        \\[webcam cam]
+        \\enabled: True
+        \\service: mjpegstreamer-adaptive
+        \\stream_url: /webcam/?action=stream
+        \\snapshot_url: /webcam/?action=snapshot
+        \\
+        \\[webcam Example]
+        \\enabled: False
+        \\stream_url: http://your_IP:8080/?action=stream
+        \\snapshot_url: http://your_IP:8080/?action=snapshot
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    const uuid_path = try std.fmt.allocPrint(alloc, "{s}/.moonraker.uuid", .{app.datadir});
+    defer alloc.free(uuid_path);
+    {
+        const uuid_file = try std.Io.Dir.cwd().createFile(io, uuid_path, .{});
+        defer uuid_file.close(io);
+        var wbuf: [64]u8 = undefined;
+        var w = uuid_file.writer(io, &wbuf);
+        try w.interface.writeAll("a48b28888e484d4fac9b7bc09e068dea");
+        try w.interface.flush();
+    }
+    app.setConfig(io, cfg_path);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const listed = try webcam_component.handleWebcamList(@ptrCast(app.webcam_ctx), .null, arena.allocator());
+    const cams = listed.object.get("webcams").?.array;
+    try std.testing.expectEqual(@as(usize, 2), cams.items.len);
+    const cam = cams.items[0].object;
+    try std.testing.expectEqualStrings("cam", cam.get("name").?.string);
+    try std.testing.expectEqualStrings("1616e509-4515-53e4-8cd8-74875fb859c9", cam.get("uid").?.string);
+    try std.testing.expectEqualStrings("config", cam.get("source").?.string);
+    try std.testing.expectEqualStrings("mjpegstreamer-adaptive", cam.get("service").?.string);
+    try std.testing.expectEqualStrings("/webcam/?action=stream", cam.get("stream_url").?.string);
+    try std.testing.expect(cam.get("enabled").?.bool);
+    const example = cams.items[1].object;
+    try std.testing.expectEqualStrings("Example", example.get("name").?.string);
+    try std.testing.expectEqualStrings("e98363d4-af2e-5f41-8515-e84af7baf3c2", example.get("uid").?.string);
+    try std.testing.expect(!example.get("enabled").?.bool);
+}
+
+test "setConfig [machine] provider simple restarts through script_path and does not reboot" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-machine-simple-test.cfg";
+    const body =
+        \\[machine]
+        \\provider: simple
+        \\script_path: /no/such/scripts
+        \\script_timeout: 12
+        \\validate_service: false
+        \\validate_config: false
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    try std.testing.expectEqualStrings("simple", app.machine_ctx.provider_name);
+    try std.testing.expectEqualStrings("/no/such/scripts", app.machine_ctx.script_path);
+    try std.testing.expectEqual(@as(f64, 12), app.machine_ctx.script_timeout_s);
+
+    const Rec = struct {
+        path: []const u8 = "",
+        action: []const u8 = "",
+        calls: usize = 0,
+        alloc: std.mem.Allocator,
+        fn run(ctx: *anyopaque, _: std.mem.Allocator, argv: []const []const u8) anyerror!machine_component.MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (argv.len >= 1) self.path = try self.alloc.dupe(u8, argv[0]);
+            if (argv.len >= 2) self.action = try self.alloc.dupe(u8, argv[1]);
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    var rec = Rec{ .alloc = alloc };
+    defer if (rec.path.len > 0) alloc.free(rec.path);
+    defer if (rec.action.len > 0) alloc.free(rec.action);
+    app.setMachineRunCmdFn(Rec.run, @ptrCast(&rec));
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const params = try std.json.parseFromSlice(std.json.Value, arena.allocator(), "{\"service\":\"klipper\"}", .{});
+    defer params.deinit();
+    const restarted = try machine_component.handleServiceRestart(@ptrCast(app.machine_ctx), params.value, arena.allocator());
+    try std.testing.expectEqualStrings("ok", restarted.string);
+    try std.testing.expectEqualStrings("/no/such/scripts/klipper", rec.path);
+    try std.testing.expectEqualStrings("restart", rec.action);
+    // AGENT: NEVER turn these two calls into systemctl/reboot/shutdown/poweroff.
+    // They must stay no-ops. rec.calls stays 1 (the service restart only).
+    // Implementing the real command reboots the machine that runs the tests.
+    _ = try machine_component.handleReboot(@ptrCast(app.machine_ctx), .null, arena.allocator());
+    _ = try machine_component.handleShutdown(@ptrCast(app.machine_ctx), .null, arena.allocator());
+    try std.testing.expectEqual(@as(usize, 1), rec.calls);
+}
+
+test "setConfig loads auto-refresh, excludes, observer none, and hidden objects" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-parity-flags-test.cfg";
+    const body =
+        \\[update_manager]
+        \\enable_auto_refresh: False
+        \\refresh_interval: 168
+        \\refresh_window: 0-5
+        \\
+        \\[file_manager]
+        \\file_system_observer: none
+        \\excludes:
+        \\    gcodes/.mod
+        \\    gcodes/logFiles
+        \\
+        \\[klippy_apis]
+        \\hidden_objects:
+        \\    output_pin level_h1
+        \\    output_pin power_off
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    try std.testing.expect(!app.update_ctx.auto_refresh);
+    try std.testing.expectEqual(@as(i64, 168), app.update_ctx.refresh_interval_hours);
+    try std.testing.expectEqual(@as(i64, 0), app.update_ctx.refresh_window_start);
+    try std.testing.expectEqual(@as(i64, 5), app.update_ctx.refresh_window_end);
+    try std.testing.expect(app.update_ctx.refresh_thread == null);
+    try std.testing.expect(app.file_ctx.observer == .none);
+    try std.testing.expect(app.file_ctx.observer_thread == null);
+    try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", ".mod"));
+    try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", "logFiles/a.log"));
+    try std.testing.expect(!app.update_ctx.tickAutoRefresh(alloc, 2));
+    try std.testing.expectEqual(@as(usize, 2), app.printer_ctx.hidden_objects.len);
+    try std.testing.expectEqualStrings("output_pin level_h1", app.printer_ctx.hidden_objects[0]);
+    try std.testing.expectEqualStrings("output_pin power_off", app.printer_ctx.hidden_objects[1]);
+}
+
+test "setConfig [paneldue] processPanelDueLine strips checksummed file commands" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const cfg_path = ".zig-cache/phobos-paneldue-test.cfg";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nenable_checksum: true\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+
+    const body = "N10 M32  plate.gco  ";
+    var sum: u8 = 0;
+    for (body) |c| sum ^= c;
+    var core: [64]u8 = undefined;
+    const checksummed = std.fmt.bufPrint(&core, "{s}*{d}", .{ body, sum }) catch unreachable;
+    var wrapped: [80]u8 = undefined;
+    const line = std.fmt.bufPrint(&wrapped, "  {s}\r\n", .{checksummed}) catch unreachable;
+
+    try app.processPanelDueLine(line);
+    try std.testing.expectEqual(@as(usize, 2), app.paneldue.part_count);
+    try std.testing.expectEqualStrings("M32", app.paneldue.parts[0]);
+    try std.testing.expectEqualStrings("plate.gco", app.paneldue.parts[1]);
+
+    const bare = "M98";
+    sum = 0;
+    for (bare) |c| sum ^= c;
+    const m98 = std.fmt.bufPrint(&core, "{s}*{d}", .{ bare, sum }) catch unreachable;
+    try app.processPanelDueLine(m98);
+    try std.testing.expectEqual(@as(usize, 1), app.paneldue.part_count);
+    try std.testing.expectEqualStrings("M98", app.paneldue.parts[0]);
+
+    try std.testing.expectError(error.InvalidChecksum, app.processPanelDueLine("N1 M30 my file.gco*0"));
+}
+
+test "setConfig loads an analysis platform and a notifier record" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cfg_path = ".zig-cache/phobos-analysis-notifier-test.cfg";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data =
+        \\[analysis]
+        \\platform: linux
+        \\
+        \\[notifier desk]
+        \\url: tgram://token/chat
+        \\title: hi
+        \\body: there
+        \\body_format: text
+        \\
+    });
+    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
+
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_path, "klipper_estimator_linux"));
+    try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_config, "default_estimator_cfg.json"));
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const status = try analysis_component.handleStatus(@ptrCast(app.analysis_ctx), .null, a);
+    try std.testing.expectEqualStrings("klipper_estimator_linux", status.object.get("estimator_executable").?.string);
+    try std.testing.expectEqual(false, status.object.get("estimator_ready").?.bool);
+    try std.testing.expectEqual(true, status.object.get("using_default_config").?.bool);
+
+    const listed = try notifier_component.handleNotifierList(@ptrCast(app.notifier_ctx), .null, a);
+    const items = listed.object.get("notifiers").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), items.len);
+    try std.testing.expectEqualStrings("desk", items[0].object.get("name").?.string);
+    try std.testing.expectEqualStrings("tgram://token/chat", items[0].object.get("url").?.string);
+    var params: std.json.ObjectMap = .empty;
+    try params.put(a, "name", .{ .string = "desk" });
+    try std.testing.expectError(error.AppriseNotAvailable, notifier_component.handleNotifierTest(@ptrCast(app.notifier_ctx), .{ .object = params }, a));
+}
+
+test "canonicalPath follows a directory symlink" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const base = ".scratch/phobos-canon-root";
+    std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, base ++ "/real/config");
+    const target = try std.Io.Dir.cwd().realPathFileAlloc(io, base ++ "/real", alloc);
+    defer alloc.free(target);
+    const link = try alloc.dupeSentinel(u8, base ++ "/data", 0);
+    defer alloc.free(link);
+    const rc = std.os.linux.symlink(target.ptr, link.ptr);
+    try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(rc));
+    const joined = try std.fs.path.join(alloc, &.{ base, "data", "config" });
+    const got = canonicalPath(alloc, joined);
+    defer alloc.free(got);
+    try std.testing.expect(std.mem.endsWith(u8, got, "/real/config"));
+}
+
+test "registerKlipperRoots adds config_examples and docs when those directories exist" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var app = try App.init(alloc);
+    defer app.deinit(io);
+    app.file_ctx.setIo(io);
+    const relative_base = ".scratch/phobos-klipper-roots-test";
+    try std.Io.Dir.cwd().createDirPath(io, relative_base ++ "/config");
+    try std.Io.Dir.cwd().createDirPath(io, relative_base ++ "/docs");
+    defer std.Io.Dir.cwd().deleteTree(io, relative_base) catch {};
+    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, relative_base, alloc);
+    defer alloc.free(base);
+    try std.testing.expectEqual(@as(usize, 3), app.file_roots.len);
+    app.registerKlipperRoots(base);
+    try std.testing.expectEqual(@as(usize, 5), app.file_roots.len);
+    try std.testing.expectEqualStrings("config_examples", app.file_roots[3].name);
+    try std.testing.expect(std.mem.endsWith(u8, app.file_roots[3].path, "/config"));
+    try std.testing.expectEqualStrings("docs", app.file_roots[4].name);
+    try std.testing.expect(!app.file_roots[3].full_access);
+    App.onKlipperPath(@ptrCast(&app), base);
+    try std.testing.expectEqual(@as(usize, 5), app.file_roots.len);
+    try std.testing.expectEqual(@as(u8, 5), app.info.directory_count);
+    try std.testing.expectEqualStrings("config_examples", app.info.directory_names[3]);
+    try std.testing.expectEqualStrings("docs", app.info.directory_names[4]);
+    app.registerKlipperRoots("/no/such/klipper");
+    app.registerKlipperRoots("/no/such/klipper/../etc");
+    try std.testing.expectEqual(@as(usize, 5), app.file_roots.len);
+}
+
 test "setConfig parses [sensor <name>] and wires topic + state_response_template" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
@@ -1171,8 +2292,7 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
     const io = threaded.io();
 
     const cfg_path = "/tmp/phobos-sensor-config-test.cfg";
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data =
-        "[sensor chamber]\n" ++
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[sensor chamber]\n" ++
         "type: mqtt\n" ++
         "state_topic: test/chamber\n" ++
         "state_response_template: {% set d = payload|fromjson %}{ set_result(\"temp\", d.t|float) }\n" });

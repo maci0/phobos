@@ -6,7 +6,7 @@
 
 A memory-efficient reimplementation of [Moonraker](https://github.com/Arksine/moonraker)
 — the API server for the [Klipper](https://www.klipper3d.org/) 3D-printer firmware —
-written in **Zig 0.16**, designed to behave 100% identically to upstream while running
+written in **Zig 0.17**, designed to behave 100% identically to upstream while running
 lean on small ARM hardware.
 
 > phobos — the smaller, faster of Mars' two moons. A lean reimplementation orbiting the
@@ -46,7 +46,8 @@ uses a vendored SQLite for moonraker-sql.db compatibility.) Details:
 - **100% of Moonraker's API surface is covered**: 130/130 JSON-RPC methods, 123/123 static
   endpoints, 27/27 server notifications, 4/4 transport routes (measured automatically — see
   below).
-- ~1239 in-tree tests pass (2 skip); peak RSS for the full test run is ~12–18 MB.
+- 1350 in-tree tests pass, with one gated real-Klippy test skipped.
+- [v0.1.1 release notes](docs/releases/v0.1.1.md) include the live Forge-X checks and retained differences.
 - This is **surface + shape parity**, plus a live Klippy path validated by a gated real-Klippy
   integration test. Byte-identical *behavioral* parity (verified against a running stock
   Moonraker) is still being hardened — see [`TODO.md`](TODO.md).
@@ -107,7 +108,7 @@ TODO.md                   status + remaining work (read this for what's next)
 
 ## Quick start
 
-Requires **Zig 0.16.0** and (for the tooling) Python 3 + `uv`.
+Requires **Zig 0.17.0** and (for the tooling) Python 3 + `uv`.
 
 ```sh
 # Run the test suite (musl-static by default)
@@ -125,7 +126,7 @@ zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall
 ```
 
 > Note: this project builds against **musl** by default because some hosts (and the deploy
-> target) can't link the system glibc with Zig 0.16. Don't run a plain glibc `zig build`.
+> target) can't link the system glibc with Zig 0.17. Don't run a plain glibc `zig build`.
 
 ## Keeping in sync with Moonraker
 

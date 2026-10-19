@@ -27,6 +27,8 @@ pub const database_component = @import("components/database.zig");
 pub const klippy_connection = @import("components/klippy_connection.zig");
 pub const ws_client = @import("components/ws_client.zig");
 pub const sensor_template = @import("components/sensor_template.zig");
+pub const paneldue = @import("components/paneldue.zig");
+pub const feather_updates = @import("components/feather_updates.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub const testutil_klippy_sim = @import("testutil/klippy_sim.zig");
@@ -42,7 +44,8 @@ const usage_text =
     \\
     \\Options:
     \\  -c, --config <path>      Moonraker-style config file to load
-    \\  -d, --data-path <path>   Data directory (gcodes/config/logs roots)
+    \\  -d, --data-path <path>   Data directory. With no -c, loads <path>/config/moonraker.conf
+    \\                           and opens <path>/database/moonraker-sql.db
     \\      --dump-api           Print the API surface as JSON to stdout and exit
     \\      schema [command]     Print the CLI Spec document and exit
     \\      --version            Print version and exit
@@ -178,7 +181,7 @@ fn run(init: std.process.Init) !void {
     // path (allocation-heavy Klippy-proxy requests) and is pointless in a
     // long-running release daemon, so use the lock-sharded `smp_allocator` in
     // release and keep the checked allocator only for Debug builds.
-    const alloc = if (@import("builtin").mode == .Debug) init.gpa else std.heap.smp_allocator;
+    const alloc = if (@import("builtin").mode == .debug) init.gpa else std.heap.smp_allocator;
     // On 32-bit targets (armv7) the runtime-default IO backend's 16 MB handler
     // stacks reserve ~2 GB of VSZ at the ~128-thread peak — enough to exhaust the
     // 3 GB user address space. Own the backend there with a 1 MB stack (handlers
@@ -268,13 +271,22 @@ fn run(init: std.process.Init) !void {
 
     if (dump_api) return dumpApi(alloc, aio);
 
+    // Moonraker's `-d` with no `-c` loads <data>/config/moonraker.conf.
+    // S65moonraker passes only `-d /root/printer_data`.
+    const implied_config = if (config_path == null and data_path != null)
+        std.fs.path.join(alloc, &.{ data_path.?, "config", "moonraker.conf" }) catch null
+    else
+        null;
+    defer if (implied_config) |p| alloc.free(p);
+    if (implied_config) |p| config_path = p;
+
     // Read host/port from config when available, with defaults matching Moonraker.
     const host, const bind_port = try resolveBindAddr(alloc, init.arena.allocator(), aio, config_path);
     std.debug.print("phobos: bind host='{s}' port={d}\n", .{ host, bind_port });
 
     // Select the DataStore backend from `[database] backend` (sqlite | file).
     const db_backend = resolveDbBackend(alloc, aio, config_path);
-    const db_path = resolveDbPath(alloc, init.arena.allocator(), aio, config_path);
+    const db_path = resolveDbPath(alloc, init.arena.allocator(), aio, config_path, data_path);
     std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(db_backend), if (db_path) |p| p else "" });
 
     if (data_path) |dp| std.debug.print("phobos: data path = {s}\n", .{dp});
@@ -291,6 +303,8 @@ fn run(init: std.process.Init) !void {
     // path calls start(); tests go through App.init/httpServer which only
     // calls setIo() so no background task is spawned during testing.
     server_app.klippy_ctx.start();
+    try server_app.data_store_ctx.startSampler();
+    server_app.update_ctx.startAutoRefresh();
 
     var listener = try io.Listener.bind(aio, host, bind_port);
     defer listener.deinit(aio);
@@ -310,16 +324,28 @@ pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]con
     return .sqlite;
 }
 
-/// Read `[database] path` — an explicit DataStore path (a SQLite file, or a
-/// directory for the file backend). Null = use the default ephemeral location.
-/// Lets phobos open an existing Moonraker `moonraker-sql.db`.
-pub fn resolveDbPath(gpa: std.mem.Allocator, arena_alloc: std.mem.Allocator, aio: std.Io, config_path: ?[]const u8) ?[]const u8 {
-    const path = config_path orelse return null;
-    var cfg = config.ConfigParser.init(gpa);
-    defer cfg.deinit();
-    cfg.parseFile(aio, path) catch return null;
-    const v = cfg.get("database", "path") orelse return null;
-    return arena_alloc.dupe(u8, v) catch null;
+/// Read `[database] path` when the config sets it. Otherwise, a `-d` data
+/// path opens `<data>/database/moonraker-sql.db`, which is where Moonraker
+/// stores the printer database. Null means the ephemeral `/tmp` file used
+/// by tests that pass no data path.
+pub fn resolveDbPath(
+    gpa: std.mem.Allocator,
+    arena_alloc: std.mem.Allocator,
+    aio: std.Io,
+    config_path: ?[]const u8,
+    data_path: ?[]const u8,
+) ?[]const u8 {
+    if (config_path) |path| {
+        var cfg = config.ConfigParser.init(gpa);
+        defer cfg.deinit();
+        if (cfg.parseFile(aio, path)) {
+            if (cfg.get("database", "path")) |v| {
+                if (v.len > 0) return arena_alloc.dupe(u8, v) catch null;
+            }
+        } else |_| {}
+    }
+    const dp = data_path orelse return null;
+    return std.fs.path.join(arena_alloc, &.{ dp, "database", "moonraker-sql.db" }) catch null;
 }
 
 /// Resolve the bind address from a config file (or defaults).
@@ -513,7 +539,7 @@ fn strLt(_: void, x: []const u8, y: []const u8) bool {
 }
 
 fn rtLt(_: void, x: registry.RequestType, y: registry.RequestType) bool {
-    return @intFromEnum(x) < @intFromEnum(y);
+    return @backingInt(x) < @backingInt(y);
 }
 
 const EndpointEntry = struct {
@@ -736,6 +762,32 @@ test "extractBindAddr: enabled boolean has no effect on bind addr" {
     const host, const port = try extractBindAddr(&cfg, "127.0.0.1", 7125);
     try std.testing.expectEqualStrings("127.0.0.1", host);
     try std.testing.expectEqual(@as(u16, 7125), port);
+}
+
+test "resolveDbPath: -d uses moonraker-sql.db unless the config sets a path" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var req_arena = std.heap.ArenaAllocator.init(alloc);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    const base = ".scratch/phobos-datapath-test";
+    std.Io.Dir.cwd().deleteTree(aio, base) catch {};
+    defer std.Io.Dir.cwd().deleteTree(aio, base) catch {};
+    try std.Io.Dir.cwd().createDirPath(aio, base ++ "/config");
+    var dir = try std.Io.Dir.cwd().openDir(aio, base, .{});
+    defer dir.close(aio);
+    try dir.writeFile(aio, .{ .sub_path = "config/moonraker.conf", .data = "[server]\nport: 7125\n" });
+    const implied = resolveDbPath(alloc, a, aio, base ++ "/config/moonraker.conf", base).?;
+    try std.testing.expect(std.mem.endsWith(u8, implied, "/database/moonraker-sql.db"));
+    try std.testing.expect(std.mem.indexOf(u8, implied, base) != null);
+
+    try dir.writeFile(aio, .{ .sub_path = "config/override.conf", .data = "[database]\npath: /var/lib/moonraker-sql.db\n" });
+    const over = resolveDbPath(alloc, a, aio, base ++ "/config/override.conf", base).?;
+    try std.testing.expectEqualStrings("/var/lib/moonraker-sql.db", over);
+
+    try std.testing.expect(resolveDbPath(alloc, a, aio, null, null) == null);
 }
 
 test {

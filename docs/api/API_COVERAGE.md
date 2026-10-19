@@ -35,7 +35,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/debug/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/table` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
-| `/debug/notifiers/test` | POST | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
+| `/debug/notifiers/test` | POST | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
 | `/machine/device_power/device` | GET, POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `/machine/device_power/devices` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `/machine/device_power/off` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
@@ -57,14 +57,14 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/td1/data` | GET | HTTP, WEBSOCKET, INTERNAL | td1 | ✅ Full | Matches Moonraker. |
 | `/machine/td1/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | td1 | ✅ Full | Matches Moonraker. |
 | `/machine/update/client` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
-| `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Runs the real git-repo update paths; the system/package portion is a no-op (see machine.update.system). |
+| `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Git-repo update paths run when configured. Package updates require an injected shell; web/zip installation remains unimplemented. |
 | `/machine/update/klipper` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/moonraker` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/recover` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/refresh` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/rollback` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/status` | GET | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
-| `/machine/update/system` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | 🚫 No-op | apt/pip system update is a no-op (emits the notification shape, never invokes the host package manager). |
+| `/machine/update/system` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Builds apt-get commands for an injected shell. The default runner rejects apt/pip; no package manager runs by default. |
 | `/machine/update/upgrade` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/wled/off` | POST | HTTP, WEBSOCKET, INTERNAL | wled | ✅ Full | Matches Moonraker. |
 | `/machine/wled/on` | POST | HTTP, WEBSOCKET, INTERNAL | wled | ✅ Full | Matches Moonraker. |
@@ -78,10 +78,10 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/printer/print/resume` | POST | HTTP, WEBSOCKET, INTERNAL | klippy_apis | ✅ Full | Matches Moonraker. |
 | `/printer/print/start` | POST | HTTP, WEBSOCKET, INTERNAL | klippy_apis | ✅ Full | Matches Moonraker. |
 | `/printer/restart` | POST | HTTP, WEBSOCKET, INTERNAL | klippy_apis | ✅ Full | Matches Moonraker. |
-| `/server/analysis/dump_config` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
-| `/server/analysis/estimate` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
-| `/server/analysis/process` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
-| `/server/analysis/status` | GET | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
+| `/server/analysis/dump_config` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `/server/analysis/estimate` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `/server/analysis/process` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `/server/analysis/status` | GET | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
 | `/server/announcements/dismiss` | POST | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
 | `/server/announcements/feed` | POST, DELETE | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
 | `/server/announcements/feeds` | GET | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
@@ -120,7 +120,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/logs/rollover` | POST | HTTP, WEBSOCKET, INTERNAL | loghelper | ✅ Full | Matches Moonraker. |
 | `/server/mqtt/publish` | POST | <dynamic> | mqtt | ✅ Full | Matches Moonraker. |
 | `/server/mqtt/subscribe` | POST | <dynamic> | mqtt | ✅ Full | Matches Moonraker. |
-| `/server/notifiers/list` | GET | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
+| `/server/notifiers/list` | GET | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
 | `/server/restart` | POST | HTTP, WEBSOCKET, INTERNAL | server | ✅ Full | Matches Moonraker. |
 | `/server/sensors/info` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
 | `/server/sensors/list` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
@@ -137,7 +137,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 | `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 
-_Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
+_Endpoints: 115 full, 8 partial, 2 no-op, 0 missing._
 
 ## JSON-RPC methods
 
@@ -162,7 +162,7 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `debug.database.list` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.post_item` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.table` |  | database | ✅ Full | Matches Moonraker. |
-| `debug.notifiers.test` |  | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
+| `debug.notifiers.test` |  | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
 | `machine.device_power.devices` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `machine.device_power.get_device` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `machine.device_power.off` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
@@ -185,14 +185,14 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `machine.td1.data` |  | td1 | ✅ Full | Matches Moonraker. |
 | `machine.td1.reboot` |  | td1 | ✅ Full | Matches Moonraker. |
 | `machine.update.client` |  | update_manager | ✅ Full | Matches Moonraker. |
-| `machine.update.full` |  | update_manager | ⚠️ Partial | Runs the real git-repo update paths; the system/package portion is a no-op (see machine.update.system). |
+| `machine.update.full` |  | update_manager | ⚠️ Partial | Git-repo update paths run when configured. Package updates require an injected shell; web/zip installation remains unimplemented. |
 | `machine.update.klipper` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.moonraker` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.recover` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.refresh` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.rollback` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.status` |  | update_manager | ✅ Full | Matches Moonraker. |
-| `machine.update.system` |  | update_manager | 🚫 No-op | apt/pip system update is a no-op (emits the notification shape, never invokes the host package manager). |
+| `machine.update.system` |  | update_manager | ⚠️ Partial | Builds apt-get commands for an injected shell. The default runner rejects apt/pip; no package manager runs by default. |
 | `machine.update.upgrade` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.wled.get_strip` |  | wled | ✅ Full | Matches Moonraker. |
 | `machine.wled.off` |  | wled | ✅ Full | Matches Moonraker. |
@@ -207,10 +207,10 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `printer.print.resume` |  | klippy_apis | ✅ Full | Matches Moonraker. |
 | `printer.print.start` |  | klippy_apis | ✅ Full | Matches Moonraker. |
 | `printer.restart` |  | klippy_apis | ✅ Full | Matches Moonraker. |
-| `server.analysis.dump_config` |  | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
-| `server.analysis.estimate` |  | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
-| `server.analysis.process` |  | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
-| `server.analysis.status` |  | analysis | ⚠️ Partial | klipper_estimator integration stubbed (no estimator binary); returns the documented shape. |
+| `server.analysis.dump_config` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `server.analysis.estimate` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `server.analysis.process` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `server.analysis.status` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
 | `server.announcements.delete_feed` |  | announcements | ✅ Full | Matches Moonraker. |
 | `server.announcements.dismiss` |  | announcements | ✅ Full | Matches Moonraker. |
 | `server.announcements.feeds` |  | announcements | ✅ Full | Matches Moonraker. |
@@ -257,7 +257,7 @@ _Endpoints: 115 full, 7 partial, 3 no-op, 0 missing._
 | `server.logs.rollover` |  | loghelper | ✅ Full | Matches Moonraker. |
 | `server.mqtt.publish` |  | mqtt | ✅ Full | Matches Moonraker. |
 | `server.mqtt.subscribe` |  | mqtt | ✅ Full | Matches Moonraker. |
-| `server.notifiers.list` |  | notifier | ⚠️ Partial | Notification dispatch stubbed (no apprise/Python); config + status shape match. |
+| `server.notifiers.list` |  | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
 | `server.restart` |  | server | ✅ Full | Matches Moonraker. |
 | `server.sensors.info` |  | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
 | `server.sensors.list` |  | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |

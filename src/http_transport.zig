@@ -42,6 +42,11 @@ pub const AuthHook = *const fn (transport: TransportType, auth_required: bool) b
 /// the AuthCtx, and request auth then runs the full JWT → oneshot → API key →
 /// trusted-client chain in `handleParsedAuth` (this hook is not consulted).
 /// INTERNAL always bypasses; `auth_required = false` skips auth (see `authorize`).
+fn routeHasTransport(route: *const Route, kind: TransportType) bool {
+    for (route.transports) |t| if (t == kind) return true;
+    return false;
+}
+
 pub fn defaultAuthHook(transport: TransportType, auth_required: bool) bool {
     if (transport == .INTERNAL) return true;
     _ = auth_required;
@@ -71,6 +76,7 @@ fn fileRouteUnauthorized(srv: *Server, transport: TransportType, creds: HttpCred
         .oneshot = creds.oneshot,
         .api_key = creds.api_key,
         .remote_ip = creds.remote_ip,
+        .proxy_ip = creds.proxy_ip,
     }, true) == .unauthorized;
 }
 
@@ -116,6 +122,10 @@ pub const Server = struct {
     /// matches any origin; `*.example.com` matches subdomains; otherwise an exact
     /// match. Empty = no CORS (same-origin only, like Moonraker's default).
     cors_domains: []const []const u8 = &.{},
+    /// Moonraker `[server] use_xheaders`, default true. When set, `X-Real-Ip`
+    /// and `X-Forwarded-For` replace the socket peer for trusted-client checks
+    /// and the socket peer must itself be trusted.
+    use_xheaders: bool = true,
 };
 
 /// Credentials carried by an HTTP request, extracted from headers and query.
@@ -124,6 +134,10 @@ pub const HttpCreds = struct {
     oneshot: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     remote_ip: ?[]const u8 = null,
+    /// Socket peer when `use_xheaders` rewrote `remote_ip`. Null otherwise.
+    proxy_ip: ?[]const u8 = null,
+    x_real_ip: ?[]const u8 = null,
+    x_forwarded_for: ?[]const u8 = null,
     /// Request `Origin` header (for CORS), duped into the arena.
     origin: ?[]const u8 = null,
 };
@@ -304,13 +318,25 @@ pub fn handleParsedAuth(
 
     const route = srv.reg.lookup(verb, path) orelse {
         // Distinguish wrong-verb (405) from genuinely-unknown path (404).
-        if (srv.reg.pathExists(path)) {
-            const b = try errorBody(alloc, 405, "Method Not Allowed");
-            return .{ .status = .method_not_allowed, .body = b };
+        inline for (.{ RequestType.GET, RequestType.POST, RequestType.DELETE }) |other_verb| {
+            if (srv.reg.lookup(other_verb, path)) |other_route| {
+                if (routeHasTransport(other_route, .HTTP)) {
+                    const b = try errorBody(alloc, 405, "Method Not Allowed");
+                    return .{ .status = .method_not_allowed, .body = b };
+                }
+            }
         }
         const b = try errorBody(alloc, 404, "Not Found");
         return .{ .status = .not_found, .body = b };
     };
+
+    // Websocket-only routes (server.websocket.id, server.connection.identify)
+    // are still registered so the API surface lists them. HTTP must 404, the
+    // same as Moonraker. The handler would otherwise answer 500.
+    if (!routeHasTransport(route, .HTTP)) {
+        const b = try errorBody(alloc, 404, "Not Found");
+        return .{ .status = .not_found, .body = b };
+    }
 
     // Auth gate. When the authorization component is wired, run the real
     // JWT → oneshot → API key → trusted chain; otherwise fall back to the
@@ -323,6 +349,7 @@ pub fn handleParsedAuth(
                 .oneshot = creds.oneshot,
                 .api_key = creds.api_key,
                 .remote_ip = creds.remote_ip,
+                .proxy_ip = creds.proxy_ip,
             }, route.auth_required);
             switch (outcome) {
                 .user => |u| resolved_user = u,
@@ -390,9 +417,9 @@ pub fn handleParsedAuth(
         // both the 503 code and the exact message (AuthorizedRequestHandler
         // .write_error → {"code": status, "message": reason}).
         const code: i64 = switch (err) {
-            error.InvalidParams => 400,
+            error.InvalidParams, error.MissingFilename, error.MissingWebcamName => 400,
             error.Forbidden => 403,
-            error.NotFound => 404,
+            error.NotFound, error.UnknownDbNamespace, error.MissingDbKey => 404,
             error.KlippyDisconnected => 503,
             error.MqttNotConfigured => 503,
             error.ServiceUnavailable => 503,
@@ -405,6 +432,10 @@ pub fn handleParsedAuth(
         };
         const msg: []const u8 = switch (err) {
             error.InvalidParams => "Bad Request",
+            error.MissingFilename => "No data for argument: filename",
+            error.MissingWebcamName => "No data for argument: name",
+            error.UnknownDbNamespace => try std.fmt.allocPrint(alloc, "Namespace {s} not found", .{params.object.get("namespace").?.string}),
+            error.MissingDbKey => try std.fmt.allocPrint(alloc, "Key '{s}' in namespace '{s}' not found", .{ params.object.get("key").?.string, params.object.get("namespace").?.string }),
             error.Forbidden => "Forbidden",
             error.NotFound => "Not Found",
             error.KlippyDisconnected => @import("components/printer.zig").klippy_disconnected_message,
@@ -422,9 +453,9 @@ pub fn handleParsedAuth(
             else => "Internal Server Error",
         };
         const status: std.http.Status = switch (err) {
-            error.InvalidParams => .bad_request,
+            error.InvalidParams, error.MissingFilename, error.MissingWebcamName => .bad_request,
             error.Forbidden => .forbidden,
-            error.NotFound => .not_found,
+            error.NotFound, error.UnknownDbNamespace, error.MissingDbKey => .not_found,
             error.KlippyDisconnected => .service_unavailable,
             error.MqttNotConfigured => .service_unavailable,
             error.ServiceUnavailable => .service_unavailable,
@@ -464,19 +495,18 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     const io = srv.io;
 
     // Extract the socket peer IP once per connection for trusted-client auth.
+    // `sockaddr.in.addr` is network byte order. Its in-memory bytes are the
+    // octets; swapping to host order and then printing the low byte first
+    // reverses them (127.0.0.1 became 1.0.0.127).
     var peer_ip_buf: [16]u8 = undefined;
     const peer_ip: ?[]const u8 = blk: {
         var sa: std.os.linux.sockaddr.in = undefined;
         var slen: std.os.linux.socklen_t = @sizeOf(@TypeOf(sa));
         const rc = std.os.linux.getpeername(stream.socket.handle, @ptrCast(&sa), &slen);
         if (std.os.linux.errno(rc) != .SUCCESS) break :blk null;
-        const addr_n = std.mem.bigToNative(u32, sa.addr);
-        break :blk std.fmt.bufPrint(&peer_ip_buf, "{d}.{d}.{d}.{d}", .{
-            @as(u8, @truncate(addr_n & 0xff)),
-            @as(u8, @truncate((addr_n >> 8) & 0xff)),
-            @as(u8, @truncate((addr_n >> 16) & 0xff)),
-            @as(u8, @truncate((addr_n >> 24) & 0xff)),
-        }) catch null;
+        if (sa.family != std.os.linux.AF.INET) break :blk null;
+        const b: *const [4]u8 = @ptrCast(&sa.addr);
+        break :blk std.fmt.bufPrint(&peer_ip_buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch null;
     };
 
     // Reader buffer also backs WebSocket input after upgrade
@@ -557,7 +587,9 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         // Plumb the socket peer IP (extracted once per connection above) so
         // the authorization layer can match trusted-client CIDRs.
         if (peer_ip) |ip| {
-            creds.remote_ip = alloc.dupe(u8, ip) catch null;
+            const addr = authz.resolveClientAddr(ip, creds.x_real_ip, creds.x_forwarded_for, srv.use_xheaders);
+            creds.remote_ip = alloc.dupe(u8, addr.client) catch null;
+            if (addr.proxy) |proxy| creds.proxy_ip = alloc.dupe(u8, proxy) catch null;
         }
 
         // Streaming upload: handle POST /server/files/upload before reading the
@@ -706,6 +738,10 @@ fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.me
             if (creds.jwt == null) creds.jwt = alloc.dupe(u8, h.value) catch null;
         } else if (std.ascii.eqlIgnoreCase(h.name, "x-api-key")) {
             creds.api_key = alloc.dupe(u8, h.value) catch null;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "x-real-ip")) {
+            creds.x_real_ip = alloc.dupe(u8, h.value) catch null;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) {
+            creds.x_forwarded_for = alloc.dupe(u8, h.value) catch null;
         } else if (std.ascii.eqlIgnoreCase(h.name, "origin")) {
             creds.origin = alloc.dupe(u8, h.value) catch null;
         }
@@ -760,8 +796,9 @@ fn readBody(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const u8
 /// The reserved named sub-routes under /server/files/ that are handled by the
 /// registry, NOT by the dynamic file-serve handler.
 const reserved_file_subpaths = [_][]const u8{
-    "list", "roots", "directory", "metadata", "metascan",
-    "thumbnails", "move", "copy", "zip", "upload", "delete_file",
+    "list",        "roots", "directory", "metadata", "metascan",
+    "thumbnails",  "move",  "copy",      "zip",      "upload",
+    "delete_file",
 };
 
 /// True if `path` is a `/server/files/<root>/<...>` path that should be served
@@ -1126,7 +1163,8 @@ test "extractDispositionField: parses filename and name, handles missing/oversiz
     // Unterminated quote → null (no closing ").
     try std.testing.expect(extractDispositionField("name=\"unterminated", "name") == null);
     // Key longer than the search buffer → null, no overflow.
-    try std.testing.expect(extractDispositionField(cd, "x" ** 64) == null);
+    const long_key: [64]u8 = @splat('x');
+    try std.testing.expect(extractDispositionField(cd, &long_key) == null);
     // Empty value is valid and returns "".
     try std.testing.expectEqualStrings("", extractDispositionField("name=\"\"", "name").?);
 }
@@ -1257,6 +1295,46 @@ test "handleParsed: POST /server/jsonrpc returns raw envelope matching REST" {
     const rpc_s = try std.json.Stringify.valueAlloc(a, rpc_result, .{});
     const rest_s = try std.json.Stringify.valueAlloc(a, rest_result, .{});
     try std.testing.expectEqualStrings(rest_s, rpc_s);
+}
+
+test "handleParsed: websocket-only route is 404 over HTTP" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var core = Core.init();
+    var d: jsonrpc.Dispatcher = undefined;
+    var reg: Registry = undefined;
+    var info: methods.ServerInfo = undefined;
+    var srv = try buildTestServer(alloc, io, &core, &d, &reg, &info);
+    defer d.deinit();
+    defer reg.deinit();
+
+    const wsOnly = struct {
+        fn f(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+            return error.WsOnlyMethod;
+        }
+    }.f;
+    try srv.reg.registerEndpoint(
+        .{ .path = "/server/websocket/id", .methods = &.{.GET}, .transports = &.{.WEBSOCKET} },
+        @ptrCast(&info),
+        wsOnly,
+    );
+    try srv.reg.registerEndpoint(
+        .{ .path = "/server/connection/identify", .methods = &.{.POST}, .transports = &.{.WEBSOCKET} },
+        @ptrCast(&info),
+        wsOnly,
+    );
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/websocket/id", "", arena.allocator());
+    try std.testing.expectEqual(std.http.Status.not_found, resp.status);
+    inline for (.{ RequestType.GET, RequestType.POST, RequestType.DELETE }) |verb| {
+        const wrong_verb = try handleParsed(&srv, .HTTP, verb, "/server/connection/identify", "", arena.allocator());
+        try std.testing.expectEqual(std.http.Status.not_found, wrong_verb.status);
+    }
 }
 
 test "handleParsed: unknown route is 404 with Moonraker error shape" {
@@ -1394,7 +1472,7 @@ test "fuzz_http_transport: random request bytes never crash, always a well-forme
             };
             _ = parsed;
             // Status must be a sane HTTP status.
-            try std.testing.expect(@intFromEnum(resp.status) >= 200);
+            try std.testing.expect(@backingInt(resp.status) >= 200);
         }
     }.run, .{});
 }

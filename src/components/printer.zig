@@ -53,11 +53,106 @@ pub const PrinterCtx = struct {
     /// Optional pointer to the Klippy connection; set by App after init.
     /// When non-null and Klippy is connected, handlers proxy to Klippy.
     klippy: ?*KlippyCtx = null,
+    /// Forge-X `[klippy_apis] hidden_objects`. Dropped from `objects/list`.
+    hidden_objects: [][]const u8 = &.{},
+    hidden_owned: bool = false,
     /// Stable storage for the standard Klipper-proxied endpoint descriptors.
     /// Populated by `registerPrinter`; the registry holds pointers into this
     /// array, so it must live as long as the PrinterCtx (App owns both).
     proxies: [proxy_specs.len]ProxyEndpoint = undefined,
+
+    /// One object name per line. Replaces any previous list.
+    pub fn setHiddenObjects(self: *PrinterCtx, alloc: std.mem.Allocator, text: []const u8) !void {
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (list.items) |s| alloc.free(s);
+            list.deinit(alloc);
+        }
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            if (line.len == 0) continue;
+            try list.append(alloc, try alloc.dupe(u8, line));
+        }
+        if (self.hidden_owned) {
+            for (self.hidden_objects) |s| alloc.free(s);
+            alloc.free(self.hidden_objects);
+        }
+        self.hidden_objects = try list.toOwnedSlice(alloc);
+        self.hidden_owned = true;
+    }
+
+    pub fn deinit(self: *PrinterCtx, alloc: std.mem.Allocator) void {
+        if (!self.hidden_owned) return;
+        for (self.hidden_objects) |s| alloc.free(s);
+        alloc.free(self.hidden_objects);
+        self.hidden_objects = &.{};
+        self.hidden_owned = false;
+    }
 };
+
+/// Drop hidden names from an `objects/list` result `{"objects":[...]}`.
+/// Other shapes are returned unchanged.
+pub fn filterObjectList(alloc: std.mem.Allocator, value: std.json.Value, hidden: []const []const u8) !std.json.Value {
+    if (hidden.len == 0 or value != .object) return value;
+    const objects = value.object.get("objects") orelse return value;
+    if (objects != .array) return value;
+    var kept: std.json.Array = .init(alloc);
+    for (objects.array.items) |item| {
+        if (item != .string) {
+            try kept.append(item);
+            continue;
+        }
+        var skip = false;
+        for (hidden) |name| {
+            if (std.mem.eql(u8, name, item.string)) {
+                skip = true;
+                break;
+            }
+        }
+        if (!skip) try kept.append(item);
+    }
+    var out: std.json.ObjectMap = .empty;
+    var it = value.object.iterator();
+    while (it.next()) |e| {
+        if (std.mem.eql(u8, e.key_ptr.*, "objects")) {
+            try out.put(alloc, e.key_ptr.*, .{ .array = kept });
+        } else {
+            try out.put(alloc, e.key_ptr.*, e.value_ptr.*);
+        }
+    }
+    return .{ .object = out };
+}
+
+/// Drop hidden object names from an `objects/query` result. Klippy puts them
+/// under `status`. A bare object map is filtered at the top level.
+pub fn filterHiddenQuery(alloc: std.mem.Allocator, value: std.json.Value, hidden: []const []const u8) !std.json.Value {
+    if (hidden.len == 0 or value != .object) return value;
+    const status_key: []const u8 = if (value.object.get("status") != null) "status" else "";
+    const target = if (status_key.len == 0) value else value.object.get("status").?;
+    if (target != .object) return value;
+    var kept: std.json.ObjectMap = .empty;
+    var it = target.object.iterator();
+    while (it.next()) |e| {
+        var skip = false;
+        for (hidden) |name| {
+            if (std.mem.eql(u8, name, e.key_ptr.*)) {
+                skip = true;
+                break;
+            }
+        }
+        if (!skip) try kept.put(alloc, e.key_ptr.*, e.value_ptr.*);
+    }
+    if (status_key.len == 0) return .{ .object = kept };
+    var out: std.json.ObjectMap = .empty;
+    var oit = value.object.iterator();
+    while (oit.next()) |e| {
+        if (std.mem.eql(u8, e.key_ptr.*, "status")) {
+            try out.put(alloc, e.key_ptr.*, .{ .object = kept });
+        } else try out.put(alloc, e.key_ptr.*, e.value_ptr.*);
+    }
+    return .{ .object = out };
+}
 
 /// One Klipper-proxied endpoint (Moonraker `is_remote=True`). `endpoint` is the
 /// Klippy-side path with slashes (e.g. "objects/query"); `parent` supplies the
@@ -109,25 +204,31 @@ pub const ProxyEndpoint = struct {
             }
             var wrapped = try std.json.ObjectMap.init(alloc, &.{}, &.{});
             try wrapped.put(alloc, "objects", .{ .object = objects });
-            return self.proxyReq(k, .{ .object = wrapped }, alloc);
+            const wrapped_result = try self.proxyReq(k, .{ .object = wrapped }, alloc);
+            return filterHiddenQuery(alloc, wrapped_result, self.parent.hidden_objects);
         }
 
         // Forward params as-is. Strip the transport-injected `_method` marker so
         // it never reaches Klippy. Non-object params become an empty object
         // (Klippy endpoints expect a params object).
-        if (params == .object) {
-            if (params.object.get("_method") != null) {
-                var clone = try std.json.ObjectMap.init(alloc, &.{}, &.{});
-                var it = params.object.iterator();
-                while (it.next()) |e| {
-                    if (std.mem.eql(u8, e.key_ptr.*, "_method")) continue;
-                    try clone.put(alloc, e.key_ptr.*, e.value_ptr.*);
-                }
-                return self.proxyReq(k, .{ .object = clone }, alloc);
+        const forwarded: std.json.Value = if (params == .object) blk: {
+            if (params.object.get("_method") == null) break :blk params;
+            var clone = try std.json.ObjectMap.init(alloc, &.{}, &.{});
+            var it = params.object.iterator();
+            while (it.next()) |e| {
+                if (std.mem.eql(u8, e.key_ptr.*, "_method")) continue;
+                try clone.put(alloc, e.key_ptr.*, e.value_ptr.*);
             }
-            return self.proxyReq(k, params, alloc);
+            break :blk .{ .object = clone };
+        } else .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) };
+        const result = try self.proxyReq(k, forwarded, alloc);
+        if (std.mem.eql(u8, self.endpoint, "objects/list")) {
+            return filterObjectList(alloc, result, self.parent.hidden_objects);
         }
-        return self.proxyReq(k, .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+        if (std.mem.eql(u8, self.endpoint, "objects/query") or std.mem.eql(u8, self.endpoint, "objects/subscribe")) {
+            return filterHiddenQuery(alloc, result, self.parent.hidden_objects);
+        }
+        return result;
     }
 };
 
@@ -336,6 +437,36 @@ const all_handlers = [_]registry.HandlerFn{
     handleFirmwareRestart,
     handleEmergencyStop,
 };
+
+test "filterObjectList drops hidden_objects from objects/list" {
+    var ctx = PrinterCtx{};
+    defer ctx.deinit(testing.allocator);
+    try ctx.setHiddenObjects(testing.allocator, "output_pin level_h1\noutput_pin power_off\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(),
+        \\{"objects":["webhooks","output_pin level_h1","heater_bed","output_pin power_off"]}
+    , .{});
+    const filtered = try filterObjectList(arena.allocator(), parsed.value, ctx.hidden_objects);
+    const items = filtered.object.get("objects").?.array.items;
+    try testing.expectEqual(@as(usize, 2), items.len);
+    try testing.expectEqualStrings("webhooks", items[0].string);
+    try testing.expectEqualStrings("heater_bed", items[1].string);
+}
+
+test "filterHiddenQuery drops hidden names from status and keeps eventtime" {
+    const hidden = [_][]const u8{"output_pin level_h1"};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(),
+        \\{"status":{"output_pin level_h1":{"value":1},"heater_bed":{"temperature":20}},"eventtime":1.5}
+    , .{});
+    const filtered = try filterHiddenQuery(arena.allocator(), parsed.value, &hidden);
+    const status = filtered.object.get("status").?.object;
+    try testing.expect(status.get("output_pin level_h1") == null);
+    try testing.expect(status.get("heater_bed") != null);
+    try testing.expect(filtered.object.get("eventtime") != null);
+}
 
 test "every printer handler returns KlippyDisconnected" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
