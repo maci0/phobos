@@ -414,6 +414,30 @@ pub const ConfigParser = struct {
     }
 };
 
+/// The trimmed, non-empty lines of a multi-line option (Moonraker `getlist`
+/// with a newline separator), each duped into `alloc`. Free with `freeLines`.
+pub fn dupeLines(alloc: std.mem.Allocator, text: []const u8) error{OutOfMemory}![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (list.items) |s| alloc.free(s);
+        list.deinit(alloc);
+    }
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        const name = try alloc.dupe(u8, line);
+        errdefer alloc.free(name);
+        try list.append(alloc, name);
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+pub fn freeLines(alloc: std.mem.Allocator, lines: [][]const u8) void {
+    for (lines) |s| alloc.free(s);
+    alloc.free(lines);
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -1070,4 +1094,32 @@ test "float options reject non-finite values" {
         try parser.parseString(try std.fmt.bufPrint(&buf, "[s]\nv: {s}\n", .{raw}), "test");
         try std.testing.expectError(ConfigError.InvalidValue, parser.getFloat("s", "v"));
     }
+}
+
+test "dupeLines: trimmed non-empty lines, freed on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const lines = try dupeLines(alloc, "  one\r\n\n\ttwo three \n");
+            defer freeLines(alloc, lines);
+            try std.testing.expectEqual(@as(usize, 2), lines.len);
+            try std.testing.expectEqualStrings("one", lines[0]);
+            try std.testing.expectEqualStrings("two three", lines[1]);
+        }
+    }.run, .{});
+}
+
+test "fuzz dupeLines: lines are trimmed, non-empty and newline-free" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const lines = try dupeLines(std.testing.allocator, &buf);
+            defer freeLines(std.testing.allocator, lines);
+            for (lines) |line| {
+                try std.testing.expect(line.len > 0);
+                try std.testing.expect(std.mem.indexOfScalar(u8, line, '\n') == null);
+                try std.testing.expectEqualStrings(std.mem.trim(u8, line, " \t\r"), line);
+            }
+        }
+    }.run, .{});
 }

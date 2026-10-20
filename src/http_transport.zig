@@ -725,7 +725,7 @@ fn handleFileServe(
     // full size. The streamed body is HTTP-only (serveConnInner); non-streaming
     // consumers of the Response (tests / INTERNAL transport) see an empty body.
     const resolved = file_manager.resolveRequestPath(fctx, alloc, request_path) catch |err| {
-        return fileErrResponse(alloc, mapResolveErr(err));
+        return fileErrResponse(alloc, err);
     };
     // Verify the file exists here so the 404 is correct for ALL consumers, not
     // only the streaming HTTP path (which opens it again — a tiny benign re-open).
@@ -735,14 +735,6 @@ fn handleFileServe(
     };
     probe.close(srv.io);
     return .{ .status = .ok, .body = "", .file_request = resolved };
-}
-
-fn mapResolveErr(err: file_manager.ResolveError) anyerror {
-    return switch (err) {
-        error.InvalidParams => error.InvalidParams,
-        error.Forbidden => error.Forbidden,
-        error.OutOfMemory => error.OutOfMemory,
-    };
 }
 
 fn fileErrResponse(alloc: std.mem.Allocator, err: anyerror) !Response {

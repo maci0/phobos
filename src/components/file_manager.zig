@@ -48,6 +48,7 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
+const confighelper = @import("../config/confighelper.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const gcode_metadata = @import("gcode_metadata.zig");
 const job_state_component = @import("job_state.zig");
@@ -138,24 +139,8 @@ pub const FileCtx = struct {
 
     /// Replace the exclude list. Each entry is `root/relative`, one per line.
     pub fn setExcludes(self: *FileCtx, text: []const u8) !void {
-        var list: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (list.items) |s| self.gpa.free(s);
-            list.deinit(self.gpa);
-        }
-        var it = std.mem.splitScalar(u8, text, '\n');
-        while (it.next()) |raw| {
-            const line = std.mem.trim(u8, raw, " \t\r");
-            if (line.len == 0) continue;
-            const name = try self.gpa.dupe(u8, line);
-            errdefer self.gpa.free(name);
-            try list.append(self.gpa, name);
-        }
-        const owned = try list.toOwnedSlice(self.gpa);
-        if (self.excludes_owned) {
-            for (self.excludes) |s| self.gpa.free(s);
-            self.gpa.free(self.excludes);
-        }
+        const owned = try confighelper.dupeLines(self.gpa, text);
+        if (self.excludes_owned) confighelper.freeLines(self.gpa, self.excludes);
         self.excludes = owned;
         self.excludes_owned = true;
     }
@@ -175,8 +160,7 @@ pub const FileCtx = struct {
 
     pub fn deinit(self: *FileCtx) void {
         if (self.excludes_owned) {
-            for (self.excludes) |s| self.gpa.free(s);
-            self.gpa.free(self.excludes);
+            confighelper.freeLines(self.gpa, self.excludes);
             self.excludes = &.{};
             self.excludes_owned = false;
         }

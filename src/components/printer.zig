@@ -38,6 +38,7 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const confighelper = @import("../config/confighelper.zig");
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -63,32 +64,15 @@ pub const PrinterCtx = struct {
 
     /// One object name per line. Replaces any previous list.
     pub fn setHiddenObjects(self: *PrinterCtx, alloc: std.mem.Allocator, text: []const u8) !void {
-        var list: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (list.items) |s| alloc.free(s);
-            list.deinit(alloc);
-        }
-        var it = std.mem.splitScalar(u8, text, '\n');
-        while (it.next()) |raw| {
-            const line = std.mem.trim(u8, raw, " \t\r");
-            if (line.len == 0) continue;
-            const name = try alloc.dupe(u8, line);
-            errdefer alloc.free(name);
-            try list.append(alloc, name);
-        }
-        const owned = try list.toOwnedSlice(alloc);
-        if (self.hidden_owned) {
-            for (self.hidden_objects) |s| alloc.free(s);
-            alloc.free(self.hidden_objects);
-        }
+        const owned = try confighelper.dupeLines(alloc, text);
+        if (self.hidden_owned) confighelper.freeLines(alloc, self.hidden_objects);
         self.hidden_objects = owned;
         self.hidden_owned = true;
     }
 
     pub fn deinit(self: *PrinterCtx, alloc: std.mem.Allocator) void {
         if (!self.hidden_owned) return;
-        for (self.hidden_objects) |s| alloc.free(s);
-        alloc.free(self.hidden_objects);
+        confighelper.freeLines(alloc, self.hidden_objects);
         self.hidden_objects = &.{};
         self.hidden_owned = false;
     }

@@ -605,7 +605,7 @@ pub fn registerMqtt(reg: *Registry, ctx: *MqttCtx) !void {
     // touch only MqttCtx state guarded by its own locks.
     try reg.registerEndpoint(.{ .path = "/server/mqtt/publish", .methods = &.{.POST}, .off_core = true }, c, handlePublish);
     try reg.registerEndpoint(.{ .path = "/server/mqtt/subscribe", .methods = &.{.POST}, .off_core = true }, c, handleSubscribe);
-    try reg.dispatcher.registerEx("server.mqtt.publish_mqtt_topic", c, handlePublishPrefixed, true);
+    try reg.dispatcher.registerEntry("server.mqtt.publish_mqtt_topic", .{ .ctx = c, .handler = handlePublishPrefixed, .off_core = true });
 }
 
 // ---------------------------------------------------------------------------

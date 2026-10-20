@@ -1,17 +1,11 @@
 //! Helpers over std.json: JSON-RPC envelopes, depth guard, owned deep copies,
-//! checked float conversion and allocation-backed serialization.
+//! checked float conversion.
 const std = @import("std");
 
 /// Checked truncation for numeric fields accepted as either JSON integers or floats.
 pub fn floatToInt(value: f64) ?i64 {
     if (!std.math.isFinite(value) or value < -0x1p63 or value >= 0x1p63) return null;
     return @intFromFloat(value);
-}
-
-/// Serialize any std.json.Value (or Zig value) to an owned []u8.
-/// Caller owns the returned slice and must free it.
-pub fn serializeAlloc(alloc: std.mem.Allocator, v: anytype) error{OutOfMemory}![]u8 {
-    return std.json.Stringify.valueAlloc(alloc, v, .{});
 }
 
 /// `{"jsonrpc":"2.0","result":<result>,"id":<id>}`. Caller owns the bytes.
@@ -152,38 +146,6 @@ test "fuzz exceedsDepth: never crashes on arbitrary nesting up to a large depth"
 }
 
 // --- Tests ---
-
-test "serializeAlloc: string value" {
-    const alloc = std.testing.allocator;
-    const v: std.json.Value = .{ .string = "hello" };
-    const out = try serializeAlloc(alloc, v);
-    defer alloc.free(out);
-    try std.testing.expectEqualStrings("\"hello\"", out);
-}
-
-test "serializeAlloc: integer value" {
-    const alloc = std.testing.allocator;
-    const v: std.json.Value = .{ .integer = 42 };
-    const out = try serializeAlloc(alloc, v);
-    defer alloc.free(out);
-    try std.testing.expectEqualStrings("42", out);
-}
-
-test "fuzz_value_helpers: never crash on arbitrary values" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            const alloc = std.testing.allocator;
-            var buf: [64]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            // Build a string value from fuzz bytes (valid UTF-8 subset: just use len)
-            const len = @as(usize, buf[0]) % 32;
-            const v: std.json.Value = .{ .string = buf[0..len] };
-
-            const s = try serializeAlloc(alloc, v);
-            defer alloc.free(s);
-        }
-    }.run, .{});
-}
 
 test "floatToInt rejects non-finite and overflowing values" {
     for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 0x1p63, -0x1p64 }) |value|

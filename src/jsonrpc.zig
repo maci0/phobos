@@ -189,12 +189,6 @@ pub const Dispatcher = struct {
         try self.registerEntry(name, .{ .ctx = ctx, .handler = handler });
     }
 
-    /// Register a method with default `Entry` settings, choosing whether it
-    /// runs off the Core lock.
-    pub fn registerEx(self: *Dispatcher, name: []const u8, ctx: *anyopaque, handler: HandlerFn, off_core: bool) error{OutOfMemory}!void {
-        try self.registerEntry(name, .{ .ctx = ctx, .handler = handler, .off_core = off_core });
-    }
-
     /// Register a method with explicit settings. `name` must outlive the
     /// Dispatcher.
     pub fn registerEntry(self: *Dispatcher, name: []const u8, entry: Entry) error{OutOfMemory}!void {

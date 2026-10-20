@@ -52,7 +52,7 @@ test "1MB stack: deeply nested JSON parses iteratively, no overflow" {
 fn serializeWorker(v: std.json.Value, ok: *bool) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const bytes = jv.serializeAlloc(arena.allocator(), v) catch {
+    const bytes = std.json.Stringify.valueAlloc(arena.allocator(), v, .{}) catch {
         ok.* = false;
         return;
     };
