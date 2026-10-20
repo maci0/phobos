@@ -174,7 +174,10 @@ test "connection methods return a bare ok result over JSON-RPC" {
     defer reg.deinit();
     var ctx: ExtensionsCtx = .{};
     try registerExtensions(&reg, &ctx);
-    const out = try d.handle("{\"jsonrpc\":\"2.0\",\"method\":\"connection.send_event\",\"params\":{\"event\":\"e\"},\"id\":1}", alloc);
+    const req = try std.json.parseFromSlice(std.json.Value, alloc, "{\"jsonrpc\":\"2.0\",\"method\":\"connection.send_event\",\"params\":{\"event\":\"e\"},\"id\":1}", .{});
+    defer req.deinit();
+    // connection.* methods are WebSocket-only.
+    const out = try d.handleParsedRoot(.{ .transport = .WEBSOCKET }, req.value, alloc);
     defer alloc.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "\"result\":\"ok\"") != null);
 }
