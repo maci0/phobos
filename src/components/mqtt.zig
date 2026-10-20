@@ -24,7 +24,7 @@
 //! QoS 0 or an absent qos means `default_qos` (`qos or self.qos` upstream).
 //! subscribe subscribes on the broker and waits, off the Core lock, for the
 //! first message on the topic, bounded by `timeout`; it returns the payload
-//! JSON-decoded, or as a string when it is not JSON.
+//! JSON-decoded, or as a string when it is not JSON. Invalid UTF-8 is rejected.
 //!
 //! Response shapes (mqtt.py): publish {"topic": t}, subscribe {"topic": t,
 //! "payload": p}. Known gaps are listed in TODO.md ("Known Moonraker gaps").
@@ -652,13 +652,21 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
     defer if (message) |m| ctx.gpa.free(m);
     const bytes = message orelse return if (woken) error.ServiceUnavailable else error.MqttTimeout;
 
-    var payload = std.json.parseFromSliceLeaky(std.json.Value, alloc, bytes, .{}) catch
-        std.json.Value{ .string = try alloc.dupe(u8, bytes) };
-    if (jv.exceedsDepth(payload, jv.max_value_depth)) payload = .{ .string = try alloc.dupe(u8, bytes) };
+    const payload = try decodePayload(alloc, bytes);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "topic", .{ .string = topic });
     try obj.put(alloc, "payload", payload);
     return .{ .object = obj };
+}
+
+/// Decode one UTF-8 payload; returned strings and containers belong to alloc.
+fn decodePayload(alloc: std.mem.Allocator, bytes: []const u8) error{ OutOfMemory, InvalidUtf8 }!std.json.Value {
+    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .string = try alloc.dupe(u8, bytes) },
+    };
+    return if (jv.exceedsDepth(parsed, jv.max_value_depth)) .{ .string = try alloc.dupe(u8, bytes) } else parsed;
 }
 
 /// JSON-RPC `server.mqtt.publish_mqtt_topic`, Moonraker's `publish_mqtt_topic`
@@ -903,6 +911,103 @@ test "handleSubscribe times out without a broker and releases its waiter" {
     ctx.io = testing.io;
     try testing.expectError(error.MqttTimeout, handleSubscribe(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"t\",\"timeout\":0.02}"), a));
     try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
+}
+
+test "handleSubscribe serializes numeric payloads and rejects binary text" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(test_options);
+    ctx.io = io;
+    const Publisher = struct {
+        fn run(c: *MqttCtx, bytes: []const u8) !void {
+            const aio = c.io.?;
+            const deadline = Io.Clock.Timestamp.fromNow(aio, .{ .raw = .fromSeconds(1), .clock = .awake });
+            while (Io.Clock.Timestamp.now(aio, .awake).compare(.lt, deadline)) {
+                c.waiters_mutex.lockUncancelable(aio);
+                const ready = c.waiter_count > 0;
+                c.waiters_mutex.unlock(aio);
+                if (ready) {
+                    c.wakeWaiters("test/payload", bytes);
+                    return;
+                }
+                try aio.sleep(.fromMilliseconds(1), .awake);
+            }
+            return error.NoWaiter;
+        }
+    };
+    for ([_][]const u8{ "{\"v\":[1.25,-2,{\"huge\":[1e500,-1e500]}]}", "not JSON", "\xff" }) |bytes| {
+        var publish = try io.concurrent(Publisher.run, .{ &ctx, bytes });
+        defer publish.cancel(io) catch {};
+        const response = handleSubscribe(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"test/payload\",\"timeout\":2}"), a);
+        if (!std.unicode.utf8ValidateSlice(bytes)) {
+            try testing.expectError(error.InvalidUtf8, response);
+        } else {
+            const wire = try std.json.Stringify.valueAlloc(a, try response, .{});
+            const decoded = try std.json.parseFromSliceLeaky(std.json.Value, a, wire, .{});
+            const payload = decoded.object.get("payload").?;
+            if (std.mem.eql(u8, bytes, "not JSON")) {
+                try testing.expectEqualStrings(bytes, payload.string);
+            } else {
+                const values = payload.object.get("v").?.array.items;
+                try testing.expectEqual(@as(f64, 1.25), values[0].float);
+                try testing.expectEqual(@as(i64, -2), values[1].integer);
+                const huge = values[2].object.get("huge").?.array.items;
+                try testing.expectEqualStrings("1e500", huge[0].number_string);
+                try testing.expectEqualStrings("-1e500", huge[1].number_string);
+            }
+        }
+        try publish.await(io);
+        try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
+    }
+}
+
+test "fuzz MQTT payload decoding only produces valid JSON" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var bytes: [256]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const nested = bytes[0] % 2 == 0;
+            const depth: usize = bytes[1] % 128;
+            if (nested) {
+                @memset(bytes[0..depth], '[');
+                @memset(bytes[depth .. depth * 2], ']');
+            }
+            const source = if (nested) bytes[0 .. depth * 2] else &bytes;
+            const parsed = decodePayload(a, source) catch |err| switch (err) {
+                error.InvalidUtf8 => {
+                    try testing.expect(!std.unicode.utf8ValidateSlice(source));
+                    return;
+                },
+                else => return err,
+            };
+            try testing.expect(!jv.exceedsDepth(parsed, jv.max_value_depth));
+            const wire = try std.json.Stringify.valueAlloc(a, parsed, .{});
+            try testing.expect(std.unicode.utf8ValidateSlice(wire));
+            _ = try std.json.parseFromSliceLeaky(std.json.Value, a, wire, .{});
+        }
+    }.run, .{});
+}
+
+test "MQTT payload decoding releases partial allocations" {
+    const Allocation = struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const parsed = try decodePayload(a, "{\"items\":[1,{\"value\":\"test\"}]}");
+            const wire = try std.json.Stringify.valueAlloc(a, parsed, .{});
+            try testing.expectEqualStrings("{\"items\":[1,{\"value\":\"test\"}]}", wire);
+            try testing.expectEqualStrings("plain text", (try decodePayload(a, "plain text")).string);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Allocation.run, .{});
 }
 
 test "MQTT handlers reject invalid timeout before network I/O" {

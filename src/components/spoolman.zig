@@ -1497,6 +1497,21 @@ test "Spoolman response parsing rejects invalid UTF-8 and preserves plain text" 
     try testing.checkAllAllocationFailures(testing.allocator, Allocation.run, .{});
 }
 
+test "Spoolman response numbers remain valid JSON after serialization" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const result = try parseProxyBody(a, "{\"v\":[1.25,-2,{\"huge\":[1e500,-1e500]}]}");
+    const wire = try jv.successResponse(a, .{ .integer = 1 }, result);
+    const round_trip = try std.json.parseFromSliceLeaky(std.json.Value, a, wire, .{});
+    const values = round_trip.object.get("result").?.object.get("v").?.array.items;
+    try testing.expectEqual(@as(f64, 1.25), values[0].float);
+    try testing.expectEqual(@as(i64, -2), values[1].integer);
+    const huge = values[2].object.get("huge").?.array.items;
+    try testing.expectEqualStrings("1e500", huge[0].number_string);
+    try testing.expectEqualStrings("-1e500", huge[1].number_string);
+}
+
 test "fuzz handleSpoolId: never panics on arbitrary params" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
