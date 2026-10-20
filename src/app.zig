@@ -148,13 +148,11 @@ const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]c
     "publish_mqtt_topic",
 };
 
-/// Klippy `RemoteHandler`, run on the Klippy reader under Core. Feather
-/// methods answer inline; the rest are queued for `remoteWorker`.
+/// Klippy `RemoteHandler`, run on the Klippy reader under Core. Queues the
+/// call for `remoteWorker`.
 fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror!void {
+    _ = alloc;
     const app: *App = @ptrCast(@alignCast(ctx));
-    for (feather_updates_component.remote_methods) |name| {
-        if (std.mem.eql(u8, method, name)) return feather_updates_component.onKlippyMethod(&app.feather, alloc, method, params);
-    }
     const io = app.klippy_ctx.io orelse return;
     const req = (try remoteMethodRequest(app.alloc, method, params)) orelse return;
     const queued = app.remote_calls.put(io, &.{req}, 0) catch 0;
@@ -166,8 +164,9 @@ fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []con
 
 /// The JSON-RPC request for Klipper remote method `method`, gpa-owned, or
 /// null for an unknown method or a `set_device_power` state Moonraker ignores.
-/// `set_device_power` maps to `machine.device_power.post_device`; the
-/// others keep their names and kwargs. `force` is not supported.
+/// `set_device_power` maps to `machine.device_power.post_device` and
+/// `publish_mqtt_topic` to `server.mqtt.publish_mqtt_topic`; the others,
+/// Feather's included, keep their names and kwargs. `force` is not supported.
 fn remoteMethodRequest(alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) error{OutOfMemory}!?[]u8 {
     const kwargs: std.json.Value = if (params == .object) params else .{ .object = .empty };
     if (std.mem.eql(u8, method, "set_device_power")) {
@@ -183,10 +182,17 @@ fn remoteMethodRequest(alloc: std.mem.Allocator, method: []const u8, params: std
     }
     const target: []const u8 = if (std.mem.eql(u8, method, "publish_mqtt_topic"))
         "server.mqtt.publish_mqtt_topic"
-    else for (klippy_remote_methods[feather_updates_component.remote_methods.len..]) |name| {
+    else for (klippy_remote_methods) |name| {
         if (std.mem.eql(u8, method, name)) break name;
     } else return null;
     return try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .method = target, .params = kwargs, .id = 0 }, .{});
+}
+
+fn featherMethod(method: []const u8) bool {
+    for (feather_updates_component.remote_methods) |name| {
+        if (std.mem.eql(u8, method, name)) return true;
+    }
+    return false;
 }
 
 /// power.py `set_device_power` state rules: a bool, or a case-insensitive
@@ -204,19 +210,30 @@ fn devicePowerAction(state: std.json.Value) ?[]const u8 {
     }
 }
 
-/// Run queued Klipper remote-method requests through the dispatcher, which
-/// takes Core per handler. Returns when the queue closes or is canceled.
+/// Run queued Klipper remote-method requests until the queue closes or the
+/// task is canceled.
 fn remoteWorker(app: *App, io: std.Io) void {
-    while (app.remote_calls.getOne(io)) |req| {
-        defer app.alloc.free(req);
-        var arena = std.heap.ArenaAllocator.init(app.alloc);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const root = std.json.parseFromSliceLeaky(std.json.Value, a, req, .{}) catch continue;
-        const out = app.dispatcher.handleParsedRoot(.{ .transport = .INTERNAL }, root, a) catch continue;
-        // Moonraker logs a failed remote method; Klipper gets no reply.
-        if (std.mem.indexOf(u8, out, "\"error\"") != null) std.debug.print("phobos: warning: Klipper remote method failed: {s}\n", .{out});
-    } else |_| {}
+    while (app.remote_calls.getOne(io)) |req| runRemoteCall(app, io, req) else |_| {}
+}
+
+/// Run one queued request and free it. Feather methods run under Core; the
+/// rest go through the dispatcher, which takes Core per handler. Moonraker
+/// logs a failed remote method; Klipper gets no reply.
+fn runRemoteCall(app: *App, io: std.Io, req: []u8) void {
+    defer app.alloc.free(req);
+    var arena = std.heap.ArenaAllocator.init(app.alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // `remoteMethodRequest` built `req`, so its shape is known.
+    const root = std.json.parseFromSliceLeaky(std.json.Value, a, req, .{}) catch return;
+    const method = root.object.get("method").?.string;
+    if (featherMethod(method)) {
+        app.core.run(io, feather_updates_component.onKlippyMethod, .{ &app.feather, app.alloc, method, root.object.get("params").? }) catch |err|
+            std.debug.print("phobos: warning: Klipper remote method {s} failed: {}\n", .{ method, err });
+        return;
+    }
+    const out = app.dispatcher.handleParsedRoot(.{ .transport = .INTERNAL }, root, a) catch return;
+    if (std.mem.indexOf(u8, out, "\"error\"") != null) std.debug.print("phobos: warning: Klipper remote method failed: {s}\n", .{out});
 }
 
 const Registry = registry.Registry;
@@ -359,10 +376,10 @@ pub const App = struct {
     paneldue: paneldue_component.PanelDue = .{},
     /// Forge-X Feather update adapter. Enabled when `[feather_updates]` exists.
     feather: feather_updates_component.FeatherCtx = .{},
-    /// Klipper `call_remote_method` calls for components other than Feather,
-    /// as gpa-owned JSON-RPC request strings. The Klippy reader enqueues
-    /// without blocking; `remoteWorker` runs them so device and broker I/O
-    /// never stalls the status drain. Bound in `httpServer`.
+    /// Klipper `call_remote_method` calls as gpa-owned JSON-RPC request
+    /// strings. The Klippy reader enqueues without blocking; `remoteWorker`
+    /// runs them so git, device and broker I/O never stalls the status
+    /// drain. Bound in `httpServer`.
     remote_calls: std.Io.Queue([]u8) = .init(&.{}),
     remote_call_buf: [remote_call_queue_len][]u8 = undefined,
     remote_worker: ?std.Io.Future(void) = null,
@@ -1873,7 +1890,12 @@ test "setConfig loads trusted clients, update sources, and feather_updates" {
     try params.put(arena.allocator(), "token", .{ .integer = 1 });
     var frame: std.json.ObjectMap = .empty;
     try frame.put(arena.allocator(), "params", .{ .object = params });
+    // Remote calls queue for the worker; run the one queued call here.
+    app.remote_calls = .init(&app.remote_call_buf);
+    app.klippy_ctx.io = io;
     try app.klippy_ctx.dispatchRemoteMethod(io, "feather_request_forge_x_update_status", .{ .object = frame });
+    try std.testing.expectEqualStrings("", rec.method);
+    runRemoteCall(&app, io, try app.remote_calls.getOne(io));
     try std.testing.expectEqualStrings("feather/update_status", rec.method);
     try std.testing.expectEqualStrings("feather_request_forge_x_update_status", app.klippy_ctx.remote_methods[0]);
     try std.testing.expectEqualStrings("feather_start_forge_x_update", app.klippy_ctx.remote_methods[1]);
@@ -1972,7 +1994,10 @@ test "dispatchFrame: id-less reset uses the daemon runner and does not spawn git
 
     const payload = "{\"method\":\"feather_reset_forge_x_update\",\"params\":{\"token\":8}}";
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"id\"") == null);
+    app.remote_calls = .init(&app.remote_call_buf);
+    app.klippy_ctx.io = io;
     try app.klippy_ctx.dispatchFrame(io, payload);
+    runRemoteCall(&app, io, try app.remote_calls.getOne(io));
     try std.testing.expectEqual(@as(usize, 2), rec.cmds.items.len);
     try std.testing.expectEqualStrings("git -C /no/such/feather-repo reset --hard HEAD", rec.cmds.items[0]);
     try std.testing.expectEqualStrings("git -C /no/such/feather-repo clean -fd", rec.cmds.items[1]);
@@ -2212,7 +2237,7 @@ test "setConfig loads auto-refresh, excludes, and hidden objects" {
     try std.testing.expect(app.update_ctx.refresh_thread == null);
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", ".mod"));
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", "logFiles/a.log"));
-    try std.testing.expect(!app.update_ctx.tickAutoRefresh(alloc, 2));
+    try std.testing.expect(!app.update_ctx.tickAutoRefresh(2));
     try std.testing.expectEqual(@as(usize, 2), app.printer_ctx.hidden_objects.len);
     try std.testing.expectEqualStrings("output_pin level_h1", app.printer_ctx.hidden_objects[0]);
     try std.testing.expectEqualStrings("output_pin power_off", app.printer_ctx.hidden_objects[1]);

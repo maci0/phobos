@@ -186,7 +186,7 @@ pub fn updateResponse(self: *FeatherCtx, alloc: std.mem.Allocator, expected_vers
 pub fn resetResponse(self: *FeatherCtx, alloc: std.mem.Allocator, token: i64) !std.json.Value {
     if (!self.printerIdle()) return failState(alloc, token, "Printer is not safely idle");
     const updates = self.updates orelse return failState(alloc, token, "Moonraker update status is unavailable");
-    if (updates.busy) return failState(alloc, token, "Moonraker update manager is busy");
+    if (updates.busy.load(.monotonic)) return failState(alloc, token, "Moonraker update manager is busy");
     runCmd(self, alloc, &.{ "git", "reset", "--hard", "HEAD" }) catch {
         return failState(alloc, token, "git reset failed");
     };

@@ -39,10 +39,10 @@
 //! with `{ ...rate_limit_stats, version_info, busy }` (1-element params array).
 //! The update/recover/rollback handlers emit `notify_update_response` with
 //! `{ application, proc_id, message, complete }` (Moonraker's CommandHelper
-//! notification shape). Both go through `bus.emitLocked` because handlers run
-//! inside `Core.run` which already holds the Core lock (calling `emit` would
-//! deadlock the non-reentrant mutex). io is wired after the event loop starts
-//! via `setIo`; emission is a no-op until then (pure unit tests).
+//! notification shape). Status and refresh run off Core, so git never blocks
+//! other handlers, and emit with `bus.emit`; the update handlers run under
+//! Core and use `bus.emitLocked`. io is wired after the event loop starts via
+//! `setIo`; emission is a no-op until then (pure unit tests).
 
 const std = @import("std");
 const sleep = @import("../util/sleep.zig");
@@ -266,9 +266,9 @@ pub const UpdateCtx = struct {
     /// setIo). Emission is a no-op while absent.
     io: ?std.Io = null,
     /// Tracks whether an update is currently in progress (CommandHelper.busy).
-    /// Updates run synchronously under Core, so this is true only inside an
-    /// update handler; it is reported in the status `busy` field.
-    busy: bool = false,
+    /// Updates run under Core; the off-Core status handlers read it for the
+    /// `busy` field.
+    busy: std.atomic.Value(bool) = .init(false),
     /// Optional printing-state check. When it returns true, mutating update
     /// operations are refused (Moonraker: 503 "Update Refused: Klippy is
     /// printing"). Wired by App to job_state.isActiveErased.
@@ -293,10 +293,6 @@ pub const UpdateCtx = struct {
     initial_refresh_done: bool = false,
     /// Unix seconds of the last auto-refresh. 0 means never.
     last_auto_refresh_s: i64 = 0,
-    /// Tests install this so a due refresh does not call `handleRefresh`
-    /// (which runs git when a repo path and io are set).
-    refresh_hook: ?*const fn (*anyopaque) void = null,
-    refresh_hook_ctx: ?*anyopaque = null,
     refresh_stop: std.Io.Event = .unset,
     refresh_thread: ?std.Thread = null,
 
@@ -327,16 +323,12 @@ pub const UpdateCtx = struct {
     /// One scheduler tick. Returns whether a refresh ran. A hook records the
     /// run. Without a hook, `handleRefresh` runs; git fetch happens only when
     /// a source has a repo path and io is set.
-    pub fn tickAutoRefresh(self: *UpdateCtx, alloc: std.mem.Allocator, hour: i64) bool {
+    /// Record an auto-refresh when one is due at `hour` and return whether it
+    /// is. Runs under Core; the caller refreshes after releasing it.
+    pub fn tickAutoRefresh(self: *UpdateCtx, hour: i64) bool {
         if (!self.autoRefreshDue(hour, self.isPrinting())) return false;
         self.initial_refresh_done = true;
         self.last_auto_refresh_s = clock.wallSecondsInt(self.clock_io);
-        if (self.refresh_hook) |hook| {
-            const ctx = self.refresh_hook_ctx orelse return true;
-            hook(ctx);
-            return true;
-        }
-        _ = handleRefresh(@ptrCast(self), .null, alloc) catch {};
         return true;
     }
 
@@ -382,9 +374,10 @@ fn autoRefreshThread(ctx: *UpdateCtx) void {
         if (sleep.untilStopped(io, .fromSeconds(3600), &ctx.refresh_stop)) break;
         const now = clock.wallSecondsInt(ctx.clock_io);
         const hour: i64 = @mod(@divFloor(now, 3600), 24);
+        if (!bus.core.run(io, UpdateCtx.tickAutoRefresh, .{ ctx, hour })) continue;
         var request_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer request_arena.deinit();
-        _ = bus.core.run(io, UpdateCtx.tickAutoRefresh, .{ ctx, request_arena.allocator(), hour });
+        _ = handleRefresh(@ptrCast(ctx), .null, request_arena.allocator()) catch {};
     }
 }
 
@@ -791,7 +784,7 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
     try out.put(alloc, "github_requests_remaining", .null);
     try out.put(alloc, "github_limit_reset_time", .null);
     try out.put(alloc, "version_info", .{ .object = version_info });
-    try out.put(alloc, "busy", .{ .bool = ctx.busy });
+    try out.put(alloc, "busy", .{ .bool = ctx.busy.load(.monotonic) });
     return .{ .object = out };
 }
 
@@ -800,14 +793,14 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
 // ---------------------------------------------------------------------------
 
 /// Emit `notify_update_refreshed` with `[status_payload]` params. No-op when the
-/// bus or io is unavailable (unit tests). Uses emitLocked (handlers run under
-/// the held Core lock).
+/// bus or io is unavailable (unit tests). Takes Core: the status and refresh
+/// handlers run off it.
 fn emitRefreshed(ctx: *UpdateCtx, alloc: std.mem.Allocator, payload: std.json.Value) void {
     const bus = ctx.bus orelse return;
     const io = ctx.io orelse return;
     var arr: std.json.Array = .init(alloc);
     arr.append(payload) catch return;
-    bus.emitLocked(io, notify.names.update_refreshed, .{ .array = arr }) catch {};
+    bus.emit(io, notify.names.update_refreshed, .{ .array = arr }) catch {};
 }
 
 /// Build the `notify_update_response` notification object (CommandHelper
@@ -924,8 +917,8 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
     const src = ctx.findSource(app) orelse return error.NotFound;
     if ((src.type == .system or src.requirements.len > 0) and ctx.shell == null) return error.NoPackageProvider;
     const proc_id = nextProcId();
-    ctx.busy = true;
-    defer ctx.busy = false;
+    ctx.busy.store(true, .monotonic);
+    defer ctx.busy.store(false, .monotonic);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Updating {s}...", .{app});
     updateSource(ctx, alloc, src) catch |err| {
@@ -1017,8 +1010,8 @@ fn runFullUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator) anyerror!std.json.Va
         if ((src.type == .system or src.requirements.len > 0) and ctx.shell == null) return error.NoPackageProvider;
     }
     const proc_id = nextProcId();
-    ctx.busy = true;
-    defer ctx.busy = false;
+    ctx.busy.store(true, .monotonic);
+    defer ctx.busy.store(false, .monotonic);
 
     notifyLine(ctx, alloc, "full", proc_id, false, "Preparing full software update...", .{});
     for (ctx.sources) |src| {
@@ -1057,8 +1050,8 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
     const proc_id = nextProcId();
-    ctx.busy = true;
-    defer ctx.busy = false;
+    ctx.busy.store(true, .monotonic);
+    defer ctx.busy.store(false, .monotonic);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Recovering {s}...", .{app});
     // Git runs only when io and a repo path are set. Unit tests leave io null.
@@ -1101,8 +1094,8 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
     const proc_id = nextProcId();
-    ctx.busy = true;
-    defer ctx.busy = false;
+    ctx.busy.store(true, .monotonic);
+    defer ctx.busy.store(false, .monotonic);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Rolling Back {s}...", .{app});
     if (src.rollback_ref.len == 0) {
@@ -1133,8 +1126,10 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 pub fn registerUpdateManager(reg: *Registry, ctx: *UpdateCtx) !void {
     const c: *anyopaque = @ptrCast(ctx);
 
-    try reg.registerEndpoint(.{ .path = "/machine/update/status", .methods = &.{.GET} }, c, handleStatus);
-    try reg.registerEndpoint(.{ .path = "/machine/update/refresh", .methods = &.{.POST} }, c, handleRefresh);
+    // Status and refresh run git without Core: they read only config-time
+    // sources, the thread-safe store and the atomic `busy`.
+    try reg.registerEndpoint(.{ .path = "/machine/update/status", .methods = &.{.GET}, .off_core = true }, c, handleStatus);
+    try reg.registerEndpoint(.{ .path = "/machine/update/refresh", .methods = &.{.POST}, .off_core = true }, c, handleRefresh);
     try reg.registerEndpoint(.{ .path = "/machine/update/upgrade", .methods = &.{.POST} }, c, handleUpgrade);
     try reg.registerEndpoint(.{ .path = "/machine/update/full", .methods = &.{.POST} }, c, handleFull);
     try reg.registerEndpoint(.{ .path = "/machine/update/moonraker", .methods = &.{.POST} }, c, handleUpdateMoonraker);
@@ -1550,6 +1545,10 @@ test "registerUpdateManager: wires expected routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/machine/update/client") != null);
     try testing.expect(reg.lookup(.POST, "/machine/update/recover") != null);
     try testing.expect(reg.lookup(.POST, "/machine/update/rollback") != null);
+    // git status and fetch must not hold Core.
+    try testing.expect(d.methods.get("machine.update.status").?.off_core);
+    try testing.expect(d.methods.get("machine.update.refresh").?.off_core);
+    try testing.expect(!d.methods.get("machine.update.client").?.off_core);
 }
 
 // ---- git status with real io ----
@@ -1922,7 +1921,7 @@ test "update failures send Moonraker's completion lines" {
     l = try rec.line(a, 0);
     try testing.expectEqualStrings("Error updating moonraker: GitFailed", l[0]);
     try testing.expect(l[1]);
-    try testing.expect(!ctx.busy);
+    try testing.expect(!ctx.busy.load(.monotonic));
 
     try testing.expectError(error.GitFailed, handleRollback(&ctx, try objParams(a, "{\"name\":\"moonraker\"}"), a));
     l = try rec.line(a, 1);
@@ -2101,7 +2100,7 @@ test "fuzz buildStatusPayload: never panics with any source set" {
             const end: usize = @min(all.len, start + @as(usize, buf[1]) % 3 + 1);
             const sources: []const Source = all[start..end];
 
-            var ctx = UpdateCtx{ .clock_io = std.testing.io, .gpa = a, .sources = sources, .bus = null, .io = null, .busy = buf[2] % 2 == 0 };
+            var ctx = UpdateCtx{ .clock_io = std.testing.io, .gpa = a, .sources = sources, .bus = null, .io = null, .busy = .init(buf[2] % 2 == 0) };
             const payload = try buildStatusPayload(&ctx, a);
 
             try testing.expect(payload.object.get("version_info") != null);
@@ -2151,40 +2150,27 @@ test "fuzz nextProcId: monotonic, never wraps" {
 }
 
 test "tickAutoRefresh: disabled and out of window do not refresh" {
-    const Count = struct {
-        n: usize = 0,
-        fn hook(ctx: *anyopaque) void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            self.n += 1;
-        }
-    };
-    var count = Count{};
     var ctx = testCtx();
-    ctx.refresh_hook = Count.hook;
-    ctx.refresh_hook_ctx = &count;
     ctx.io = null;
-    try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
-    try testing.expectEqual(@as(usize, 0), count.n);
+    try testing.expect(!ctx.tickAutoRefresh(2));
 
     ctx.auto_refresh = true;
-    try testing.expect(ctx.tickAutoRefresh(testing.allocator, 23));
-    try testing.expectEqual(@as(usize, 1), count.n);
+    try testing.expect(ctx.tickAutoRefresh(23));
     try testing.expect(ctx.initial_refresh_done);
 
     ctx.last_auto_refresh_s = clock.wallSecondsInt(ctx.clock_io);
-    try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
-    try testing.expectEqual(@as(usize, 1), count.n);
+    try testing.expect(!ctx.tickAutoRefresh(2));
 
     ctx.last_auto_refresh_s = 0;
-    try testing.expect(ctx.tickAutoRefresh(testing.allocator, 2));
-    try testing.expectEqual(@as(usize, 2), count.n);
+    try testing.expect(ctx.tickAutoRefresh(2));
 
     ctx.last_auto_refresh_s = 0;
+    var dummy: u8 = 0;
     ctx.printing_check = testPrintingCheck;
-    ctx.printing_ctx = &count;
+    ctx.printing_ctx = &dummy;
     test_printing_flag = true;
     defer test_printing_flag = false;
-    try testing.expect(!ctx.tickAutoRefresh(testing.allocator, 2));
+    try testing.expect(!ctx.tickAutoRefresh(2));
     try testing.expect(!UpdateCtx.inRefreshWindow(0, 5, 12));
     try testing.expect(UpdateCtx.inRefreshWindow(0, 5, 0));
     try testing.expect(UpdateCtx.inRefreshWindow(22, 5, 23));
