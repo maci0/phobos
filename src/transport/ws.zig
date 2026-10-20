@@ -60,7 +60,7 @@ fn idResult(alloc: std.mem.Allocator, key: []const u8, id: u64) !std.json.Value 
 
 /// The dispatcher's view of a connection's sender.
 fn callerOf(conn: *const Connection) jsonrpc.Caller {
-    return .{ .transport = .WEBSOCKET, .user = conn.user, .remote_ip = conn.remote_ip, .need_auth = conn.need_auth };
+    return .{ .transport = .WEBSOCKET, .user = conn.user, .remote_ip = conn.remote_ip, .need_auth = conn.need_auth.load(.acquire) };
 }
 
 /// Core WS request handling, independent of sockets so it is unit- and
@@ -100,7 +100,7 @@ pub fn dispatchMessage(
     const id = obj.get("id") orelse .null;
     const params = obj.get("params") orelse std.json.Value{ .object = .empty };
     if (params != .object) return jv.errorResponse(alloc, id, -32602, "Invalid params:");
-    if (conn.need_auth) {
+    if (conn.need_auth.load(.acquire)) {
         const entry = srv.dispatcher.methods.get(method);
         if (entry == null or entry.?.auth_required) return jv.errorResponse(alloc, id, -32602, "Unauthorized");
     }
@@ -154,7 +154,7 @@ fn handleIdentify(srv: *WsServer, conn: *Connection, params: std.json.Value, all
         } else if (api_key != null and conn.user == null) {
             if (api_key.? != .string or !authz.validateApiKey(auth, api_key.?.string)) return error.Unauthorized;
             try srv.conns.setUser(conn, authz.api_user);
-        } else if (conn.need_auth) return error.Unauthorized;
+        } else if (conn.need_auth.load(.acquire)) return error.Unauthorized;
     }
     try srv.conns.identify(srv.io, conn, .{
         .name = getStr(params, "client_name"),
@@ -195,9 +195,8 @@ pub const UpgradeAuth = struct {
 /// (the HTTP reader buffer) bounds the largest message accepted; oversize
 /// frames terminate the connection.
 pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket, upgrade: UpgradeAuth) void {
-    const conn = srv.conns.add(srv.io) catch return;
+    const conn = srv.conns.add(srv.io, upgrade.need_auth) catch return;
     defer srv.conns.remove(srv.io, conn);
-    conn.need_auth = upgrade.need_auth;
     conn.remote_ip = upgrade.remote_ip;
     if (upgrade.user) |u| srv.conns.setUser(conn, u) catch return;
 
@@ -347,8 +346,8 @@ test "a connection that failed upgrade auth runs only auth-free methods" {
     defer deinitFixture(&f);
     try f.reg.registerEndpoint(.{ .path = "/server/connection/identify", .methods = &.{.POST}, .transports = &.{.WEBSOCKET}, .auth_required = false }, @ptrCast(&f.info), wsOnlyStub);
     try f.reg.registerEndpoint(.{ .path = "/server/websocket/id", .methods = &.{.GET}, .transports = &.{.WEBSOCKET} }, @ptrCast(&f.info), wsOnlyStub);
-    const conn = try f.conns.add(f.io());
-    conn.need_auth = true;
+    const conn = try f.conns.add(f.io(), false);
+    conn.need_auth.store(true, .release);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
@@ -375,7 +374,7 @@ test "WS refuses a request whose id nests past max_value_depth" {
     var f: Fixture = undefined;
     try initFixture(&f, alloc);
     defer deinitFixture(&f);
-    const conn = try f.conns.add(f.io());
+    const conn = try f.conns.add(f.io(), false);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const depth = 300;
@@ -400,7 +399,7 @@ test "server.websocket.id returns the connection's id" {
     defer deinitFixture(&f);
     const io = f.io();
 
-    const conn = try f.conns.add(io);
+    const conn = try f.conns.add(io, false);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
@@ -421,7 +420,7 @@ test "server.connection.identify returns connection_id and stores client data" {
     defer deinitFixture(&f);
     const io = f.io();
 
-    const conn = try f.conns.add(io);
+    const conn = try f.conns.add(io, false);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
@@ -445,8 +444,8 @@ test "two connections get distinct monotonic ids via identify" {
     defer deinitFixture(&f);
     const io = f.io();
 
-    const c1 = try f.conns.add(io);
-    const c2 = try f.conns.add(io);
+    const c1 = try f.conns.add(io, false);
+    const c2 = try f.conns.add(io, false);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -470,7 +469,7 @@ test "server.info over WS dispatch equals HTTP result payload" {
     defer deinitFixture(&f);
     const io = f.io();
 
-    const conn = try f.conns.add(io);
+    const conn = try f.conns.add(io, false);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const a = arena.allocator();
@@ -500,7 +499,7 @@ test "unknown method over WS returns -32601" {
     defer deinitFixture(&f);
     const io = f.io();
 
-    const conn = try f.conns.add(io);
+    const conn = try f.conns.add(io, false);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
@@ -521,7 +520,7 @@ test "notification (no id) over WS produces no response bytes" {
     defer deinitFixture(&f);
     const io = f.io();
 
-    const conn = try f.conns.add(io);
+    const conn = try f.conns.add(io, false);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
@@ -538,7 +537,7 @@ test "fuzz_ws: random bytes through dispatchMessage never crash, valid JSON or e
     try initFixture(&f, alloc);
     defer deinitFixture(&f);
     const io = f.io();
-    const conn = try f.conns.add(io);
+    const conn = try f.conns.add(io, false);
 
     const Ctx = struct { f: *Fixture, conn: *Connection, io: Io };
     var ctx = Ctx{ .f = &f, .conn = conn, .io = io };

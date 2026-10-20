@@ -711,7 +711,7 @@ test "ingestMqttMessage: notify_sensor_update params is [{id: {param: value}}], 
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
     var rec: Recorder = .{ .arena = a };
-    conns.attachWriter(io, try conns.add(io), &rec, Recorder.write);
+    conns.attachWriter(io, try conns.add(io, false), &rec, Recorder.write);
 
     var ctx = SensorCtx.init(testing.allocator, &bus);
     defer ctx.deinit();

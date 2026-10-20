@@ -1186,7 +1186,7 @@ test "processStatusUpdate: live shutdown sets state and emits once" {
     defer ctx.deinit();
     const io = std.testing.io;
     var counter = NotifyCounter{ .needle = "notify_klippy_shutdown" };
-    const conn = try nb.conns_obj.add(io);
+    const conn = try nb.conns_obj.add(io, false);
     nb.conns_obj.attachWriter(io, conn, &counter, NotifyCounter.write);
 
     _ = ctx.setState(.ready);
@@ -1281,7 +1281,7 @@ test "process_gcode_response: forwards the response STRING as a [response] array
     const io = std.testing.io;
 
     var cap = GcodeCapture{};
-    const conn = try nb.conns_obj.add(io);
+    const conn = try nb.conns_obj.add(io, false);
     nb.conns_obj.attachWriter(io, conn, &cap, GcodeCapture.write);
 
     var pobj: std.json.ObjectMap = .empty;
@@ -1464,7 +1464,7 @@ test "Klippy shutdown keeps the connection, allows FIRMWARE_RESTART and disconne
     const nb = try NullBus.init(alloc);
     defer nb.deinit(alloc);
     var counter = NotifyCounter{ .needle = "notify_klippy_disconnected" };
-    const conn = try nb.conns_obj.add(io);
+    const conn = try nb.conns_obj.add(io, false);
     defer nb.conns_obj.remove(io, conn);
     nb.conns_obj.attachWriter(io, conn, &counter, NotifyCounter.write);
     var info: methods.ServerInfo = .{};

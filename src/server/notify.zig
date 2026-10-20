@@ -313,8 +313,8 @@ test "emit broadcasts to all connections in FIFO order" {
     var conns = Connections.init(alloc, &core);
     defer conns.deinit(io);
 
-    const c1 = try conns.add(io);
-    const c2 = try conns.add(io);
+    const c1 = try conns.add(io, false);
+    const c2 = try conns.add(io, false);
     var r1 = RecordWriter{ .alloc = alloc };
     defer r1.deinit();
     var r2 = RecordWriter{ .alloc = alloc };
@@ -348,8 +348,8 @@ test "emitStatus delivers only to subscribed connections" {
     var conns = Connections.init(alloc, &core);
     defer conns.deinit(io);
 
-    const sub = try conns.add(io);
-    const unsub = try conns.add(io);
+    const sub = try conns.add(io, false);
+    const unsub = try conns.add(io, false);
     var rs = RecordWriter{ .alloc = alloc };
     defer rs.deinit();
     var ru = RecordWriter{ .alloc = alloc };
@@ -383,8 +383,8 @@ test "emit skips a dead connection without stalling others" {
         }
     };
 
-    const dead = try conns.add(io);
-    const live = try conns.add(io);
+    const dead = try conns.add(io, false);
+    const live = try conns.add(io, false);
     var dummy: u8 = 0;
     var rl = RecordWriter{ .alloc = alloc };
     defer rl.deinit();
@@ -436,7 +436,7 @@ test "fuzz_notify: concurrent emitters keep per-producer order, never lose a fra
             var conns = Connections.init(std.heap.smp_allocator, &core);
             defer conns.deinit(io);
 
-            const c = try conns.add(io);
+            const c = try conns.add(io, false);
             var rec = RecordWriter{ .alloc = std.heap.smp_allocator };
             defer rec.deinit();
             conns.attachWriter(io, c, &rec, RecordWriter.write);

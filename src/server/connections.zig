@@ -44,8 +44,8 @@ pub const Connection = struct {
     /// Read and written only by the connection's own serve loop.
     user: ?[]const u8 = null,
     /// The upgrade request failed authentication: `auth_required` methods are
-    /// refused until identify supplies credentials. Serve loop only.
-    need_auth: bool = false,
+    /// refused until identify supplies credentials. Broadcast reads atomically.
+    need_auth: std.atomic.Value(bool) = .init(false),
     /// Client address, borrowed from the transport for the session.
     remote_ip: ?[]const u8 = null,
     /// Per-connection write mutex. EVERY write to this connection's WebSocket —
@@ -169,6 +169,7 @@ pub const Connections = struct {
             // growing it by doubling on every broadcast.
             targets.ensureTotalCapacity(alloc, self.list.items.len) catch {};
             for (self.list.items) |conn| {
+                if (conn.need_auth.load(.acquire)) continue;
                 if (topic) |t| {
                     if (!conn.subs.contains(t)) continue;
                 }
@@ -229,11 +230,11 @@ pub const Connections = struct {
     /// Create and register a fresh connection with id from `nextId`. Returns a
     /// pointer-stable `*Connection` the caller (and handlers) can retain until
     /// `remove`. Thread-safe.
-    pub fn add(self: *Connections, io: Io) !*Connection {
+    pub fn add(self: *Connections, io: Io, need_auth: bool) !*Connection {
         const id = self.nextId(io);
         const c = try self.alloc.create(Connection);
         errdefer self.alloc.destroy(c);
-        c.* = .{ .id = id };
+        c.* = .{ .id = id, .need_auth = .init(need_auth) };
 
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -278,7 +279,7 @@ pub const Connections = struct {
         const owned = try self.alloc.dupe(u8, user);
         if (conn.user) |old| self.alloc.free(old);
         conn.user = owned;
-        conn.need_auth = false;
+        conn.need_auth.store(false, .release);
     }
 
     /// Store identify metadata on a connection, replacing any prior values.
@@ -333,8 +334,8 @@ test "add assigns increasing ids and tracks count" {
     defer conns.deinit(io);
 
     try std.testing.expectEqual(@as(usize, 0), conns.count(io));
-    const c1 = try conns.add(io);
-    const c2 = try conns.add(io);
+    const c1 = try conns.add(io, false);
+    const c2 = try conns.add(io, false);
     try std.testing.expect(c2.id > c1.id);
     try std.testing.expectEqual(@as(usize, 2), conns.count(io));
     try std.testing.expect(conns.has(io, c1.id));
@@ -350,8 +351,8 @@ test "remove drops the connection and frees it" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c1 = try conns.add(io);
-    const c2 = try conns.add(io);
+    const c1 = try conns.add(io, false);
+    const c2 = try conns.add(io, false);
     const id1 = c1.id;
     conns.remove(io, c1);
     try std.testing.expectEqual(@as(usize, 1), conns.count(io));
@@ -371,15 +372,36 @@ test "setUser copies the user, replaces the old one and clears need_auth" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
-    c.need_auth = true;
+    const c = try conns.add(io, false);
+    c.need_auth.store(true, .release);
     var name = "alice".*;
     try conns.setUser(c, &name);
     name[0] = 'X';
     try std.testing.expectEqualStrings("alice", c.user.?);
-    try std.testing.expect(!c.need_auth);
+    try std.testing.expect(!c.need_auth.load(.acquire));
     try conns.setUser(c, "bob");
     try std.testing.expectEqualStrings("bob", c.user.?);
+}
+
+test "broadcast skips unauthenticated connections until identify authenticates" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var core = Core.init();
+    var conns = Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    const conn = try conns.add(io, true);
+    var writer = RecordWriter{ .alloc = alloc };
+    defer writer.deinit();
+    conns.attachWriter(io, conn, &writer, RecordWriter.write);
+    defer conns.detachWriter(io, conn);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    conns.broadcast(io, arena.allocator(), "private output", null);
+    try std.testing.expectEqual(@as(usize, 0), writer.frames.items.len);
+    try conns.setUser(conn, "authenticated");
+    conns.broadcast(io, arena.allocator(), "private output", null);
+    try std.testing.expectEqual(@as(usize, 1), writer.frames.items.len);
+    try std.testing.expectEqualStrings("private output", writer.frames.items[0]);
 }
 
 test "fuzz setUser owns every user it stores" {
@@ -391,7 +413,7 @@ test "fuzz setUser owns every user it stores" {
             var core = Core.init();
             var conns = Connections.init(std.testing.allocator, &core);
             defer conns.deinit(io);
-            const c = try conns.add(io);
+            const c = try conns.add(io, false);
             var buf: [32]u8 = undefined;
             for (0..smith.valueRangeAtMostWithHash(u8, 0, 4, 0)) |i| {
                 const n = smith.valueRangeAtMostWithHash(u8, 0, buf.len, @intCast(i + 1));
@@ -412,7 +434,7 @@ test "identify stores client data and sets identified" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     try std.testing.expect(!c.identified);
     try conns.identify(io, c, .{ .name = "mainsail", .version = "0.1", .type = "web", .url = "http://x" });
     try std.testing.expect(c.identified);
@@ -435,7 +457,7 @@ const Worker = struct {
 fn addWorker(w: *Worker) void {
     var i: usize = 0;
     while (i < w.count) : (i += 1) {
-        const c = w.conns.add(w.io) catch return;
+        const c = w.conns.add(w.io, false) catch return;
         w.ids[w.base + i] = c.id;
     }
 }
@@ -488,7 +510,7 @@ test "fuzz_connections: random add/remove sequence keeps count consistent" {
             var expected: usize = 0;
             for (ops) |b| {
                 if (b & 1 == 0 or live.items.len == 0) {
-                    const c = try conns.add(io);
+                    const c = try conns.add(io, false);
                     try live.append(std.heap.smp_allocator, c);
                     expected += 1;
                 } else {
@@ -533,7 +555,7 @@ test "writeFrame routes bytes through the attached writer in order" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     var rec = RecordWriter{ .alloc = std.testing.allocator };
     defer rec.deinit();
     conns.attachWriter(io, c, &rec, RecordWriter.write);
@@ -555,7 +577,7 @@ test "writeFrame is a no-op with no writer attached" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     // No attachWriter: must not error, must not crash.
     try conns.writeFrame(io, c, "ignored");
     try std.testing.expect(!c.dead);
@@ -570,7 +592,7 @@ test "writeFrame flags the connection dead on write failure" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     var rec = RecordWriter{ .alloc = std.testing.allocator, .fail = true };
     defer rec.deinit();
     conns.attachWriter(io, c, &rec, RecordWriter.write);
@@ -593,7 +615,7 @@ test "broadcast: connection removed during its own write is freed via deferred r
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     const Remover = struct {
         conns: *Connections,
         conn: *Connection,
@@ -626,7 +648,7 @@ test "detachWriter stops further delivery" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     var rec = RecordWriter{ .alloc = std.testing.allocator };
     defer rec.deinit();
     conns.attachWriter(io, c, &rec, RecordWriter.write);
@@ -645,7 +667,7 @@ test "subscribe and unsubscribe track topics" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const c = try conns.add(io);
+    const c = try conns.add(io, false);
     try std.testing.expect(!c.subs.contains("toolhead"));
 
     try conns.subscribe(io, c, &.{ "toolhead", "extruder" });
@@ -679,7 +701,7 @@ test "fuzz_subscribe: random subscribe/unsubscribe never crashes or leaks" {
             var conns = Connections.init(std.heap.smp_allocator, &core);
             defer conns.deinit(io);
 
-            const c = try conns.add(io);
+            const c = try conns.add(io, false);
             const topics = [_][]const u8{ "toolhead", "extruder", "gcode_move", "heater_bed" };
             for (ops) |b| {
                 const t = topics[(b >> 1) % topics.len];
@@ -709,7 +731,7 @@ test "fuzz_writeframe: random frames delivered in order, never crash" {
             var conns = Connections.init(std.heap.smp_allocator, &core);
             defer conns.deinit(io);
 
-            const c = try conns.add(io);
+            const c = try conns.add(io, false);
             var rec = RecordWriter{ .alloc = std.heap.smp_allocator };
             defer rec.deinit();
             conns.attachWriter(io, c, &rec, RecordWriter.write);

@@ -1626,7 +1626,7 @@ const TestEnv = struct {
         self.* = .{ .mem = .init(arena), .conns = undefined, .bus = undefined, .ctx = undefined, .arena = arena };
         self.conns = .init(arena, &self.core);
         self.bus = .init(&self.core, &self.conns);
-        const conn = try self.conns.add(io);
+        const conn = try self.conns.add(io, false);
         self.conns.attachWriter(io, conn, self, record);
         self.ctx = try .init(arena, std.testing.io, self.mem.dataStore(), &self.bus);
         self.ctx.io = io;

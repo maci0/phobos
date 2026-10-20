@@ -1461,7 +1461,7 @@ test "update: POST /machine/update/refresh returns status and emits notify_updat
     var rec = RecordWriter{};
     defer rec.deinit();
     const conns = ts.conns;
-    const cid = try conns.add(ts.io);
+    const cid = try conns.add(ts.io, false);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
     defer conns.detachWriter(ts.io, cid);
@@ -1488,7 +1488,7 @@ test "update: POST /machine/update/upgrade emits notify_update_response and acks
     var rec = RecordWriter{};
     defer rec.deinit();
     const conns = ts.conns;
-    const cid = try conns.add(ts.io);
+    const cid = try conns.add(ts.io, false);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
     defer conns.detachWriter(ts.io, cid);
@@ -1623,7 +1623,7 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
     var rec = RecordWriter{};
     defer rec.deinit();
     const conns = ts.conns;
-    const cid = try conns.add(ts.io);
+    const cid = try conns.add(ts.io, false);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
     defer conns.detachWriter(ts.io, cid);
@@ -1889,7 +1889,7 @@ test "octoprint: with Klippy sim, /api/printer/command runs gcode through Klippy
 
     var rec = RecordWriter{};
     defer rec.deinit();
-    const cid = try ts.conns.add(ts.io);
+    const cid = try ts.conns.add(ts.io, false);
     ts.conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer ts.conns.remove(ts.io, cid);
     defer ts.conns.detachWriter(ts.io, cid);
@@ -2193,7 +2193,7 @@ test "files: notify_filelist_changed emitted on upload with correct payload" {
     var rec = RecordWriter{};
     defer rec.deinit();
     const conns = ts.conns;
-    const cid = try conns.add(ts.io);
+    const cid = try conns.add(ts.io, false);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
     defer conns.detachWriter(ts.io, cid);

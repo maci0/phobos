@@ -74,7 +74,10 @@ pub const Listener = struct {
             };
             // Acquire a slot before spawning; blocks once `max_concurrent_conns`
             // handlers are in flight, so the worker pool can't grow past the cap.
-            sem.waitUncancelable(io);
+            sem.wait(io) catch |err| {
+                stream.close(io);
+                return err;
+            };
             group.concurrent(io, connTaskCtxBounded, .{ ctx, io, stream, handler, &sem }) catch
                 group.async(io, connTaskCtxBounded, .{ ctx, io, stream, handler, &sem });
         }
@@ -165,6 +168,57 @@ test "canceling serveWith cancels live connections instead of waiting for them" 
     const start = Io.Clock.Timestamp.now(io, .awake);
     srv_fut.cancel(io);
     try std.testing.expect(start.untilNow(io).raw.toMilliseconds() < 1000);
+}
+
+test "canceling a saturated listener releases the accepted connection" {
+    const Ctx = struct {
+        io: Io,
+        listener: *Listener,
+        accepted: std.atomic.Value(usize) = .init(0),
+        canceled: Io.Event = .unset,
+        future: ?Io.Future(void) = null,
+        fn handler(raw: *anyopaque, io: Io, stream: net.Stream) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            _ = self.accepted.fetchAdd(1, .release);
+            holdOpen(raw, io, stream);
+        }
+        fn serve(self: *@This()) void {
+            self.listener.serveWith(self.io, self, handler) catch {};
+        }
+        fn cancel(self: *@This()) void {
+            self.future.?.cancel(self.io);
+            self.canceled.set(self.io);
+        }
+    };
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = Listener.handler_stack_size });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try Listener.bind(io, "127.0.0.1", 0);
+    defer listener.deinit(io);
+    var ctx: Ctx = .{ .io = io, .listener = &listener };
+    ctx.future = try io.concurrent(Ctx.serve, .{&ctx});
+    defer if (!ctx.canceled.isSet()) ctx.future.?.cancel(io);
+    var clients: [Listener.max_concurrent_conns + 1]net.Stream = undefined;
+    var count: usize = 0;
+    defer for (clients[0..count]) |client| client.close(io);
+    const address = try net.IpAddress.parse("127.0.0.1", listener.port());
+    for (&clients) |*client| {
+        client.* = try address.connect(io, .{ .mode = .stream });
+        count += 1;
+    }
+    const deadline = Io.Clock.awake.now(io).addDuration(.fromSeconds(5));
+    while (ctx.accepted.load(.acquire) != Listener.max_concurrent_conns) {
+        if (deadline.nanoseconds <= Io.Clock.awake.now(io).nanoseconds) return error.Timeout;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    // Let accept consume the extra connection before canceling the slot wait.
+    try io.sleep(.fromMilliseconds(30), .awake);
+    var canceler = try io.concurrent(Ctx.cancel, .{&ctx});
+    const timely = if (ctx.canceled.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } })) |_| true else |_| false;
+    // A regression must fail rather than leave uncancelable workers wedged.
+    for (clients[0..count]) |client| client.shutdown(io, .both) catch {};
+    canceler.await(io);
+    try std.testing.expect(timely);
 }
 
 test "fuzz_listener: random payload round-trips through serveWith" {

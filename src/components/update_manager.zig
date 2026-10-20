@@ -1866,7 +1866,7 @@ test "update failures send Moonraker's completion lines" {
     var core: @import("../server/core.zig").Core = .init();
     var conns = @import("../server/connections.zig").Connections.init(testing.allocator, &core);
     defer conns.deinit(io);
-    conns.attachWriter(io, try conns.add(io), &rec, Rec.write);
+    conns.attachWriter(io, try conns.add(io, false), &rec, Rec.write);
     var bus = NotifyBus.init(&core, &conns);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -124,3 +124,8 @@ method, transport, argument and authentication checks for each request, includin
 batch items. A failed upstream request can replace the reserved `_method` value
 with an owned status/message object immediately before returning
 `UpstreamRequestFailed`; client-supplied reserved values are always replaced.
+
+WebSocket authentication state is initialized before registry insertion and
+published atomically. Notification fan-out excludes unauthenticated sessions.
+Listener capacity waits remain cancellable and close the accepted stream if
+canceled before a handler starts.
