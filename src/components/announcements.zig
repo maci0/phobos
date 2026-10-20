@@ -59,7 +59,7 @@ const UPDATE_CHECK_TIME: u64 = 1800;
 /// connect_timeout 5 s plus request_timeout 10 s.
 const FETCH_TIMEOUT: std.Io.Duration = .fromSeconds(15);
 /// `wake_at` value when no dismissed entry has a wake time.
-const no_wake = std.math.maxInt(i64);
+const no_wake = std.math.maxInt(u32);
 
 // ---------------------------------------------------------------------------
 // Context
@@ -82,8 +82,9 @@ pub const AnnouncementsCtx = struct {
     /// Counter for new entry keys (hex sequence).
     next_key: u64,
     /// Unix second at or after which a dismissed entry wakes; `no_wake` when
-    /// none. Written under Core, read by the refresh worker without it.
-    wake_at: std.atomic.Value(i64) = .init(no_wake),
+    /// none. Written under Core, read by the refresh worker without it. u32
+    /// because 32-bit ARM has no 64-bit atomics; it saturates in 2106.
+    wake_at: std.atomic.Value(u32) = .init(no_wake),
     /// Background refresh timer stop flag. Set by deinit, polled by the timer thread.
     refresh_stop: std.Io.Event = .unset,
     /// Handle for the background refresh timer thread, joined in deinit.
@@ -445,12 +446,12 @@ fn entryShouldWake(entry: std.json.Value, now: f64) bool {
 }
 
 /// Earliest whole second at which a dismissed entry wakes, or `no_wake`.
-fn earliestWake(entries: std.json.ObjectMap) i64 {
-    var earliest: i64 = no_wake;
+fn earliestWake(entries: std.json.ObjectMap) u32 {
+    var earliest: u32 = no_wake;
     for (entries.values()) |entry| {
         if (!boolMember(entry, "dismissed")) continue;
         const wake = floatMember(entry, "dismiss_wake") orelse continue;
-        earliest = @min(earliest, std.math.lossyCast(i64, @ceil(wake)));
+        earliest = @min(earliest, std.math.lossyCast(u32, @ceil(wake)));
     }
     return earliest;
 }
@@ -627,7 +628,7 @@ pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     if (wake_time) |wt| {
         const wake = cur_time + @as(f64, @floatFromInt(wt));
         try entry.object.put(alloc, "dismiss_wake", .{ .float = wake });
-        _ = c.wake_at.fetchMin(std.math.lossyCast(i64, @ceil(wake)), .monotonic);
+        _ = c.wake_at.fetchMin(std.math.lossyCast(u32, @ceil(wake)), .monotonic);
     } else {
         try entry.object.put(alloc, "dismiss_wake", .null);
     }
@@ -1319,7 +1320,7 @@ test "announcementsRefreshTimerThread: returns at once when stopped or without i
     var bus = NotifyBus.init(&core, &conns);
     var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
-    try testing.expectEqual(@as(i64, 1), ctx.wake_at.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), ctx.wake_at.load(.monotonic));
 
     const start = std.Io.Clock.Timestamp.now(io, .awake);
     // No io: returns before the first wait.
@@ -1858,7 +1859,7 @@ test "checkWakes: wakes due entries, emits [{entry_id}], recomputes wake_at" {
         \\{"entry_id":"later","dismissed":true,"date":1.0,"date_dismissed":1.0,"dismiss_wake":9e15,"feed":"moonraker"}
     );
     try env.ctx.scanEntries();
-    try testing.expectEqual(@as(i64, 3), env.ctx.wake_at.load(.monotonic));
+    try testing.expectEqual(@as(u32, 3), env.ctx.wake_at.load(.monotonic));
 
     checkWakes(&env.ctx, a);
     const params = try env.onlyParams(notify.names.announcement_wake);
@@ -1866,7 +1867,8 @@ test "checkWakes: wakes due entries, emits [{entry_id}], recomputes wake_at" {
     const woken = (try env.mem.dataStore().getItem(a, ns_entries, "000001")).?.object;
     try testing.expect(!woken.get("dismissed").?.bool);
     try testing.expect(woken.get("dismiss_wake").? == .null);
-    try testing.expectEqual(@as(i64, 9e15), env.ctx.wake_at.load(.monotonic));
+    // Wake times past 2106 saturate to `no_wake`.
+    try testing.expectEqual(no_wake, env.ctx.wake_at.load(.monotonic));
 }
 
 test "fuzz earliestWake: any wake time, including NaN and infinities, never crashes" {
