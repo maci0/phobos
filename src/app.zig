@@ -135,6 +135,90 @@ fn featherKlippySend(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const 
     app.klippy_ctx.postMethod(method, params, alloc) catch {};
 }
 
+/// Pending Klipper remote-method calls; further calls are dropped with a warning.
+const remote_call_queue_len = 16;
+
+/// Remote methods registered with Klippy: Feather's, plus the component
+/// methods Moonraker registers (power.py, wled.py, spoolman.py, mqtt.py).
+const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]const u8{
+    "set_device_power",
+    "set_wled_state",
+    "set_wled",
+    "spoolman_set_active_spool",
+    "publish_mqtt_topic",
+};
+
+/// Klippy `RemoteHandler`, run on the Klippy reader under Core. Feather
+/// methods answer inline; the rest are queued for `remoteWorker`.
+fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror!void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    for (feather_updates_component.remote_methods) |name| {
+        if (std.mem.eql(u8, method, name)) return feather_updates_component.onKlippyMethod(&app.feather, alloc, method, params);
+    }
+    const io = app.klippy_ctx.io orelse return;
+    const req = (try remoteMethodRequest(app.alloc, method, params)) orelse return;
+    const queued = app.remote_calls.put(io, &.{req}, 0) catch 0;
+    if (queued == 0) {
+        app.alloc.free(req);
+        std.debug.print("phobos: warning: Klipper remote method {s} dropped: queue full\n", .{method});
+    }
+}
+
+/// The JSON-RPC request for Klipper remote method `method`, gpa-owned, or
+/// null for an unknown method or a `set_device_power` state Moonraker ignores.
+/// `set_device_power` maps to `machine.device_power.post_device`; the
+/// others keep their names and kwargs. `force` is not supported.
+fn remoteMethodRequest(alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) error{OutOfMemory}!?[]u8 {
+    const kwargs: std.json.Value = if (params == .object) params else .{ .object = .empty };
+    if (std.mem.eql(u8, method, "set_device_power")) {
+        const action = devicePowerAction(kwargs.object.get("state") orelse .null) orelse return null;
+        const device = kwargs.object.get("device") orelse return null;
+        if (device != .string) return null;
+        return try std.json.Stringify.valueAlloc(alloc, .{
+            .jsonrpc = "2.0",
+            .method = "machine.device_power.post_device",
+            .params = .{ .device = device.string, .action = action },
+            .id = 0,
+        }, .{});
+    }
+    const target: []const u8 = if (std.mem.eql(u8, method, "publish_mqtt_topic"))
+        "server.mqtt.publish_mqtt_topic"
+    else for (klippy_remote_methods[feather_updates_component.remote_methods.len..]) |name| {
+        if (std.mem.eql(u8, method, name)) break name;
+    } else return null;
+    return try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .method = target, .params = kwargs, .id = 0 }, .{});
+}
+
+/// power.py `set_device_power` state rules: a bool, or a case-insensitive
+/// "on", "off", "toggle", "true" or "false". Anything else is ignored.
+fn devicePowerAction(state: std.json.Value) ?[]const u8 {
+    switch (state) {
+        .bool => |b| return if (b) "on" else "off",
+        .string => |s| {
+            inline for (.{ .{ "on", "on" }, .{ "true", "on" }, .{ "off", "off" }, .{ "false", "off" }, .{ "toggle", "toggle" } }) |pair| {
+                if (std.ascii.eqlIgnoreCase(s, pair[0])) return pair[1];
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+/// Run queued Klipper remote-method requests through the dispatcher, which
+/// takes Core per handler. Returns when the queue closes or is canceled.
+fn remoteWorker(app: *App, io: std.Io) void {
+    while (app.remote_calls.getOne(io)) |req| {
+        defer app.alloc.free(req);
+        var arena = std.heap.ArenaAllocator.init(app.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = std.json.parseFromSliceLeaky(std.json.Value, a, req, .{}) catch continue;
+        const out = app.dispatcher.handleParsedRoot(.{ .transport = .INTERNAL }, root, a) catch continue;
+        // Moonraker logs a failed remote method; Klipper gets no reply.
+        if (std.mem.indexOf(u8, out, "\"error\"") != null) std.debug.print("phobos: warning: Klipper remote method failed: {s}\n", .{out});
+    } else |_| {}
+}
+
 const Registry = registry.Registry;
 const Dispatcher = jsonrpc.Dispatcher;
 const Connections = connections.Connections;
@@ -275,6 +359,13 @@ pub const App = struct {
     paneldue: paneldue_component.PanelDue = .{},
     /// Forge-X Feather update adapter. Enabled when `[feather_updates]` exists.
     feather: feather_updates_component.FeatherCtx = .{},
+    /// Klipper `call_remote_method` calls for components other than Feather,
+    /// as gpa-owned JSON-RPC request strings. The Klippy reader enqueues
+    /// without blocking; `remoteWorker` runs them so device and broker I/O
+    /// never stalls the status drain. Bound in `httpServer`.
+    remote_calls: std.Io.Queue([]u8) = .init(&.{}),
+    remote_call_buf: [remote_call_queue_len][]u8 = undefined,
+    remote_worker: ?std.Io.Future(void) = null,
     /// Records `git -C <repo>` argv in tests. Production leaves this null and
     /// `daemonFeatherRun` spawns git only when update io is set.
     git_spawn: ?GitSpawnFn = null,
@@ -870,7 +961,7 @@ pub const App = struct {
         }
 
         if (cfg.hasSection("feather_updates")) {
-            self.klippy_ctx.remote_methods = &feather_updates_component.remote_methods;
+            self.klippy_ctx.remote_methods = &klippy_remote_methods;
             self.feather.enabled = true;
             if (cfg.get("feather_updates", "update_key")) |key| {
                 if (key.len > 0 and key.len <= 64) self.feather.update_key = key;
@@ -1095,6 +1186,12 @@ pub const App = struct {
 
     /// Stop and join workers before freeing their dependencies.
     pub fn deinit(self: *App, io: std.Io) void {
+        if (self.remote_worker) |*w| {
+            self.remote_calls.close(io);
+            // Cancel an in-flight device or broker request.
+            w.cancel(io);
+            while (self.remote_calls.getOne(io)) |req| self.alloc.free(req) else |_| {}
+        }
         self.update_ctx.stopAutoRefresh();
         self.data_store_ctx.stopSampler();
         self.klippy_ctx.stop(io);
@@ -1282,7 +1379,7 @@ pub const App = struct {
         // Forge-X Feather callbacks. The three remote method names are
         // installed on the heap KlippyCtx here. httpServer/setConfig rebind
         // the handler pointer once App is at its final address.
-        self.klippy_ctx.remote_methods = &feather_updates_component.remote_methods;
+        self.klippy_ctx.remote_methods = &klippy_remote_methods;
         self.bindFeather();
     }
 
@@ -1332,8 +1429,8 @@ pub const App = struct {
         self.feather.cmd_ctx = self;
         self.feather.klippy_send = featherKlippySend;
         self.feather.klippy_send_ctx = self;
-        self.klippy_ctx.remote_handler = feather_updates_component.onKlippyMethod;
-        self.klippy_ctx.remote_handler_ctx = &self.feather;
+        self.klippy_ctx.remote_handler = onKlippyRemoteMethod;
+        self.klippy_ctx.remote_handler_ctx = self;
     }
 
     /// Moonraker registers `config_examples` and `docs` only after Klippy
@@ -1477,6 +1574,13 @@ pub const App = struct {
     pub fn httpServer(self: *App, io: std.Io) http_transport.Server {
         // Rebind after App is at its final address (init returned it by value).
         self.bindFeather();
+        if (self.remote_worker == null) {
+            self.remote_calls = .init(&self.remote_call_buf);
+            self.remote_worker = io.concurrent(remoteWorker, .{ self, io }) catch |err| blk: {
+                std.debug.print("phobos: warning: Klipper remote methods disabled: {}\n", .{err});
+                break :blk null;
+            };
+        }
         self.ensureInstanceUuid(io);
         // Temperature store needs io to lock its buffer from the RPC handler.
         // Wire Core+io into the dispatcher so it takes the Core lock per-method
@@ -1720,7 +1824,7 @@ test "setConfig loads trusted clients, update sources, and feather_updates" {
     try std.testing.expectEqualStrings("/no/such/klippy.sock", app.klippy_ctx.uds_path);
     try std.testing.expect(app.feather.enabled);
     try std.testing.expectEqualStrings("forge-x", app.feather.update_key);
-    try std.testing.expectEqual(@as(usize, 3), app.klippy_ctx.remote_methods.len);
+    try std.testing.expectEqual(klippy_remote_methods.len, app.klippy_ctx.remote_methods.len);
     try std.testing.expect(app.klippy_ctx.remote_handler != null);
 
     var saw_system = false;
@@ -2769,4 +2873,48 @@ test "startup accepts symlinked file roots and database parents" {
     defer alloc.free(path);
     var store = try FileStore.open(aio, path);
     defer store.deinit();
+}
+
+test "Klipper remote methods map to Moonraker's JSON-RPC requests" {
+    const alloc = std.testing.allocator;
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(alloc);
+    try params.put(alloc, "device", .{ .string = "psu" });
+    try params.put(alloc, "state", .{ .string = "TRUE" });
+    const power = (try remoteMethodRequest(alloc, "set_device_power", .{ .object = params })).?;
+    defer alloc.free(power);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","method":"machine.device_power.post_device","params":{"device":"psu","action":"on"},"id":0}
+    , power);
+    // power.py ignores unknown states; unknown methods are dropped.
+    try params.put(alloc, "state", .{ .string = "blink" });
+    try std.testing.expect(try remoteMethodRequest(alloc, "set_device_power", .{ .object = params }) == null);
+    try std.testing.expect(try remoteMethodRequest(alloc, "no_such_method", .{ .object = params }) == null);
+    const mqtt = (try remoteMethodRequest(alloc, "publish_mqtt_topic", .null)).?;
+    defer alloc.free(mqtt);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","method":"server.mqtt.publish_mqtt_topic","params":{},"id":0}
+    , mqtt);
+    try std.testing.expectEqualStrings("toggle", devicePowerAction(.{ .string = "Toggle" }).?);
+    try std.testing.expectEqualStrings("off", devicePowerAction(.{ .bool = false }).?);
+    try std.testing.expect(devicePowerAction(.{ .integer = 1 }) == null);
+}
+
+test "fuzz remoteMethodRequest: any method and kwargs give valid JSON or null" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const alloc = std.testing.allocator;
+            var buf: [24]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const names = klippy_remote_methods ++ [_][]const u8{"unknown"};
+            var params: std.json.ObjectMap = .empty;
+            defer params.deinit(alloc);
+            try params.put(alloc, "device", .{ .string = buf[0..8] });
+            try params.put(alloc, "state", .{ .string = buf[8..] });
+            const req = (try remoteMethodRequest(alloc, names[buf[0] % names.len], .{ .object = params })) orelse return;
+            defer alloc.free(req);
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, req, .{});
+            parsed.deinit();
+        }
+    }.run, .{});
 }

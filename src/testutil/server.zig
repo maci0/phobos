@@ -2238,3 +2238,22 @@ test "files: upload refuses to overwrite the gcode of an active print" {
     defer alloc.free(contents);
     try std.testing.expectEqualStrings("G28\n", contents);
 }
+
+test "Klipper remote methods run on the worker, not the Klippy reader" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const KlippyCtx = @import("../components/klippy_connection.zig").KlippyCtx;
+    const SpoolmanCtx = @import("../components/spoolman.zig").SpoolmanCtx;
+
+    const frame = try std.json.parseFromSlice(std.json.Value, alloc, "{\"method\":\"spoolman_set_active_spool\",\"params\":{\"spool_id\":7}}", .{});
+    defer frame.deinit();
+    // The Klippy reader dispatches method frames under Core.
+    try ts.app.core.run(ts.io, KlippyCtx.dispatchRemoteMethod, .{ ts.app.klippy_ctx, ts.io, "spoolman_set_active_spool", frame.value });
+
+    var attempts: u16 = 0;
+    while (ts.app.core.run(ts.io, SpoolmanCtx.getSpoolId, .{ts.app.spoolman_ctx}) != 7) : (attempts += 1) {
+        if (attempts >= 500) return error.RemoteMethodNotRun;
+        std.Io.sleep(ts.io, .{ .nanoseconds = 10_000_000 }, .real) catch {};
+    }
+}

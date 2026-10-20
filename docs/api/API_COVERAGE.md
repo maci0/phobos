@@ -339,9 +339,9 @@ Calls phobos registers that the static baseline lists don't enumerate. Most are 
 | `process_status_update` | klippy_connection | ✅ Full | Matches Moonraker. |
 | `publish_mqtt_topic` | mqtt | ✅ Full | Matches Moonraker. |
 | `reboot_machine` | machine | ✅ Full | Matches Moonraker. |
-| `set_device_power` | power | ❌ Missing | Not registered with Klippy (TODO.md). |
-| `set_wled` | wled | ⚠️ Partial | Client JSON-RPC method only; not registered with Klippy (TODO.md). |
-| `set_wled_state` | wled | ⚠️ Partial | Client JSON-RPC method only; not registered with Klippy (TODO.md). |
+| `set_device_power` | power | ⚠️ Partial | Registered with Klippy and run off the Klippy reader; `force` is ignored, so `locked_while_printing` still applies (TODO.md). |
+| `set_wled` | wled | ✅ Full | Matches Moonraker. |
+| `set_wled_state` | wled | ✅ Full | Matches Moonraker. |
 | `shutdown_machine` | machine | ✅ Full | Matches Moonraker. |
 | `spoolman_set_active_spool` | spoolman | ✅ Full | Matches Moonraker. |
 | `start_job_queue` | job_queue | ✅ Full | Matches Moonraker. |

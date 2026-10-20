@@ -50,10 +50,7 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     "notify:notify_service_state_changed": (S_PARTIAL, "Sent after API service actions only; Moonraker also sends it from its periodic service-state poll."),
     # --- Power --------------------------------------------------------------
     "component:power": (S_PARTIAL, "http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md)."),
-    "remote:set_device_power": (S_MISSING, "Not registered with Klippy (TODO.md)."),
-    # --- WLED ---------------------------------------------------------------
-    "remote:set_wled_state": (S_PARTIAL, "Client JSON-RPC method only; not registered with Klippy (TODO.md)."),
-    "remote:set_wled": (S_PARTIAL, "Client JSON-RPC method only; not registered with Klippy (TODO.md)."),
+    "remote:set_device_power": (S_PARTIAL, "Registered with Klippy and run off the Klippy reader; `force` is ignored, so `locked_while_printing` still applies (TODO.md)."),
     # --- Button -------------------------------------------------------------
     "notify:notify_button_event": (S_MISSING, "Never emitted: `[button]` sections and templates are not implemented (TODO.md)."),
     # --- TD-1 ---------------------------------------------------------------
