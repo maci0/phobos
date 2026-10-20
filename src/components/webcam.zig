@@ -30,8 +30,9 @@
 //! GET /server/webcams/item params: name or uid
 //! POST /server/webcams/test params: name or uid
 //!   Response: {"name": ..., "snapshot_reachable": bool, "snapshot_url": ..., "stream_url": ...}
-//!   URLs without `scheme://host` resolve against http://127.0.0.1. The
-//!   snapshot GET runs with the Core lock released and is cancelled after 2 s.
+//!   Relative URLs use the routed local address, with a loopback fallback.
+//!   Local wildcard listeners are rewritten to loopback. DNS and the snapshot
+//!   GET run with Core released and each is cancelled after 2 s.
 //!
 //! A `uid` param naming no webcam is a 404 for every verb. New webcams get a
 //! random UUID4. Config webcams list first; a database webcam with a config
@@ -48,6 +49,7 @@ const webreq = @import("../json/params.zig");
 const http_get = @import("http_get.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
+const machine = @import("machine.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -216,6 +218,7 @@ pub const WebcamCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
     io: ?std.Io,
+    machine_ctx: ?*machine.MachineCtx = null,
     /// Allocator for owned strings in in-memory cam list
     gpa: std.mem.Allocator,
     /// In-memory map: uid → Webcam (persisted to DataStore on writes)
@@ -653,21 +656,132 @@ pub fn handleWebcamDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.me
 
 /// Moonraker probes snapshots with connect_timeout=1 s and request_timeout=1 s.
 const SNAPSHOT_TIMEOUT: std.Io.Duration = .fromSeconds(2);
-/// Host for URLs without a scheme (Moonraker `WebCam._default_host` before
-/// the machine's public address is known).
-const default_host = "http://127.0.0.1";
+/// Linux exposes TCP listeners as text; read them through std.Io.
+const network_file_limit = 256 * 1024;
+const URL_RESOLVE_TIMEOUT: std.Io.Duration = .fromSeconds(2);
+const UrlEnvironment = struct {
+    public_ip: ?[]const u8 = null,
+    network: std.json.Value = .null,
+    tcp4: []const u8 = "",
+    tcp6: []const u8 = "",
+    io: ?std.Io = null,
+};
 
-/// Moonraker `_get_url`: a URL without `scheme://host` is a path on the
-/// default host. Empty stays empty (Moonraker reports "").
-fn resolveUrl(alloc: std.mem.Allocator, url: []const u8) ![]const u8 {
-    if (url.len == 0) return "";
-    if (std.mem.indexOf(u8, url, "://")) |sep| {
-        const scheme_ok = sep > 0 and for (url[0..sep]) |ch| {
-            if (!std.ascii.isAlphanumeric(ch) and ch != '_') break false;
-        } else true;
-        if (scheme_ok and sep + 3 < url.len and url[sep + 3] != '/') return alloc.dupe(u8, url);
+fn readNetworkFile(aio: std.Io, alloc: std.mem.Allocator, path: []const u8) []const u8 {
+    const file = std.Io.Dir.cwd().openFile(aio, path, .{}) catch return "";
+    defer file.close(aio);
+    var buffer: [4096]u8 = undefined;
+    var reader = file.readerStreaming(aio, &buffer);
+    return reader.interface.allocRemaining(alloc, .limited(network_file_limit)) catch "";
+}
+
+/// UDP connect selects a source address without sending any packets.
+fn publicAddress(aio: std.Io, candidates: []const std.Io.net.IpAddress) ?std.Io.net.IpAddress {
+    for (candidates) |candidate| {
+        const stream = candidate.connect(aio, .{ .mode = .dgram, .protocol = .udp }) catch continue;
+        defer stream.close(aio);
+        return stream.socket.address;
     }
-    return std.fmt.allocPrint(alloc, default_host ++ "/{s}", .{std.mem.trimStart(u8, url, "/")});
+    return null;
+}
+
+fn isLoopback(ip: std.Io.net.IpAddress) bool {
+    return switch (ip) {
+        .ip4 => |v| v.bytes[0] == 127,
+        .ip6 => |v| std.mem.eql(u8, &v.bytes, &std.Io.net.Ip6Address.loopback(0).bytes) or
+            if (std.Io.net.Ip4Address.fromIp6(v)) |v4| v4.bytes[0] == 127 else false,
+    };
+}
+
+fn isLocalAddress(network: std.json.Value, ip: std.Io.net.IpAddress) bool {
+    if (network != .object) return false;
+    var it = network.object.iterator();
+    while (it.next()) |iface| {
+        if (iface.value_ptr.* != .object) continue;
+        const addresses = iface.value_ptr.object.get("ip_addresses") orelse continue;
+        if (addresses != .array) continue;
+        for (addresses.array.items) |entry| {
+            if (entry != .object) continue;
+            const address = entry.object.get("address") orelse continue;
+            if (address != .string) continue;
+            const local = std.Io.net.IpAddress.parse(address.string, 0) catch continue;
+            if (local.eql(&ip)) return true;
+        }
+    }
+    return false;
+}
+
+fn hasWildcardListener(tcp: []const u8, port: u16, ipv6: bool) bool {
+    var lines = std.mem.tokenizeScalar(u8, tcp, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        _ = fields.next() orelse continue;
+        const local = fields.next() orelse continue;
+        _ = fields.next() orelse continue;
+        const state = fields.next() orelse continue;
+        if (!std.mem.eql(u8, state, "0A")) continue;
+        const colon = std.mem.indexOfScalar(u8, local, ':') orelse continue;
+        if (colon != (if (ipv6) @as(usize, 32) else 8)) continue;
+        if (!std.mem.allEqual(u8, local[0..colon], '0')) continue;
+        const parsed = std.fmt.parseInt(u16, local[colon + 1 ..], 16) catch continue;
+        if (parsed == port) return true;
+    }
+    return false;
+}
+
+fn resolveHost(aio: std.Io, host: []const u8, port: u16) ?std.Io.net.IpAddress {
+    const Task = struct {
+        fn run(tio: std.Io, name: std.Io.net.HostName, target_port: u16, done: *std.Io.Event) ?std.Io.net.IpAddress {
+            defer done.set(tio);
+            var buffer: [16]std.Io.net.HostName.LookupResult = undefined;
+            var queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&buffer);
+            name.lookup(tio, &queue, .{ .port = target_port }) catch return null;
+            while (queue.getOne(tio)) |result| switch (result) {
+                .address => |address| return address,
+                .canonical_name => {},
+            } else |_| {}
+            return null;
+        }
+    };
+    const name = std.Io.net.HostName.init(host) catch return null;
+    var done: std.Io.Event = .unset;
+    var task = aio.concurrent(Task.run, .{ aio, name, port, &done }) catch return null;
+    _ = sleep.untilStopped(aio, URL_RESOLVE_TIMEOUT, &done);
+    var address = task.cancel(aio) orelse return null;
+    address.setPort(0);
+    return address;
+}
+
+/// Returned URL owns alloc storage, except for the empty string.
+fn resolveUrl(alloc: std.mem.Allocator, url: []const u8, env: UrlEnvironment, convert_local: bool) ![]const u8 {
+    if (url.len == 0) return "";
+    const absolute = if (std.mem.indexOf(u8, url, "://")) |sep| sep > 0 and
+        (for (url[0..sep]) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') break false;
+        } else true) and sep + 3 < url.len and url[sep + 3] != '/' else false;
+    const resolved = if (absolute) try alloc.dupe(u8, url) else blk: {
+        const ip = if (env.public_ip) |text| std.Io.net.IpAddress.parse(text, 0) catch null else null;
+        const host = env.public_ip orelse "127.0.0.1";
+        const brackets = ip != null and ip.? == .ip6;
+        break :blk try std.fmt.allocPrint(alloc, "http://{s}{s}{s}/{s}", .{ if (brackets) "[" else "", host, if (brackets) "]" else "", std.mem.trimStart(u8, url, "/") });
+    };
+    errdefer alloc.free(resolved);
+    if (!convert_local) return resolved;
+    if (env.network != .object or env.network.object.count() == 0) return resolved;
+    var uri = std.Uri.parse(resolved) catch return resolved;
+    const port = uri.port orelse if (std.ascii.eqlIgnoreCase(uri.scheme, "http")) @as(u16, 80) else if (std.ascii.eqlIgnoreCase(uri.scheme, "https")) @as(u16, 443) else if (std.ascii.eqlIgnoreCase(uri.scheme, "rtsp")) @as(u16, 554) else return resolved;
+    const host_component = uri.host orelse return resolved;
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = host_component.toRaw(&host_buf) catch return resolved;
+    const bare_host = if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') host[1 .. host.len - 1] else host;
+    const ip = std.Io.net.IpAddress.parse(bare_host, 0) catch if (env.io) |aio| resolveHost(aio, bare_host, port) orelse return resolved else return resolved;
+    if (isLoopback(ip) or !isLocalAddress(env.network, ip)) return resolved;
+    const loopback = if (hasWildcardListener(env.tcp4, port, false)) "127.0.0.1" else if (hasWildcardListener(env.tcp6, port, true)) "[::1]" else return resolved;
+    uri.host = .{ .raw = loopback };
+    uri.port = port;
+    const result = try std.fmt.allocPrint(alloc, "{f}", .{uri});
+    alloc.free(resolved);
+    return result;
 }
 
 /// GET an `http(s)://` snapshot URL and report whether it responded with a
@@ -701,19 +815,38 @@ pub fn handleWebcamTest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
 
     const cam = try lookupCamera(c, params) orelse return error.NotFound;
-    // Copies: the webcam may change while Core is released.
-    const snapshot_url = try resolveUrl(alloc, cam.snapshot_url);
+    // The camera may change while Core is released.
+    const raw_snapshot = try alloc.dupe(u8, cam.snapshot_url);
+    defer alloc.free(raw_snapshot);
+    const raw_stream = try alloc.dupe(u8, cam.stream_url);
+    defer alloc.free(raw_stream);
     var result: std.json.ObjectMap = .empty;
     try result.put(alloc, "name", .{ .string = try alloc.dupe(u8, cam.name) });
+    var env: UrlEnvironment = .{};
+    if (c.io) |aio| {
+        c.bus.core.unlock(aio);
+    }
+    defer if (c.io) |aio| c.bus.core.lock(aio);
+    if (c.io) |aio| {
+        env.io = aio;
+        if (c.machine_ctx) |mctx| env.network = machine.buildNetworkInfo(mctx, alloc).network;
+        const candidates = [_]std.Io.net.IpAddress{
+            .{ .ip4 = .{ .bytes = .{ 10, 255, 255, 255 }, .port = 1 } },
+            .{ .ip6 = .{ .bytes = .{ 0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0x34 }, .port = 1, .interface = .none } },
+        };
+        if (publicAddress(aio, &candidates)) |ip| {
+            var host_buf: [64]u8 = undefined;
+            const address = try std.fmt.bufPrint(&host_buf, "{f}", .{ip});
+            const host = address[0..std.mem.lastIndexOfScalar(u8, address, ':').?];
+            env.public_ip = try alloc.dupe(u8, std.mem.trim(u8, host, "[]"));
+        }
+        env.tcp4 = readNetworkFile(aio, alloc, "/proc/net/tcp");
+        env.tcp6 = readNetworkFile(aio, alloc, "/proc/net/tcp6");
+    }
+    const snapshot_url = try resolveUrl(alloc, raw_snapshot, env, true);
     try result.put(alloc, "snapshot_url", .{ .string = snapshot_url });
-    try result.put(alloc, "stream_url", .{ .string = try resolveUrl(alloc, cam.stream_url) });
-
-    var reachable = false;
-    if (c.io) |io| if (std.mem.startsWith(u8, snapshot_url, "http")) {
-        c.bus.core.unlock(io);
-        defer c.bus.core.lock(io);
-        reachable = probeSnapshot(io, c.gpa, snapshot_url, SNAPSHOT_TIMEOUT);
-    };
+    try result.put(alloc, "stream_url", .{ .string = try resolveUrl(alloc, raw_stream, env, true) });
+    const reachable = if (c.io) |aio| probeSnapshot(aio, c.gpa, snapshot_url, SNAPSHOT_TIMEOUT) else false;
     try result.put(alloc, "snapshot_reachable", .{ .bool = reachable });
     return .{ .object = result };
 }
@@ -1474,12 +1607,12 @@ test "resolveUrl: paths use the default host like Moonraker _get_url" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("http://127.0.0.1/webcam/?action=snapshot", try resolveUrl(a, "/webcam/?action=snapshot"));
-    try testing.expectEqualStrings("http://127.0.0.1/webcam", try resolveUrl(a, "webcam"));
-    try testing.expectEqualStrings("http://cam:8080/x", try resolveUrl(a, "http://cam:8080/x"));
-    try testing.expectEqualStrings("rtsp://cam/stream", try resolveUrl(a, "rtsp://cam/stream"));
-    try testing.expectEqualStrings("http://127.0.0.1/a://b", try resolveUrl(a, "/a://b"));
-    try testing.expectEqualStrings("", try resolveUrl(a, ""));
+    try testing.expectEqualStrings("http://127.0.0.1/webcam/?action=snapshot", try resolveUrl(a, "/webcam/?action=snapshot", .{}, true));
+    try testing.expectEqualStrings("http://127.0.0.1/webcam", try resolveUrl(a, "webcam", .{}, true));
+    try testing.expectEqualStrings("http://cam:8080/x", try resolveUrl(a, "http://cam:8080/x", .{}, true));
+    try testing.expectEqualStrings("rtsp://cam/stream", try resolveUrl(a, "rtsp://cam/stream", .{}, true));
+    try testing.expectEqualStrings("http://127.0.0.1/a://b", try resolveUrl(a, "/a://b", .{}, true));
+    try testing.expectEqualStrings("", try resolveUrl(a, "", .{}, true));
 }
 
 test "fuzz resolveUrl: output is empty or carries a scheme and host" {
@@ -1488,7 +1621,7 @@ test "fuzz resolveUrl: output is empty or carries a scheme and host" {
             var buf: [48]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const len = smith.valueRangeAtMostWithHash(u8, 0, buf.len, 1);
-            const out = try resolveUrl(testing.allocator, buf[0..len]);
+            const out = try resolveUrl(testing.allocator, buf[0..len], .{}, true);
             defer if (out.len > 0) testing.allocator.free(out);
             if (len == 0) return testing.expectEqual(@as(usize, 0), out.len);
             try testing.expect(std.mem.indexOf(u8, out, "://") != null);
@@ -1525,4 +1658,101 @@ test "probeSnapshot cancels a partial Content-Length body without panicking" {
     const start = std.Io.Clock.Timestamp.now(aio, .awake);
     try testing.expect(!probeSnapshot(aio, std.heap.smp_allocator, try device.url(&url, "/"), .fromMilliseconds(20)));
     try testing.expect(start.untilNow(aio).raw.toMilliseconds() < 5000);
+}
+
+const test_tcp4 = "0: 00000000:0050 00000000:0000 0A\n1: 00000000:1F90 00000000:0000 0A\n";
+const test_tcp6 = "0: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A\n";
+const test_network = "{\"eth0\":{\"ip_addresses\":[{\"address\":\"192.168.5.10\",\"family\":\"ipv4\",\"is_link_local\":false},{\"address\":\"2001:db8::10\",\"family\":\"ipv6\",\"is_link_local\":false}]}}";
+
+test "publicAddress uses the local socket address without sending a datagram" {
+    const ip = publicAddress(testing.io, &.{.{ .ip4 = .loopback(1) }}).?;
+    try testing.expect(isLoopback(ip));
+    try testing.expect(ip.getPort() != 0);
+    try testing.expect(publicAddress(testing.io, &.{}) == null);
+}
+
+test "resolveUrl uses the public IPv4 or IPv6 address and preserves URL components" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const network = try mkParams(a, test_network);
+    var env: UrlEnvironment = .{ .public_ip = "192.168.5.10", .network = network, .tcp4 = test_tcp4, .tcp6 = test_tcp6 };
+    try testing.expectEqualStrings("http://192.168.5.10/cam?token=a%2Fb#image", try resolveUrl(a, "cam?token=a%2Fb#image", env, false));
+    try testing.expectEqualStrings("http://127.0.0.1:80/cam?token=a%2Fb#image", try resolveUrl(a, "/cam?token=a%2Fb#image", env, true));
+    try testing.expectEqualStrings("http://user:p%40ss%3Aword@127.0.0.1:8080/cam?q=a%26b#frame", try resolveUrl(a, "http://user:p%40ss%3Aword@192.168.5.10:8080/cam?q=a%26b#frame", env, true));
+    env.public_ip = "2001:db8::10";
+    try testing.expectEqualStrings("http://[2001:db8::10]/cam", try resolveUrl(a, "/cam", env, false));
+    try testing.expectEqualStrings("https://[::1]:443/snap?x=1", try resolveUrl(a, "https://[2001:db8::10]/snap?x=1", env, true));
+    try testing.expectEqualStrings("http://127.0.0.2:8080/x", try resolveUrl(a, "http://127.0.0.2:8080/x", env, true));
+    try testing.expectEqualStrings("http://192.168.5.20:8080/x", try resolveUrl(a, "http://192.168.5.20:8080/x", env, true));
+    try testing.expectEqualStrings("custom://192.168.5.10/x", try resolveUrl(a, "custom://192.168.5.10/x", env, true));
+    env.tcp4 = "0: 0A05A8C0:1F90 00000000:0000 0A\n";
+    try testing.expectEqualStrings("http://192.168.5.10:8080/x", try resolveUrl(a, "http://192.168.5.10:8080/x", env, true));
+}
+
+test "hasWildcardListener requires a wildcard address, matching port and LISTEN state" {
+    try testing.expect(hasWildcardListener(test_tcp4, 80, false));
+    try testing.expect(hasWildcardListener(test_tcp6, 443, true));
+    try testing.expect(!hasWildcardListener(test_tcp4, 443, false));
+    try testing.expect(!hasWildcardListener("0: 00000000:0050 00000000:0000 01\n", 80, false));
+    try testing.expect(!hasWildcardListener("0: 0100007F:0050 00000000:0000 0A\n", 80, false));
+    try testing.expect(!hasWildcardListener(test_tcp4, 80, true));
+}
+
+test "readNetworkFile reads bounded fixture files and tolerates missing snapshots" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "route", .data = test_tcp4 });
+    const path = try tmp.dir.realPathFileAlloc(testing.io, "route", a);
+    defer a.free(path);
+    const contents = readNetworkFile(testing.io, a, path);
+    defer a.free(contents);
+    try testing.expectEqualStrings(test_tcp4, contents);
+    try tmp.dir.deleteFile(testing.io, "route");
+    try testing.expectEqualStrings("", readNetworkFile(testing.io, a, path));
+}
+
+test "resolveHost resolves localhost with native DNS and rejects invalid names" {
+    const ip = resolveHost(testing.io, "localhost", 80).?;
+    try testing.expect(isLoopback(ip));
+    try testing.expectEqual(@as(u16, 0), ip.getPort());
+    try testing.expect(resolveHost(testing.io, "bad host", 80) == null);
+    try testing.expect(isLoopback(try std.Io.net.IpAddress.parse("::ffff:127.0.0.1", 0)));
+    try testing.expect(!isLoopback(try std.Io.net.IpAddress.parse("2001:db8::1", 0)));
+}
+
+test "fuzz webcam listener and local URL conversion parsers" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var bytes: [256]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const len = smith.valueRangeAtMostWithHash(u16, 0, bytes.len, 1);
+            const text = bytes[0..len];
+            _ = hasWildcardListener(text, 80, false);
+            _ = hasWildcardListener(text, 443, true);
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "tcp", .data = text });
+            const path = try tmp.dir.realPathFileAlloc(testing.io, "tcp", testing.allocator);
+            defer testing.allocator.free(path);
+            const contents = readNetworkFile(testing.io, testing.allocator, path);
+            defer testing.allocator.free(contents);
+            try testing.expectEqualStrings(text, contents);
+            var invalid_name: [265]u8 = undefined;
+            const name = try std.fmt.bufPrint(&invalid_name, "invalid {s}", .{text});
+            try testing.expect(resolveHost(testing.io, name, 80) == null);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const network = try mkParams(a, test_network);
+            _ = publicAddress(testing.io, if (len % 2 == 0) &.{.{ .ip4 = .loopback(1) }} else &.{});
+            const ip = std.Io.net.IpAddress.parse(text, 0) catch try std.Io.net.IpAddress.parse("192.168.5.10", 0);
+            _ = isLocalAddress(network, ip);
+            _ = isLoopback(ip);
+            const resolved = try resolveUrl(testing.allocator, text, .{ .public_ip = "2001:db8::10", .network = network, .tcp4 = text, .tcp6 = text }, true);
+            defer if (resolved.len > 0) testing.allocator.free(resolved);
+            if (len > 0) try testing.expect(std.mem.indexOf(u8, resolved, "://") != null);
+        }
+    }.run, .{});
 }

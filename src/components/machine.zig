@@ -1044,7 +1044,7 @@ fn parseIpAddrJson(alloc: std.mem.Allocator, text: []const u8) NetInfo {
 
 /// Run `ip -json -det address` and parse it. Returns empty maps when io is
 /// absent or `ip` is unavailable/failed.
-fn buildNetworkInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) NetInfo {
+pub fn buildNetworkInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) NetInfo {
     const empty: NetInfo = .{ .network = .{ .object = .empty }, .canbus = .{ .object = .empty } };
     // Forge-X keeps `ip` in /usr/sbin, which is not on a chroot daemon PATH.
     const tries = [_][]const []const u8{

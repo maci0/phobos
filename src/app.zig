@@ -626,6 +626,7 @@ pub const App = struct {
         const machine_ctx = try alloc.create(MachineCtx);
         errdefer alloc.destroy(machine_ctx);
         machine_ctx.* = .{ .clock_io = aio, .gpa = alloc, .bus = bus, .conns = conns };
+        webcam_ctx.machine_ctx = machine_ctx;
 
         // --- Update manager context (machine.update.*) ---
         // The default source set (system + moonraker + klipper git repos) is a
