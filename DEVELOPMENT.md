@@ -206,3 +206,7 @@ parsed config; it rejects a second load. A persisted queue that cannot be read
 fails initialization rather than replacing it with a partial or empty queue.
 Enqueue allocates every new job before changing the existing queue. Deleting a
 migrated history job commits its table row and KV shadow in one transaction.
+History totals and auxiliary fields propagate allocation and store failures;
+reset builds the response before changing either persisted or auxiliary totals.
+Configuration wildcard matching uses an iterative last-star retry, so repeated
+wildcards cannot consume recursive stack space or exponential retry work.

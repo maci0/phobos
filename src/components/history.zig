@@ -253,18 +253,18 @@ pub const HistoryCtx = struct {
     }
 
     /// Build the per-job `auxiliary_data` array (only fields that saw a value).
-    fn buildAuxData(self: *HistoryCtx, alloc: std.mem.Allocator) std.json.Array {
+    fn buildAuxData(self: *HistoryCtx, alloc: std.mem.Allocator) !std.json.Array {
         self.lockAux();
         defer self.unlockAux();
         var arr: std.json.Array = .init(alloc);
         for (self.aux_fields.items) |*f| {
             if (!f.has_value) continue;
             var o: std.json.ObjectMap = .empty;
-            o.put(alloc, "provider", .{ .string = f.provider }) catch continue;
-            o.put(alloc, "name", .{ .string = f.name }) catch continue;
-            o.put(alloc, "value", .{ .float = f.jobValue() }) catch continue;
-            o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null) catch continue;
-            arr.append(.{ .object = o }) catch continue;
+            try o.put(alloc, "provider", .{ .string = f.provider });
+            try o.put(alloc, "name", .{ .string = f.name });
+            try o.put(alloc, "value", .{ .float = f.jobValue() });
+            try o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null);
+            try arr.append(.{ .object = o });
         }
         return arr;
     }
@@ -276,17 +276,17 @@ pub const HistoryCtx = struct {
     }
 
     /// Build the `auxiliary_totals` array across all registered fields.
-    pub fn buildAuxTotals(self: *HistoryCtx, alloc: std.mem.Allocator) std.json.Array {
+    pub fn buildAuxTotals(self: *HistoryCtx, alloc: std.mem.Allocator) !std.json.Array {
         self.lockAux();
         defer self.unlockAux();
         var arr: std.json.Array = .init(alloc);
         for (self.aux_fields.items) |*f| {
             var o: std.json.ObjectMap = .empty;
-            o.put(alloc, "provider", .{ .string = f.provider }) catch continue;
-            o.put(alloc, "name", .{ .string = f.name }) catch continue;
-            o.put(alloc, "total", .{ .float = f.total }) catch continue;
-            o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null) catch continue;
-            arr.append(.{ .object = o }) catch continue;
+            try o.put(alloc, "provider", .{ .string = f.provider });
+            try o.put(alloc, "name", .{ .string = f.name });
+            try o.put(alloc, "total", .{ .float = f.total });
+            try o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null);
+            try arr.append(.{ .object = o });
         }
         return arr;
     }
@@ -502,7 +502,7 @@ pub const HistoryCtx = struct {
         try job_obj.put(a, "total_duration", .{ .float = total_duration });
         try job_obj.put(a, "filament_used", .{ .float = filament_used });
         try job_obj.put(a, "metadata", .{ .object = .empty });
-        try job_obj.put(a, "auxiliary_data", .{ .array = self.buildAuxData(a) });
+        try job_obj.put(a, "auxiliary_data", .{ .array = try self.buildAuxData(a) });
         try job_obj.put(a, "user", .{ .string = self.job_user });
 
         try self.store.updateItem(a, ns_history, job_id_str, .{ .object = job_obj });
@@ -651,12 +651,7 @@ fn loadTotals(c: *HistoryCtx, alloc: std.mem.Allocator) !std.json.Value {
 
 /// Save totals to store.
 fn saveTotals(c: *HistoryCtx, alloc: std.mem.Allocator, totals: std.json.Value) !void {
-    c.store.insertItem(alloc, ns_totals, totals_key, totals) catch |err| switch (err) {
-        // transient store failure: don't propagate, but surface it — otherwise
-        // cumulative print stats silently stop persisting with no signal.
-        ds.Error.BackendError => std.debug.print("phobos: warning: history totals persist failed: {} — cumulative stats may be stale\n", .{err}),
-        else => return err,
-    };
+    try c.store.insertItem(alloc, ns_totals, totals_key, totals);
 }
 
 /// Collect all job records from the history namespace, sorted by job_id.
@@ -797,7 +792,7 @@ pub fn handleTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator
     const totals = try loadTotals(c, alloc);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "job_totals", totals);
-    try obj.put(alloc, "auxiliary_totals", .{ .array = c.buildAuxTotals(alloc) });
+    try obj.put(alloc, "auxiliary_totals", .{ .array = try c.buildAuxTotals(alloc) });
     return .{ .object = obj };
 }
 
@@ -810,13 +805,13 @@ pub fn handleResetTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
     if (c.getCurrentJobId() != null) return error.InvalidParams;
     const last_totals = try loadTotals(c, alloc);
     const new_totals = try buildBaseTotals(alloc);
-    try saveTotals(c, alloc, new_totals);
     // Snapshot aux totals before clearing them.
-    const last_aux = c.buildAuxTotals(alloc);
-    c.resetAuxTotals();
+    const last_aux = try c.buildAuxTotals(alloc);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "last_totals", last_totals);
     try obj.put(alloc, "last_auxiliary_totals", .{ .array = last_aux });
+    try saveTotals(c, alloc, new_totals);
+    c.resetAuxTotals();
     return .{ .object = obj };
 }
 
@@ -1028,7 +1023,7 @@ test "history aux fields: record → job auxiliary_data → totals" {
     ctx.recordAuxValue("chamber", "temperature", 55);
     ctx.recordAuxValue("other", "x", 999); // no matching field → ignored
 
-    const aux = ctx.buildAuxData(a);
+    const aux = try ctx.buildAuxData(a);
     try testing.expectEqual(@as(usize, 1), aux.items.len);
     const e = aux.items[0].object;
     try testing.expectEqualStrings("chamber", e.get("provider").?.string);
@@ -1037,12 +1032,55 @@ test "history aux fields: record → job auxiliary_data → totals" {
     try testing.expectEqualStrings("C", e.get("units").?.string);
 
     ctx.accumulateAux();
-    const totals = ctx.buildAuxTotals(a);
+    const totals = try ctx.buildAuxTotals(a);
     try testing.expectEqual(@as(usize, 1), totals.items.len);
     try testing.expectEqual(@as(f64, 55), totals.items[0].object.get("total").?.float);
 
     ctx.resetAuxTotals();
-    try testing.expectEqual(@as(f64, 0), ctx.buildAuxTotals(a).items[0].object.get("total").?.float);
+    try testing.expectEqual(@as(f64, 0), (try ctx.buildAuxTotals(a)).items[0].object.get("total").?.float);
+}
+
+test "history auxiliary allocation failures preserve complete totals" {
+    const Case = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var seed = std.heap.ArenaAllocator.init(testing.allocator);
+            defer seed.deinit();
+            const a = seed.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            const initial = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"total_jobs\":9}", .{});
+            try mem.dataStore().insertItem(a, ns_totals, totals_key, initial);
+            var bus: NotifyBus = undefined;
+            var ctx = HistoryCtx{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "", .gpa = testing.allocator };
+            defer ctx.deinit();
+            try ctx.registerAuxField("one", "reading", "temperature", "C", .accumulate);
+            try ctx.registerAuxField("two", "reading", "temperature", null, .maximum);
+            ctx.recordAuxValue("one", "temperature", 3);
+            ctx.recordAuxValue("two", "temperature", 8);
+            ctx.accumulateAux();
+            var request = std.heap.ArenaAllocator.init(alloc);
+            defer request.deinit();
+            const req = request.allocator();
+            const data = try ctx.buildAuxData(req);
+            try testing.expectEqual(@as(usize, 2), data.items.len);
+            const totals = try handleTotals(@ptrCast(&ctx), .null, req);
+            try testing.expectEqual(@as(usize, 2), totals.object.get("auxiliary_totals").?.array.items.len);
+            const reset = handleResetTotals(@ptrCast(&ctx), .null, req) catch |err| {
+                try testing.expectEqual(@as(i64, 9), (try mem.dataStore().getItem(a, ns_totals, totals_key)).?.object.get("total_jobs").?.integer);
+                try testing.expectEqual(@as(f64, 3), ctx.aux_fields.items[0].total);
+                return err;
+            };
+            try testing.expectEqual(@as(usize, 2), reset.object.get("last_auxiliary_totals").?.array.items.len);
+            try testing.expectEqual(@as(f64, 0), ctx.aux_fields.items[0].total);
+        }
+    };
+    var baseline = testing.FailingAllocator.init(testing.allocator, .{});
+    try Case.run(baseline.allocator());
+    for (0..baseline.alloc_index) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        Case.run(failing.allocator()) catch |err| try testing.expectEqual(error.OutOfMemory, err);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 // ---- In-memory store for tests ----
@@ -1869,6 +1907,9 @@ test "history handlers report store failures instead of empty results" {
         fn getNamespace(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8) ds.Error!std.json.Value {
             return ds.Error.BackendError;
         }
+        fn insertItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {
+            return ds.Error.BackendError;
+        }
     };
     var bus: NotifyBus = undefined;
 
@@ -1887,6 +1928,11 @@ test "history handlers report store failures instead of empty results" {
     ctx.onJobStateChanged(JobEvent.started, .empty, ps);
     try testing.expect(ctx.current_job_id == null);
     try testing.expectEqualStrings("a.gcode", (try mem.dataStore().getItem(a, ns_history, "000001")).?.object.get("filename").?.string);
+
+    var no_write = MemStore.vtable;
+    no_write.insertItem = failing.insertItem;
+    ctx.store = .{ .ctx = &mem, .vtable = &no_write };
+    try testing.expectError(ds.Error.BackendError, handleResetTotals(@ptrCast(&ctx), .null, a));
 }
 
 test "prepJob: exists reports whether the gcode file is present" {

@@ -565,17 +565,27 @@ fn globExpandIo(
 }
 
 fn globMatch(pattern: []const u8, name: []const u8) bool {
-    if (pattern.len == 0) return name.len == 0;
-    if (pattern[0] == '*') {
-        var i: usize = 0;
-        while (i <= name.len) : (i += 1) {
-            if (globMatch(pattern[1..], name[i..])) return true;
+    var p: usize = 0;
+    var n: usize = 0;
+    var star: ?usize = null;
+    var matched: usize = 0;
+    while (n < name.len) {
+        if (p < pattern.len and (pattern[p] == '?' or pattern[p] == name[n])) {
+            p += 1;
+            n += 1;
+        } else if (p < pattern.len and pattern[p] == '*') {
+            star = p;
+            p += 1;
+            matched = n;
+        } else if (star) |last| {
+            p = last + 1;
+            matched += 1;
+            n = matched;
+        } else {
+            return false;
         }
-        return false;
     }
-    if (name.len == 0) return false;
-    if (pattern[0] == '?' or pattern[0] == name[0]) return globMatch(pattern[1..], name[1..]);
-    return false;
+    return std.mem.trimStart(u8, pattern[p..], "*").len == 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1029,18 @@ test "globMatch: patterns" {
     try std.testing.expect(globMatch("*", "anything"));
     try std.testing.expect(globMatch("exact", "exact"));
     try std.testing.expect(!globMatch("exact", "inexact"));
+    try std.testing.expect(globMatch("*a?c*d?e", "prefixabc_middledee"));
+    try std.testing.expect(!globMatch("*a?c*d?e", "prefixabc_middledf"));
+    try std.testing.expect(globMatch("", ""));
+    try std.testing.expect(!globMatch("", "name"));
+    try std.testing.expect(!globMatch("?", ""));
+}
+
+test "globMatch: repeated wildcards do not recurse or retry exponentially" {
+    try std.testing.expect(!globMatch("*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*ab", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    const stars: [8192]u8 = @splat('*');
+    try std.testing.expect(globMatch(&stars, ""));
+    try std.testing.expect(globMatch(&stars, "name"));
 }
 
 test "expandTabs: tab → 4 spaces" {
