@@ -27,6 +27,7 @@ const authz = @import("components/authorization.zig");
 const file_manager = @import("components/file_manager.zig");
 const klippy_connection = @import("components/klippy_connection.zig");
 const DeadlineWriter = @import("util/deadline_writer.zig").DeadlineWriter;
+const SocketDeadline = @import("util/socket_deadline.zig").SocketDeadline;
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -38,6 +39,9 @@ pub const jsonrpc_path = "/server/jsonrpc";
 
 /// Moonraker `[server] max_websocket_connections` default.
 pub const default_max_websocket_connections = 50;
+
+/// Tornado HTTP1Connection's default idle/header receive timeout.
+pub const default_http_header_timeout: Io.Duration = .fromSeconds(3600);
 
 fn routeHasTransport(route: *const Route, kind: TransportType) bool {
     for (route.transports) |t| if (t == kind) return true;
@@ -95,7 +99,7 @@ pub const Server = struct {
     klippy_ctx: ?*klippy_connection.KlippyCtx = null,
     /// Allowed CORS origins from `[authorization] cors_domains`. An entry of `*`
     /// matches any origin; `*.example.com` matches subdomains; otherwise an exact
-    /// match. Empty = no CORS (same-origin only, like Moonraker's default).
+    /// match. A nonempty list also permits trusted Origin IPs. Empty = no CORS.
     cors_domains: []const []const u8 = &.{},
     /// Moonraker `[server] use_xheaders`, default true. When set, `X-Real-Ip`
     /// and `X-Forwarded-For` replace the socket peer for trusted-client checks
@@ -103,6 +107,8 @@ pub const Server = struct {
     use_xheaders: bool = true,
     /// Upgrades are refused once this many WebSocket sessions are open.
     max_websocket_connections: usize = default_max_websocket_connections,
+    /// One absolute deadline for each HTTP head, including partial headers.
+    http_header_timeout: Io.Duration = default_http_header_timeout,
 };
 
 /// Credentials and client headers carried by an HTTP request. All slices
@@ -364,21 +370,21 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     var peer_ip_buf: [64]u8 = undefined;
     const peer_ip = try peerAddress(&peer_ip_buf, stream.socket.address);
 
-    // Reader buffer also backs WebSocket input after upgrade
-    // (std.http.WebSocket.input == server.reader.in), and `readSmallMessage`
-    // requires each INBOUND WS message fit it, so 16 KiB caps one inbound
-    // JSON-RPC message. The writer streams responses/notifications, so 8 KB
-    // suffices. These live for the whole connection; 64+64 KB × the
-    // WS-connection ceiling (default 50) was ~6.4 MB of stack.
+    // Reader storage also backs WebSocket input after upgrade. Keep the normal
+    // input buffer at 16 KiB; larger messages grow lazily in util/ws_message.zig.
+    // The writer streams responses and notifications through its 8 KiB buffer.
     var sbuf: [16 * 1024]u8 = undefined;
-    var s_r = stream.reader(io, &sbuf);
+    var read_deadline: SocketDeadline = .{ .base_io = io, .timeout = .none };
+    var s_r = stream.reader(read_deadline.io(), &sbuf);
     var wbuf: [8 * 1024]u8 = undefined;
     var s_w = stream.writer(io, &wbuf);
 
     var http_server = std.http.Server.init(&s_r.interface, &s_w.interface);
 
     while (true) {
+        read_deadline.timeout = .{ .deadline = .fromNow(io, .{ .raw = srv.http_header_timeout, .clock = .awake }) };
         var req = http_server.receiveHead() catch return;
+        read_deadline.timeout = .none;
 
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer arena.deinit();
@@ -393,7 +399,7 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         creds.remote_ip = try alloc.dupe(u8, addr.client);
         if (addr.proxy) |proxy| creds.proxy_ip = try alloc.dupe(u8, proxy);
         const path = pathOf(target);
-        const headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
+        const headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin, srv.auth);
 
         switch (req.upgradeRequested()) {
             .websocket => |key| {
@@ -492,7 +498,7 @@ fn serveUpgrade(
             r.respond(b, .{ .status = status, .extra_headers = h, .keep_alive = false }) catch {};
         }
     }.f;
-    if (!originAllowed(srv.cors_domains, creds.origin, creds.host)) return refuse(req, alloc, headers, .forbidden, "Cross origin websockets not allowed");
+    if (!originAllowed(srv.cors_domains, creds.origin, creds.host, srv.auth)) return refuse(req, alloc, headers, .forbidden, "Cross origin websockets not allowed");
     const conns = srv.conns orelse return refuse(req, alloc, headers, .bad_request, "WebSocket unsupported");
     if (std.mem.eql(u8, path, "/klippysocket")) {
         if (conns.count(srv.io) >= srv.max_websocket_connections) return refuse(req, alloc, headers, .service_unavailable, "Maximum Number of Websocket Connections Reached");
@@ -594,13 +600,13 @@ test "fuzz WebSocket preparation respects capacity across removals" {
 
 /// Tornado `WebSocketHandler.check_origin` with Moonraker's CORS fallback: no
 /// origin, or one whose host[:port] equals the Host header, is allowed;
-/// otherwise the origin must match `cors_domains`.
-fn originAllowed(cors_domains: []const []const u8, origin: ?[]const u8, host: ?[]const u8) bool {
+/// otherwise CORS patterns or trusted Origin IPs must allow it.
+fn originAllowed(cors_domains: []const []const u8, origin: ?[]const u8, host: ?[]const u8, auth: ?*const authz.AuthCtx) bool {
     const o = origin orelse return true;
     const rest = if (std.mem.indexOf(u8, o, "://")) |i| o[i + 3 ..] else o;
     const netloc = rest[0 .. std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len];
     if (host) |h| if (std.ascii.eqlIgnoreCase(netloc, h)) return true;
-    return corsOriginAllowed(cors_domains, o);
+    return corsOriginAllowed(cors_domains, o, auth);
 }
 
 /// Stream a file from disk to the HTTP response in 64 KB chunks, with
@@ -637,7 +643,8 @@ fn sendFileStreaming(io: Io, req: *std.http.Server.Request, file_request: file_m
 
 /// True if `origin` is permitted by `cors_domains` (Moonraker rules): `*` allows
 /// any; `*.example.com` matches subdomains; otherwise an exact origin or host match.
-fn corsOriginAllowed(cors_domains: []const []const u8, origin: []const u8) bool {
+/// A nonempty list also enables the trusted-Origin-IP fallback.
+fn corsOriginAllowed(cors_domains: []const []const u8, origin: []const u8, auth: ?*const authz.AuthCtx) bool {
     if (origin.len == 0) return false;
     const host = if (std.mem.indexOf(u8, origin, "://")) |i| origin[i + 3 ..] else origin;
     for (cors_domains) |d| {
@@ -646,16 +653,27 @@ fn corsOriginAllowed(cors_domains: []const []const u8, origin: []const u8) bool 
         if (std.mem.eql(u8, d, host)) return true;
         if (std.mem.startsWith(u8, d, "*.") and std.mem.endsWith(u8, host, d[1..])) return true;
     }
-    return false;
+    const ctx = auth orelse return false;
+    return cors_domains.len != 0 and trustedOriginIP(&ctx.trusted, origin);
+}
+
+fn trustedOriginIP(trusted: *const authz.TrustedConfig, origin: []const u8) bool {
+    if (!std.mem.startsWith(u8, origin, "http://") and !std.mem.startsWith(u8, origin, "https://")) return false;
+    const uri = std.Uri.parse(origin) catch return false;
+    if (uri.user != null or uri.password != null) return false;
+    const host = uri.host orelse return false;
+    // Moonraker's Origin fallback only extracts unbracketed IPv4 literals.
+    const ip = net.IpAddress.parseIp4(host.percent_encoded, 0) catch return false;
+    return trusted.isTrusted(ip);
 }
 
 /// Build the response header list: always content-type; plus the CORS allow
 /// headers (echoing `origin`) when it is permitted. Arena-allocated.
-fn buildResponseHeaders(alloc: std.mem.Allocator, cors_domains: []const []const u8, origin: ?[]const u8) []const std.http.Header {
+fn buildResponseHeaders(alloc: std.mem.Allocator, cors_domains: []const []const u8, origin: ?[]const u8, auth: ?*const authz.AuthCtx) []const std.http.Header {
     var list: std.ArrayList(std.http.Header) = .empty;
     list.append(alloc, .{ .name = "content-type", .value = "application/json" }) catch return &.{};
     if (origin) |o| {
-        if (corsOriginAllowed(cors_domains, o)) {
+        if (corsOriginAllowed(cors_domains, o, auth)) {
             list.append(alloc, .{ .name = "Access-Control-Allow-Origin", .value = o }) catch {};
             list.append(alloc, .{ .name = "Access-Control-Allow-Credentials", .value = "true" }) catch {};
             list.append(alloc, .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, PUT, DELETE, OPTIONS" }) catch {};
@@ -1301,18 +1319,18 @@ test "handleParsed: unknown route is 404 with Moonraker error shape" {
 
 test "corsOriginAllowed: wildcard, exact, subdomain, host" {
     const star = [_][]const u8{"*"};
-    try std.testing.expect(corsOriginAllowed(&star, "http://anything.com"));
+    try std.testing.expect(corsOriginAllowed(&star, "http://anything.com", null));
     const exact = [_][]const u8{"http://app.example.com"};
-    try std.testing.expect(corsOriginAllowed(&exact, "http://app.example.com"));
-    try std.testing.expect(!corsOriginAllowed(&exact, "http://evil.com"));
+    try std.testing.expect(corsOriginAllowed(&exact, "http://app.example.com", null));
+    try std.testing.expect(!corsOriginAllowed(&exact, "http://evil.com", null));
     const sub = [_][]const u8{"*.local"};
-    try std.testing.expect(corsOriginAllowed(&sub, "http://printer.local"));
-    try std.testing.expect(!corsOriginAllowed(&sub, "http://printer.remote"));
+    try std.testing.expect(corsOriginAllowed(&sub, "http://printer.local", null));
+    try std.testing.expect(!corsOriginAllowed(&sub, "http://printer.remote", null));
     const host = [_][]const u8{"192.168.0.150:7199"};
-    try std.testing.expect(corsOriginAllowed(&host, "http://192.168.0.150:7199"));
+    try std.testing.expect(corsOriginAllowed(&host, "http://192.168.0.150:7199", null));
     // Empty origin / empty list never allowed.
-    try std.testing.expect(!corsOriginAllowed(&star, ""));
-    try std.testing.expect(!corsOriginAllowed(&.{}, "http://x"));
+    try std.testing.expect(!corsOriginAllowed(&star, "", null));
+    try std.testing.expect(!corsOriginAllowed(&.{}, "http://x", null));
 }
 
 test "buildResponseHeaders: CORS headers only when origin allowed" {
@@ -1320,7 +1338,7 @@ test "buildResponseHeaders: CORS headers only when origin allowed" {
     defer arena.deinit();
     const a = arena.allocator();
     const allow = [_][]const u8{"*"};
-    const h1 = buildResponseHeaders(a, &allow, "http://ui.example");
+    const h1 = buildResponseHeaders(a, &allow, "http://ui.example", null);
     var has_acao = false;
     for (h1) |h| if (std.ascii.eqlIgnoreCase(h.name, "Access-Control-Allow-Origin")) {
         has_acao = true;
@@ -1328,8 +1346,158 @@ test "buildResponseHeaders: CORS headers only when origin allowed" {
     };
     try std.testing.expect(has_acao);
     // No origin / no cors config → just content-type, no ACAO.
-    const h2 = buildResponseHeaders(a, &.{}, "http://ui.example");
+    const h2 = buildResponseHeaders(a, &.{}, "http://ui.example", null);
     for (h2) |h| try std.testing.expect(!std.ascii.eqlIgnoreCase(h.name, "Access-Control-Allow-Origin"));
+}
+
+test "CORS responses and WebSocket upgrades accept trusted Origin IPs only with configured domains" {
+    const alloc = std.testing.allocator;
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]bool{ false, true }) |configured| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "cors.cfg", .data = if (configured)
+            "[authorization]\ntrusted_clients: 10.0.0.0/8\ncors_domains: https://ui.example\n"
+        else
+            "[authorization]\ntrusted_clients: 10.0.0.0/8\n" });
+        const path = try tmp.dir.realPathFileAlloc(io, "cors.cfg", alloc);
+        defer alloc.free(path);
+        const ts = try TestServer.initWithConfig(alloc, path);
+        defer ts.stop();
+        for ([_]struct { origin: []const u8, trusted: bool }{
+            .{ .origin = "http://10.4.5.6:8080", .trusted = true },
+            .{ .origin = "https://10.255.0.1", .trusted = true },
+            .{ .origin = "http://11.4.5.6", .trusted = false },
+            .{ .origin = "http://10.4.5.6.evil.example", .trusted = false },
+            .{ .origin = "http://10.4.5.6@evil.example", .trusted = false },
+            .{ .origin = "ftp://10.4.5.6", .trusted = false },
+            .{ .origin = "https://ui.example", .trusted = true },
+        }) |case| {
+            const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+            defer stream.close(ts.io);
+            var deadline: SocketDeadline = .{ .base_io = ts.io, .timeout = .{ .deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(1), .clock = .awake }) } };
+            var wb: [512]u8 = undefined;
+            var writer = stream.writer(deadline.io(), &wb);
+            try writer.interface.print("OPTIONS /server/info HTTP/1.1\r\nHost: printer.local\r\nOrigin: {s}\r\nConnection: close\r\n\r\n", .{case.origin});
+            try writer.interface.flush();
+            var rb: [2048]u8 = undefined;
+            var reader = stream.reader(deadline.io(), &rb);
+            try std.testing.expectEqualStrings("HTTP/1.1 204 No Content\r\n", try reader.interface.takeDelimiterInclusive('\n'));
+            var allowed = false;
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.mem.eql(u8, line, "\r\n")) break;
+                if (std.mem.startsWith(u8, line, "Access-Control-Allow-Origin: ")) {
+                    try std.testing.expectEqualStrings(case.origin, std.mem.trimEnd(u8, line[29..], "\r\n"));
+                    allowed = true;
+                }
+            }
+            try std.testing.expectEqual(configured and case.trusted, allowed);
+        }
+        var rb: [1024]u8 = undefined;
+        const status = try rawStatusLine(ts.io, ts.port(), "GET /websocket HTTP/1.1\r\nHost: printer.local\r\nOrigin: http://10.4.5.6:8080\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n", &rb);
+        try std.testing.expectEqualStrings(if (configured) "HTTP/1.1 101 Switching Protocols" else "HTTP/1.1 403 Forbidden", status);
+    }
+}
+
+test "trustedOriginIP accepts literal IPv4 hosts without credentials" {
+    const ips = [_]net.IpAddress{try net.IpAddress.parse("192.168.0.150", 0)};
+    const trusted: authz.TrustedConfig = .{ .ips = &ips };
+    try std.testing.expect(trustedOriginIP(&trusted, "http://192.168.0.150:8080"));
+    for ([_][]const u8{
+        "https://192.168.0.151",
+        "http://printer.local",
+        "http://user@192.168.0.150",
+        "http://192.168.0.150.evil.example",
+        "http://192.168.0.150:99999",
+        "http://%31%39%32.168.0.150",
+        "http://[::1]",
+        "ftp://192.168.0.150",
+        "HTTP://192.168.0.150",
+        "null",
+        "",
+    }) |origin| try std.testing.expect(!trustedOriginIP(&trusted, origin));
+}
+
+test "fuzz trustedOriginIP parses bounded origins and honors IPv4 ranges" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const ranges = [_]authz.TrustedConfig.Cidr{.{ .addr = try net.IpAddress.parse("10.0.0.0", 0), .prefix = 8 }};
+            const trusted: authz.TrustedConfig = .{ .ranges = &ranges };
+            var bytes: [256]u8 = undefined;
+            const len = smith.valueRangeAtMostWithHash(u16, 0, bytes.len, 0);
+            smith.bytesWithHash(bytes[0..len], 1);
+            _ = trustedOriginIP(&trusted, bytes[0..len]);
+            const prefix = smith.valueRangeAtMostWithHash(u8, 0, 255, 2);
+            const tail = smith.valueRangeAtMostWithHash(u8, 0, 255, 3);
+            const origin = try std.fmt.bufPrint(&bytes, "https://{d}.3.4.{d}:7125", .{ prefix, tail });
+            try std.testing.expectEqual(prefix == 10, trustedOriginIP(&trusted, origin));
+        }
+    }.run, .{});
+}
+
+test "HTTP header deadlines close initial partial and keepalive idle connections" {
+    const ts = try @import("testutil/server.zig").TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    ts.srv.http_header_timeout = .fromMilliseconds(100);
+    for ([_][]const u8{ "", "GET /server/info HTTP/1.1\r\nHost:", "OPTIONS /server/info HTTP/1.1\r\nHost: localhost\r\n\r\n" }, 0..) |prefix, i| {
+        const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+        defer stream.close(ts.io);
+        var deadline: SocketDeadline = .{ .base_io = ts.io, .timeout = .{ .deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+        var writer = stream.writer(deadline.io(), &.{});
+        try writer.interface.writeAll(prefix);
+        var rb: [2048]u8 = undefined;
+        var reader = stream.reader(deadline.io(), &rb);
+        if (i == 2) {
+            try std.testing.expectEqualStrings("HTTP/1.1 204 No Content\r\n", try reader.interface.takeDelimiterInclusive('\n'));
+            while (!std.mem.eql(u8, try reader.interface.takeDelimiterInclusive('\n'), "\r\n")) {}
+        }
+        try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+    }
+    const body = try ts.get(std.testing.allocator, "/server/info");
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"result\"") != null);
+}
+
+test "HTTP header deadline does not limit a request body" {
+    const ts = try @import("testutil/server.zig").TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    ts.srv.http_header_timeout = .fromMilliseconds(100);
+    const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+    defer stream.close(ts.io);
+    var deadline: SocketDeadline = .{ .base_io = ts.io, .timeout = .{ .deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+    var wb: [512]u8 = undefined;
+    var writer = stream.writer(deadline.io(), &wb);
+    const payload = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server.info\"}";
+    try writer.interface.print("POST /server/jsonrpc HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{payload.len});
+    try writer.interface.flush();
+    try ts.io.sleep(.fromMilliseconds(200), .awake);
+    try writer.interface.writeAll(payload);
+    try writer.interface.flush();
+    var rb: [2048]u8 = undefined;
+    var reader = stream.reader(deadline.io(), &rb);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\n", try reader.interface.takeDelimiterInclusive('\n'));
+}
+
+test "fuzz incomplete HTTP headers expire without occupying a handler indefinitely" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const ts = try @import("testutil/server.zig").TestServer.init(std.testing.allocator);
+            defer ts.stop();
+            ts.srv.http_header_timeout = .fromMilliseconds(20);
+            const head = "GET /server/info HTTP/1.1\r\nHost: localhost\r\nX-Partial: ";
+            const len = smith.valueRangeAtMostWithHash(u8, 0, head.len, 0);
+            const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+            defer stream.close(ts.io);
+            var deadline: SocketDeadline = .{ .base_io = ts.io, .timeout = .{ .deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+            var writer = stream.writer(deadline.io(), &.{});
+            try writer.interface.writeAll(head[0..len]);
+            var rb: [128]u8 = undefined;
+            var reader = stream.reader(deadline.io(), &rb);
+            try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+        }
+    }.run, .{});
 }
 
 test "fuzz_http_transport: random request bytes never crash, always a well-formed response" {
@@ -1446,10 +1614,11 @@ fn rawStatusLine(io: Io, port: u16, request: []const u8, out: []u8) ![]const u8 
     const stream = try (try net.IpAddress.parse("127.0.0.1", port)).connect(io, .{ .mode = .stream });
     defer stream.close(io);
     var wbuf: [1024]u8 = undefined;
-    var w = stream.writer(io, &wbuf);
+    var deadline: SocketDeadline = .{ .base_io = io, .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+    var w = stream.writer(deadline.io(), &wbuf);
     try w.interface.writeAll(request);
     try w.interface.flush();
-    var r = stream.reader(io, out);
+    var r = stream.reader(deadline.io(), out);
     return std.mem.trimEnd(u8, try r.interface.takeDelimiterInclusive('\n'), "\r\n");
 }
 
@@ -1548,11 +1717,11 @@ test "WebSocket upgrades check the origin and the bridge requires auth" {
 
 test "originAllowed matches the Host header or cors_domains" {
     const cors = [_][]const u8{"*.example.com"};
-    try std.testing.expect(originAllowed(&.{}, null, "h:1"));
-    try std.testing.expect(originAllowed(&.{}, "http://Printer.local:7125/path", "printer.local:7125"));
-    try std.testing.expect(!originAllowed(&.{}, "http://evil.example", "printer.local:7125"));
-    try std.testing.expect(!originAllowed(&.{}, "http://printer.local", "printer.local:7125"));
-    try std.testing.expect(originAllowed(&cors, "https://ui.example.com", "printer.local"));
+    try std.testing.expect(originAllowed(&.{}, null, "h:1", null));
+    try std.testing.expect(originAllowed(&.{}, "http://Printer.local:7125/path", "printer.local:7125", null));
+    try std.testing.expect(!originAllowed(&.{}, "http://evil.example", "printer.local:7125", null));
+    try std.testing.expect(!originAllowed(&.{}, "http://printer.local", "printer.local:7125", null));
+    try std.testing.expect(originAllowed(&cors, "https://ui.example.com", "printer.local", null));
 }
 
 test "fuzz originAllowed never crashes and allows a missing origin" {
@@ -1564,8 +1733,8 @@ test "fuzz originAllowed never crashes and allows a missing origin" {
             const hl = smith.valueRangeAtMostWithHash(u8, 0, h.len, 1);
             smith.bytesWithHash(o[0..ol], 2);
             smith.bytesWithHash(h[0..hl], 3);
-            _ = originAllowed(&.{"*.x"}, o[0..ol], h[0..hl]);
-            try std.testing.expect(originAllowed(&.{}, null, h[0..hl]));
+            _ = originAllowed(&.{"*.x"}, o[0..ol], h[0..hl], null);
+            try std.testing.expect(originAllowed(&.{}, null, h[0..hl], null));
         }
     }.run, .{});
 }
