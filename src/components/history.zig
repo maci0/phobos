@@ -2283,7 +2283,7 @@ test "fuzz markInterruptedJobs: never panics" {
 }
 
 test "auxiliary field registration cleans up every allocation failure" {
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
     defer db.deinit();
     try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn register(alloc: std.mem.Allocator, store: DataStore) !void {

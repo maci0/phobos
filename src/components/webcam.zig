@@ -958,7 +958,7 @@ test "addFromConfig: config webcam is listed and cannot be overwritten" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
     defer db.deinit();
     var nb: NullBus = undefined;
     nb.init(a);
@@ -1449,7 +1449,7 @@ test "addFromConfig: hides a same-name database webcam without deleting it and l
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
     defer db.deinit();
     var nb: NullBus = undefined;
     nb.init(a);

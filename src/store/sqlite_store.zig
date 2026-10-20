@@ -24,7 +24,6 @@ const ds = @import("datastore.zig");
 const Error = ds.Error;
 
 pub const SqliteStore = struct {
-    gpa: std.mem.Allocator,
     io: std.Io,
     db: *c.sqlite3,
     /// Serializes read-modify-write so concurrent inserts to one top-level
@@ -41,7 +40,7 @@ pub const SqliteStore = struct {
         self.rmw_lock.unlock(self.io);
     }
 
-    pub fn open(gpa: std.mem.Allocator, io: std.Io, path: [:0]const u8) Error!SqliteStore {
+    pub fn open(io: std.Io, path: [:0]const u8) Error!SqliteStore {
         if (std.fs.path.dirname(path)) |parent| {
             var parent_dir = std.Io.Dir.cwd().createDirPathOpen(io, parent, .{}) catch return Error.BackendError;
             parent_dir.close(io);
@@ -56,7 +55,7 @@ pub const SqliteStore = struct {
             return Error.BackendError;
         }
         errdefer _ = c.sqlite3_close(db.?);
-        var self = SqliteStore{ .gpa = gpa, .io = io, .db = db.? };
+        var self = SqliteStore{ .io = io, .db = db.? };
         // WAL for crash-safety + concurrency; create the namespace table to match
         // Moonraker's schema (the `record` declared type drives no behaviour here
         // — we encode/decode the blobs ourselves — but keeps the schema identical).
@@ -517,7 +516,7 @@ test "SqliteStore.open creates missing database parents" {
     defer testing.allocator.free(root);
     var path_buf: [512]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/missing/database/moonraker-sql.db", .{root}, 0);
-    var db = try SqliteStore.open(testing.allocator, testing.io, path);
+    var db = try SqliteStore.open(testing.io, path);
     defer db.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -525,7 +524,7 @@ test "SqliteStore.open creates missing database parents" {
     try db.insertItem(a, "test", "value", .{ .integer = 42 });
     const value = (try db.getItem(a, "test", "value")).?;
     try testing.expectEqual(@as(i64, 42), value.integer);
-    var again = try SqliteStore.open(testing.allocator, testing.io, path);
+    var again = try SqliteStore.open(testing.io, path);
     defer again.deinit();
     try testing.expectEqual(@as(i64, 42), (try again.getItem(a, "test", "value")).?.integer);
 }
@@ -545,7 +544,7 @@ test "fuzz SqliteStore.open creates bounded nested paths" {
             for (&name) |*ch| ch.* = 'a' + ch.* % 26;
             var path_buf: [512]u8 = undefined;
             const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/{s}/database/db.sqlite", .{ root, name }, 0);
-            var db = try SqliteStore.open(testing.allocator, testing.io, path);
+            var db = try SqliteStore.open(testing.io, path);
             defer db.deinit();
             var file = try std.Io.Dir.cwd().openFile(io, path, .{});
             file.close(io);
@@ -597,7 +596,7 @@ test "SqliteStore: migrated job_history stays visible beside new KV jobs" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var s = try SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
     try createJobHistory(&s);
 
@@ -628,7 +627,7 @@ test "SqliteStore: an unreadable job_history table is an error, not an empty his
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var s = try SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
     try testing.expectEqual(@as(usize, 0), (try s.getNamespace(a, "history")).object.count());
     try s.execSql("CREATE TABLE job_history (unrelated TEXT);");
@@ -637,7 +636,7 @@ test "SqliteStore: an unreadable job_history table is an error, not an empty his
 }
 
 test "fuzz SqliteStore history keys: arbitrary job keys never panic" {
-    var s = try SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
     try createJobHistory(&s);
     try testing.fuzz(&s, struct {
@@ -670,7 +669,7 @@ test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
     const path = try std.fmt.allocPrintSentinel(a, "{s}/moonraker-sql.db", .{root}, 0);
     {
-        var s = try SqliteStore.open(testing.allocator, testing.io, path);
+        var s = try SqliteStore.open(testing.io, path);
         defer s.deinit();
         try s.insertItem(a, "moonraker", "file_manager.metadata_version", .{ .integer = 3 });
         try testing.expectEqual(@as(i64, 3), (try s.getItem(a, "moonraker", "file_manager.metadata_version")).?.integer);
@@ -678,7 +677,7 @@ test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
         try s.insertItem(a, "moonraker", "instance_id", .{ .string = "abc" });
     }
     {
-        var s = try SqliteStore.open(testing.allocator, testing.io, path);
+        var s = try SqliteStore.open(testing.io, path);
         defer s.deinit();
         try testing.expectEqual(@as(i64, 4), (try s.getItem(a, "moonraker", "file_manager.metadata_version")).?.integer);
         const names = try s.listNamespaces(a);
@@ -700,7 +699,7 @@ test "SqliteStore: reads Moonraker job_history/job_totals tables (drop-in compat
     defer tmp.cleanup();
     const root = try tmp.dir.realPathFileAlloc(io, ".", a);
     const path = try std.fmt.allocPrintSentinel(a, "{s}/moonraker-sql.db", .{root}, 0);
-    var s = try SqliteStore.open(testing.allocator, testing.io, path);
+    var s = try SqliteStore.open(testing.io, path);
     defer s.deinit();
     // Recreate Moonraker's dedicated history tables + a couple of rows.
     try s.execSql(

@@ -2394,7 +2394,7 @@ test "genJobId: same-nanosecond calls differ by seq suffix" {
 }
 
 test "persisted queue loading cleans up partial jobs and rejects non-string fields" {
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
     defer db.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -1156,7 +1156,7 @@ fn testCtx() UpdateCtx {
 }
 
 test "status reads persistent git and web versions without refreshing" {
-    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
     defer db.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

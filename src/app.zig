@@ -469,7 +469,7 @@ pub const App = struct {
                 const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
                 const store_ptr = try alloc.create(SqliteStore);
                 errdefer alloc.destroy(store_ptr);
-                store_ptr.* = try SqliteStore.open(alloc, aio, store_path);
+                store_ptr.* = try SqliteStore.open(aio, store_path);
                 break :blk .{ .sqlite = store_ptr };
             },
             .file => blk: {
