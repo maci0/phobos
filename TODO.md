@@ -53,8 +53,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   MqttCtx refactored: init/deinit pattern, getOptAny return-switch fix, port overflow fix.
   spoolman: notify deadlock fixed (emit→emitLocked), notify_spoolman_status_changed
   emission on setIo/setServerUrl, query param support in handleProxy, GET+body rejection.
-  announcements: real RSS fetch from Moonlight via fetchAndUpdateFeed + rss.zig parser,
-  pruneByPrefix removes stale entries, handleFeedDispatchMulti branches on _method param,
+  announcements: real RSS fetch from Moonlight (bounded, with Core released) + rss.zig parser,
+  prefix pruning of stale entries, handleFeedDispatchMulti branches on _method param,
   handlePostFeed triggers immediate fetch on new feed, notify_announcement_update emission,
   background periodic refresh timer (30 min, atomically stoppable, 1 s join latency).
   job_queue notify_job_queue_changed emission wired.
@@ -228,7 +228,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   job_queue (notify_job_queue_changed),
   **history** (notify_history_changed on delete_job),
   **announcements** (notify_announcement_dismissed on dismiss;
-  notify_announcement_update on RSS fetch; notify_announcement_wake helper ready),
+  notify_announcement_update on RSS fetch; notify_announcement_wake from the refresh worker),
   **webcam** (notify_webcams_changed on POST/DELETE; helpers + setIo plumbed).
 - **OctoPrint compat** — live printer_state() tracks Klippy readiness + print_stats
   state; handleServer reports dynamic safemode; handleJob/handlePrinter report live
@@ -327,8 +327,8 @@ _norm_structure_compare array item masking (Python).
   publish/subscribe, background reader, LWT); only TLS + auto-reconnect/backoff +
   JSON-RPC-over-MQTT dispatch remain P3.
 - **spoolman/announcements** — announcements: real RSS fetch from Moonlight
-  (arksine.github.io/moonlight) via fetchAndUpdateFeed using rss.zig parser,
-  pruneByPrefix removes stale entries, notify_announcement_update on changes,
+  (arksine.github.io/moonlight) via refreshFeeds using rss.zig parser,
+  prefix pruning removes stale entries, notify_announcement_update on changes,
   handleFeedDispatchMulti branches on _method param for proper verb dispatch;
   spoolman: real HTTP proxy with query param support, GET+body rejection,
   notify_spoolman_status_changed on setIo/setServerUrl via emitLocked.
