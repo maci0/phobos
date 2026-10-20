@@ -305,14 +305,9 @@ pub const AnnouncementsCtx = struct {
         const body = resp.body;
 
         // Parse RSS XML.
-        var parser = rss.RssParser.init(alloc);
-        const items = parser.parse(body, feed_name) catch return false;
-        defer {
-            for (items) |it| {
-                it.deinit(alloc);
-            }
-            alloc.free(items);
-        }
+        const feed = rss.parse(alloc, body) catch return false;
+        defer feed.deinit(alloc);
+        const items = feed.items;
 
         // Extract prefix from first item's guid (first two path segments).
         var prefix: ?[]const u8 = null;
@@ -344,7 +339,7 @@ pub const AnnouncementsCtx = struct {
             try entry_obj.put(alloc, "title", if (item.title.len > 0) .{ .string = item.title } else .null);
             try entry_obj.put(alloc, "description", if (item.description.len > 0) .{ .string = item.description } else .null);
             try entry_obj.put(alloc, "priority", if (item.category.len > 0) .{ .string = item.category } else .null);
-            try entry_obj.put(alloc, "date", .{ .float = item.date });
+            try entry_obj.put(alloc, "date", .{ .float = item.date orelse clock.wallSeconds(self.clock_io) });
             try entry_obj.put(alloc, "dismissed", .{ .bool = false });
             try entry_obj.put(alloc, "date_dismissed", .null);
             try entry_obj.put(alloc, "dismiss_wake", .null);
