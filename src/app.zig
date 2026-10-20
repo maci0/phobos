@@ -375,9 +375,9 @@ pub const App = struct {
     file_roots: []FileRoot,
     /// Owns the active DataStore backend (SQLite or atomic-rename file).
     db_store: StoreHolder,
-    /// Parsed config, populated by setConfig(). Null when no config file was
-    /// loaded (dump-api, tests). Owned; freed in deinit.
+    /// Parsed configuration. Null when no file was loaded; owned until deinit.
     cfg: ?*config_helper.ConfigParser = null,
+    config_path_owned: ?[]u8 = null,
     /// Allowed CORS origins from `[authorization] cors_domains`. Each slice + the
     /// outer array are gpa-owned; freed in deinit. Passed to the HTTP server.
     cors_domains: [][]const u8 = &.{},
@@ -776,10 +776,7 @@ pub const App = struct {
         self.info.directory_count = @intCast(n);
     }
 
-    /// Parse a config file and wire it into server.config responses. Safe to
-    /// call even when no --config flag was given; in that case the config
-    /// objects stay empty (server.config still returns the correct shape).
-    /// Parse errors leave configuration unset and fail startup.
+    /// Parse and apply a config file. Parse errors leave configuration unset.
     pub fn setConfig(self: *App, aio: std.Io, config_path: []const u8) !void {
         if (self.cfg != null) return error.ConfigAlreadyLoaded;
         const cfg = try self.alloc.create(config_helper.ConfigParser);
@@ -787,9 +784,17 @@ pub const App = struct {
         cfg.* = config_helper.ConfigParser.init(self.alloc);
         errdefer cfg.deinit();
         try cfg.parseFile(aio, config_path);
+        try self.setParsedConfig(aio, config_path, cfg);
+    }
+
+    /// Takes ownership of cfg on success. It must use self.alloc.
+    pub fn setParsedConfig(self: *App, aio: std.Io, config_path: []const u8, cfg: *config_helper.ConfigParser) !void {
+        if (self.cfg != null) return error.ConfigAlreadyLoaded;
+        const owned_path = try self.alloc.dupe(u8, config_path);
         self.cfg = cfg;
+        self.config_path_owned = owned_path;
         self.info.cfg = cfg;
-        self.info.config_file_path = config_path;
+        self.info.config_file_path = owned_path;
         self.ensureInstanceUuid(aio);
 
         // [server] use_xheaders defaults true. False keeps the socket peer
@@ -1307,6 +1312,7 @@ pub const App = struct {
             cfg.deinit();
             self.alloc.destroy(cfg);
         }
+        if (self.config_path_owned) |path| self.alloc.free(path);
     }
 
     /// Register ALL currently-implemented endpoints, JSON-RPC methods, and
@@ -3024,4 +3030,25 @@ test "fuzz remoteMethodRequest: any method and kwargs give valid JSON or null" {
             parsed.deinit();
         }
     }.run, .{});
+}
+
+test "setParsedConfig keeps caller ownership when path allocation fails" {
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const alloc = failing.allocator();
+    var app = try testApp(alloc, aio, &tmp);
+    defer app.deinit(aio);
+    const cfg = try alloc.create(config_helper.ConfigParser);
+    defer alloc.destroy(cfg);
+    cfg.* = config_helper.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseString("[server]\nuse_xheaders: false\n", "startup.conf");
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, app.setParsedConfig(aio, "startup.conf", cfg));
+    try std.testing.expect(app.cfg == null);
+    try std.testing.expect(app.info.cfg == null);
+    try std.testing.expect(app.use_xheaders);
+    try std.testing.expectEqualStrings("false", cfg.get("server", "use_xheaders").?);
 }
