@@ -214,7 +214,7 @@ pub const NotifyBus = struct {
         // stall connection add/remove), then drops the refs. A concurrent WS
         // teardown (`Connections.remove`) defers the free while a ref is held, so
         // there is no use-after-free against background-thread emits.
-        self.conns.broadcast(io, a, frame, topic);
+        self.conns.broadcast(io, a, frame, topic, if (topic != null) .{ .method = method, .params = params } else null);
     }
 };
 
@@ -356,11 +356,13 @@ test "emitStatus delivers only to subscribed connections" {
     defer ru.deinit();
     conns.attachWriter(io, sub, &rs, RecordWriter.write);
     conns.attachWriter(io, unsub, &ru, RecordWriter.write);
-    try conns.subscribe(io, sub, &.{"toolhead"});
 
     var bus = NotifyBus.init(&core, &conns);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
+    var requested: std.json.ObjectMap = .empty;
+    try requested.put(arena.allocator(), "toolhead", .null);
+    try conns.replaceSubscriptions(io, sub, .{ .object = requested });
     try bus.emitStatus(io, names.status_update, try paramsArray(arena.allocator(), "s"), "toolhead");
 
     try std.testing.expectEqual(@as(usize, 1), rs.frames.items.len);

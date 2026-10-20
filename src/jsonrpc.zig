@@ -140,6 +140,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         // Klippy rejected the command (bad gcode, unknown mcu command): a
         // client error, as in Moonraker.
         error.KlippyRequestFailed => .{ .bad_request, "Klippy request failed" },
+        error.KlippyRequestTimedOut => .{ .internal_server_error, "Klippy request timed out" },
         error.Unauthorized => .{ .unauthorized, "Unauthorized" },
         // Moonraker klippy_connection.py: objects/subscribe needs a socket.
         error.NoSubscriptionConnection => .{ .bad_request, "No connection associated with subscription request" },

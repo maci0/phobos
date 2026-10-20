@@ -202,3 +202,10 @@ Socket writes use a native stream writer with one absolute five-second deadline
 for the complete ETX frame. Each bridge shuts down the client socket when its
 Klippy connection ends, without waiting for the client's close response.
 Remote-method queues close and drain even when their worker could not start.
+
+WebSocket batches dispatch connection-bound methods per item. Status subscriptions
+replace the connection's previous object/field map; initial responses and pushes
+are pruned to it. Klippy's aggregate is rebuilt from active connections and
+internal heater objects. Subscription requests serialize separately from Core
+and use a twenty-second deadline. Handshake ids are read with the JSON parser,
+so whitespace and nested unrelated `id` fields cannot change response matching.

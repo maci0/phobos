@@ -81,11 +81,30 @@ pub fn dispatchMessage(
         return jv.errorResponse(alloc, .null, -32700, "Parse error");
     };
     defer parsed.deinit();
-    const root = parsed.value;
-    const caller = callerOf(conn);
+    return dispatchParsedRoot(srv, conn, parsed.value, alloc);
+}
 
+fn dispatchParsedRoot(srv: *WsServer, conn: *Connection, root: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
+    const caller = callerOf(conn);
     // The dispatcher refuses over-deep input before any id is echoed.
-    if (root != .object or jv.exceedsDepth(root, jv.max_value_depth)) return srv.dispatcher.handleParsedRoot(caller, root, alloc);
+    if (jv.exceedsDepth(root, jv.max_value_depth)) return srv.dispatcher.handleParsedRoot(caller, root, alloc);
+    if (root == .array) {
+        var out: Io.Writer.Allocating = .init(alloc);
+        defer out.deinit();
+        for (root.array.items) |item| {
+            const response = if (item == .object)
+                try dispatchParsedRoot(srv, conn, item, alloc)
+            else
+                try jv.errorResponse(alloc, .null, -32600, "Invalid Request");
+            defer alloc.free(response);
+            if (response.len == 0) continue;
+            out.writer.writeByte(if (out.written().len == 0) '[' else ',') catch return error.OutOfMemory;
+            out.writer.writeAll(response) catch return error.OutOfMemory;
+        }
+        if (out.written().len != 0) out.writer.writeByte(']') catch return error.OutOfMemory;
+        return out.toOwnedSlice();
+    }
+    if (root != .object) return srv.dispatcher.handleParsedRoot(caller, root, alloc);
     const obj = root.object;
     const jrpc = obj.get("jsonrpc") orelse .null;
     const method_v = obj.get("method") orelse .null;
@@ -123,21 +142,8 @@ pub fn dispatchMessage(
 /// requested objects on `conn` (fan-out gating), add them to Klippy's aggregate
 /// subscription + resubscribe with the template, and return the live status.
 fn handleObjectsSubscribe(srv: *WsServer, conn: *Connection, params: std.json.Value, alloc: std.mem.Allocator) !std.json.Value {
-    const klippy = srv.klippy.?;
-    const objects: std.json.Value = params.object.get("objects") orelse .null;
-    if (objects == .object) {
-        var names: std.ArrayList([]const u8) = .empty;
-        defer names.deinit(alloc);
-        var it = objects.object.iterator();
-        while (it.next()) |e| {
-            klippy.addSubscriptionObject(e.key_ptr.*) catch {};
-            names.append(alloc, e.key_ptr.*) catch {};
-        }
-        // Register on the connection (conns.subscribe dupes the topics).
-        srv.conns.subscribe(srv.io, conn, names.items) catch {};
-    }
-    // Resubscribe Klippy to the aggregate set (with template) + get live status.
-    return klippy.subscribeAggregate(alloc);
+    const objects = params.object.get("objects") orelse std.json.Value{ .object = .empty };
+    return srv.klippy.?.subscribe(conn, objects, alloc);
 }
 
 /// Moonraker `_handle_identify` with `BaseRemoteConnection.authenticate`: an
@@ -331,6 +337,8 @@ fn initFixture(f: *Fixture, alloc: std.mem.Allocator) !void {
     f.reg = registry.Registry.init(alloc, &f.dispatcher);
     f.info = .{};
     try methods.registerCore(&f.reg, &f.info);
+    try f.reg.registerEndpoint(.{ .path = "/server/connection/identify", .methods = &.{.POST}, .transports = &.{.WEBSOCKET}, .auth_required = false }, @ptrCast(&f.info), wsOnlyStub);
+    try f.reg.registerEndpoint(.{ .path = "/server/websocket/id", .methods = &.{.GET}, .transports = &.{.WEBSOCKET} }, @ptrCast(&f.info), wsOnlyStub);
     f.conns = Connections.init(alloc, &f.core);
     f.srv = .{ .io = f.threaded.io(), .dispatcher = &f.dispatcher, .conns = &f.conns };
 }
@@ -383,6 +391,27 @@ test "WS refuses a request whose id nests past max_value_depth" {
     try std.testing.expectEqualStrings(
         \\{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}
     , resp);
+}
+
+test "WS batches retain connection-bound methods and notification semantics" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try initFixture(&f, alloc);
+    defer deinitFixture(&f);
+    const conn = try f.conns.add(f.io(), false);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const response = try dispatchMessage(&f.srv, conn,
+        \\[{"jsonrpc":"2.0","method":"server.connection.identify","params":{"client_name":"batch"},"id":1},{"jsonrpc":"2.0","method":"server.websocket.id","id":2},{"jsonrpc":"2.0","method":"server.websocket.id"},[],{"jsonrpc":"2.0","method":"server.info","id":3}]
+    , a);
+    const result = try std.json.parseFromSliceLeaky(std.json.Value, a, response, .{});
+    try std.testing.expectEqual(@as(usize, 4), result.array.items.len);
+    try std.testing.expectEqualStrings("batch", conn.client.name);
+    try std.testing.expectEqual(conn.id, @as(u64, @intCast(result.array.items[0].object.get("result").?.object.get("connection_id").?.integer)));
+    try std.testing.expectEqual(conn.id, @as(u64, @intCast(result.array.items[1].object.get("result").?.object.get("websocket_id").?.integer)));
+    try std.testing.expectEqual(@as(i64, -32600), result.array.items[2].object.get("error").?.object.get("code").?.integer);
+    try std.testing.expect(result.array.items[3].object.get("result") != null);
 }
 
 fn deinitFixture(f: *Fixture) void {

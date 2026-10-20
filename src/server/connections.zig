@@ -13,6 +13,12 @@
 const std = @import("std");
 const Io = std.Io;
 const Core = @import("core.zig").Core;
+const jv = @import("../json/value.zig");
+
+pub const max_subscription_objects = 256;
+pub const max_subscription_name_len = 256;
+
+pub const StatusMessage = struct { method: []const u8, params: std.json.Value };
 
 /// Identify metadata supplied by `server.connection.identify`. All fields are
 /// owned by the connection record (duped into the registry allocator) so they
@@ -62,11 +68,10 @@ pub const Connection = struct {
     /// skipped. The transport writer shuts the socket down on failure, which
     /// ends the serve loop. Guarded by `write_mutex`.
     dead: bool = false,
-    /// Subscription topic set for status updates (`printer.objects.subscribe`).
-    /// Empty => not subscribed. Owned by `Connections.alloc`; guarded by the
-    /// registry mutex. Status notifications are gated on membership here; all
-    /// other notifications broadcast regardless.
-    subs: std.StringHashMapUnmanaged(void) = .empty,
+    /// Status subscriptions: object names map to null (all fields) or a field
+    /// array. Empty means unsubscribed. Keys and values use Connections.alloc
+    /// and are guarded by the registry mutex.
+    subs: std.json.ObjectMap = .empty,
     /// In-flight broadcast references. Guarded by the registry mutex. `broadcast`
     /// increments this while it writes to the connection with the registry lock
     /// released; `remove` defers the actual free until it returns to 0. Lets the
@@ -103,9 +108,7 @@ pub const Connections = struct {
         self.alloc.free(c.client.type);
         self.alloc.free(c.client.url);
         if (c.user) |u| self.alloc.free(u);
-        var it = c.subs.keyIterator();
-        while (it.next()) |k| self.alloc.free(k.*);
-        c.subs.deinit(self.alloc);
+        jv.free(self.alloc, .{ .object = c.subs });
         self.alloc.destroy(c);
     }
 
@@ -157,8 +160,9 @@ pub const Connections = struct {
     /// `remove` defers the free). We release the mutex, write to each target,
     /// then re-take the mutex to drop the refs and perform any deferred free.
     /// `targets` is built in `alloc` (the caller's per-broadcast arena).
-    pub fn broadcast(self: *Connections, io: Io, alloc: std.mem.Allocator, frame: []const u8, topic: ?[]const u8) void {
-        var targets: std.ArrayList(*Connection) = .empty;
+    pub fn broadcast(self: *Connections, io: Io, alloc: std.mem.Allocator, frame: []const u8, topic: ?[]const u8, status: ?StatusMessage) void {
+        const Target = struct { conn: *Connection, frame: []const u8 };
+        var targets: std.ArrayList(Target) = .empty;
         defer targets.deinit(alloc);
 
         // Phase 1: select + pin (refs) under the registry mutex.
@@ -170,11 +174,22 @@ pub const Connections = struct {
             targets.ensureTotalCapacity(alloc, self.list.items.len) catch {};
             for (self.list.items) |conn| {
                 if (conn.need_auth.load(.acquire)) continue;
+                var message = frame;
                 if (topic) |t| {
                     if (!conn.subs.contains(t)) continue;
+                    if (conn.subs.get(t).? == .array) if (status) |s| {
+                        if (s.params != .array or s.params.array.items.len != 2) continue;
+                        const filtered = filterStatus(alloc, conn.subs, s.params.array.items[0], false) catch continue;
+                        if (filtered.object.count() == 0) continue;
+                        message = std.json.Stringify.valueAlloc(alloc, .{
+                            .jsonrpc = "2.0",
+                            .method = s.method,
+                            .params = [_]std.json.Value{ filtered, s.params.array.items[1] },
+                        }, .{}) catch continue;
+                    };
                 }
                 conn.refs += 1;
-                targets.append(alloc, conn) catch {
+                targets.append(alloc, .{ .conn = conn, .frame = message }) catch {
                     conn.refs -= 1; // OOM: drop this target, keep refs balanced.
                 };
             }
@@ -182,40 +197,57 @@ pub const Connections = struct {
 
         // Phase 2: write outside the lock. A pinned (refs>0) connection cannot be
         // freed by `remove`, so this is safe even if the client disconnects mid-write.
-        for (targets.items) |conn| self.writeFrame(io, conn, frame) catch {};
+        for (targets.items) |target| self.writeFrame(io, target.conn, target.frame) catch {};
 
         // Phase 3: release refs; perform any free deferred by `remove`.
         {
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
-            for (targets.items) |conn| {
+            for (targets.items) |target| {
+                const conn = target.conn;
                 conn.refs -= 1;
                 if (conn.refs == 0 and conn.pending_free) self.freeConn(conn);
             }
         }
     }
 
-    /// Add status-update topics to a connection's subscription set. Duplicate
-    /// topics are ignored. Strings are copied into the registry allocator.
-    /// Thread-safe.
-    pub fn subscribe(self: *Connections, io: Io, conn: *Connection, topics: []const []const u8) !void {
+    /// Replace one connection's complete subscription. Invalid input or an
+    /// allocation failure leaves the previous subscription intact.
+    pub fn replaceSubscriptions(self: *Connections, io: Io, conn: *Connection, objects: std.json.Value) !void {
+        if (objects != .object or objects.object.count() > max_subscription_objects) return error.InvalidParams;
+        var it = objects.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.len > max_subscription_name_len) return error.InvalidParams;
+            switch (entry.value_ptr.*) {
+                .null => {},
+                .array => |fields| {
+                    if (fields.items.len > max_subscription_objects) return error.InvalidParams;
+                    for (fields.items) |field| {
+                        if (field != .string or field.string.len > max_subscription_name_len) return error.InvalidParams;
+                    }
+                },
+                else => return error.InvalidParams,
+            }
+        }
+        const replacement = try jv.deepCopy(self.alloc, objects);
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        for (topics) |t| {
-            if (conn.subs.contains(t)) continue;
-            const key = try self.alloc.dupe(u8, t);
-            errdefer self.alloc.free(key);
-            try conn.subs.put(self.alloc, key, {});
-        }
+        jv.free(self.alloc, .{ .object = conn.subs });
+        conn.subs = replacement.object;
     }
 
-    /// Remove topics from a connection's subscription set. No-op for absent
-    /// topics. Thread-safe.
-    pub fn unsubscribe(self: *Connections, io: Io, conn: *Connection, topics: []const []const u8) void {
+    /// Append owned object names from all live connections to an aggregate.
+    pub fn appendSubscriptionObjects(self: *Connections, io: Io, alloc: std.mem.Allocator, objects: *std.json.ObjectMap) !void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        for (topics) |t| {
-            if (conn.subs.fetchRemove(t)) |kv| self.alloc.free(kv.key);
+        for (self.list.items) |conn| {
+            for (conn.subs.keys()) |name| {
+                if (!objects.contains(name)) {
+                    const owned = try alloc.dupe(u8, name);
+                    errdefer alloc.free(owned);
+                    try objects.put(alloc, owned, .null);
+                }
+            }
         }
     }
 
@@ -305,6 +337,27 @@ pub const Connections = struct {
         conn.identified = true;
     }
 };
+
+/// Prune status to the requested objects and fields. Returned maps borrow the
+/// source values; alloc must be a request arena. Serialize before either source changes.
+pub fn filterStatus(alloc: std.mem.Allocator, subscriptions: std.json.ObjectMap, status: std.json.Value, include_empty: bool) !std.json.Value {
+    var out: std.json.ObjectMap = .empty;
+    if (status != .object) return .{ .object = out };
+    var it = status.object.iterator();
+    while (it.next()) |entry| {
+        const fields = subscriptions.get(entry.key_ptr.*) orelse continue;
+        if (fields == .null) {
+            try out.put(alloc, entry.key_ptr.*, entry.value_ptr.*);
+        } else if (fields == .array and entry.value_ptr.* == .object) {
+            var selected: std.json.ObjectMap = .empty;
+            for (fields.array.items) |field| {
+                if (entry.value_ptr.object.get(field.string)) |value| try selected.put(alloc, field.string, value);
+            }
+            if (include_empty or selected.count() != 0) try out.put(alloc, entry.key_ptr.*, .{ .object = selected });
+        }
+    }
+    return .{ .object = out };
+}
 
 // --- tests ---------------------------------------------------------------
 
@@ -396,10 +449,10 @@ test "broadcast skips unauthenticated connections until identify authenticates" 
     defer conns.detachWriter(io, conn);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    conns.broadcast(io, arena.allocator(), "private output", null);
+    conns.broadcast(io, arena.allocator(), "private output", null, null);
     try std.testing.expectEqual(@as(usize, 0), writer.frames.items.len);
     try conns.setUser(conn, "authenticated");
-    conns.broadcast(io, arena.allocator(), "private output", null);
+    conns.broadcast(io, arena.allocator(), "private output", null, null);
     try std.testing.expectEqual(@as(usize, 1), writer.frames.items.len);
     try std.testing.expectEqualStrings("private output", writer.frames.items[0]);
 }
@@ -633,7 +686,7 @@ test "broadcast: connection removed during its own write is freed via deferred r
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    conns.broadcast(io, arena.allocator(), "frame", null);
+    conns.broadcast(io, arena.allocator(), "frame", null, null);
 
     try std.testing.expect(rem.called);
     try std.testing.expectEqual(@as(usize, 0), conns.count(io));
@@ -658,61 +711,104 @@ test "detachWriter stops further delivery" {
     try std.testing.expectEqual(@as(usize, 1), rec.frames.items.len);
 }
 
-test "subscribe and unsubscribe track topics" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
+test "subscription replacement filters fields and removes stale aggregate names" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
     var core = Core.init();
-    var conns = Connections.init(std.testing.allocator, &core);
+    var conns = Connections.init(alloc, &core);
     defer conns.deinit(io);
-
-    const c = try conns.add(io, false);
-    try std.testing.expect(!c.subs.contains("toolhead"));
-
-    try conns.subscribe(io, c, &.{ "toolhead", "extruder" });
-    try std.testing.expect(c.subs.contains("toolhead"));
-    try std.testing.expect(c.subs.contains("extruder"));
-
-    // Duplicate subscribe is idempotent.
-    try conns.subscribe(io, c, &.{"toolhead"});
-    try std.testing.expect(c.subs.contains("toolhead"));
-
-    conns.unsubscribe(io, c, &.{"toolhead"});
-    try std.testing.expect(!c.subs.contains("toolhead"));
-    try std.testing.expect(c.subs.contains("extruder"));
-
-    // Unsubscribe of an absent topic is a no-op.
-    conns.unsubscribe(io, c, &.{"missing"});
-    try std.testing.expect(c.subs.contains("extruder"));
+    const conn = try conns.add(io, false);
+    var rec: RecordWriter = .{ .alloc = alloc };
+    defer rec.deinit();
+    conns.attachWriter(io, conn, &rec, RecordWriter.write);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const objects = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"toolhead\":[\"position\"]}", .{});
+    try conns.replaceSubscriptions(io, conn, objects);
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a, "[{\"toolhead\":{\"position\":[1,2,3],\"velocity\":4},\"extruder\":{\"temperature\":21}},10]", .{});
+    conns.broadcast(io, a, "unfiltered", "toolhead", .{ .method = "notify_status_update", .params = params });
+    try std.testing.expectEqual(@as(usize, 1), rec.frames.items.len);
+    const message = try std.json.parseFromSliceLeaky(std.json.Value, a, rec.frames.items[0], .{});
+    const status = message.object.get("params").?.array.items[0].object;
+    try std.testing.expectEqual(@as(usize, 1), status.count());
+    const toolhead = status.get("toolhead").?.object;
+    try std.testing.expectEqual(@as(usize, 1), toolhead.count());
+    try std.testing.expect(toolhead.contains("position"));
+    try conns.replaceSubscriptions(io, conn, try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"extruder\":null}", .{}));
+    conns.broadcast(io, a, "unfiltered", "toolhead", .{ .method = "notify_status_update", .params = params });
+    try std.testing.expectEqual(@as(usize, 1), rec.frames.items.len);
+    var aggregate: std.json.ObjectMap = .empty;
+    try conns.appendSubscriptionObjects(io, a, &aggregate);
+    try std.testing.expectEqual(@as(usize, 1), aggregate.count());
+    try std.testing.expect(aggregate.contains("extruder"));
+    try std.testing.expectError(error.InvalidParams, conns.replaceSubscriptions(io, conn, try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"toolhead\":[1]}", .{})));
+    try std.testing.expect(conn.subs.contains("extruder"));
+    conns.detachWriter(io, conn);
+    conns.remove(io, conn);
+    aggregate = .empty;
+    try conns.appendSubscriptionObjects(io, a, &aggregate);
+    try std.testing.expectEqual(@as(usize, 0), aggregate.count());
 }
 
-test "fuzz_subscribe: random subscribe/unsubscribe never crashes or leaks" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var ops: [128]u8 = undefined;
-            smith.bytesWithHash(&ops, 0);
-
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
-
+test "subscription replacement preserves old state on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const io = std.testing.io;
             var core = Core.init();
-            var conns = Connections.init(std.heap.smp_allocator, &core);
+            var conns = Connections.init(alloc, &core);
             defer conns.deinit(io);
+            const conn = try conns.add(io, false);
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const old = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"toolhead\":[\"position\"]}", .{});
+            const next = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"extruder\":[\"temperature\",\"target\"]}", .{});
+            try conns.replaceSubscriptions(io, conn, old);
+            conns.replaceSubscriptions(io, conn, next) catch |err| {
+                try std.testing.expect(conn.subs.contains("toolhead"));
+                try std.testing.expect(!conn.subs.contains("extruder"));
+                return err;
+            };
+            try std.testing.expect(!conn.subs.contains("toolhead"));
+            try std.testing.expect(conn.subs.contains("extruder"));
+        }
+    }.run, .{});
+}
 
-            const c = try conns.add(io, false);
-            const topics = [_][]const u8{ "toolhead", "extruder", "gcode_move", "heater_bed" };
-            for (ops) |b| {
-                const t = topics[(b >> 1) % topics.len];
-                if (b & 1 == 0) {
-                    try conns.subscribe(io, c, &.{t});
-                    try std.testing.expect(c.subs.contains(t));
-                } else {
-                    conns.unsubscribe(io, c, &.{t});
-                    try std.testing.expect(!c.subs.contains(t));
+test "fuzz subscription replacement and status filtering keep only requested fields" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const io = std.testing.io;
+            var core = Core.init();
+            var conns = Connections.init(std.testing.allocator, &core);
+            defer conns.deinit(io);
+            const conn = try conns.add(io, false);
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const names = [_][]const u8{ "toolhead", "extruder" };
+            const fields = [_][]const u8{ "temperature", "position", "unknown" };
+            var request: std.json.ObjectMap = .empty;
+            for (names, 0..) |name, i| {
+                if (smith.valueRangeAtMostWithHash(u8, 0, 1, @intCast(i)) == 0) continue;
+                var selected: std.json.Array = .init(a);
+                const field = fields[smith.valueRangeAtMostWithHash(u8, 0, fields.len - 1, @intCast(i + 10))];
+                try selected.append(.{ .string = field });
+                try request.put(a, name, if (smith.valueRangeAtMostWithHash(u8, 0, 1, @intCast(i + 20)) == 0) .null else .{ .array = selected });
+            }
+            try conns.replaceSubscriptions(io, conn, .{ .object = request });
+            const status = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"toolhead\":{\"position\":[0,0,0],\"temperature\":1},\"extruder\":{\"temperature\":21}}", .{});
+            const filtered = try filterStatus(a, conn.subs, status, true);
+            var it = filtered.object.iterator();
+            while (it.next()) |entry| {
+                const selected = request.get(entry.key_ptr.*).?;
+                if (selected == .array) {
+                    var values = entry.value_ptr.object.iterator();
+                    while (values.next()) |value| try std.testing.expectEqualStrings(selected.array.items[0].string, value.key_ptr.*);
                 }
             }
+            try std.testing.expect(filtered.object.count() <= request.count());
         }
     }.run, .{});
 }

@@ -26,6 +26,7 @@ const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
 const clock = @import("../util/clock.zig");
 const SocketDeadline = @import("../util/socket_deadline.zig").SocketDeadline;
+const connections = @import("../server/connections.zig");
 
 /// One in-flight request awaiting its response. The persistent reader routes
 /// a matching response frame here and posts the semaphore.
@@ -65,8 +66,8 @@ const gcode_subscribe_params = "{\"response_template\":{\"method\":\"process_gco
 /// Objects phobos always subscribes for its own state tracking.
 const base_sub_objects = [_][]const u8{ "webhooks", "toolhead", "print_stats" };
 /// Bounds on the client-extended subscription set.
-const max_sub_objects = 256;
-const max_sub_object_name_len = 256;
+const max_sub_objects = connections.max_subscription_objects;
+const max_sub_object_name_len = connections.max_subscription_name_len;
 /// `info` polls while Klippy reports `startup`, and the delay between them.
 const startup_polls = 100;
 const startup_poll_delay: std.Io.Duration = .fromMilliseconds(250);
@@ -121,10 +122,13 @@ fn collectHeaterNames(result: std.json.Value, field: []const u8, alloc: std.mem.
 }
 
 /// Handshake-only match of phobos's own string id in a raw frame.
-fn frameIdMatches(payload: []const u8, id: u64) bool {
-    var buf: [32]u8 = undefined;
-    const quoted = std.fmt.bufPrint(&buf, "\"id\":\"{d}\"", .{id}) catch return false;
-    return std.mem.indexOf(u8, payload, quoted) != null;
+fn frameIdMatches(alloc: std.mem.Allocator, payload: []const u8, id: u64) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const value = parsed.value.object.get("id") orelse return false;
+    if (value != .string) return false;
+    return (std.fmt.parseInt(u64, value.string, 10) catch return false) == id;
 }
 
 /// A JSON number (int or float) as f64; null for absent/non-numeric.
@@ -282,10 +286,11 @@ pub const KlippyCtx = struct {
     stopping: std.Io.Event = .unset,
     task: ?std.Io.Future(void) = null,
 
-    /// Objects clients and Klippy's heater list add to the base subscription.
+    /// Objects Klippy's heater list adds to the base subscription.
     /// Keys are gpa-owned; bounded by `max_sub_objects`. Guarded by `sub_mutex`.
     extra_sub_objects: std.StringHashMapUnmanaged(void) = .empty,
     sub_mutex: std.Io.Mutex = std.Io.Mutex.init,
+    subscribe_mutex: std.Io.Mutex = .init,
 
     pub fn init(gpa: std.mem.Allocator, bus: *notify.NotifyBus) !KlippyCtx {
         return KlippyCtx{
@@ -332,30 +337,25 @@ pub const KlippyCtx = struct {
     /// extra, and the `response_template` without which Klippy pushes no
     /// updates (klippy_connection.py:644).
     fn buildSubscribeParams(self: *KlippyCtx, io: std.Io, alloc: std.mem.Allocator) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(alloc);
-        defer aw.deinit();
-        var jw: std.json.Stringify = .{ .writer = &aw.writer };
-        try jw.beginObject();
-        try jw.objectField("objects");
-        try jw.beginObject();
+        var objects: std.json.ObjectMap = .empty;
+        defer jv.free(alloc, .{ .object = objects });
         for (base_sub_objects) |name| {
-            try jw.objectField(name);
-            try jw.write(null);
+            const owned = try alloc.dupe(u8, name);
+            errdefer alloc.free(owned);
+            try objects.put(alloc, owned, .null);
         }
         {
             self.sub_mutex.lockUncancelable(io);
             defer self.sub_mutex.unlock(io);
             var it = self.extra_sub_objects.keyIterator();
             while (it.next()) |k| {
-                try jw.objectField(k.*);
-                try jw.write(null);
+                const owned = try alloc.dupe(u8, k.*);
+                errdefer alloc.free(owned);
+                try objects.put(alloc, owned, .null);
             }
         }
-        try jw.endObject();
-        try jw.objectField("response_template");
-        try jw.write(.{ .method = "process_status_update" });
-        try jw.endObject();
-        return aw.toOwnedSlice();
+        try self.bus.conns.appendSubscriptionObjects(io, alloc, &objects);
+        return std.json.Stringify.valueAlloc(alloc, .{ .objects = std.json.Value{ .object = objects }, .response_template = .{ .method = "process_status_update" } }, .{});
     }
 
     /// Start the background Klippy connection task. Must be called after setIo().
@@ -521,7 +521,7 @@ pub const KlippyCtx = struct {
         try self.writeFrame(io, frame);
         for (0..handshake_max_frames) |_| {
             const payload = try self.readFrame();
-            if (frameIdMatches(payload, id)) return payload;
+            if (frameIdMatches(self.gpa, payload, id)) return payload;
             defer self.gpa.free(payload);
             self.dispatchFrame(io, payload) catch {};
         }
@@ -617,6 +617,7 @@ pub const KlippyCtx = struct {
         self.pending_mutex.lockUncancelable(io);
         defer self.pending_mutex.unlock(io);
         const waiter = self.pending.get(id_num) orelse return;
+        if (waiter.payload != null or waiter.failed) return;
         // On OOM the waiter wakes without a payload and reports it.
         waiter.payload = self.gpa.dupe(u8, payload) catch null;
         waiter.sem.post(io);
@@ -761,16 +762,18 @@ pub const KlippyCtx = struct {
     }
 
     /// Send one request and wait for its response. `release` is the Core lock
-    /// the caller holds: it is dropped for the wait so the reader can dispatch
+    /// the caller holds: it is dropped for the write and wait so the reader can dispatch
     /// pushes, and retaken before returning. The result lives in `alloc`.
     fn call(
         self: *KlippyCtx,
         method: []const u8,
         params_json: []const u8,
         release: ?*server_core.Core,
+        timeout: std.Io.Timeout,
         alloc: std.mem.Allocator,
     ) !std.json.Value {
         const io = self.io orelse return error.KlippyDisconnected;
+        const deadline = timeout.toDeadline(io);
         const id = self.nextId(io);
         var waiter: Waiter = .{};
         {
@@ -792,7 +795,10 @@ pub const KlippyCtx = struct {
             if (release) |core| core.unlock(io);
             defer if (release) |core| core.lock(io);
             try self.writeFrame(io, frame);
-            try waiter.sem.wait(io);
+            waiter.sem.waitTimeout(io, deadline) catch |err| switch (err) {
+                error.Timeout => return error.KlippyRequestTimedOut,
+                error.Canceled => return error.Canceled,
+            };
         }
         if (waiter.payload) |payload| return parseKlippyResult(alloc, payload);
         return if (waiter.failed) error.KlippyDisconnected else error.OutOfMemory;
@@ -804,7 +810,7 @@ pub const KlippyCtx = struct {
         try self.recordGcodeCommand(method, params);
         const params_json = try serializeParams(alloc, params);
         defer if (params_json.len > 0) alloc.free(params_json);
-        return self.call(method, params_json, self.bus.core, alloc);
+        return self.call(method, params_json, self.bus.core, .none, alloc);
     }
 
     /// `request` for callers that do NOT hold Core (off-Core proxies, the job
@@ -813,7 +819,7 @@ pub const KlippyCtx = struct {
         if (self.io) |io| try self.bus.core.run(io, recordGcodeCommand, .{ self, method, params });
         const params_json = try serializeParams(alloc, params);
         defer if (params_json.len > 0) alloc.free(params_json);
-        return self.call(method, params_json, null, alloc);
+        return self.call(method, params_json, null, .none, alloc);
     }
 
     /// Store a non-empty `gcode/script` script as a gcode store command
@@ -827,14 +833,22 @@ pub const KlippyCtx = struct {
         if (script == .string) try ts.pushGcodeCommand(script.string, clock.wallSeconds(io));
     }
 
-    /// Resubscribe Klippy to the aggregate object set with the
-    /// `response_template` and return the result (`{"eventtime","status"}`).
-    /// Called off Core by the WebSocket `printer.objects.subscribe` handler.
-    pub fn subscribeAggregate(self: *KlippyCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    /// Replace one client's subscription and resubscribe Klippy to the active
+    /// aggregate. Return only its requested fields. Called off Core; serialized
+    /// with other subscription requests and bounded to Moonraker's 20 seconds.
+    pub fn subscribe(self: *KlippyCtx, conn: *connections.Connection, objects: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
         const io = self.io orelse return error.KlippyDisconnected;
+        try self.subscribe_mutex.lock(io);
+        defer self.subscribe_mutex.unlock(io);
+        if (!self.isConnected()) return error.KlippyDisconnected;
+        try self.bus.conns.replaceSubscriptions(io, conn, objects);
         const params_json = try self.buildSubscribeParams(io, alloc);
         defer alloc.free(params_json);
-        return self.call("objects/subscribe", params_json, null, alloc);
+        var result = try self.call("objects/subscribe", params_json, null, .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } }, alloc);
+        if (result == .object) if (result.object.getPtr("status")) |status| {
+            status.* = try connections.filterStatus(alloc, objects.object, status.*, true);
+        };
+        return result;
     }
 
     /// Send a request without waiting for its response. Used for Feather
@@ -1060,7 +1074,7 @@ test "fuzz formatRequest: valid JSON for any JSON params and id" {
             defer alloc.free(got);
             const p = try std.json.parseFromSlice(std.json.Value, alloc, got, .{});
             defer p.deinit();
-            try std.testing.expect(frameIdMatches(got, id));
+            try std.testing.expect(frameIdMatches(alloc, got, id));
         }
     }.run, .{});
 }
@@ -1084,8 +1098,27 @@ test "collectHeaterNames reads sensors and ignores null monitors" {
 }
 
 test "frameIdMatches does not accept a longer id" {
-    try std.testing.expect(frameIdMatches("{\"id\":\"12\",\"result\":1}", 12));
-    try std.testing.expect(!frameIdMatches("{\"id\":\"12\",\"result\":1}", 1));
+    const a = std.testing.allocator;
+    try std.testing.expect(frameIdMatches(a, "{\"id\":\"12\",\"result\":1}", 12));
+    try std.testing.expect(!frameIdMatches(a, "{\"id\":\"12\",\"result\":1}", 1));
+    try std.testing.expect(frameIdMatches(a, "{\"id\" : \"12\",\"result\":1}", 12));
+    try std.testing.expect(!frameIdMatches(a, "{\"result\":{\"id\":\"12\"}}", 12));
+    try std.testing.expect(!frameIdMatches(a, "{\"id\":12}", 12));
+}
+
+test "fuzz frameIdMatches reads only the root JSON string id" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const a = std.testing.allocator;
+            const id = smith.valueRangeAtMostWithHash(u64, 0, std.math.maxInt(u64), 0);
+            const root = try std.fmt.allocPrint(a, "{{\"id\" : \"{d}\"}}", .{id});
+            defer a.free(root);
+            try std.testing.expect(frameIdMatches(a, root, id));
+            const nested = try std.fmt.allocPrint(a, "{{\"params\":{{\"id\":\"{d}\"}}}}", .{id});
+            defer a.free(nested);
+            try std.testing.expect(!frameIdMatches(a, nested, id));
+        }
+    }.run, .{});
 }
 
 test "parseKlippyState maps every Klippy state" {
@@ -1447,6 +1480,88 @@ test "request releases Core before a socket write needs the reader to drain" {
     if (result) |_| {} else |_| ctx.stream.?.shutdown(io, .both) catch {};
     peer_task.cancel(io);
     try std.testing.expectEqualStrings("ok", (try result).string);
+}
+
+test "subscribe returns requested fields and replaces the aggregate client set" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    const conn = try nb.conns_obj.add(io, false);
+    defer nb.conns_obj.remove(io, conn);
+    var ctx = try KlippyCtx.init(std.heap.smp_allocator, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    var listener = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer listener.deinit(io);
+    ctx.stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    ctx.reader = ctx.stream.?.reader(io, &ctx.read_buffer);
+    ctx.connected.store(true, .release);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    const Peer = struct {
+        fn run(aio: std.Io, stream: net.Stream) !void {
+            var deadline: SocketDeadline = .{ .base_io = aio, .timeout = .{ .deadline = .fromNow(aio, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+            var buffer: [4096]u8 = undefined;
+            var reader = stream.reader(deadline.io(), &buffer);
+            var writer = stream.writer(deadline.io(), &.{});
+            for (0..2) |iteration| {
+                var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const frame = try framing.read(a, &reader.interface);
+                const request = try std.json.parseFromSliceLeaky(std.json.Value, a, frame, .{});
+                const objects = request.object.get("params").?.object.get("objects").?.object;
+                try std.testing.expectEqual(iteration == 0, objects.contains("extruder"));
+                try std.testing.expectEqual(iteration == 1, objects.contains("gcode_move"));
+                try std.testing.expect(objects.contains("webhooks"));
+                const response = try std.fmt.allocPrint(
+                    a,
+                    "{{\"id\":\"{s}\",\"result\":{{\"eventtime\":1,\"status\":{{\"webhooks\":{{\"state\":\"ready\"}},\"toolhead\":{{\"position\":[1,2,3],\"velocity\":20}},\"extruder\":{{\"temperature\":21}},\"gcode_move\":{{\"speed_factor\":1}}}}}}}}",
+                    .{request.object.get("id").?.string},
+                );
+                try framing.write(&writer.interface, response);
+                try writer.interface.flush();
+            }
+        }
+    };
+    var peer_task = try io.concurrent(Peer.run, .{ io, peer });
+    defer peer_task.cancel(io) catch {};
+    var reader_task = try io.concurrent(KlippyCtx.readerLoop, .{ &ctx, io });
+    defer reader_task.cancel(io) catch {};
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const first = try ctx.subscribe(conn, try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"toolhead\":[\"position\"],\"extruder\":[]}", .{}), a);
+    const status = first.object.get("status").?.object;
+    try std.testing.expectEqual(@as(usize, 2), status.count());
+    try std.testing.expectEqual(@as(usize, 1), status.get("toolhead").?.object.count());
+    try std.testing.expect(status.get("toolhead").?.object.contains("position"));
+    try std.testing.expectEqual(@as(usize, 0), status.get("extruder").?.object.count());
+    const second = try ctx.subscribe(conn, try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"gcode_move\":null}", .{}), a);
+    try std.testing.expectEqual(@as(usize, 1), second.object.get("status").?.object.count());
+    try std.testing.expect(second.object.get("status").?.object.contains("gcode_move"));
+    try std.testing.expectEqual(@as(usize, 0), ctx.extra_sub_objects.count());
+    try peer_task.await(io);
+}
+
+test "a timed request removes its waiter when Klippy never responds" {
+    const io = std.testing.io;
+    const nb = try NullBus.init(std.testing.allocator);
+    defer nb.deinit(std.testing.allocator);
+    var ctx = try KlippyCtx.init(std.testing.allocator, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    var listener = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer listener.deinit(io);
+    ctx.stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    ctx.connected.store(true, .release);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.KlippyRequestTimedOut, ctx.call("info", "{}", null, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }, arena.allocator()));
+    try std.testing.expectEqual(@as(u32, 0), ctx.pending.count());
 }
 
 /// Test-local Klippy: accepts one connection, answers `info` with `state`,
