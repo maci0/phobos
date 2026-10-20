@@ -286,6 +286,7 @@ fn run(init: std.process.Init) !void {
     // calls setIo() so no background task is spawned during testing.
     try server_app.klippy_ctx.start();
     try server_app.data_store_ctx.startSampler();
+    try server_app.file_ctx.startObserver();
     server_app.update_ctx.startAutoRefresh();
     // Moonraker fetches announcements at startup; the refresh worker first
     // waits its interval. Fetch in the background so the listener starts now.

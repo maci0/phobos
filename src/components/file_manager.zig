@@ -55,6 +55,7 @@ const gcode_metadata = @import("gcode_metadata.zig");
 const job_state_component = @import("job_state.zig");
 const ServerInfo = @import("../core/methods.zig").ServerInfo;
 const zip_writer = @import("../zip_writer.zig");
+const file_observer = @import("file_observer.zig");
 
 const Registry = registry.Registry;
 const Dir = std.Io.Dir;
@@ -139,6 +140,61 @@ pub const FileCtx = struct {
     job_state: ?*job_state_component.JobStateCtx = null,
     /// Klippy readiness for the loaded-file lock. Borrowed; set by the App.
     server_info: ?*ServerInfo = null,
+    observer_kind: file_observer.Kind = .inotify,
+    observer: ?*file_observer.Observer = null,
+
+    pub fn startObserver(self: *FileCtx) !void {
+        if (self.observer_kind == .none) return;
+        const io = try self.requireIo();
+        if (self.bus) |bus| bus.core.lock(io);
+        defer if (self.bus) |bus| bus.core.unlock(io);
+        if (self.observer != null) return;
+        self.observer = try file_observer.Observer.start(self);
+    }
+
+    pub fn stopObserver(self: *FileCtx) void {
+        const io = self.io orelse return;
+        if (self.bus) |bus| bus.core.lock(io);
+        const observer = self.observer;
+        if (observer) |value| value.active.store(false, .release);
+        self.observer = null;
+        if (self.bus) |bus| bus.core.unlock(io);
+        if (observer) |value| value.stop();
+    }
+
+    /// Refresh a registered root's native watches. Call under Core.
+    pub fn observeRoot(self: *FileCtx, name: []const u8) void {
+        const observer = self.observer orelse return;
+        if (!observer.active.load(.acquire)) return;
+        for (self.roots, 0..) |root, index| {
+            if (std.mem.eql(u8, root.name, name)) {
+                observer.updateRoot(index) catch |err| {
+                    observer.active.store(false, .release);
+                    std.debug.print("phobos: file observer root update failed: {}\n", .{err});
+                };
+                return;
+            }
+        }
+    }
+
+    /// Invalidate cached metadata and publish an observation. Call under Core.
+    pub fn notifyObservedLocked(self: *FileCtx, action: []const u8, root: Root, rel: []const u8, source: ?SourceItem) !void {
+        const io = try self.requireIo();
+        const bus = self.bus orelse return;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        const abs = try std.fs.path.join(alloc, &.{ root.path, rel });
+        const resolved: Resolved = .{ .root = root, .rel = rel, .abs = abs };
+        if (!std.mem.startsWith(u8, action, "delete_")) _ = resolved.stat(io, alloc) catch return;
+        self.lockMeta();
+        self.evictMetadata();
+        self.unlockMeta();
+        const info = try buildNotifyInfo(io, alloc, action, root, rel, abs, source);
+        var params: std.json.Array = .init(alloc);
+        try params.append(info);
+        try bus.emitLocked(io, notify.names.filelist_changed, .{ .array = params });
+    }
 
     pub fn setIo(self: *FileCtx, io: std.Io) void {
         self.io = io;
@@ -166,6 +222,7 @@ pub const FileCtx = struct {
     }
 
     pub fn deinit(self: *FileCtx) void {
+        self.stopObserver();
         if (self.excludes_owned) {
             confighelper.freeLines(self.gpa, self.excludes);
             self.excludes = &.{};
@@ -672,7 +729,7 @@ const StatKind = enum { file, dir, other, missing };
 // notify_filelist_changed emission
 // ---------------------------------------------------------------------------
 
-const SourceItem = struct { root: Root, rel: []const u8 };
+pub const SourceItem = struct { root: Root, rel: []const u8 };
 
 /// Build the notify_info object: `{ action, item, source_item? }`. The `item`
 /// is path_info augmented with `path` (relative) and `root`.
@@ -710,6 +767,7 @@ fn buildNotifyInfo(
 /// HTTP/JSON-RPC transports wrap every handler in it), which already holds the
 /// non-reentrant Core lock. Calling the locking `emit` here would deadlock.
 fn emitFilelistChanged(ctx: *FileCtx, io: std.Io, alloc: std.mem.Allocator, notify_info: std.json.Value) void {
+    if (ctx.observer) |observer| if (observer.active.load(.acquire)) return;
     const bus = ctx.bus orelse return;
     var arr: std.json.Array = .init(alloc);
     arr.append(notify_info) catch return;

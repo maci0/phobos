@@ -1003,6 +1003,12 @@ pub const App = struct {
             }
         }
 
+        if (cfg.get("file_manager", "file_system_observer")) |raw| {
+            self.file_ctx.observer_kind = if (std.ascii.eqlIgnoreCase(raw, "inotify")) .inotify else .none;
+            if (!std.ascii.eqlIgnoreCase(raw, "none") and self.file_ctx.observer_kind == .none)
+                std.debug.print("phobos: warning: invalid file_system_observer '{s}', using none\n", .{raw});
+        }
+
         if (cfg.get("file_manager", "excludes")) |raw| {
             self.file_ctx.setExcludes(raw) catch |err| {
                 std.debug.print("phobos: warning: file excludes not applied: {}\n", .{err});
@@ -1227,6 +1233,7 @@ pub const App = struct {
         self.power_ctx.stopTimerWorker();
         self.button_ctx.stop();
         self.paneldue.deinit();
+        self.file_ctx.stopObserver();
         self.remote_calls.close(io);
         if (self.remote_worker) |*w| {
             // Cancel and join the worker's calls before component teardown.
@@ -1517,6 +1524,7 @@ pub const App = struct {
             r.path = path;
             r.full_access = false;
             self.file_ctx.roots = self.file_roots;
+            self.file_ctx.observeRoot(name);
             return;
         }
         const grown = self.alloc.realloc(self.file_roots, self.file_roots.len + 1) catch {
@@ -1526,6 +1534,7 @@ pub const App = struct {
         grown[grown.len - 1] = .{ .name = name, .path = path, .full_access = false };
         self.file_roots = grown;
         self.file_ctx.roots = grown;
+        self.file_ctx.observeRoot(name);
         self.syncRegisteredDirectories();
     }
 
@@ -2317,6 +2326,8 @@ test "setConfig loads auto-refresh, excludes, and hidden objects" {
     try std.testing.expectEqual(@as(i64, 0), app.update_ctx.refresh_window_start);
     try std.testing.expectEqual(@as(i64, 5), app.update_ctx.refresh_window_end);
     try std.testing.expect(app.update_ctx.refresh_thread == null);
+    try std.testing.expectEqual(.none, app.file_ctx.observer_kind);
+    try std.testing.expect(app.file_ctx.observer == null);
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", ".mod"));
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", "logFiles/a.log"));
     try std.testing.expect(!app.update_ctx.tickAutoRefresh(2));

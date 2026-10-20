@@ -71,12 +71,28 @@ API becomes available and passes both host and ARM checks.
 | GPIO input layout in `gpio_input.zig` | No GPIO declaration. Local Linux ABI v1 structs and `std.os.linux.IOCTL.IOWR` provide edge requests and initial values through `io.operate(.device_io_control)`; event reads and cancellation use `std.Io.File`. |
 | Disk capacity in `disk_usage.c` | No `std.Io` filesystem-capacity operation. ARM C translation produces an opaque `statvfs` type because its platform header has a bitfield. The C header owns its ABI. |
 | Local refresh hours and PanelDue file timestamps in `local_time.c` | `std.Tz` parses TZif tables but does not evaluate POSIX footers or expose local-time conversion. `localtime_r` applies host timezone and future DST rules; C owns `struct tm` and `time_t`. PanelDue uses English ctime date fields. |
+| Directory watches in `file_observer.zig` | No `std.Io` filesystem observer. The local adapter uses typed Linux inotify setup, masks and event layout; reads, deadlines, close and worker cancellation use `std.Io`. |
 | SQLite bindings in `sqlite_c.zig` | No standard SQLite driver. The translated `SQLITE_TRANSIENT` function-pointer sentinel fails ARM alignment checks; the local opaque-pointer declaration preserves the C sentinel. |
 | Network address enumeration | `std.Io.net.Interface` maps names and indices but does not enumerate addresses. The `ip -json` fallback remains. |
 | WebSocket client frames | The standard server codec requires masked input and writes unmasked output. Client masking and bounded frame validation remain local. |
 
 Zig 0.17.0 has `std.Build.addTranslateC`; it does not have `@cImport`. Translation
 does not remove the ARM header and sentinel limitations above.
+
+The file observer starts only in the daemon. `[file_manager] file_system_observer`
+selects `inotify` (default) or `none`; an invalid value warns and selects `none`.
+Checked directory handles supply `/proc/self/fd` watch paths, retaining root
+containment during watch installation. Core serializes watch-table changes,
+registered-root updates, cache invalidation and notifications; native reads run
+outside Core. Shutdown cancels and joins the read before freeing roots or connections.
+Watches are bounded to 512 directories, pending actions to 128, owned relative
+names to 128 KiB and each native read to 16 KiB. Completed writes and directory
+changes coalesce for 250 ms; unmatched moves become deletions after one second.
+Atomic replacement reports the final file, and `.thumbs`, `.git` and configured
+excludes produce no observer events. Inode aliases share their first installed
+watch. Startup limit failures reject startup; runtime exhaustion, kernel queue
+overflow or an externally replaced root stops observation with a warning and
+restores direct API notifications. Restart to observe subsequent external changes.
 
 File operations retain an open root handle and check every path component.
 Native canonicalization handles nested links and `..`; an in-root target is
