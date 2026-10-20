@@ -54,6 +54,7 @@ const config_helper = @import("../config/confighelper.zig");
 const DataStore = @import("../store/datastore.zig").DataStore;
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const process = @import("../util/process.zig");
+const net_update = @import("update_net.zig");
 
 const Registry = registry.Registry;
 const status_refresh_interval_s = 60;
@@ -110,6 +111,7 @@ pub const Source = struct {
     /// Commit `rollback` resets to. Empty means rollback is not performed.
     rollback_ref: []const u8 = "",
     managed_services: []const []const u8 = &.{},
+    persistent_files: []const []const u8 = &.{},
     /// Whether this source is a git repository eligible for recover/rollback.
     pub fn isGit(self: Source) bool {
         return self.type == .git_repo;
@@ -179,6 +181,14 @@ pub fn sourcesFromConfig(arena: std.mem.Allocator, cfg: *const config_helper.Con
         const channel = cfg.get(sect, "channel") orelse if (stype == .git_repo) "dev" else "stable";
         const path = cfg.get(sect, "path") orelse "";
         var services: std.ArrayList([]const u8) = .empty;
+        var persistent: std.ArrayList([]const u8) = .empty;
+        if (cfg.get(sect, "persistent_files")) |raw| {
+            var paths = std.mem.tokenizeAny(u8, raw, ", \t\r\n");
+            while (paths.next()) |file| {
+                if (!net_update.validRelative(file) or std.mem.eql(u8, file, ".version") or std.mem.eql(u8, file, "release_info.json")) return error.InvalidPersistentFile;
+                try persistent.append(arena, try arena.dupe(u8, file));
+            }
+        }
         if (stype != .web) {
             if (cfg.get(sect, "managed_services")) |raw| {
                 var names_iter = std.mem.tokenizeAny(u8, raw, ", \t\r\n");
@@ -200,6 +210,7 @@ pub fn sourcesFromConfig(arena: std.mem.Allocator, cfg: *const config_helper.Con
             .channel = try arena.dupe(u8, channel),
             .origin = try arena.dupe(u8, origin),
             .managed_services = try services.toOwnedSlice(arena),
+            .persistent_files = try persistent.toOwnedSlice(arena),
         });
     }
     return list.items;
@@ -275,6 +286,26 @@ test "sourcesFromConfig: forge-x clients and system updates off" {
     try std.testing.expectEqualStrings("zip", info.get("guppyscreen").?.object.get("configured_type").?.string);
 }
 
+test "source persistent files retain relative names and reject reserved paths" {
+    var cfg = config_helper.ConfigParser.init(testing.allocator);
+    defer cfg.deinit();
+    try cfg.parseString("[update_manager client]\ntype: zip\npersistent_files: settings/theme, local.json\n", "<test>");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const sources = try sourcesFromConfig(arena.allocator(), &cfg);
+    const paths = sources[sources.len - 1].persistent_files;
+    try testing.expectEqual(@as(usize, 2), paths.len);
+    try testing.expectEqualStrings("settings/theme", paths[0]);
+    try testing.expectEqualStrings("local.json", paths[1]);
+    for ([_][]const u8{ ".version", "release_info.json", "../escape", ".git/config" }) |path| {
+        cfg.deinit();
+        cfg = config_helper.ConfigParser.init(testing.allocator);
+        const body = try std.fmt.allocPrint(arena.allocator(), "[update_manager client]\ntype: zip\npersistent_files: {s}\n", .{path});
+        try cfg.parseString(body, "<test>");
+        try testing.expectError(error.InvalidPersistentFile, sourcesFromConfig(arena.allocator(), &cfg));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -310,6 +341,7 @@ pub const UpdateCtx = struct {
     shell_ctx: ?*anyopaque = null,
     restart_service: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void = null,
     service_ctx: ?*anyopaque = null,
+    github_api_base: []const u8 = "https://api.github.com",
     /// `[update_manager] enable_auto_refresh`. False does not start a timer
     /// and `tickAutoRefresh` does not refresh. The printer sets this false.
     auto_refresh: bool = false,
@@ -791,12 +823,28 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
     var version_info: std.json.ObjectMap = .empty;
     for (ctx.sources) |src| {
         const entry = if (cached == .object) cached.object.get(src.name) else null;
-        const status = if (entry) |value|
+        var status = if (entry) |value|
             try buildCachedStatus(alloc, src, value)
         else if (ctx.store != null and src.type == .git_repo and src.repo_path.len == 0)
             std.json.Value{ .object = .empty }
         else
             try buildSourceStatus(ctx.io, alloc, src, ctx.gitEnvironment());
+        if ((src.type == .web or src.type == .zip) and src.repo_path.len > 0) if (ctx.io) |io| {
+            const target = net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment()) catch {
+                try status.object.put(alloc, "is_valid", .{ .bool = false });
+                try version_info.put(alloc, src.name, status);
+                continue;
+            };
+            defer target.close(io);
+            if (target.read(alloc, io, src)) |current| {
+                try status.object.put(alloc, "version", .{ .string = current.version });
+                try status.object.put(alloc, "is_valid", .{ .bool = true });
+            } else |_| try status.object.put(alloc, "is_valid", .{ .bool = false });
+            if (target.parent.openDir(io, target.backup, .{ .follow_symlinks = false })) |backup| {
+                defer backup.close(io);
+                if (net_update.installed(alloc, io, backup, src)) |old| try status.object.put(alloc, "rollback_version", .{ .string = old.version }) else |_| {}
+            } else |_| {}
+        };
         try version_info.put(alloc, src.name, status);
     }
 
@@ -888,7 +936,7 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
             for (ctx.sources) |src| {
                 if (src.type == .git_repo and src.repo_path.len > 0) {
                     _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
-                }
+                } else if (src.type == .web or src.type == .zip) try refreshNet(ctx, alloc, src);
             }
             ctx.last_status_refresh = .now(ctx.clock_io, .awake);
         }
@@ -922,6 +970,7 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
         for (ctx.sources) |src| {
             if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
             if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
+            if (src.type == .web or src.type == .zip) try refreshNet(ctx, alloc, src);
         }
         ctx.last_status_refresh = .now(ctx.clock_io, .awake);
         break :blk try buildStatusPayload(ctx, alloc);
@@ -986,9 +1035,44 @@ fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
                 changed = !std.mem.eql(u8, previous, current) or (dirty != null and dirty.?.len > 0);
             }
         }
+        if (src.type == .web or src.type == .zip) {
+            const io = ctx.io orelse return error.IoUnavailable;
+            const target = try net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment());
+            defer target.close(io);
+            const current = try target.read(alloc, io, src);
+            const cache = if (ctx.store) |store| (try store.getItem(alloc, "update_manager", src.name)) orelse .null else .null;
+            const release = net_update.cachedRelease(cache) orelse try net_update.refresh(alloc, io, src, current, ctx.github_api_base);
+            changed = try net_update.install(alloc, io, target, src, release);
+            try saveNetCache(ctx, alloc, src, release, (try target.read(alloc, io, src)).version);
+        }
         try updatePackages(ctx, alloc, src);
     }
     if (changed) try restartServices(ctx, alloc, src);
+}
+
+fn saveNetCache(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source, release: net_update.Release, version: []const u8) !void {
+    const store = ctx.store orelse return;
+    var cache: std.json.ObjectMap = .empty;
+    try cache.put(alloc, "version", .{ .string = version });
+    try cache.put(alloc, "remote_version", .{ .string = release.version });
+    try cache.put(alloc, "is_valid", .{ .bool = true });
+    try cache.put(alloc, "last_error", .{ .string = "" });
+    var info: std.json.Array = .init(alloc);
+    try info.append(.{ .string = release.url });
+    try info.append(.{ .string = "application/zip" });
+    try info.append(.{ .integer = @intCast(release.size) });
+    try cache.put(alloc, "dl_info", .{ .array = info });
+    try store.insertItem(alloc, "update_manager", src.name, .{ .object = cache });
+}
+
+fn refreshNet(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    const io = ctx.io orelse return;
+    if (src.repo_path.len == 0) return;
+    const target = net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment()) catch return;
+    defer target.close(io);
+    const current = target.read(alloc, io, src) catch return;
+    const release = try net_update.refresh(alloc, io, src, current, ctx.github_api_base);
+    try saveNetCache(ctx, alloc, src, release, current.version);
 }
 
 fn restartServices(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
@@ -1102,7 +1186,7 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     const hard = ((try webreq.optional(bool, params, "hard")) orelse false);
     _ = ((try webreq.optional(bool, params, "update_deps")) orelse false);
     const src = ctx.findSource(app) orelse return error.NotFound;
-    if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
+    if (!src.isGit()) return error.InvalidParams;
 
     const proc_id = nextProcId();
     try ctx.beginMutation();
@@ -1153,13 +1237,27 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const app = try webreq.required([]const u8, params, "name");
     const src = ctx.findSource(app) orelse return error.NotFound;
-    if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
+    if (src.type == .system) return error.InvalidParams;
 
     const proc_id = nextProcId();
     try ctx.beginMutation();
     defer ctx.busy.store(false, .release);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Rolling Back {s}...", .{app});
+    if (src.type == .web or src.type == .zip) {
+        const io = ctx.io orelse return error.IoUnavailable;
+        {
+            try ctx.commands.lock(ctx.clock_io);
+            defer ctx.commands.unlock(ctx.clock_io);
+            if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+            const target = try net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment());
+            defer target.close(io);
+            try net_update.rollback(alloc, io, target, src);
+        }
+        try restartServices(ctx, alloc, src);
+        notifyLine(ctx, alloc, app, proc_id, true, "{s} rollback finished", .{app});
+        return .{ .string = "ok" };
+    }
     if (src.rollback_ref.len == 0) {
         notifyLine(ctx, alloc, app, proc_id, true, "Rollback not performed", .{});
         return .{ .string = "ok" };

@@ -23,6 +23,7 @@ vendored libraries keep their upstream implementations.
 | HTTP percent decoding | `std.Uri.Component.toRawMaybeAlloc`; form queries also replace `+` with a space |
 | Calendar rules and UTC formatting | `std.time.epoch` and `std.fmt` |
 | JSON parsing and serialization | `std.json` |
+| Release archives | `std.zip.Iterator` and `Entry.extractTo`, with `Writer.hashed(Crc32)` verification and checked staging directories |
 | Request arguments | `json/params.zig` over standard numeric parsers and ASCII helpers |
 | Text searches, case conversion, hex and Base64 | `std.mem`, `std.ascii`, `std.fmt`, `std.base64` |
 | Test directories and allocation failures | `std.testing.tmpDir` and `checkAllAllocationFailures` |
