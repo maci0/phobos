@@ -48,7 +48,6 @@ API becomes available and passes both host and ARM checks.
 | Adapter | Reason |
 | --- | --- |
 | Serial configuration in `serial.zig` | `std.Io` has no termios configuration operation. Use `std.posix.tcgetattr` and `tcsetattr`, including Linux baud bits. |
-| Inotify creation and watch registration in `file_manager.zig` | No `std.Io` watch API. Read, cancel and close through `std.Io`. |
 | System identity in `machine.zig` | No higher-level uname or effective-UID operation. `process.getUserInfo` resolves names to IDs, not IDs to names. |
 | Video capability layout in `machine.zig` | No V4L2 declaration. Use a local `extern struct`, `std.os.linux.IOCTL.IOR` and `io.operate(.device_io_control)`. |
 | Disk capacity in `disk_usage.c` | No `std.Io` filesystem-capacity operation. ARM C translation produces an opaque `statvfs` type because its platform header has a bitfield. The C header owns its ABI. |

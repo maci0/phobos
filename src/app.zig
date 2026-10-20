@@ -831,22 +831,10 @@ pub const App = struct {
             }
         }
 
-        if (cfg.hasSection("file_manager")) {
-            if (cfg.get("file_manager", "file_system_observer")) |raw| {
-                if (std.ascii.eqlIgnoreCase(raw, "inotify")) {
-                    self.file_ctx.observer = .inotify;
-                } else {
-                    self.file_ctx.observer = .none;
-                }
-            } else {
-                // Moonraker's default when the section exists and the key does not.
-                self.file_ctx.observer = .inotify;
-            }
-            if (cfg.get("file_manager", "excludes")) |raw| {
-                self.file_ctx.setExcludes(raw) catch |err| {
-                    std.debug.print("phobos: warning: file excludes not applied: {}\n", .{err});
-                };
-            }
+        if (cfg.get("file_manager", "excludes")) |raw| {
+            self.file_ctx.setExcludes(raw) catch |err| {
+                std.debug.print("phobos: warning: file excludes not applied: {}\n", .{err});
+            };
         }
 
         if (cfg.get("klippy_apis", "hidden_objects")) |raw| {
@@ -1508,7 +1496,6 @@ pub const App = struct {
         self.td1_ctx.startPolling();
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
-        if (self.file_ctx.observer == .inotify) self.file_ctx.startObserver();
         self.analysis_ctx.io = io;
         self.klippy_ctx.on_klipper_path = onKlipperPath;
         self.klippy_ctx.on_klipper_path_ctx = self;
@@ -2081,7 +2068,7 @@ test "setConfig [machine] provider simple restarts through script_path and does 
     try std.testing.expectEqual(@as(usize, 1), rec.calls);
 }
 
-test "setConfig loads auto-refresh, excludes, observer none, and hidden objects" {
+test "setConfig loads auto-refresh, excludes, and hidden objects" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -2118,8 +2105,6 @@ test "setConfig loads auto-refresh, excludes, observer none, and hidden objects"
     try std.testing.expectEqual(@as(i64, 0), app.update_ctx.refresh_window_start);
     try std.testing.expectEqual(@as(i64, 5), app.update_ctx.refresh_window_end);
     try std.testing.expect(app.update_ctx.refresh_thread == null);
-    try std.testing.expect(app.file_ctx.observer == .none);
-    try std.testing.expect(app.file_ctx.observer_task == null);
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", ".mod"));
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", "logFiles/a.log"));
     try std.testing.expect(!app.update_ctx.tickAutoRefresh(alloc, 2));

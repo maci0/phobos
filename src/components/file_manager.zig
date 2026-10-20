@@ -118,16 +118,9 @@ pub const FileCtx = struct {
     /// Guards metadata_cache. metadata runs under Core today, but lock anyway so
     /// the cache stays correct if it ever moves off-Core. No-op when io unset.
     metadata_cache_mutex: std.Io.Mutex = .init,
-    /// `[file_manager] file_system_observer`. `none` does not watch. The
-    /// printer sets none. `inotify` watches the roots.
-    observer: enum { none, inotify } = .none,
     /// `root/relative` paths omitted from listings. Forge-X `excludes`.
     excludes: [][]const u8 = &.{},
     excludes_owned: bool = false,
-    observer_task: ?std.Io.Future(void) = null,
-    observer_file: ?std.Io.File = null,
-    last_fs_name: [160]u8 = undefined,
-    last_fs_len: std.atomic.Value(usize) = .init(0),
 
     pub fn setIo(self: *FileCtx, io: std.Io) void {
         self.io = io;
@@ -170,77 +163,7 @@ pub const FileCtx = struct {
         return false;
     }
 
-    pub fn startObserver(self: *FileCtx) void {
-        if (self.observer != .inotify or self.observer_task != null) return;
-        const io = self.io orelse return;
-        if (self.roots.len == 0) return;
-        const IN = std.os.linux.IN;
-        const fd_rc = std.os.linux.inotify_init1(IN.CLOEXEC);
-        if (std.os.linux.errno(fd_rc) != .SUCCESS) return;
-        const file: std.Io.File = .{ .handle = @intCast(fd_rc), .flags = .{ .nonblocking = false } };
-        const mask: u32 = IN.CLOSE_WRITE | IN.MOVED_FROM | IN.MOVED_TO | IN.CREATE | IN.DELETE;
-        var watched: usize = 0;
-        for (self.roots) |root| {
-            const path_z = self.gpa.dupeSentinel(u8, root.path, 0) catch continue;
-            defer self.gpa.free(path_z);
-            const wd = std.os.linux.inotify_add_watch(file.handle, path_z.ptr, mask);
-            if (std.os.linux.errno(wd) == .SUCCESS) watched += 1;
-        }
-        if (watched == 0) {
-            file.close(io);
-            return;
-        }
-        self.observer_file = file;
-        self.last_fs_len.store(0, .release);
-        self.observer_task = io.concurrent(observerThread, .{self}) catch {
-            file.close(io);
-            self.observer_file = null;
-            return;
-        };
-    }
-
-    fn observerThread(self: *FileCtx) void {
-        const io = self.io orelse return;
-        const file = self.observer_file orelse return;
-        var buf: [4096]u8 align(8) = undefined;
-        while (true) {
-            const n = file.readStreaming(io, &.{&buf}) catch return;
-            if (n == 0) return;
-            var off: usize = 0;
-            const hdr_size = @sizeOf(std.os.linux.inotify_event);
-            while (off + hdr_size <= n) {
-                var hdr: std.os.linux.inotify_event = undefined;
-                @memcpy(std.mem.asBytes(&hdr), buf[off..][0..hdr_size]);
-                if (hdr.len > 0 and off + hdr_size + hdr.len <= n) {
-                    const raw = buf[off + hdr_size ..][0..hdr.len];
-                    const end = std.mem.indexOfScalar(u8, raw, 0) orelse raw.len;
-                    const copy_len = @min(end, self.last_fs_name.len);
-                    if (copy_len > 0) {
-                        @memcpy(self.last_fs_name[0..copy_len], raw[0..copy_len]);
-                        self.last_fs_len.store(copy_len, .release);
-                    }
-                }
-                const step = hdr_size + hdr.len;
-                if (step == 0) break;
-                off += step;
-            }
-        }
-    }
-
-    pub fn stopObserver(self: *FileCtx) void {
-        const io = self.io orelse return;
-        if (self.observer_task) |*task| {
-            task.cancel(io);
-            self.observer_task = null;
-        }
-        if (self.observer_file) |file| {
-            file.close(io);
-            self.observer_file = null;
-        }
-    }
-
     pub fn deinit(self: *FileCtx) void {
-        self.stopObserver();
         if (self.excludes_owned) {
             for (self.excludes) |s| self.gpa.free(s);
             self.gpa.free(self.excludes);
@@ -1425,26 +1348,6 @@ test "excludes omit a directory from the file list" {
     try testing.expect(FileCtx.pathExcluded(c.excludes, "gcodes", ".mod/secret.gcode"));
 }
 
-test "inotify observer records a created file name" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var tr = try TestRoots.init(arena.allocator());
-    defer tr.deinit();
-    var c = tr.ctx();
-    defer c.deinit();
-    c.observer = .inotify;
-    c.startObserver();
-    try testing.expect(c.observer_task != null);
-    try tr.writeFile("gcodes/watched.gcode", "G1\n");
-    var i: usize = 0;
-    while (i < 50 and c.last_fs_len.load(.acquire) == 0) : (i += 1) {
-        std.Io.sleep(tr.io, .{ .nanoseconds = 20_000_000 }, .real) catch {};
-    }
-    const n = c.last_fs_len.load(.acquire);
-    try testing.expect(n > 0);
-    try testing.expectEqualStrings("watched.gcode", c.last_fs_name[0..n]);
-}
-
 test "normalizeRel: collapses . and empty segments" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2330,23 +2233,4 @@ test "file excludes preserve ownership on allocation failure" {
             try std.testing.expectEqual(@as(usize, 2), ctx.excludes.len);
         }
     }.check, .{});
-}
-
-test "inotify observer cancellation closes an idle native file" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var tr = try TestRoots.init(arena.allocator());
-    defer tr.deinit();
-    var ctx = tr.ctx();
-    defer ctx.deinit();
-    ctx.observer = .inotify;
-    ctx.startObserver();
-    try testing.expect(ctx.observer_task != null);
-    try tr.io.sleep(.fromMilliseconds(10), .awake);
-    const start = std.Io.Clock.Timestamp.now(tr.io, .awake);
-    ctx.stopObserver();
-    try testing.expect(start.untilNow(tr.io).raw.toMilliseconds() < 1000);
-    try testing.expect(ctx.observer_task == null);
-    try testing.expect(ctx.observer_file == null);
-    ctx.stopObserver();
 }
