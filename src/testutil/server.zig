@@ -1160,6 +1160,38 @@ test "files: upload → list → metadata → download round-trip" {
     try std.testing.expectEqualStrings("G28\nG1 X1 Y2\n", dl);
 }
 
+test "files: zip creates an archive and emits its create_file notification" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const upload = try ts.uploadFile(alloc, "gcodes", null, "cube.gcode", "G1 X25\n");
+    defer alloc.free(upload);
+    var rec = RecordWriter{};
+    defer rec.deinit();
+    const cid = try ts.conns.add(ts.io, false);
+    ts.conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+    defer ts.conns.remove(ts.io, cid);
+    defer ts.conns.detachWriter(ts.io, cid);
+    const body = try ts.postJson(alloc, "/server/files/zip", "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/cube.gcode\"]}");
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?;
+    try std.testing.expectEqualStrings("zip_files", result.object.get("action").?.string);
+    try std.testing.expect(result.object.get("destination").?.object.get("size").?.integer > 0);
+    const download = try ts.get(alloc, "/server/files/config/out.zip");
+    defer alloc.free(download);
+    try std.testing.expect(download.len > 30);
+    try std.testing.expectEqualSlices(u8, &std.zip.local_file_header_sig, download[0..4]);
+    var saw = false;
+    for (rec.frames.items) |frame| {
+        if (std.mem.indexOf(u8, frame, "notify_filelist_changed") != null and
+            std.mem.indexOf(u8, frame, "create_file") != null and
+            std.mem.indexOf(u8, frame, "out.zip") != null) saw = true;
+    }
+    try std.testing.expect(saw);
+}
+
 test "files: metadata thumbnails persist and their advertised URLs serve image bytes" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

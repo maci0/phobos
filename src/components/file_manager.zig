@@ -54,6 +54,7 @@ const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const gcode_metadata = @import("gcode_metadata.zig");
 const job_state_component = @import("job_state.zig");
 const ServerInfo = @import("../core/methods.zig").ServerInfo;
+const zip_writer = @import("../zip_writer.zig");
 
 const Registry = registry.Registry;
 const Dir = std.Io.Dir;
@@ -129,6 +130,8 @@ pub const FileCtx = struct {
     /// Guards metadata_cache. metadata runs under Core today, but lock anyway so
     /// the cache stays correct if it ever moves off-Core. No-op when io unset.
     metadata_cache_mutex: std.Io.Mutex = .init,
+    /// Archive compression runs outside Core, one archive at a time.
+    archive_mutex: std.Io.Mutex = .init,
     /// `root/relative` paths omitted from listings. Forge-X `excludes`.
     excludes: [][]const u8 = &.{},
     excludes_owned: bool = false,
@@ -1262,24 +1265,154 @@ pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
 // ---------------------------------------------------------------------------
 // POST /server/files/zip → server.files.zip
 // ---------------------------------------------------------------------------
-// Archive creation. phobos does not bundle a zip writer; we validate inputs and
-// return the Moonraker response shape `{ "destination": <item>, "action":
-// "zip_files" }`. The archive is not actually produced (noted limitation).
+// Archive creation uses a bounded source list and streaming native DEFLATE.
+// Like the pinned file_manager, selected directories include immediate files.
 
 pub fn handleZip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const dest = ((try webreq.optional([]const u8, params, "dest")) orelse "config/collection.zip");
-    const resolved = try resolveRequestPath(ctx, alloc, dest);
-    if (!resolved.root.full_access) return error.Forbidden;
+    const requested = (try webreq.optionalList(alloc, params, "items")) orelse return error.InvalidParams;
+    if (requested.len == 0 or requested.len > zip_writer.Archive.max_entries) return error.InvalidParams;
+    const store_only = (try webreq.optional(bool, params, "store_only")) orelse false;
+    var timestamp_buf: [32]u8 = undefined;
+    const timestamp = @import("../util/clock.zig").iso8601(io, &timestamp_buf);
+    const default_dest = try std.fmt.allocPrint(alloc, "config/collection-{s}{s}{s}-{s}{s}{s}.zip", .{ timestamp[0..4], timestamp[5..7], timestamp[8..10], timestamp[11..13], timestamp[14..16], timestamp[17..19] });
+    const dest = (try webreq.optional([]const u8, params, "dest")) orelse default_dest;
 
-    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, resolved.root.permissions());
-    try item.object.put(alloc, "path", .{ .string = resolved.rel });
-    try item.object.put(alloc, "root", .{ .string = resolved.root.name });
+    // The App can add roots while Core is released. Keep a stable snapshot;
+    // all source-list and path-resolution allocations die with this operation.
+    var scratch = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const roots = try a.alloc(Root, ctx.roots.len);
+    for (ctx.roots, roots) |root, *copy| copy.* = .{ .name = try a.dupe(u8, root.name), .path = try a.dupe(u8, root.path), .full_access = root.full_access };
+    const excludes = try a.alloc([]const u8, ctx.excludes.len);
+    for (ctx.excludes, excludes) |exclude, *copy| copy.* = try a.dupe(u8, exclude);
+    const snapshot: FileCtx = .{ .gpa = ctx.gpa, .roots = roots, .bus = null, .io = io, .excludes = excludes };
+    const destination = try resolveRequestPath(&snapshot, a, dest);
+    if (!destination.root.full_access or archiveReserved(snapshot.excludes, destination)) return error.Forbidden;
+    if (destination.rel.len == 0) return error.InvalidParams;
+    try ctx.checkInUse(destination, false);
+    const core = if (ctx.bus) |bus| bus.core else null;
+    if (core) |c| c.unlock(io);
+    defer if (core) |c| c.lock(io);
+    return createArchive(ctx, &snapshot, destination, requested, store_only, a, alloc) catch |err| switch (err) {
+        error.ArchiveTooLarge => error.InvalidParams,
+        else => accessError(err),
+    };
+}
 
+fn archiveReserved(excludes: []const []const u8, path: Resolved) bool {
+    if (FileCtx.pathExcluded(excludes, path.root.name, path.rel)) return true;
+    var parts = std.mem.splitScalar(u8, path.rel, '/');
+    while (parts.next()) |part| if (std.mem.eql(u8, part, ".git")) return true;
+    return false;
+}
+
+const ArchiveSources = struct {
+    items: std.ArrayList(struct { resolved: Resolved, name: []const u8 }) = .empty,
+    canonical: std.StringHashMapUnmanaged(void) = .empty,
+    path_bytes: usize = 0,
+    scanned: usize = 0,
+
+    fn append(self: *ArchiveSources, io: std.Io, alloc: std.mem.Allocator, transient: std.mem.Allocator, resolved: Resolved) !void {
+        var parent = try resolved.parent(io, transient, .{ .follow_leaf = true });
+        defer parent.close(io);
+        var canonical_buf: [Dir.max_path_bytes]u8 = undefined;
+        const canonical = canonical_buf[0..try parent.dir.realPathFile(io, parent.name, &canonical_buf)];
+        if (self.canonical.contains(canonical)) return;
+        const name_len = resolved.root.name.len + 1 + resolved.rel.len;
+        const bytes = canonical.len + name_len + resolved.abs.len + resolved.rel.len;
+        if (self.items.items.len >= zip_writer.Archive.max_entries or bytes > zip_writer.Archive.max_names_bytes - self.path_bytes) return error.ArchiveTooLarge;
+        const canonical_owned = try alloc.dupe(u8, canonical);
+        try self.canonical.put(alloc, canonical_owned, {});
+        const name = try std.fs.path.join(alloc, &.{ resolved.root.name, resolved.rel });
+        const owned: Resolved = .{ .root = resolved.root, .rel = try alloc.dupe(u8, resolved.rel), .abs = try alloc.dupe(u8, resolved.abs) };
+        try self.items.append(alloc, .{ .resolved = owned, .name = name });
+        self.path_bytes += bytes;
+    }
+};
+
+fn createArchive(ctx: *FileCtx, snapshot: *const FileCtx, destination: Resolved, requested: []const []const u8, store_only: bool, scratch: std.mem.Allocator, alloc: std.mem.Allocator) !std.json.Value {
+    const io = try ctx.requireIo();
+    try ctx.archive_mutex.lock(io);
+    defer ctx.archive_mutex.unlock(io);
+    var sources: ArchiveSources = .{};
+    defer sources.items.deinit(scratch);
+    defer sources.canonical.deinit(scratch);
+    for (requested) |request| {
+        var transient = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer transient.deinit();
+        const a = transient.allocator();
+        const source = try resolveRequestPath(snapshot, a, request);
+        if (archiveReserved(snapshot.excludes, source)) return error.Forbidden;
+        const info = source.stat(io, a) catch |err| return accessError(err);
+        if (info.kind == .file) {
+            try sources.append(io, scratch, a, source);
+        } else if (info.kind == .directory) {
+            const dir = try source.openDirectory(io, a);
+            defer dir.close(io);
+            var iter = dir.iterate();
+            while (try iter.next(io)) |entry| {
+                sources.scanned += 1;
+                if (sources.scanned > 65536) return error.ArchiveTooLarge;
+                // Resolve each file independently, including in-root links.
+                // Missing, inaccessible and escaping children are omitted.
+                if (entry.kind == .directory) continue;
+                var child_arena = std.heap.ArenaAllocator.init(ctx.gpa);
+                defer child_arena.deinit();
+                const ca = child_arena.allocator();
+                const child = try childResolved(ca, source, entry.name);
+                if (archiveReserved(snapshot.excludes, child)) continue;
+                const st = child.stat(io, ca) catch |err| switch (err) {
+                    error.NotFound, error.FileNotFound, error.Forbidden, error.AccessDenied, error.PermissionDenied, error.SymLinkLoop => continue,
+                    else => return err,
+                };
+                if (st.kind == .file) try sources.append(io, scratch, ca, child);
+            }
+        } else return error.InvalidParams;
+    }
+    // Stage the source list first, so the atomic temporary never archives itself.
+    var parent = try destination.parent(io, scratch, .{});
+    defer parent.close(io);
+    if (parent.dir.statFile(io, parent.name, .{ .follow_symlinks = false })) |st| {
+        if (st.kind == .directory) return error.InvalidParams;
+        if (st.kind == .sym_link) return error.Forbidden;
+    } else |err| if (err != error.FileNotFound) return err;
+    var atomic = try parent.dir.createFileAtomic(io, parent.name, .{ .replace = true });
+    defer atomic.deinit(io);
+    var buf: [8192]u8 = undefined;
+    var output = atomic.file.writer(io, &buf);
+    var archive = zip_writer.Archive.init(ctx.gpa, &output, store_only);
+    defer archive.deinit();
+    for (sources.items.items) |source| {
+        var source_arena = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer source_arena.deinit();
+        const file = try source.resolved.openFile(io, source_arena.allocator());
+        defer file.close(io);
+        try archive.addFile(file, source.name);
+    }
+    try archive.finish();
+    try atomic.file.sync(io);
+    if (ctx.bus) |bus| return bus.core.run(io, commitArchive, .{ ctx, &atomic, destination, alloc });
+    return commitArchive(ctx, &atomic, destination, alloc);
+}
+
+fn commitArchive(ctx: *FileCtx, atomic: *std.Io.File.Atomic, destination: Resolved, alloc: std.mem.Allocator) !std.json.Value {
+    const io = try ctx.requireIo();
+    // Printing may have started while compression ran outside Core.
+    try ctx.checkInUse(destination, false);
+    var item = try buildPathInfo(alloc, try atomic.file.stat(io), destination.root.permissions());
+    try item.object.put(alloc, "path", .{ .string = try alloc.dupe(u8, destination.rel) });
+    try item.object.put(alloc, "root", .{ .string = try alloc.dupe(u8, destination.root.name) });
+    var notification: std.json.ObjectMap = .empty;
+    try notification.put(alloc, "action", .{ .string = "create_file" });
+    try notification.put(alloc, "item", item);
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "destination", item);
     try out.put(alloc, "action", .{ .string = "zip_files" });
+    try atomic.replace(io);
+    emitFilelistChanged(ctx, io, alloc, .{ .object = notification });
     return .{ .object = out };
 }
 
@@ -2595,18 +2728,148 @@ test "handleThumbnails: missing file returns an empty list" {
     try testing.expectEqual(@as(usize, 0), result.array.items.len);
 }
 
-test "handleZip: response shape destination + action" {
+test "handleZip creates a readable archive with selected root paths" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var tr = try TestRoots.init(a);
     defer tr.deinit();
     var c = tr.ctx();
-    const result = try handleZip(@ptrCast(&c), try objParams(a, "{\"dest\":\"config/out.zip\",\"items\":[]}"), a);
+    try tr.writeFile("gcodes/cube.gcode", "G1 X0\n");
+    const result = try handleZip(@ptrCast(&c), try objParams(a, "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/cube.gcode\"]}"), a);
     try testing.expectEqualStrings("zip_files", result.object.get("action").?.string);
     const dst = result.object.get("destination").?.object;
     try testing.expectEqualStrings("out.zip", dst.get("path").?.string);
     try testing.expectEqualStrings("config", dst.get("root").?.string);
+    const archive = try tr.tmp.dir.openFile(tr.io, "config/out.zip", .{});
+    defer archive.close(tr.io);
+    var buf: [1024]u8 = undefined;
+    var reader = archive.reader(tr.io, &buf);
+    var iter = try std.zip.Iterator.init(&reader);
+    const entry = (try iter.next()).?;
+    var name_buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("gcodes/cube.gcode", try entry.getFilename(&reader, &name_buf, .{}));
+    var contents: [128]u8 = undefined;
+    var output: std.Io.Writer = .fixed(&contents);
+    try entry.extractTo(&reader, &output);
+    try testing.expectEqualStrings("G1 X0\n", output.buffered());
+    try testing.expectEqual(null, try iter.next());
+}
+
+test "handleZip directories are shallow, excluded paths are omitted and aliases deduplicate" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/cube.gcode", "cube");
+    try tr.writeFile("gcodes/sub/deeper.gcode", "omit subdirectories");
+    try tr.writeFile("gcodes/private.gcode", "excluded");
+    try tr.writeFile("config/secret.cfg", "outside source root");
+    try tr.tmp.dir.symLink(tr.io, "cube.gcode", "gcodes/alias.gcode", .{});
+    try tr.tmp.dir.symLink(tr.io, "../config/secret.cfg", "gcodes/escape.gcode", .{});
+    var c = tr.ctx();
+    var excludes = [_][]const u8{"gcodes/private.gcode"};
+    c.excludes = &excludes;
+    _ = try handleZip(@ptrCast(&c), try objParams(a, "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/cube.gcode\",\"gcodes\"],\"store_only\":true}"), a);
+    const file = try tr.tmp.dir.openFile(tr.io, "config/out.zip", .{});
+    defer file.close(tr.io);
+    var buf: [1024]u8 = undefined;
+    var reader = file.reader(tr.io, &buf);
+    var iter = try std.zip.Iterator.init(&reader);
+    const entry = (try iter.next()).?;
+    var name_buf: [128]u8 = undefined;
+    try testing.expectEqualStrings("gcodes/cube.gcode", try entry.getFilename(&reader, &name_buf, .{}));
+    try testing.expectEqual(std.zip.CompressionMethod.store, entry.compression_method);
+    try testing.expectEqual(null, try iter.next());
+}
+
+test "handleZip validation and late failures preserve the existing destination" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("config/out.zip", "previous archive");
+    try tr.writeFile("gcodes/cube.gcode", "cube");
+    try tr.writeFile("config/.git/config", "reserved");
+    var c = tr.ctx();
+    const cases = [_]struct { params: []const u8, err: anyerror }{
+        .{ .params = "{\"dest\":\"config/out.zip\"}", .err = error.InvalidParams },
+        .{ .params = "{\"dest\":\"config/out.zip\",\"items\":[]}", .err = error.InvalidParams },
+        .{ .params = "{\"dest\":\"config/out.zip\",\"items\":[5]}", .err = error.InvalidParams },
+        .{ .params = "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/missing\"]}", .err = error.NotFound },
+        .{ .params = "{\"dest\":\"config/out.zip\",\"items\":[\"config/.git/config\"]}", .err = error.Forbidden },
+        .{ .params = "{\"dest\":\"logs/out.zip\",\"items\":[\"gcodes/cube.gcode\"]}", .err = error.Forbidden },
+        .{ .params = "{\"dest\":\"config/sub/out.zip\",\"items\":[\"gcodes/cube.gcode\"]}", .err = error.NotFound },
+    };
+    for (cases) |case| {
+        try testing.expectError(case.err, handleZip(@ptrCast(&c), try objParams(a, case.params), a));
+        try testing.expectEqualStrings("previous archive", try tr.tmp.dir.readFileAlloc(tr.io, "config/out.zip", a, .limited(100)));
+    }
+    const huge = try tr.tmp.dir.createFile(tr.io, "gcodes/huge.gcode", .{});
+    defer huge.close(tr.io);
+    try huge.setLength(tr.io, std.math.maxInt(u32));
+    try testing.expectError(error.InvalidParams, handleZip(@ptrCast(&c), try objParams(a, "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/huge.gcode\"]}"), a));
+    try testing.expectEqualStrings("previous archive", try tr.tmp.dir.readFileAlloc(tr.io, "config/out.zip", a, .limited(100)));
+    var dir = try tr.tmp.dir.openDir(tr.io, "config", .{ .iterate = true });
+    defer dir.close(tr.io);
+    var iter = dir.iterate();
+    var count: usize = 0;
+    while (try iter.next(tr.io)) |_| count += 1;
+    try testing.expectEqual(@as(usize, 2), count); // out.zip and .git; no temporary remains.
+}
+
+test "handleZip rejects escaping destinations and bounded source tables" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/cube.gcode", "cube");
+    try tr.tmp.dir.symLink(tr.io, "../logs", "config/outside", .{ .is_directory = true });
+    var c = tr.ctx();
+    try testing.expectError(error.Forbidden, handleZip(@ptrCast(&c), try objParams(a, "{\"dest\":\"config/outside/out.zip\",\"items\":[\"gcodes/cube.gcode\"]}"), a));
+    try testing.expectEqual(StatKind.missing, tr.exists("logs/out.zip"));
+    const source = try resolveRequestPath(&c, a, "gcodes/cube.gcode");
+    var sources: ArchiveSources = .{};
+    defer sources.items.deinit(a);
+    defer sources.canonical.deinit(a);
+    sources.path_bytes = zip_writer.Archive.max_names_bytes;
+    try testing.expectError(error.ArchiveTooLarge, sources.append(tr.io, a, a, source));
+    sources.path_bytes = 0;
+    try sources.items.resize(a, zip_writer.Archive.max_entries);
+    try testing.expectError(error.ArchiveTooLarge, sources.append(tr.io, a, a, source));
+}
+
+test "fuzz handleZip archives only the selected file and preserves its contents" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var tr = try TestRoots.init(a);
+            defer tr.deinit();
+            var buf: [2048]u8 = undefined;
+            const bytes = buf[0..smith.slice(&buf)];
+            try tr.writeFile("gcodes/print.gcode", bytes);
+            var c = tr.ctx();
+            const params = try objParams(a, if (smith.value(bool)) "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/print.gcode\",\"gcodes/print.gcode\"],\"store_only\":true}" else "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/print.gcode\"]}");
+            _ = try handleZip(@ptrCast(&c), params, a);
+            const file = try tr.tmp.dir.openFile(tr.io, "config/out.zip", .{});
+            defer file.close(tr.io);
+            var read_buf: [1024]u8 = undefined;
+            var reader = file.reader(tr.io, &read_buf);
+            var iter = try std.zip.Iterator.init(&reader);
+            const entry = (try iter.next()).?;
+            var data: std.Io.Writer.Allocating = .init(a);
+            defer data.deinit();
+            try entry.extractTo(&reader, &data.writer);
+            try testing.expectEqualSlices(u8, bytes, data.written());
+            try testing.expectEqual(std.hash.Crc32.hash(bytes), entry.crc32);
+            try testing.expectEqual(null, try iter.next());
+        }
+    }.run, .{});
 }
 
 test "isGcodeExt: recognizes valid extensions" {
