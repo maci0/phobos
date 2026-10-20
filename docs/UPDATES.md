@@ -16,6 +16,9 @@ web installs can instead use `.version` with their manifest. The configured repo
 must match the bundle identity. Refresh selects a GitHub release ZIP, respecting
 the installed `asset_name` when present. Updates first use Moonraker's cached
 `remote_version` and `dl_info`, so an existing cached asset needs no API refresh.
+New client records use the `phobos_update_cache` database namespace with hex
+source-name keys. This keeps `foo.bar` separate from `foo` despite the database's
+dotted-path string API. Valid legacy Moonraker records remain a read fallback.
 
 Downloads stream to a private sibling directory with a two-minute deadline and
 a 128 MiB compressed-size limit. Extraction uses `std.zip`, verifies CRC32, and

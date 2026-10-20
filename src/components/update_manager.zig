@@ -58,6 +58,7 @@ const net_update = @import("update_net.zig");
 
 const Registry = registry.Registry;
 const status_refresh_interval_s = 60;
+const net_cache_namespace: [:0]const u8 = "phobos_update_cache";
 extern fn phobos_local_hour(seconds: i64, hour: *c_int) c_int;
 
 fn localHour(seconds: i64) !i64 {
@@ -815,14 +816,19 @@ fn buildCachedStatus(alloc: std.mem.Allocator, src: Source, cache: std.json.Valu
 ///   { github_rate_limit, github_requests_remaining, github_limit_reset_time,
 ///     version_info: { <name>: {...} }, busy }
 ///
-/// The GitHub rate-limit stats are null until phobos makes a GitHub API request
-/// (it never does in the spine), matching HttpClient.github_api_stats on a fresh
-/// process.
+/// GitHub rate-limit statistics remain null: the release metadata request helper
+/// currently returns the body without retaining rate-limit response headers.
 fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value {
     const cached = if (ctx.store) |store| try store.getNamespace(alloc, "update_manager") else .null;
+    const own_cached = if (ctx.store) |store| try store.getNamespace(alloc, net_cache_namespace) else .null;
     var version_info: std.json.ObjectMap = .empty;
     for (ctx.sources) |src| {
-        const entry = if (cached == .object) cached.object.get(src.name) else null;
+        const entry = if (src.type == .web or src.type == .zip)
+            try netCacheEntry(alloc, src.name, own_cached, cached)
+        else if (cached == .object)
+            cached.object.get(src.name)
+        else
+            null;
         var status = if (entry) |value|
             try buildCachedStatus(alloc, src, value)
         else if (ctx.store != null and src.type == .git_repo and src.repo_path.len == 0)
@@ -849,7 +855,7 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
     }
 
     var out: std.json.ObjectMap = .empty;
-    // get_rate_limit_stats() — null on a process that has made no GitHub calls.
+    // The metadata fetcher does not retain GitHub rate-limit headers.
     try out.put(alloc, "github_rate_limit", .null);
     try out.put(alloc, "github_requests_remaining", .null);
     try out.put(alloc, "github_limit_reset_time", .null);
@@ -1040,7 +1046,10 @@ fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
             const target = try net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment());
             defer target.close(io);
             const current = try target.read(alloc, io, src);
-            const cache = if (ctx.store) |store| (try store.getItem(alloc, "update_manager", src.name)) orelse .null else .null;
+            const cache = if (ctx.store) |store|
+                (try netCacheEntry(alloc, src.name, try store.getNamespace(alloc, net_cache_namespace), try store.getNamespace(alloc, "update_manager"))) orelse .null
+            else
+                .null;
             const release = net_update.cachedRelease(cache) orelse try net_update.refresh(alloc, io, src, current, ctx.github_api_base);
             changed = try net_update.install(alloc, io, target, src, release);
             try saveNetCache(ctx, alloc, src, release, (try target.read(alloc, io, src)).version);
@@ -1062,7 +1071,42 @@ fn saveNetCache(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source, release:
     try info.append(.{ .string = "application/zip" });
     try info.append(.{ .integer = @intCast(release.size) });
     try cache.put(alloc, "dl_info", .{ .array = info });
-    try store.insertItem(alloc, "update_manager", src.name, .{ .object = cache });
+    try store.insertItem(alloc, net_cache_namespace, try netCacheKey(alloc, src.name), .{ .object = cache });
+}
+
+/// A single DataStore segment, including for dotted or empty source names.
+fn netCacheKey(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return alloc.print("x{x}", .{name});
+}
+
+fn netCacheValid(cache: std.json.Value) bool {
+    if (cache != .object) return false;
+    for ([_][]const u8{ "version", "remote_version" }) |field| {
+        const value = cache.object.get(field) orelse return false;
+        if (value != .string or value.string.len == 0 or !std.unicode.utf8ValidateSlice(value.string)) return false;
+    }
+    for ([_][]const u8{ "rollback_version", "last_error" }) |field| if (cache.object.get(field)) |value| {
+        if (value != .string or !std.unicode.utf8ValidateSlice(value.string)) return false;
+    };
+    if (cache.object.get("is_valid")) |value| if (value != .bool) return false;
+    if (cache.object.get("dl_info")) |info| {
+        if (info != .array or info.array.items.len != 3) return false;
+        for (info.array.items[0..2]) |value| if (value != .string or !std.unicode.utf8ValidateSlice(value.string)) return false;
+        const size = info.array.items[2];
+        if (size != .integer or size.integer < 0 or size.integer > 128 * 1024 * 1024) return false;
+    }
+    return true;
+}
+
+/// Prefer the private cache, then accept a literal legacy Moonraker key.
+fn netCacheEntry(alloc: std.mem.Allocator, name: []const u8, own: std.json.Value, vendor: std.json.Value) !?std.json.Value {
+    if (own == .object) if (own.object.get(try netCacheKey(alloc, name))) |value| {
+        if (netCacheValid(value)) return value;
+    };
+    if (vendor == .object) if (vendor.object.get(name)) |value| {
+        if (netCacheValid(value)) return value;
+    };
+    return null;
 }
 
 fn refreshNet(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
@@ -1331,6 +1375,96 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 
 fn testCtx() UpdateCtx {
     return .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &default_sources, .bus = null, .io = null };
+}
+
+test "update caches persist dotted and plain source names separately across reopen" {
+    var temp = testing.tmpDir(.{});
+    defer temp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const root = try temp.dir.realPathFileAlloc(testing.io, ".", a);
+    const path = try a.printSentinel("{s}/updates.db", .{root}, 0);
+    const SqliteStore = @import("../store/sqlite_store.zig").SqliteStore;
+    var db = try SqliteStore.open(testing.io, path);
+    var open = true;
+    defer if (open) db.deinit();
+    const sources = [_]Source{
+        .{ .name = "foo.bar", .type = .web },
+        .{ .name = "foo", .type = .web },
+    };
+    var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &sources, .bus = null, .store = db.dataStore() };
+    try saveNetCache(&ctx, a, sources[0], .{ .version = "dot.remote", .url = "http://127.0.0.1/dot.zip", .size = 42 }, "dot.current");
+    try saveNetCache(&ctx, a, sources[1], .{ .version = "plain.remote", .url = "http://127.0.0.1/plain.zip", .size = 24 }, "plain.current");
+    db.deinit();
+    open = false;
+    db = try SqliteStore.open(testing.io, path);
+    open = true;
+    ctx.store = db.dataStore();
+    const status = try handleStatus(&ctx, .null, a);
+    const info = status.object.get("version_info").?.object;
+    try testing.expectEqualStrings("dot.current", info.get("foo.bar").?.object.get("version").?.string);
+    try testing.expectEqualStrings("dot.remote", info.get("foo.bar").?.object.get("remote_version").?.string);
+    try testing.expectEqualStrings("plain.current", info.get("foo").?.object.get("version").?.string);
+    try testing.expectEqualStrings("plain.remote", info.get("foo").?.object.get("remote_version").?.string);
+    const cached = try db.dataStore().getNamespace(a, net_cache_namespace);
+    try testing.expectEqual(@as(usize, 2), cached.object.count());
+    const dotted = (try netCacheEntry(a, "foo.bar", cached, .null)).?;
+    const plain = (try netCacheEntry(a, "foo", cached, .null)).?;
+    try testing.expectEqualStrings("http://127.0.0.1/dot.zip", net_update.cachedRelease(dotted).?.url);
+    try testing.expectEqualStrings("http://127.0.0.1/plain.zip", net_update.cachedRelease(plain).?.url);
+    try testing.expectEqualStrings("x666f6f2e626172", try netCacheKey(a, "foo.bar"));
+    try testing.expectEqualStrings("x666f6f", try netCacheKey(a, "foo"));
+}
+
+test "invalid private update records fall back to literal vendor cache entries" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const vendor = try objParams(a, "{\"foo.bar\":{\"version\":\"legacy.current\",\"remote_version\":\"legacy.remote\"}}");
+    var own: std.json.ObjectMap = .empty;
+    const key = try netCacheKey(a, "foo.bar");
+    for ([_][]const u8{
+        "null",
+        "{\"version\":42,\"remote_version\":\"bad\"}",
+        "{\"version\":\"bad\",\"remote_version\":\"bad\",\"is_valid\":\"true\"}",
+        "{\"version\":\"bad\",\"remote_version\":\"bad\",\"dl_info\":[\"http://127.0.0.1/bad\",\"zip\",-1]}",
+    }) |body| {
+        try own.put(a, key, try objParams(a, body));
+        const entry = (try netCacheEntry(a, "foo.bar", .{ .object = own }, vendor)).?;
+        try testing.expectEqualStrings("legacy.current", entry.object.get("version").?.string);
+    }
+    try own.put(a, key, try objParams(a, "{\"version\":\"private.current\",\"remote_version\":\"private.remote\"}"));
+    const entry = (try netCacheEntry(a, "foo.bar", .{ .object = own }, vendor)).?;
+    try testing.expectEqualStrings("private.current", entry.object.get("version").?.string);
+    try testing.expect((try netCacheEntry(a, "foo", .{ .object = own }, vendor)) == null);
+}
+
+test "fuzz update cache keys roundtrip arbitrary bytes and validate stored fields" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena_state.deinit();
+            const a = arena_state.allocator();
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const name = bytes[0..smith.valueRangeAtMost(u8, 0, bytes.len)];
+            const key = try netCacheKey(a, name);
+            try testing.expectEqual(@as(usize, name.len * 2 + 1), key.len);
+            try testing.expect(std.mem.indexOfScalar(u8, key, '.') == null);
+            var decoded: [64]u8 = undefined;
+            try testing.expectEqualSlices(u8, name, try std.fmt.hexToBytes(&decoded, key[1..]));
+            var record: std.json.ObjectMap = .empty;
+            try record.put(a, "version", .{ .string = &bytes });
+            try record.put(a, "remote_version", .{ .string = "remote" });
+            try record.put(a, "last_error", if (smith.value(bool)) .{ .integer = -1 } else .{ .string = "" });
+            const value: std.json.Value = .{ .object = record };
+            var cache: std.json.ObjectMap = .empty;
+            try cache.put(a, key, value);
+            const result = try netCacheEntry(a, name, .{ .object = cache }, .null);
+            try testing.expectEqual(netCacheValid(value), result != null);
+        }
+    }.run, .{});
 }
 
 test "status reads persistent git and web versions without refreshing" {
