@@ -1,83 +1,38 @@
-//! Conformance oracle replay engine (§8).
+//! In-process conformance cases.
 //!
-//! Replays a scripted sequence of JSON-RPC requests against a phobos dispatcher
-//! and asserts normalized-equality against expected responses. Uses the
-//! field-normalization rules from `normalize.zig` before comparison.
-//!
-//! In snapshot mode (expected_response = ""), the test accepts whatever phobos
-//! returns — this validates the handler doesn't crash and returns valid JSON-RPC.
-//! In parity mode (expected_response populated with Moonraker captures), the
-//! test performs strict normalized comparison.
-//!
-//! Adding a golden case:
-//!   1. Add an entry to `goldenCases` below.
-//!   2. Run the test — it will fail with the actual phobos response.
-//!   3. Either: copy the actual response as the expected (snapshot), or
-//!      capture the equivalent response from Moonraker (parity).
+//! Each case sends one JSON-RPC request through the App's dispatcher (no
+//! Klippy connected) and checks the response against stock Moonraker: the
+//! exact top-level keys of `result`, an array `result`, or the `error.code`.
+//! Key sets come from `conformance/golden/capture.json` or, for methods that
+//! capture lacks, the vendored Moonraker handler. Value-level normalized
+//! equality against the captures is `conformance/replay.py`.
 
 const std = @import("std");
 const jsonrpc = @import("../jsonrpc.zig");
-const normalize = @import("normalize.zig");
 const methods_mod = @import("../core/methods.zig");
-const App = @import("../app.zig").App;
+const TestServer = @import("../testutil/server.zig").TestServer;
 
 const Dispatcher = jsonrpc.Dispatcher;
 
-// ---------------------------------------------------------------------------
-// Golden case
-// ---------------------------------------------------------------------------
+pub const Expect = union(enum) {
+    /// `result` is an object with exactly these keys, sorted.
+    keys: []const []const u8,
+    /// `result` is an array.
+    array,
+    /// The response is an error envelope with this code.
+    error_code: i64,
+};
 
 pub const GoldenCase = struct {
     /// JSON-RPC method name (e.g. "server.info").
     method: []const u8,
     /// JSON params object as a string (e.g. "{}") or "null" for no params.
     params_json: []const u8,
-    /// Expected JSON-RPC response. Empty string = snapshot mode (accept any valid response).
-    expected_response: []const u8,
-    /// If true, only validate that the response has a "result" (not an error).
-    result_only: bool = false,
+    expect: Expect,
 };
 
-// ---------------------------------------------------------------------------
-// Replay engine
-// ---------------------------------------------------------------------------
-
-pub const ReplayResult = struct {
-    case: *const GoldenCase,
-    passed: bool,
-    actual: []const u8,
-    expected: []const u8,
-};
-
-/// Replay all golden cases against `dispatcher`. Returns owned results.
-pub fn replay(
-    alloc: std.mem.Allocator,
-    dispatcher: *Dispatcher,
-    cases: []const GoldenCase,
-) ![]ReplayResult {
-    var results: std.ArrayList(ReplayResult) = .empty;
-    errdefer results.deinit(alloc);
-
-    for (cases) |*case| {
-        const actual = try callEndpoint(alloc, dispatcher, case.method, case.params_json);
-        const passed = if (case.expected_response.len == 0)
-            true // snapshot mode: accept actual
-        else if (case.result_only)
-            try resultShapeOk(alloc, actual)
-        else
-            try normalize.normalizedEqual(alloc, actual, case.expected_response, case.method);
-
-        try results.append(alloc, .{
-            .case = case,
-            .passed = passed,
-            .actual = actual,
-            .expected = if (case.expected_response.len == 0) actual else case.expected_response,
-        });
-    }
-
-    return results.toOwnedSlice(alloc);
-}
-
+/// Send `method` with `params_json` through `dispatcher`. Caller frees the
+/// returned response bytes with `alloc`.
 fn callEndpoint(
     alloc: std.mem.Allocator,
     dispatcher: *Dispatcher,
@@ -91,44 +46,43 @@ fn callEndpoint(
     return try dispatcher.handle(request_json, alloc);
 }
 
-fn resultShapeOk(alloc: std.mem.Allocator, response_json: []const u8) !bool {
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, response_json, .{}) catch return false;
-    defer parsed.deinit();
-    return parsed.value == .object and parsed.value.object.get("result") != null;
-}
-
-// ---------------------------------------------------------------------------
-// Golden cases
-// ---------------------------------------------------------------------------
-// To populate with real Moonraker responses:
-//   1. Start Moonraker without Klippy
-//   2. Send each request via: curl -s -X POST http://127.0.0.1:7125/printer/api -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"<method>","params":<params>}'
-//   3. Paste the full response into expected_response
-// ---------------------------------------------------------------------------
-
 pub const goldenCases: []const GoldenCase = &.{
-    .{ .method = "server.info", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.config", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.gcode_store", .params_json = "{\"count\":10}", .expected_response = "" },
-    .{ .method = "server.temperature_store", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.sensors.list", .params_json = "{}", .expected_response = "" },
-    .{ .method = "printer.print.start", .params_json = "{\"filename\":\"test.gcode\"}", .expected_response = "" },
-    .{ .method = "printer.restart", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.files.list", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.files.metadata", .params_json = "{\"filename\":\"test.gcode\"}", .expected_response = "" },
-    .{ .method = "server.history.list", .params_json = "{\"limit\":10}", .expected_response = "" },
-    .{ .method = "server.job_queue.status", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.announcements.list", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.webcams.list", .params_json = "{}", .expected_response = "" },
-    .{ .method = "machine.system_info", .params_json = "{}", .expected_response = "", .result_only = true },
-    .{ .method = "machine.proc_stats", .params_json = "{}", .expected_response = "", .result_only = true },
-    .{ .method = "machine.device_power.devices", .params_json = "{}", .expected_response = "" },
-    .{ .method = "machine.update.status", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.database.list", .params_json = "{}", .expected_response = "" },
-    .{ .method = "machine.wled.strips", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.spoolman.status", .params_json = "{}", .expected_response = "" },
-    .{ .method = "machine.td1.data", .params_json = "{}", .expected_response = "" },
-    .{ .method = "server.extensions.list", .params_json = "{}", .expected_response = "" },
+    .{ .method = "server.info", .params_json = "{}", .expect = .{ .keys = &.{
+        "api_version",                 "api_version_string", "components",
+        "failed_components",           "klippy_connected",   "klippy_state",
+        "missing_klippy_requirements", "moonraker_version",  "registered_directories",
+        "warnings",                    "websocket_count",
+    } } },
+    .{ .method = "server.config", .params_json = "{}", .expect = .{ .keys = &.{ "config", "files", "orig" } } },
+    .{ .method = "server.gcode_store", .params_json = "{\"count\":10}", .expect = .{ .keys = &.{"gcode_store"} } },
+    // No Klippy, so no sensors are tracked.
+    .{ .method = "server.temperature_store", .params_json = "{}", .expect = .{ .keys = &.{} } },
+    .{ .method = "server.sensors.list", .params_json = "{}", .expect = .{ .keys = &.{"sensors"} } },
+    // klippy_connection.py: "Klippy Host not connected", 503.
+    .{ .method = "printer.print.start", .params_json = "{\"filename\":\"test.gcode\"}", .expect = .{ .error_code = 503 } },
+    .{ .method = "printer.restart", .params_json = "{}", .expect = .{ .error_code = 503 } },
+    .{ .method = "server.files.list", .params_json = "{}", .expect = .array },
+    // file_manager.py raises 404; common.py JsonRPC maps 404 to -32601.
+    .{ .method = "server.files.metadata", .params_json = "{\"filename\":\"test.gcode\"}", .expect = .{ .error_code = -32601 } },
+    .{ .method = "server.history.list", .params_json = "{\"limit\":10}", .expect = .{ .keys = &.{ "count", "jobs" } } },
+    .{ .method = "server.job_queue.status", .params_json = "{}", .expect = .{ .keys = &.{ "queue_state", "queued_jobs" } } },
+    .{ .method = "server.announcements.list", .params_json = "{}", .expect = .{ .keys = &.{ "entries", "feeds" } } },
+    .{ .method = "server.webcams.list", .params_json = "{}", .expect = .{ .keys = &.{"webcams"} } },
+    .{ .method = "machine.system_info", .params_json = "{}", .expect = .{ .keys = &.{"system_info"} } },
+    .{ .method = "machine.proc_stats", .params_json = "{}", .expect = .{ .keys = &.{
+        "cpu_temp",      "moonraker_stats", "network",         "system_cpu_usage",
+        "system_memory", "system_uptime",   "throttled_state", "websocket_connections",
+    } } },
+    .{ .method = "machine.device_power.devices", .params_json = "{}", .expect = .{ .keys = &.{"devices"} } },
+    // update_manager.py: github_api_stats() plus version_info and busy.
+    .{ .method = "machine.update.status", .params_json = "{}", .expect = .{ .keys = &.{
+        "busy", "github_limit_reset_time", "github_rate_limit", "github_requests_remaining", "version_info",
+    } } },
+    .{ .method = "server.database.list", .params_json = "{}", .expect = .{ .keys = &.{ "backups", "namespaces" } } },
+    .{ .method = "machine.wled.strips", .params_json = "{}", .expect = .{ .keys = &.{"strips"} } },
+    .{ .method = "server.spoolman.status", .params_json = "{}", .expect = .{ .keys = &.{ "pending_reports", "spool_id", "spoolman_connected" } } },
+    .{ .method = "machine.td1.data", .params_json = "{}", .expect = .{ .keys = &.{ "devices", "status" } } },
+    .{ .method = "server.extensions.list", .params_json = "{}", .expect = .{ .keys = &.{"agents"} } },
 };
 
 // ===========================================================================
@@ -137,117 +91,45 @@ pub const goldenCases: []const GoldenCase = &.{
 
 const testing = std.testing;
 
-test "conformance: snapshots — all golden cases return valid JSON-RPC" {
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+test "conformance: every golden case matches the Moonraker result keys or error code" {
     const alloc = testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(data_path);
-    var app = try App.init(alloc, io, data_path);
-    defer app.deinit(io);
-    // Wire live io into components so handlers that need it (file_manager,
-    // spoolman, etc.) don't crash on null-io dereference.
-    // Disable the proc_stat timer thread, as TestServer does: it deadlocks the harness.
-    app.machine_ctx.no_proc_stat_timer = true;
-    _ = app.httpServer(io);
-
-    const results = try replay(alloc, app.dispatcher, goldenCases);
-    defer {
-        for (results) |r| alloc.free(r.actual);
-        alloc.free(results);
-    }
-
-    for (results) |r| {
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, r.actual, .{}) catch {
-            std.debug.print("FAIL {s}: unparseable response: {s}\n", .{ r.case.method, r.actual });
-            return error.TestFailed;
-        };
+    for (goldenCases) |case| {
+        const resp = try callEndpoint(alloc, ts.app.dispatcher, case.method, case.params_json);
+        defer alloc.free(resp);
+        errdefer std.debug.print("conformance case {s}: {s}\n", .{ case.method, resp });
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
         defer parsed.deinit();
-
-        if (parsed.value != .object) {
-            std.debug.print("FAIL {s}: response not an object: {s}\n", .{ r.case.method, r.actual });
-            return error.TestFailed;
-        }
         const obj = parsed.value.object;
-        if (obj.get("jsonrpc") == null) {
-            std.debug.print("FAIL {s}: missing jsonrpc\n", .{r.case.method});
-            return error.TestFailed;
-        }
         try testing.expectEqualStrings("2.0", obj.get("jsonrpc").?.string);
-        if (obj.get("id") == null) {
-            std.debug.print("FAIL {s}: missing id\n", .{r.case.method});
-            return error.TestFailed;
-        }
-        if (obj.get("result") == null and obj.get("error") == null) {
-            std.debug.print("FAIL {s}: missing result and error: {s}\n", .{ r.case.method, r.actual });
-            return error.TestFailed;
-        }
-        if (!r.passed) {
-            std.debug.print("FAIL {s}: response differs.\n  actual:   {s}\n  expected: {s}\n", .{ r.case.method, r.actual, r.expected });
-            return error.TestFailed;
+        try testing.expectEqual(@as(i64, 1), obj.get("id").?.integer);
+
+        switch (case.expect) {
+            .keys => |want| {
+                const result = obj.get("result") orelse return error.TestUnexpectedResult;
+                if (result != .object) return error.TestUnexpectedResult;
+                const got = try alloc.dupe([]const u8, result.object.keys());
+                defer alloc.free(got);
+                std.mem.sort([]const u8, got, {}, lessThanStr);
+                try testing.expectEqual(want.len, got.len);
+                for (want, got) |w, g| try testing.expectEqualStrings(w, g);
+            },
+            .array => {
+                const result = obj.get("result") orelse return error.TestUnexpectedResult;
+                try testing.expect(result == .array);
+            },
+            .error_code => |code| {
+                const err = obj.get("error") orelse return error.TestUnexpectedResult;
+                try testing.expectEqual(code, err.object.get("code").?.integer);
+            },
         }
     }
-}
-
-test "conformance: server.info has required fields" {
-    const alloc = testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(data_path);
-    var app = try App.init(alloc, io, data_path);
-    defer app.deinit(io);
-
-    const resp = try callEndpoint(alloc, app.dispatcher, "server.info", "{}");
-    defer alloc.free(resp);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-    const result = parsed.value.object.get("result").?.object;
-
-    try testing.expect(result.get("klippy_connected") != null);
-    try testing.expect(result.get("klippy_state") != null);
-    try testing.expect(result.get("components") != null);
-    try testing.expect(result.get("failed_components") != null);
-    try testing.expect(result.get("registered_directories") != null);
-    try testing.expect(result.get("warnings") != null);
-    try testing.expect(result.get("websocket_count") != null);
-    try testing.expect(result.get("moonraker_version") != null);
-    try testing.expect(result.get("api_version") != null);
-    try testing.expect(result.get("api_version_string") != null);
-}
-
-test "conformance: server.config has required fields" {
-    const alloc = testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(data_path);
-    var app = try App.init(alloc, io, data_path);
-    defer app.deinit(io);
-
-    const resp = try callEndpoint(alloc, app.dispatcher, "server.config", "{}");
-    defer alloc.free(resp);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
-    defer parsed.deinit();
-    const result = parsed.value.object.get("result").?.object;
-
-    try testing.expect(result.get("config") != null);
-    try testing.expect(result.get("files") != null);
-    try testing.expect(result.get("orig") != null);
 }
 
 test "callEndpoint: valid method returns valid JSON-RPC" {
@@ -304,93 +186,29 @@ test "callEndpoint: invalid params returns -32602" {
     try testing.expectEqual(@as(i64, -32602), parsed.value.object.get("error").?.object.get("code").?.integer);
 }
 
-test "result_only: passes when response has result" {
-    const alloc = testing.allocator;
-    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"x\":1}}";
-    try testing.expect(try resultShapeOk(alloc, resp));
-}
-
-test "result_only: fails when response has error" {
-    const alloc = testing.allocator;
-    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-1,\"message\":\"oops\"}}";
-    try testing.expect(!try resultShapeOk(alloc, resp));
-}
-
-// The capture test writes Zig fixture source to golden_captures.txt in its
-// temporary directory and checks that it parses.
-test "capture: print all golden case responses" {
-    const alloc = testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(data_path);
-    var app = try App.init(alloc, io, data_path);
-    defer app.deinit(io);
-    // Disable the proc_stat timer thread, as TestServer does: it deadlocks the harness.
-    app.machine_ctx.no_proc_stat_timer = true;
-    _ = app.httpServer(io);
-
-    var file = try tmp.dir.createFile(io, "golden_captures.txt", .{});
-    defer file.close(io);
-
-    var wbuf: [4096]u8 = undefined;
-    var writer = file.writer(io, &wbuf);
-    try writer.interface.writeAll("const cases = .{\n");
-    for (goldenCases) |*gc| {
-        const resp = callEndpoint(alloc, app.dispatcher, gc.method, gc.params_json) catch |err| {
-            try writer.interface.print("// {s}: ERROR: {}\n", .{ gc.method, err });
-            continue;
-        };
-        defer alloc.free(resp);
-        try writer.interface.print(".{{ .method = \"{f}\", .params_json = \"{f}\", .expected_response = \"{f}\" }},\n", .{
-            std.zig.fmtString(gc.method), std.zig.fmtString(gc.params_json), std.zig.fmtString(resp),
-        });
-    }
-    try writer.interface.writeAll("};\n");
-    try writer.interface.flush();
-    const contents = try tmp.dir.readFileAlloc(io, "golden_captures.txt", alloc, .limited(1 << 20));
-    defer alloc.free(contents);
-    const source = try alloc.dupeSentinel(u8, contents, 0);
-    defer alloc.free(source);
-    var parsed = try std.zig.Ast.parse(alloc, source, .{});
-    defer parsed.deinit(alloc);
-    try testing.expectEqual(@as(usize, 0), parsed.errors.len);
-    try testing.expect(std.mem.indexOf(u8, contents, ".expected_response =") != null);
-}
-
-// ---------------------------------------------------------------------------
-// Fuzz
-// ---------------------------------------------------------------------------
-
-test "fuzz callEndpoint: never crashes on arbitrary method/params" {
+test "fuzz callEndpoint: unregistered methods always return -32601" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [64]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
+            const alloc = testing.allocator;
 
-            var d = Dispatcher.init(a);
+            var d = Dispatcher.init(alloc);
             defer d.deinit();
 
             const method_chars = "abcdefghijklmnopqrstuvwxyz._";
-            var mn_buf: [32]u8 = undefined;
-            var mn: usize = 0;
-            for (buf[0..@min(buf.len, 16)]) |b| {
-                mn_buf[mn] = method_chars[b % method_chars.len];
-                mn += 1;
-            }
-            const method = mn_buf[0..@max(1, mn % 32)];
+            var mn_buf: [16]u8 = undefined;
+            for (&mn_buf, buf[0..mn_buf.len]) |*c, b| c.* = method_chars[b % method_chars.len];
+            const method = mn_buf[0 .. 1 + buf[16] % mn_buf.len];
 
             const param_templates = [_][]const u8{ "{}", "null", "[]", "\"x\"" };
-            const params = param_templates[buf[0] % param_templates.len];
+            const params = param_templates[buf[17] % param_templates.len];
 
-            _ = callEndpoint(a, &d, method, params) catch {};
+            const resp = try callEndpoint(alloc, &d, method, params);
+            defer alloc.free(resp);
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
+            defer parsed.deinit();
+            try testing.expectEqual(@as(i64, -32601), parsed.value.object.get("error").?.object.get("code").?.integer);
         }
     }.run, .{});
 }

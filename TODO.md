@@ -219,9 +219,9 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - Conformance oracle: capture.py (boots vendored Moonraker, captures 54 HTTP/WS
   events), replay.py (replays against phobos, asserts normalized equality with
   manifest-based field masking). All 54 events pass.
-- Normalizer: Zig (`src/oracle/normalize.zig`) and Python (`conformance/replay.py`)
-  normalizers with manifest-based rules (mask, version_pin, sort_array, path_relativize,
-  structure_compare, files_compare), v4l2_devices mask rule, normalizeWarnings fix.
+- Normalizer: Python (`conformance/replay.py`) with manifest-based rules (mask,
+  version_pin, sort_array, path_relativize, structure_compare, files_compare),
+  v4l2_devices mask rule. `src/oracle/replay.zig` checks result keys and error codes in-process.
 - API drift scanner + coverage gate (tools/api_scanner/, 67 pytest tests).
 - Notification emission verified for: power, file_manager, update_manager, spoolman
   (P0 deadlock fixed: emit→emitLocked; notify_spoolman_status_changed on setIo/setServerUrl),
@@ -286,8 +286,8 @@ component ordering — see the §8a manifest).
 - `conformance/replay.py` — replays captures against phobos, asserts normalized
   equality with manifest-based field masking (mask, version_pin, sort_array,
   path_relativize, structure_compare, files_compare).
-- Normalizer: Zig (`src/oracle/normalize.zig`) + Python (`conformance/replay.py`)
-  normalizers with identical manifest-based rules.
+- Normalizer: manifest-based rules in `conformance/replay.py`. `src/oracle/replay.zig`
+  checks Moonraker result keys and error codes through the App dispatcher.
 
 Key fixes discovered during conformance work: v4l2 device key ordering, v4l2 device
 version field, structure_compare → mask for v4l2_devices, normalizeWarnings (Zig),

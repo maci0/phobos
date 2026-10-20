@@ -6,8 +6,7 @@ equivalent configuration, replays the identical request sequence, captures
 phobos' responses and notifications, and asserts **normalized equality**
 against the golden stream per the §8a normalization manifest.
 
-The normalization rules are a Python port of ``src/oracle/normalize.zig``
-(the authoritative implementation).  Keep them in sync.
+This file holds the only implementation of the normalization rules.
 
 Usage:
   zig build
@@ -19,11 +18,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
-import glob
 import json
 import os
 import pathlib
-import shutil
 import signal
 import subprocess
 import sys
@@ -49,7 +46,7 @@ except ImportError:
 
 
 # ===========================================================================
-# §8a Normalization manifest (Python port of src/oracle/normalize.zig)
+# §8a Normalization manifest
 # ===========================================================================
 
 MANIFEST: List[Dict[str, Any]] = [
@@ -405,14 +402,9 @@ class PhobosRunner:
 
     def start(self) -> None:
         """Write config, start phobos, wait for it to accept and stabilize."""
-        # Clean stale data dirs from previous runs (phobos uses /tmp/phobos-data-*).
-        import glob
-        for d in glob.glob("/tmp/phobos-data-*"):
-            try:
-                shutil.rmtree(d)
-            except Exception:
-                pass
-
+        # The datadir lives in this run's workdir, so concurrent runs never
+        # share or delete each other's state.
+        data_path = self.workdir / "data"
         cfg_path = self.workdir / "moonraker.conf"
         cfg_path.write_text(
             f"[server]\n"
@@ -432,7 +424,7 @@ class PhobosRunner:
         )
 
         self.proc = subprocess.Popen(
-            [str(self.binary), "-c", str(cfg_path)],
+            [str(self.binary), "-c", str(cfg_path), "-d", str(data_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
