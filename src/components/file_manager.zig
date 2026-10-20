@@ -447,6 +447,8 @@ pub const Resolved = struct {
             error.WriteFailed => return writer.err.?,
         };
         try writer.flush();
+        // File.Atomic.replace renames without syncing; match the upload path.
+        try output.file.sync(io);
         try output.replace(io);
     }
 };
@@ -718,7 +720,7 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     const io = try ctx.requireIo();
     const path = getStrDefault(params, "path", "gcodes");
     const extended = getBool(params, "extended", false);
-    const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, path);
 
     var dirs: std.json.Array = .init(alloc);
     var files: std.json.Array = .init(alloc);
@@ -791,14 +793,18 @@ pub fn handlePostDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: s
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
     const path = try getStr(params, "path");
-    const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, path);
 
     if (!resolved.root.full_access) return error.Forbidden;
     if (resolved.rel.len == 0) return error.Forbidden; // cannot recreate the root
 
-    var parent = resolved.parent(io, alloc, .{ .make_path = true, .follow_leaf = true }) catch |err| return accessError(err);
+    // os.mkdir: a missing parent or an existing entry is a 400 error.
+    var parent = resolved.parent(io, alloc, .{}) catch |err| return switch (accessError(err)) {
+        error.NotFound => error.InvalidParams,
+        else => |e| e,
+    };
     defer parent.close(io);
-    parent.dir.createDirPath(io, parent.name) catch |err| return accessError(err);
+    parent.dir.createDir(io, parent.name, .default_dir) catch |err| return accessError(err);
 
     const info = try buildNotifyInfo(io, alloc, "create_dir", resolved.root, resolved.rel, resolved.abs, null);
     emitFilelistChanged(ctx, io, alloc, info);
@@ -814,7 +820,7 @@ pub fn handleDeleteDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc:
     const io = try ctx.requireIo();
     const path = try getStr(params, "path");
     const force = getBool(params, "force", false);
-    const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, path);
 
     if (!resolved.root.full_access) return error.Forbidden;
     if (resolved.rel.len == 0) return error.Forbidden; // cannot delete root
@@ -951,7 +957,7 @@ pub fn handleDeleteFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
 
 pub fn deleteFileImpl(ctx: *FileCtx, alloc: std.mem.Allocator, path: []const u8) anyerror!std.json.Value {
     const io = try ctx.requireIo();
-    const resolved = resolveRequestPath(ctx, alloc, path) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, path);
     if (!resolved.root.full_access) return error.Forbidden;
     if (try resolvedKind(io, alloc, resolved) != .file) return error.NotFound;
     var parent = resolved.parent(io, alloc, .{}) catch |err| return accessError(err);
@@ -974,30 +980,27 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     const filename = try getStr(params, "filename");
 
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
-    const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, req);
     const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
     defer file.close(io);
     const st = try file.stat(io);
-    if (st.kind != .file) return error.NotFound;
-    const size: u64 = @intCast(st.size);
     const mtime = mtimeSecs(st);
 
     // Return the cached record if the file is unchanged (size + mtime). Avoids
     // re-reading 256 KiB + re-parsing the gcode header on every request.
-    if (ctx.cachedMetadata(alloc, resolved.abs, size, mtime)) |cached| return cached;
+    if (ctx.cachedMetadata(alloc, resolved.abs, st.size, mtime)) |cached| return cached;
 
-    const value = try buildMetadata(io, alloc, file, filename);
-    ctx.cacheMetadata(resolved.abs, size, mtime, value);
+    const value = try buildMetadata(io, alloc, file, st, filename);
+    ctx.cacheMetadata(resolved.abs, st.size, mtime, value);
     return value;
 }
 
 /// Build the metadata record with stat-derived fields plus deep gcode-parsed
 /// fields (slicer, layer_height, estimated_time, filament_total, thumbnails,
 /// temperatures). Reads the first 256 KiB of the file to extract comment-header
-/// metadata via `gcode_metadata.parse`.
-fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, filename: []const u8) !std.json.Value {
+/// metadata via `gcode_metadata.parse`. `st` is the open file's stat.
+fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, st: std.Io.File.Stat, filename: []const u8) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
-    const st = try file.stat(io);
     try obj.put(alloc, "size", .{ .integer = @intCast(st.size) });
     try obj.put(alloc, "modified", .{ .float = mtimeSecs(st) });
     try obj.put(alloc, "uuid", .{ .string = try stableUuid(alloc, filename) });
@@ -1009,10 +1012,10 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, filena
     // to extract slicer info, layer count, estimated time, filament usage,
     // temperatures, layer height, and embedded thumbnails.
     if (isGcodeExt(filename)) {
-        if (readFileHeader(io, alloc, file)) |header_text| {
+        if (readFileHeader(io, alloc, file, st.size)) |header_text| {
             // Real PrusaSlicer/Orca/Bambu files carry their config block at the
             // end, so also scan the footer for est-time/filament/height/temps.
-            const footer_text = readFileFooter(io, alloc, file);
+            const footer_text = readFileFooter(io, alloc, file, st.size);
             const meta = gcode_metadata.parseFull(alloc, header_text, footer_text);
 
             if (meta.slicer) |s| {
@@ -1033,21 +1036,7 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, filena
             if (meta.object_height) |oh| try obj.put(alloc, "object_height", .{ .float = oh });
             if (meta.nozzle_diameter) |nd| try obj.put(alloc, "nozzle_diameter", .{ .float = nd });
 
-            // Thumbnails: convert gcode_metadata.Thumbnail slices to JSON.
-            if (meta.thumbnails.len > 0) {
-                var thumbs: std.json.Array = .init(alloc);
-                for (meta.thumbnails) |t| {
-                    var tobj: std.json.ObjectMap = .empty;
-                    try tobj.put(alloc, "width", .{ .integer = t.width });
-                    try tobj.put(alloc, "height", .{ .integer = t.height });
-                    try tobj.put(alloc, "size", .{ .integer = t.size });
-                    try tobj.put(alloc, "data", .{ .string = t.data });
-                    try thumbs.append(.{ .object = tobj });
-                }
-                try obj.put(alloc, "thumbnails", .{ .array = thumbs });
-            } else {
-                try obj.put(alloc, "thumbnails", .{ .array = .init(alloc) });
-            }
+            try obj.put(alloc, "thumbnails", try thumbnailsJson(alloc, meta.thumbnails));
         } else |_| {
             try obj.put(alloc, "slicer", .{ .string = "Unknown" });
             try obj.put(alloc, "thumbnails", .{ .array = .init(alloc) });
@@ -1060,25 +1049,36 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, filena
     return .{ .object = obj };
 }
 
-/// Read the first max_bytes of a file into `alloc`-owned memory. Returns
-/// an error if the file cannot be opened or read (best-effort enrichment).
+/// `[{width, height, size, data}]` for parsed thumbnails, in `alloc`.
+fn thumbnailsJson(alloc: std.mem.Allocator, thumbnails: []const gcode_metadata.Thumbnail) !std.json.Value {
+    var thumbs: std.json.Array = try .initCapacity(alloc, thumbnails.len);
+    for (thumbnails) |t| {
+        var tobj: std.json.ObjectMap = .empty;
+        try tobj.put(alloc, "width", .{ .integer = t.width });
+        try tobj.put(alloc, "height", .{ .integer = t.height });
+        try tobj.put(alloc, "size", .{ .integer = t.size });
+        try tobj.put(alloc, "data", .{ .string = t.data });
+        thumbs.appendAssumeCapacity(.{ .object = tobj });
+    }
+    return .{ .array = thumbs };
+}
+
+/// Read the first max_bytes of a file of `size` bytes into `alloc`-owned
+/// memory. Returns an error if the file cannot be read (best-effort enrichment).
 const header_max_bytes = 256 * 1024;
 const footer_max_bytes = 32 * 1024;
 
-fn readFileHeader(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File) ![]u8 {
-    const st = try file.stat(io);
-    const buf = try alloc.alloc(u8, @intCast(@min(st.size, header_max_bytes)));
+fn readFileHeader(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, size: u64) ![]u8 {
+    const buf = try alloc.alloc(u8, @intCast(@min(size, header_max_bytes)));
     errdefer alloc.free(buf);
     const got = try file.readPositionalAll(io, buf, 0);
     return alloc.realloc(buf, got);
 }
 
-/// Read the last `footer_max_bytes` of the file (slicer config block for
-/// PrusaSlicer/Orca/Bambu). Returns "" when the file is no larger than the
-/// header window (the header already covers it).
-fn readFileFooter(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File) []u8 {
-    const st = file.stat(io) catch return "";
-    const size: u64 = st.size;
+/// Read the last `footer_max_bytes` of a file of `size` bytes (slicer config
+/// block for PrusaSlicer/Orca/Bambu). Returns "" when the file is no larger
+/// than the header window (the header already covers it).
+fn readFileFooter(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, size: u64) []u8 {
     if (size <= header_max_bytes) return ""; // header already has the whole file
     const n: usize = @intCast(@min(size, @as(u64, footer_max_bytes)));
     const buf = alloc.alloc(u8, n) catch return "";
@@ -1121,11 +1121,11 @@ pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     const io = try ctx.requireIo();
     const filename = try getStr(params, "filename");
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
-    const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, req);
     const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
     defer file.close(io);
     if (!isGcodeExt(filename)) return error.InvalidParams;
-    return buildMetadata(io, alloc, file, filename);
+    return buildMetadata(io, alloc, file, try file.stat(io), filename);
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,24 +1143,14 @@ pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
     const filename = getOptStr(params, "filename") orelse return error.MissingFilename;
     if (filename.len == 0) return .{ .array = .init(alloc) };
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
-    const resolved = resolveRequestPath(ctx, alloc, req) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, req);
     const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
     defer file.close(io);
     if (!isGcodeExt(filename)) return .{ .array = .init(alloc) };
 
-    const header_text = readFileHeader(io, alloc, file) catch return .{ .array = .init(alloc) };
-    const meta = gcode_metadata.parse(alloc, header_text);
-
-    var thumbs: std.json.Array = .init(alloc);
-    for (meta.thumbnails) |t| {
-        var tobj: std.json.ObjectMap = .empty;
-        try tobj.put(alloc, "width", .{ .integer = t.width });
-        try tobj.put(alloc, "height", .{ .integer = t.height });
-        try tobj.put(alloc, "size", .{ .integer = t.size });
-        try tobj.put(alloc, "data", .{ .string = t.data });
-        try thumbs.append(.{ .object = tobj });
-    }
-    return .{ .array = thumbs };
+    const st = try file.stat(io);
+    const header_text = readFileHeader(io, alloc, file, st.size) catch return .{ .array = .init(alloc) };
+    return thumbnailsJson(alloc, gcode_metadata.parse(alloc, header_text).thumbnails);
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,7 +1164,7 @@ pub fn handleZip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
     const dest = getStrDefault(params, "dest", "config/collection.zip");
-    const resolved = resolveRequestPath(ctx, alloc, dest) catch |e| return mapResolveErr(e);
+    const resolved = try resolveRequestPath(ctx, alloc, dest);
     if (!resolved.root.full_access) return error.Forbidden;
 
     var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, resolved.root);
@@ -1206,18 +1196,6 @@ pub fn buildUploadResult(ctx: *FileCtx, alloc: std.mem.Allocator, resolved: Reso
     try out.put(alloc, "print_started", .{ .bool = false });
     try out.put(alloc, "print_queued", .{ .bool = false });
     return .{ .object = out };
-}
-
-// ---------------------------------------------------------------------------
-// Error mapping
-// ---------------------------------------------------------------------------
-
-fn mapResolveErr(e: ResolveError) anyerror {
-    return switch (e) {
-        error.InvalidParams => error.InvalidParams,
-        error.Forbidden => error.Forbidden,
-        error.OutOfMemory => error.OutOfMemory,
-    };
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,7 +1443,7 @@ test "root handles retain in-root aliases and reject link loops and recursive co
     const indirect = try resolveRequestPath(&ctx, alloc, "gcodes/indirect");
     const opened = try indirect.openFile(tr.io, alloc);
     defer opened.close(tr.io);
-    try testing.expectEqualStrings("correct\n", try readFileHeader(tr.io, alloc, opened));
+    try testing.expectEqualStrings("correct\n", try readFileHeader(tr.io, alloc, opened, (try opened.stat(tr.io)).size));
     try tr.tmp.dir.symLink(tr.io, "loop_b", "gcodes/loop_a", .{});
     try tr.tmp.dir.symLink(tr.io, "loop_a", "gcodes/loop_b", .{});
     try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"loop_a\"}"), alloc));
@@ -1525,7 +1503,7 @@ test "fuzz root file access: links cannot expose another registered root" {
             const path = try resolveRequestPath(&ctx, alloc, "gcodes/alias");
             const file = path.openFile(tr.io, alloc) catch return;
             defer file.close(tr.io);
-            try testing.expectEqualStrings("inside\n", try readFileHeader(tr.io, alloc, file));
+            try testing.expectEqualStrings("inside\n", try readFileHeader(tr.io, alloc, file, (try file.stat(tr.io)).size));
             var parent = try path.parent(tr.io, alloc, .{ .follow_leaf = true });
             defer parent.close(tr.io);
             const canonical = try parent.dir.realPathFileAlloc(tr.io, parent.name, alloc);
@@ -1674,6 +1652,11 @@ test "handlePostDirectory: mkdir then notify info shape" {
     try testing.expectEqualStrings("newdir", item.get("path").?.string);
     try testing.expectEqualStrings("gcodes", item.get("root").?.string);
     try testing.expectEqual(StatKind.dir, tr.exists("gcodes/newdir"));
+
+    // os.mkdir semantics: no parents, no existing entry.
+    try testing.expectError(error.InvalidParams, handlePostDirectory(@ptrCast(&c), try objParams(a, "{\"path\":\"gcodes/newdir\"}"), a));
+    try testing.expectError(error.InvalidParams, handlePostDirectory(@ptrCast(&c), try objParams(a, "{\"path\":\"gcodes/missing/child\"}"), a));
+    try testing.expectEqual(StatKind.missing, tr.exists("gcodes/missing"));
 }
 
 test "handlePostDirectory: read-only root → Forbidden" {
@@ -1790,7 +1773,7 @@ test "handleCopy: source == destination is rejected (no self-truncation)" {
     // The source file is untouched (still its original size, not truncated to 0).
     const file = try Dir.cwd().openFile(tr.io, try std.fs.path.join(a, &.{ tr.roots[0].path, "a.gcode" }), .{});
     defer file.close(tr.io);
-    const md = try buildMetadata(tr.io, a, file, "a.gcode");
+    const md = try buildMetadata(tr.io, a, file, try file.stat(tr.io), "a.gcode");
     try testing.expectEqual(@as(i64, @intCast(contents.len)), md.object.get("size").?.integer);
 }
 
@@ -1982,7 +1965,7 @@ test "fuzz readFileHeader: reads a bounded prefix of any file size" {
             const abs = try std.fs.path.join(a, &.{ tr.roots[0].path, "prefix.gcode" });
             const file = try Dir.cwd().openFile(tr.io, abs, .{});
             defer file.close(tr.io);
-            const header = try readFileHeader(tr.io, a, file);
+            const header = try readFileHeader(tr.io, a, file, size);
             try testing.expectEqualSlices(u8, content[0..@min(size, header_max_bytes)], header);
         }
     }.run, .{});
