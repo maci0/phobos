@@ -47,6 +47,7 @@ const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
 const process = @import("../util/process.zig");
 const Core = @import("../server/core.zig").Core;
+const video_modes = @import("video_modes.zig");
 
 const Registry = registry.Registry;
 const NotifyBus = notify.NotifyBus;
@@ -2178,8 +2179,7 @@ fn queryV4l2Cap(io: std.Io, alloc: std.mem.Allocator, dev_path: []const u8) ?V4l
     return V4l2Cap.read(io, f, alloc) catch null;
 }
 
-/// `sysfs_devs.find_video_devices` without `modes` (no format enumeration):
-/// only nodes whose QUERYCAP succeeds with VIDEO_CAPTURE in device_caps.
+/// Only nodes whose QUERYCAP succeeds with VIDEO_CAPTURE in device_caps.
 fn enumVideo(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
     const by_path = collectDevLinks(io, alloc, "/dev/v4l/by-path");
     const by_id = collectDevLinks(io, alloc, "/dev/v4l/by-id");
@@ -2206,7 +2206,14 @@ fn enumVideo(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
         try dev.put(alloc, "alt_name", attrOrDefault(io, alloc, base, "name", null));
         const loc = findUsbLocation(io, alloc, try std.fs.path.join(alloc, &.{ base, "device" }));
         try dev.put(alloc, "usb_location", if (loc) |l| .{ .string = l } else .null);
-        try dev.put(alloc, "modes", .{ .array = .init(alloc) });
+        const video_file = Dir.cwd().openFile(io, dev_path, .{}) catch continue;
+        const modes = video_modes.enumerate(io, video_file, alloc) catch |err| {
+            video_file.close(io);
+            if (err == error.Canceled) return err;
+            continue;
+        };
+        video_file.close(io);
+        try dev.put(alloc, "modes", .{ .array = modes });
         try found.append(alloc, .{ .name = name, .dev = .{ .object = dev } });
     }
     std.mem.sort(VideoEntry, found.items, {}, VideoEntry.lessThan);

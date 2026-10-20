@@ -19,3 +19,9 @@ validation as the HTTP endpoints.
 The supervisord provider preserves lowercased sub-state names. `running` is
 active, `stopping` is deactivating, and other reported states are inactive.
 `supervisorctl status` exit code 3 is accepted for stopped programs.
+
+Video devices enumerate formats and discrete resolutions with typed
+`VIDIOC_ENUM_FMT` and `VIDIOC_ENUM_FRAMESIZES` structures through
+`std.Io.operate(.device_io_control)`. Each list is capped at Moonraker's 128
+entries. Modes with no discrete resolutions are omitted. Descriptions must be
+UTF-8; the fourcc decoder drops non-ASCII bytes like Moonraker.
