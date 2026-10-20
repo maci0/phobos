@@ -124,6 +124,26 @@ pub const ConnectOptions = struct {
     will_retain: bool = false,
 };
 
+/// MQTT UTF-8 strings exclude NUL and have a two-byte byte-length prefix.
+fn validateString(value: []const u8) error{InvalidTopic}!void {
+    if (value.len > std.math.maxInt(u16) or std.mem.indexOfScalar(u8, value, 0) != null or !std.unicode.utf8ValidateSlice(value)) return error.InvalidTopic;
+}
+
+pub fn validateTopicName(topic: []const u8) error{InvalidTopic}!void {
+    try validateString(topic);
+    if (topic.len == 0 or std.mem.indexOfAny(u8, topic, "#+") != null) return error.InvalidTopic;
+}
+
+pub fn validateTopicFilter(topic: []const u8) error{InvalidTopic}!void {
+    try validateString(topic);
+    if (topic.len == 0) return error.InvalidTopic;
+    var levels = std.mem.splitScalar(u8, topic, '/');
+    while (levels.next()) |level| {
+        if (std.mem.indexOfScalar(u8, level, '#') != null and (!std.mem.eql(u8, level, "#") or levels.peek() != null)) return error.InvalidTopic;
+        if (std.mem.indexOfScalar(u8, level, '+') != null and !std.mem.eql(u8, level, "+")) return error.InvalidTopic;
+    }
+}
+
 /// Encode a CONNECT packet.
 pub fn encodeConnect(alloc: std.mem.Allocator, opts: ConnectOptions) ![]u8 {
     var body: std.ArrayList(u8) = .empty;
@@ -141,7 +161,7 @@ pub fn encodeConnect(alloc: std.mem.Allocator, opts: ConnectOptions) ![]u8 {
         if (opts.will_retain) flags |= 0x20;
     }
     if (opts.username != null) flags |= 0x80;
-    if (opts.password != null) flags |= 0x40;
+    if (opts.username != null and opts.password != null) flags |= 0x40;
     try body.append(alloc, flags);
     try appendU16(&body, alloc, opts.keepalive_s);
 
@@ -152,7 +172,7 @@ pub fn encodeConnect(alloc: std.mem.Allocator, opts: ConnectOptions) ![]u8 {
         try appendStr(&body, alloc, payload);
     };
     if (opts.username) |u| try appendStr(&body, alloc, u);
-    if (opts.password) |p| try appendStr(&body, alloc, p);
+    if (opts.username != null) if (opts.password) |p| try appendStr(&body, alloc, p);
 
     return frame(alloc, .connect, 0, body.items);
 }
@@ -166,6 +186,7 @@ pub fn encodePublish(
     retain: bool,
     packet_id: u16,
 ) ![]u8 {
+    try validateTopicName(topic);
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(alloc);
 
@@ -186,6 +207,7 @@ pub fn encodeSubscribe(
     topic_filter: []const u8,
     qos: u2,
 ) ![]u8 {
+    try validateTopicFilter(topic_filter);
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(alloc);
 
@@ -258,6 +280,7 @@ pub fn parsePublish(pkt: Packet) !PublishView {
     if (qos == 3) return error.MalformedPacket;
     const retain = (pkt.flags & 0x1) != 0;
     const t = try readStr(pkt.body, 0);
+    validateTopicName(t.s) catch return error.MalformedPacket;
     var off = t.next;
     var packet_id: u16 = 0;
     if (qos > 0) {
@@ -344,6 +367,41 @@ test "encodeConnect: with will + credentials sets flags and payload order" {
     try testing.expectEqualStrings("w/t", topic.s);
     const payload = try readStr(dec.body, topic.next);
     try testing.expectEqualStrings("off", payload.s);
+}
+
+test "encodeConnect ignores a password without a username" {
+    const pkt = try encodeConnect(testing.allocator, .{ .client_id = "id", .password = "secret" });
+    defer testing.allocator.free(pkt);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const dec = try decodeAll(pkt, &body);
+    try testing.expectEqual(@as(u8, 0x02), dec.body[7]);
+    const cid = try readStr(dec.body, 10);
+    try testing.expectEqualStrings("id", cid.s);
+    try testing.expectEqual(cid.next, dec.body.len);
+}
+
+test "topic encoders reject invalid UTF-8 names and filters before writing" {
+    const invalid = [_][]const u8{ "", "\x00", "a\x00b", "\xff", "\xed\xa0\x80" };
+    for (invalid) |topic| {
+        try testing.expectError(error.InvalidTopic, encodePublish(testing.allocator, topic, "p", 0, false, 0));
+        try testing.expectError(error.InvalidTopic, encodeSubscribe(testing.allocator, 1, topic, 0));
+    }
+    for ([_][]const u8{ "a/#", "a/+/b", "#", "+" }) |topic| {
+        try testing.expectError(error.InvalidTopic, encodePublish(testing.allocator, topic, "p", 0, false, 0));
+        const pkt = try encodeSubscribe(testing.allocator, 1, topic, 0);
+        testing.allocator.free(pkt);
+    }
+    for ([_][]const u8{ "a#", "a/#/b", "a+", "a/+b" }) |topic|
+        try testing.expectError(error.InvalidTopic, encodeSubscribe(testing.allocator, 1, topic, 0));
+
+    const long = try testing.allocator.alloc(u8, std.math.maxInt(u16) + 1);
+    defer testing.allocator.free(long);
+    @memset(long, 'a');
+    const pkt = try encodePublish(testing.allocator, long[0 .. long.len - 1], "p", 0, false, 0);
+    defer testing.allocator.free(pkt);
+    try testing.expectError(error.InvalidTopic, encodePublish(testing.allocator, long, "p", 0, false, 0));
+    try testing.expectError(error.InvalidTopic, encodeSubscribe(testing.allocator, 1, long, 0));
 }
 
 test "encodePublish/parsePublish: qos0 round-trips" {
@@ -501,7 +559,13 @@ test "fuzz encodePublish/ack: round-trip topic, payload and packet id" {
             const split = @max(1, @as(usize, buf[0]) % buf.len);
             const qos: u2 = @intCast(buf[0] % 3);
             const id = std.mem.readInt(u16, buf[1..3], .big);
-            const pkt = try encodePublish(testing.allocator, buf[1..split], buf[split..], qos, buf[0] & 1 == 1, id);
+            const pkt = encodePublish(testing.allocator, buf[1..split], buf[split..], qos, buf[0] & 1 == 1, id) catch |err| switch (err) {
+                error.InvalidTopic => {
+                    try testing.expectError(error.InvalidTopic, validateTopicName(buf[1..split]));
+                    return;
+                },
+                else => return err,
+            };
             defer testing.allocator.free(pkt);
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(testing.allocator);
@@ -520,7 +584,13 @@ test "fuzz encodeSubscribe: filter round-trips" {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [40]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            const pkt = try encodeSubscribe(testing.allocator, 1, buf[1..], @intCast(buf[0] % 3));
+            const pkt = encodeSubscribe(testing.allocator, 1, buf[1..], @intCast(buf[0] % 3)) catch |err| switch (err) {
+                error.InvalidTopic => {
+                    try testing.expectError(error.InvalidTopic, validateTopicFilter(buf[1..]));
+                    return;
+                },
+                else => return err,
+            };
             defer testing.allocator.free(pkt);
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(testing.allocator);

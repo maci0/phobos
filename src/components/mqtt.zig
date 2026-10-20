@@ -11,12 +11,13 @@
 //! `{"server":"offline"}` Last Will on `{instance_name}/moonraker/status`,
 //! publishes `{"server":"online"}` there retained, subscribes
 //! `{instance_name}/moonraker/api/request` when `enable_moonraker_api` is set,
-//! and sends PINGREQ every half keepalive interval. A background reader
+//! and sends PINGREQ every half keepalive interval while replies arrive.
+//! An unanswered ping closes the connection after one keepalive interval. A background reader
 //! dispatches inbound PUBLISH frames: API requests go through the JSON-RPC
 //! dispatcher and the response is published to
 //! `{instance_name}/moonraker/api/response`; other topics wake pending
 //! subscribe requests and reach `on_message` (MQTT sensors). Shutdown publishes
-//! `{"server":"offline"}` and sends DISCONNECT.
+//! `{"server":"offline"}` and sends DISCONNECT with a one-second write budget.
 //!
 //! publish sends one PUBLISH with paho's payload encoding: objects and arrays
 //! as JSON, strings raw, booleans `true`/`false`, null as an empty payload.
@@ -53,6 +54,9 @@ const max_subscribe_waiters = 16;
 const duplicate_request_code: i64 = -10000;
 /// Longest honoured subscribe `timeout`, keeping deadlines representable on 32-bit.
 const max_timeout_s: f64 = std.time.s_per_day;
+/// Best-effort offline publication must not delay shutdown behind broker I/O.
+const shutdown_timeout: Io.Duration = .fromSeconds(1);
+const local_transports = [_]registry.TransportType{ .HTTP, .WEBSOCKET, .INTERNAL };
 
 const online_payload = "{\"server\":\"online\"}";
 const offline_payload = "{\"server\":\"offline\"}";
@@ -161,7 +165,9 @@ pub const MqttCtx = struct {
     /// Validate and copy `[mqtt]` options. Replaces the previous config only on
     /// success. Call before `start`.
     pub fn setConfig(self: *MqttCtx, opts: Options) !void {
-        if (std.mem.indexOfAny(u8, opts.instance_name, "+#") != null) return error.InvalidInstanceName;
+        if (opts.instance_name.len != 0) mqtt_proto.validateTopicName(opts.instance_name) catch return error.InvalidInstanceName;
+        const longest_suffix = "/moonraker/api/response";
+        if (opts.instance_name.len > std.math.maxInt(u16) - longest_suffix.len) return error.InvalidInstanceName;
         const default_qos = try qosValue(opts.default_qos);
         const api_qos = try qosValue(opts.api_qos orelse opts.default_qos);
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -200,14 +206,20 @@ pub const MqttCtx = struct {
         };
     }
 
-    /// Publish offline status, disconnect, join the supervisor and release
-    /// pending subscribers. Safe to call when not connected.
+    /// Wake subscribers, bound the offline write, then join all workers.
     fn stop(self: *MqttCtx, io: Io) void {
         self.reader_stop.set(io);
+        self.closeWaiters(io);
         self.client_lock.lockSharedUncancelable(io);
         if (self.client) |client| {
-            if (self.config) |cfg| client.publish(cfg.status_topic, offline_payload, cfg.default_qos, true) catch {};
-            client.disconnect();
+            var done: Io.Event = .unset;
+            if (io.concurrent(disconnect, .{ self, client, &done })) |future| {
+                var closing = future;
+                const deadline = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = shutdown_timeout, .clock = .awake });
+                done.waitTimeout(io, .{ .deadline = deadline }) catch {};
+                client.shutdownRecv();
+                closing.cancel(io);
+            } else |_| {}
             client.shutdownRecv();
         }
         self.client_lock.unlockShared(io);
@@ -215,7 +227,15 @@ pub const MqttCtx = struct {
             t.cancel(io);
             self.connect_thread = null;
         }
-        self.closeWaiters(io);
+        self.waiters_mutex.lockUncancelable(io);
+        defer self.waiters_mutex.unlock(io);
+        while (self.waiter_count != 0) self.waiters_idle.waitUncancelable(io, &self.waiters_mutex);
+    }
+
+    fn disconnect(self: *MqttCtx, client: *MqttClient, done: *Io.Event) void {
+        defer done.set(self.io.?);
+        if (self.config) |cfg| client.publish(cfg.status_topic, offline_payload, cfg.default_qos, true) catch return;
+        client.disconnect();
     }
 
     /// CONNECT options for `cfg`: the retained offline Last Will (mqtt.py
@@ -224,7 +244,7 @@ pub const MqttCtx = struct {
         return .{
             .client_id = cfg.client_id,
             .username = cfg.username,
-            .password = cfg.password,
+            .password = if (cfg.username != null) cfg.password else null,
             .keepalive_s = self.keepalive_s,
             .will_topic = cfg.status_topic,
             .will_payload = offline_payload,
@@ -273,10 +293,12 @@ pub const MqttCtx = struct {
                 const waiter: *Waiter = @fieldParentPtr("node", node);
                 try client.subscribe(waiter.topic, waiter.qos);
             }
+            // New waiters either occur in this pass or see the live client.
+            self.setClient(io, client);
         }
-        self.setClient(io, client);
         self.reader_done.reset();
         self.reader_thread = io.concurrent(runReader, .{ self, client }) catch |err| {
+            client.shutdownRecv();
             self.setClient(io, null);
             return err;
         };
@@ -295,8 +317,15 @@ pub const MqttCtx = struct {
     /// Ping every half keepalive until the reader exits or the task is canceled.
     fn keepAlive(self: *MqttCtx, io: Io, client: *MqttClient) void {
         const interval: Io.Duration = .fromMilliseconds(@as(i64, self.keepalive_s) * (std.time.ms_per_s / 2));
+        var missed: u2 = 0;
         while (!sleep.untilStopped(io, interval, &self.reader_done)) {
-            client.ping() catch return;
+            if (client.ping_pending.load(.acquire)) {
+                missed += 1;
+                if (missed == 2) return;
+            } else {
+                missed = 0;
+                client.ping() catch return;
+            }
         }
     }
 
@@ -431,7 +460,7 @@ pub const MqttCtx = struct {
         }
     }
 
-    /// Refuse new waiters, wake the pending ones and wait until they unlink.
+    /// Refuse new waiters and wake pending ones before joining the reader.
     fn closeWaiters(self: *MqttCtx, io: Io) void {
         self.waiters_mutex.lockUncancelable(io);
         defer self.waiters_mutex.unlock(io);
@@ -441,7 +470,6 @@ pub const MqttCtx = struct {
             const waiter: *Waiter = @fieldParentPtr("node", node);
             waiter.done.set(io);
         }
-        while (self.waiter_count != 0) self.waiters_idle.waitUncancelable(io, &self.waiters_mutex);
     }
 };
 
@@ -480,11 +508,12 @@ fn encodePayload(w: *std.Io.Writer, payload: std.json.Value) !void {
 
 /// Validate a subscription topic: Moonraker rejects the wildcards `#` and `+`.
 fn validateTopic(topic: []const u8) error{InvalidParams}!void {
-    if (std.mem.indexOfAny(u8, topic, "#+") != null) return error.InvalidParams;
+    mqtt_proto.validateTopicName(topic) catch return error.InvalidParams;
 }
 
 fn publishParams(ctx: *MqttCtx, topic: []const u8, params: std.json.Value) !void {
     const cfg = &(ctx.config orelse return error.MqttNotConfigured);
+    try validateTopic(topic);
     const qos = try requestQos(cfg, params);
     const retain = ((try webreq.optional(bool, params, "retain")) orelse false);
     const payload = if (params == .object) params.object.get("payload") orelse .null else .null;
@@ -573,9 +602,9 @@ pub fn registerMqtt(reg: *Registry, ctx: *MqttCtx) !void {
     const c: *anyopaque = @ptrCast(ctx);
     // Broker I/O blocks, so every MQTT handler runs off the Core lock. They
     // touch only MqttCtx state guarded by its own locks.
-    try reg.registerEndpoint(.{ .path = "/server/mqtt/publish", .methods = &.{.POST}, .off_core = true }, c, handlePublish);
-    try reg.registerEndpoint(.{ .path = "/server/mqtt/subscribe", .methods = &.{.POST}, .off_core = true }, c, handleSubscribe);
-    try reg.dispatcher.registerEntry("server.mqtt.publish_mqtt_topic", .{ .ctx = c, .handler = handlePublishPrefixed, .off_core = true });
+    try reg.registerEndpoint(.{ .path = "/server/mqtt/publish", .methods = &.{.POST}, .transports = &local_transports, .off_core = true }, c, handlePublish);
+    try reg.registerEndpoint(.{ .path = "/server/mqtt/subscribe", .methods = &.{.POST}, .transports = &local_transports, .off_core = true }, c, handleSubscribe);
+    try reg.dispatcher.registerEntry("server.mqtt.publish_mqtt_topic", .{ .ctx = c, .handler = handlePublishPrefixed, .transports = &local_transports, .off_core = true });
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +742,26 @@ test "handlers: not configured, bad params and disconnected publish" {
     try testing.expectError(error.ServiceUnavailable, handlePublish(c, try mkParams(a, "{\"topic\":\"t\",\"payload\":1}"), a));
 }
 
+test "MQTT handlers reject invalid topics before creating waiters or touching the broker" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(test_options);
+    ctx.io = testing.io;
+    const long = try a.alloc(u8, std.math.maxInt(u16) + 1);
+    @memset(long, 'a');
+    for ([_][]const u8{ "", "a/#", "a/+/b", "\x00", "\xff", long }) |topic| {
+        var params: std.json.ObjectMap = .empty;
+        try params.put(a, "topic", .{ .string = topic });
+        try testing.expectError(error.InvalidParams, handlePublish(@ptrCast(&ctx), .{ .object = params }, a));
+        try testing.expectError(error.InvalidParams, handleSubscribe(@ptrCast(&ctx), .{ .object = params }, a));
+        try testing.expectError(error.InvalidParams, handlePublishPrefixed(@ptrCast(&ctx), .{ .object = params }, a));
+        try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
+    }
+}
+
 test "fuzz handlers: arbitrary params never crash without a broker" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
@@ -844,6 +893,15 @@ test "registerMqtt wires off-Core routes and the JSON-RPC method" {
     try testing.expect(reg.lookup(.POST, "/server/mqtt/subscribe").?.off_core);
     try testing.expect(d.methods.get("server.mqtt.publish").?.off_core);
     try testing.expect(d.methods.get("server.mqtt.publish_mqtt_topic").?.off_core);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "server.mqtt.publish", "server.mqtt.subscribe", "server.mqtt.publish_mqtt_topic" }) |method| {
+        const request = try std.fmt.allocPrint(a, "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"params\":{{\"topic\":\"t\"}},\"id\":1}}", .{method});
+        const response = try d.handleParsedRoot(.{ .transport = .MQTT }, try mkParams(a, request), a);
+        const value = try mkParams(a, response);
+        try testing.expectEqual(@as(i64, -32601), value.object.get("error").?.object.get("code").?.integer);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +1008,95 @@ test "live broker: keepalive sends PINGREQ every half interval" {
     ctx.start();
     try waitConnected(&ctx, io);
     try testing.expect(waitFor(io, &broker.pings, 1));
+}
+
+test "live broker: missing PINGRESP ends the connection within keepalive" {
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    broker.reply_pings = false;
+    var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 16) });
+    defer peer.cancel(io);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "phobos" });
+    ctx.keepalive_s = 1;
+    ctx.io = io;
+    ctx.start();
+    try waitConnected(&ctx, io);
+    try testing.expect(waitFor(io, &broker.pings, 1));
+    try ctx.reader_done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+    try testing.expectEqual(@as(u32, 1), broker.pings.load(.acquire));
+}
+
+test "stop wakes an untimed subscription before joining workers" {
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(test_options);
+    ctx.io = io;
+    const Subscriber = struct {
+        fn run(c: *MqttCtx) !void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            try testing.expectError(error.ServiceUnavailable, handleSubscribe(@ptrCast(c), try mkParams(a, "{\"topic\":\"pending\"}"), a));
+        }
+    };
+    var subscriber = try io.concurrent(Subscriber.run, .{&ctx});
+    defer if (subscriber.cancel(io)) |_| {} else |_| {};
+    var waiting = false;
+    for (0..400) |_| {
+        ctx.waiters_mutex.lockUncancelable(io);
+        waiting = ctx.waiter_count == 1;
+        ctx.waiters_mutex.unlock(io);
+        if (waiting) break;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try testing.expect(waiting);
+    ctx.stop(io);
+    try subscriber.await(io);
+    try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
+}
+
+test "stop bounds offline writes behind a broker that stops reading" {
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 2) });
+    defer peer.cancel(io);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "phobos" });
+    ctx.io = io;
+    ctx.start();
+    try waitConnected(&ctx, io);
+    peer.await(io);
+    const payload = try std.heap.smp_allocator.alloc(u8, mqtt_client.max_packet_len);
+    defer std.heap.smp_allocator.free(payload);
+    @memset(payload, 'p');
+    var done: Io.Event = .unset;
+    const Publisher = struct {
+        fn run(c: *MqttCtx, bytes: []const u8, finished: *Io.Event) void {
+            defer finished.set(c.io.?);
+            c.publishRaw("blocked", bytes, 0, false) catch {};
+        }
+    };
+    var publisher = try io.concurrent(Publisher.run, .{ &ctx, payload, &done });
+    defer publisher.cancel(io);
+    try io.sleep(.fromMilliseconds(100), .awake);
+    try testing.expect(!done.isSet());
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    ctx.stop(io);
+    try testing.expect(start.untilNow(io).raw.toMilliseconds() < 2000);
+    publisher.await(io);
+    try testing.expect(done.isSet());
 }
 
 test "stop cancels a broker stalled before CONNACK" {

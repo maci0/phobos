@@ -49,6 +49,8 @@ pub const MqttClient = struct {
     /// Serializes writes so a background reader's acknowledgements cannot
     /// interleave with a foreground publish.
     write_mtx: Io.Mutex = .init,
+    /// Set before PINGREQ and cleared only by the reader receiving PINGRESP.
+    ping_pending: std.atomic.Value(bool) = .init(false),
 
     /// Connect to `host:port`, send CONNECT, await an accepted CONNACK.
     /// Accepts IPv4, IPv6, or a DNS hostname.
@@ -174,6 +176,7 @@ pub const MqttClient = struct {
     }
 
     pub fn ping(self: *MqttClient) !void {
+        self.ping_pending.store(true, .release);
         try self.writeLocked(&proto.pingreq);
     }
 
@@ -225,6 +228,7 @@ pub const MqttClient = struct {
             },
             .pubrec => try self.writeLocked(&proto.ack(.pubrel, try pkt.packetId())),
             .pubrel => try self.writeLocked(&proto.ack(.pubcomp, try pkt.packetId())),
+            .pingresp => self.ping_pending.store(false, .release),
             else => {},
         }
         return pkt.ptype;
@@ -261,6 +265,7 @@ pub const TestBroker = struct {
     publishes: std.atomic.Value(u32) = .init(0),
     subscribes: std.atomic.Value(u32) = .init(0),
     pings: std.atomic.Value(u32) = .init(0),
+    reply_pings: bool = true,
 
     pub fn bind(io: Io) !TestBroker {
         var ip = try net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -315,7 +320,10 @@ pub const TestBroker = struct {
                     self.got_retain = v.retain;
                     _ = self.publishes.fetchAdd(1, .release);
                 },
-                .pingreq => _ = self.pings.fetchAdd(1, .release),
+                .pingreq => {
+                    _ = self.pings.fetchAdd(1, .release);
+                    if (self.reply_pings) self.writeAll(stream, &.{ 0xD0, 0x00 }) catch return;
+                },
                 else => {},
             }
         }

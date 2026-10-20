@@ -108,6 +108,10 @@ These differ from older Zig docs — use these forms:
   hung the suite once — see `TODO.md`).
 - Each connection has its own write mutex so a notification and a JSON-RPC response can't
   interleave on the same socket.
+- MQTT publish and subscribe handlers exclude the MQTT transport because its reader
+  must remain available to receive subscription responses. Shutdown wakes subscribers
+  before joining workers and permits at most one second for offline publication.
+  An unanswered PINGREQ closes the connection after one keepalive interval.
 
 ## 5. Adding (or completing) a component — the standard pattern
 
