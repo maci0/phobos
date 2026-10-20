@@ -491,10 +491,8 @@ fn pushMoonrakerSample(self: *MachineCtx, io: std.Io, sample: MachineCtx.Moonrak
 /// mem_units} objects in chronological order (oldest first). Locks the mutex
 /// when io is available.
 fn buildMoonrakerStats(self: *MachineCtx, alloc: std.mem.Allocator, io: ?std.Io) std.json.Value {
-    if (io) |i| {
-        self.moonraker_stats_mutex.lockUncancelable(i);
-        defer self.moonraker_stats_mutex.unlock(i);
-    }
+    if (io) |i| self.moonraker_stats_mutex.lockUncancelable(i);
+    defer if (io) |i| self.moonraker_stats_mutex.unlock(i);
 
     var arr = std.json.Array.init(alloc);
 
@@ -763,84 +761,90 @@ fn matchKeyEq(text: []const u8, key: []const u8) ?[]const u8 {
 }
 
 /// Build the `sd_info` object from /sys/block/mmcblk0/device/{cid,csd}.
-/// Returns empty object when no SD card is detected (no cid file).
-/// Matches Moonraker's `_get_sdcard_info` key set and parsing logic.
+/// Returns an empty object when no SD card is detected (no cid file).
 fn buildSdInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
-    var obj: std.json.ObjectMap = .empty;
-    const io = ctx.io orelse return .{ .object = obj };
+    const io = ctx.io orelse return .{ .object = .empty };
+    const cid_raw = readFile(io, alloc, SD_CID_PATH) orelse return .{ .object = .empty };
+    return parseSdInfo(alloc, cid_raw, readFile(io, alloc, SD_CSD_PATH));
+}
 
-    const cid_raw = readFile(io, alloc, SD_CID_PATH) orelse return .{ .object = obj };
-    const cid_text = std.mem.trim(u8, cid_raw, "\r\n");
-    if (cid_text.len < 30) return .{ .object = obj };
+/// Pure parser for the SD CID and CSD register texts (Moonraker
+/// `_get_sdcard_info`). A malformed CID yields `{}`; a missing or malformed CSD
+/// keeps capacity "Unknown" and total_bytes 0. Allocates from `alloc` (an arena).
+pub fn parseSdInfo(alloc: std.mem.Allocator, cid_raw: []const u8, csd_raw: ?[]const u8) !std.json.Value {
+    const empty: std.json.Value = .{ .object = .empty };
+    const cid_text = try std.ascii.allocLowerString(alloc, std.mem.trim(u8, cid_raw, &std.ascii.whitespace));
+    if (cid_text.len < 30) return empty;
 
-    // Parse CID hex string (32 hex chars = 16 byte CID register).
-    // Offsets match Moonraker's _get_sdcard_info CID slicing.
-    const mid = cid_text[0..2];
-    try obj.put(alloc, "manufacturer_id", .{ .string = try alloc.dupe(u8, mid) });
-    try obj.put(alloc, "manufacturer", .{ .string = sd_manufacturers.get(mid) orelse "Unknown" });
-    try obj.put(alloc, "oem_id", .{ .string = try alloc.dupe(u8, cid_text[2..6]) });
-
-    // Product name: bytes 3-7 (10 hex chars → 5 ASCII bytes).
-    if (hexDecodeAlloc(alloc, cid_text[6..16])) |name| {
-        try obj.put(alloc, "product_name", .{ .string = name });
-    } else |_| {
-        try obj.put(alloc, "product_name", .{ .string = try alloc.dupe(u8, cid_text[6..16]) });
+    // Offsets match Moonraker's CID slicing.
+    var name_buf: [5]u8 = undefined;
+    const name_raw = std.fmt.hexToBytes(&name_buf, cid_text[6..16]) catch return empty;
+    // `decode("ascii", errors="ignore")` drops non-ASCII bytes.
+    var name_len: usize = 0;
+    for (name_raw) |b| {
+        if (!std.ascii.isAscii(b)) continue;
+        name_buf[name_len] = b;
+        name_len += 1;
     }
+    const rev_major = std.fmt.parseInt(u8, cid_text[16..17], 16) catch return empty;
+    const rev_minor = std.fmt.parseInt(u8, cid_text[17..18], 16) catch return empty;
+    const mfg_year = std.fmt.parseInt(u16, cid_text[27..29], 16) catch return empty;
+    const mfg_month = std.fmt.parseInt(u8, cid_text[29..30], 16) catch return empty;
 
-    // Product revision BCD: major.minor.
-    const rev_major = try std.fmt.parseInt(u8, cid_text[16..17], 16);
-    const rev_minor = try std.fmt.parseInt(u8, cid_text[17..18], 16);
+    var obj: std.json.ObjectMap = .empty;
+    const mid = cid_text[0..2];
+    try obj.put(alloc, "manufacturer_id", .{ .string = mid });
+    try obj.put(alloc, "manufacturer", .{ .string = sd_manufacturers.get(mid) orelse "Unknown" });
+    try obj.put(alloc, "oem_id", .{ .string = cid_text[2..6] });
+    try obj.put(alloc, "product_name", .{ .string = try alloc.dupe(u8, name_buf[0..name_len]) });
     try obj.put(alloc, "product_revision", .{ .string = try std.fmt.allocPrint(alloc, "{d}.{d}", .{ rev_major, rev_minor }) });
-
-    try obj.put(alloc, "serial_number", .{ .string = try alloc.dupe(u8, cid_text[18..26]) });
-
-    // Manufacturing date: year offset at chars 27-28, month at char 29.
-    const mfg_year = try std.fmt.parseInt(u16, cid_text[27..29], 16);
-    const mfg_month = try std.fmt.parseInt(u8, cid_text[29..30], 16);
+    try obj.put(alloc, "serial_number", .{ .string = cid_text[18..26] });
     try obj.put(alloc, "manufacturer_date", .{ .string = try std.fmt.allocPrint(alloc, "{d}/{d}", .{ mfg_month, mfg_year + 2000 }) });
 
-    // Capacity: parse CSD register.
     var capacity_str: []const u8 = "Unknown";
     var total_bytes: u64 = 0;
-    if (readFile(io, alloc, SD_CSD_PATH)) |csd_raw| {
-        const csd_text = std.mem.trim(u8, csd_raw, "\r\n");
-        if (csd_text.len >= 20) {
-            const csd = hexDecodeAlloc(alloc, csd_text[0..20]) catch &[_]u8{};
-            if (csd.len >= 10) {
-                const csd_type = (csd[0] >> 6) & 0x3;
-                if (csd_type == 0) {
-                    // Standard Capacity (CSD v1.0)
-                    const max_block_len: u64 = @as(u64, 1) << @as(u6, @truncate(csd[5] & 0xF));
-                    const c_size: u64 = ((@as(u64, csd[6] & 0x3)) << 10) | (@as(u64, csd[7]) << 2) | ((@as(u64, csd[8]) >> 6) & 0x3);
-                    const c_mult_reg: u64 = ((@as(u64, csd[9] & 0x3)) << 1) | (@as(u64, csd[10]) >> 7);
-                    total_bytes = (c_size + 1) * (c_mult_reg + 1) * max_block_len;
-                    capacity_str = try std.fmt.allocPrint(alloc, "{d:.1} MiB", .{@as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0)});
-                } else if (csd_type == 1) {
-                    // High Capacity (CSD v2.0)
-                    const c_size: u64 = ((@as(u64, csd[7] & 0x3F)) << 16) | (@as(u64, csd[8]) << 8) | @as(u64, csd[9]);
-                    total_bytes = (c_size + 1) * 512 * 1024;
-                    capacity_str = try std.fmt.allocPrint(alloc, "{d:.1} GiB", .{@as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0 * 1024.0)});
-                } else if (csd_type == 2) {
-                    // Ultra Capacity (CSD v3.0)
-                    const c_size: u64 = ((@as(u64, csd[6] & 0xF)) << 24) | (@as(u64, csd[7]) << 16) | (@as(u64, csd[8]) << 8) | @as(u64, csd[9]);
-                    total_bytes = (c_size + 1) * 512 * 1024;
-                    capacity_str = try std.fmt.allocPrint(alloc, "{d:.1} TiB", .{@as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0 * 1024.0 * 1024.0)});
-                }
-            }
+    if (csd_raw) |raw| {
+        if (parseCsdCapacity(std.mem.trim(u8, raw, &std.ascii.whitespace))) |cap| {
+            total_bytes = cap.total_bytes;
+            const scaled = @as(f64, @floatFromInt(total_bytes)) / cap.divisor;
+            capacity_str = try std.fmt.allocPrint(alloc, "{d:.1} {s}", .{ scaled, cap.unit });
         }
     }
     try obj.put(alloc, "capacity", .{ .string = capacity_str });
-    try obj.put(alloc, "total_bytes", .{ .integer = @as(i64, @intCast(total_bytes)) });
-
+    // At most 2^47 bytes (CSD v3.0), so the cast cannot fail.
+    try obj.put(alloc, "total_bytes", .{ .integer = @intCast(total_bytes) });
     return .{ .object = obj };
 }
 
-/// Decode a hex string into a newly allocated byte slice.
-fn hexDecodeAlloc(alloc: std.mem.Allocator, hex: []const u8) ![]u8 {
-    if (hex.len % 2 != 0) return error.InvalidHex;
-    const out = try alloc.alloc(u8, hex.len / 2);
-    errdefer alloc.free(out);
-    return std.fmt.hexToBytes(out, hex);
+/// SD card capacity decoded from the CSD register, with Moonraker's display unit.
+const SdCapacity = struct { total_bytes: u64, divisor: f64, unit: []const u8 };
+
+/// Decode the 128-bit CSD register (32 hex digits) into the card capacity.
+/// Returns null for malformed text or an unknown CSD structure version.
+fn parseCsdCapacity(csd_text: []const u8) ?SdCapacity {
+    if (csd_text.len != 32) return null;
+    var csd: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&csd, csd_text) catch return null;
+    switch (csd[0] >> 6) {
+        0 => {
+            // Standard Capacity (CSD v1.0): (C_SIZE + 1) * 2^(C_SIZE_MULT + 2) * 2^READ_BL_LEN.
+            const read_bl_len: u6 = @intCast(csd[5] & 0xF);
+            const c_size: u64 = (@as(u64, csd[6] & 0x3) << 10) | (@as(u64, csd[7]) << 2) | (csd[8] >> 6);
+            const c_size_mult: u6 = @intCast(((csd[9] & 0x3) << 1) | (csd[10] >> 7));
+            return .{ .total_bytes = (c_size + 1) << (c_size_mult + 2) << read_bl_len, .divisor = 1024.0 * 1024.0, .unit = "MiB" };
+        },
+        1 => {
+            // High Capacity (CSD v2.0)
+            const c_size: u64 = (@as(u64, csd[7] & 0x3F) << 16) | (@as(u64, csd[8]) << 8) | csd[9];
+            return .{ .total_bytes = (c_size + 1) * 512 * 1024, .divisor = 1024.0 * 1024.0 * 1024.0, .unit = "GiB" };
+        },
+        2 => {
+            // Ultra Capacity (CSD v3.0)
+            const c_size: u64 = (@as(u64, csd[6] & 0xF) << 24) | (@as(u64, csd[7]) << 16) | (@as(u64, csd[8]) << 8) | csd[9];
+            return .{ .total_bytes = (c_size + 1) * 512 * 1024, .divisor = 1024.0 * 1024.0 * 1024.0 * 1024.0, .unit = "TiB" };
+        },
+        else => return null,
+    }
 }
 
 /// Build the `distribution` object. Matches the key set Moonraker derives from
@@ -3345,97 +3349,78 @@ test "fuzz_machine_handlers_peripherals: never crash" {
     }.run, .{});
 }
 
-test "hexDecodeAlloc: basic decode" {
-    const a = testing.allocator;
-    const out = try hexDecodeAlloc(a, "48656c6c6f");
-    defer a.free(out);
-    try testing.expectEqualStrings("Hello", out);
-}
-
-test "hexDecodeAlloc: empty string" {
-    const out = try hexDecodeAlloc(testing.allocator, "");
-    try testing.expectEqual(@as(usize, 0), out.len);
-}
-
-test "hexDecodeAlloc: odd length fails" {
-    try testing.expectError(error.InvalidHex, hexDecodeAlloc(testing.allocator, "abc"));
-}
-
-test "hexDecodeAlloc: full byte range 0x00-0xFF" {
-    const a = testing.allocator;
-    const out = try hexDecodeAlloc(a, "00ff7f80");
-    defer a.free(out);
-    try testing.expectEqual(@as(u8, 0x00), out[0]);
-    try testing.expectEqual(@as(u8, 0xff), out[1]);
-    try testing.expectEqual(@as(u8, 0x7f), out[2]);
-    try testing.expectEqual(@as(u8, 0x80), out[3]);
-}
-
 test "buildSdInfo: no io returns empty object" {
     var ctx = testCtx(testing.allocator);
     const info = try buildSdInfo(&ctx, testing.allocator);
     try testing.expect(info.object.count() == 0);
 }
 
-test "CSD capacity: High Capacity type 1" {
-    const c_size: u64 = 15193;
-    const total_bytes = (c_size + 1) * 512 * 1024;
-    try testing.expectEqual(@as(u64, 7966031872), total_bytes);
-    const gib: f64 = @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0 * 1024.0);
-    try testing.expectApproxEqRel(@as(f64, 7.4189453125), gib, 0.01);
+test "parseCsdCapacity: CSD v1.0, v2.0 and v3.0 registers" {
+    // 2 GB standard-capacity card: C_SIZE 3859, C_SIZE_MULT 7, READ_BL_LEN 10.
+    const v1 = parseCsdCapacity("005e00325f5a83c4edb7bf9f96400089").?;
+    try testing.expectEqual(@as(u64, 2023751680), v1.total_bytes);
+    try testing.expectEqualStrings("MiB", v1.unit);
+    // 8 GB SDHC card: C_SIZE 0x3b37.
+    try testing.expectEqual(@as(u64, 7948206080), parseCsdCapacity("400e00325b5900003b377f800a40008d").?.total_bytes);
+    // SDUC layout: C_SIZE 0x03ba2b.
+    try testing.expectEqual(@as(u64, 128066781184), parseCsdCapacity("800e00325b590003ba2b7f800a400000").?.total_bytes);
+    // Reserved structure version, truncated and non-hex registers.
+    try testing.expectEqual(@as(?SdCapacity, null), parseCsdCapacity("c00e00325b5900003b377f800a40008d"));
+    try testing.expectEqual(@as(?SdCapacity, null), parseCsdCapacity("005e00325f5a83c4edb7"));
+    try testing.expectEqual(@as(?SdCapacity, null), parseCsdCapacity("zz5e00325f5a83c4edb7bf9f96400089"));
 }
 
-test "CSD capacity: Standard Capacity type 0" {
-    const c_size: u64 = 4095;
-    const c_mult_reg: u64 = 7;
-    const max_block_len: u64 = 1024;
-    const total_bytes = (c_size + 1) * (c_mult_reg + 1) * max_block_len;
-    try testing.expectEqual(@as(u64, 33554432), total_bytes);
+test "parseSdInfo: real CID and CSD registers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const info = try parseSdInfo(a, "035344534C303847801A2B3C4D017AC5\n", "005e00325f5a83c4edb7bf9f96400089\n");
+    const o = info.object;
+    try testing.expectEqualStrings("03", o.get("manufacturer_id").?.string);
+    try testing.expectEqualStrings("Sandisk", o.get("manufacturer").?.string);
+    try testing.expectEqualStrings("5344", o.get("oem_id").?.string);
+    try testing.expectEqualStrings("SL08G", o.get("product_name").?.string);
+    try testing.expectEqualStrings("8.0", o.get("product_revision").?.string);
+    try testing.expectEqualStrings("1a2b3c4d", o.get("serial_number").?.string);
+    try testing.expectEqualStrings("10/2023", o.get("manufacturer_date").?.string);
+    try testing.expectEqualStrings("1930.0 MiB", o.get("capacity").?.string);
+    try testing.expectEqual(@as(i64, 2023751680), o.get("total_bytes").?.integer);
+
+    const hc = try parseSdInfo(a, "035344534c303847801a2b3c4d017ac5", "400e00325b5900003b377f800a40008d");
+    try testing.expectEqualStrings("7.4 GiB", hc.object.get("capacity").?.string);
+
+    const no_csd = try parseSdInfo(a, "035344534c303847801a2b3c4d017ac5", null);
+    try testing.expectEqualStrings("Unknown", no_csd.object.get("capacity").?.string);
+    try testing.expectEqual(@as(i64, 0), no_csd.object.get("total_bytes").?.integer);
+
+    // Non-ASCII product-name bytes are dropped, as `errors="ignore"` does.
+    const named = try parseSdInfo(a, "03534453ff303847801a2b3c4d017ac5", null);
+    try testing.expectEqualStrings("S08G", named.object.get("product_name").?.string);
 }
 
-test "CSD capacity: Ultra Capacity type 2" {
-    const c_size: u64 = 244140;
-    const total_bytes = (c_size + 1) * 512 * 1024;
-    try testing.expectEqual(@as(u64, 128000196608), total_bytes);
+test "parseSdInfo: malformed CID yields an empty object" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "", "0353", "035344534c303847801a2b3c4d017zc5", "035344534c3038zz801a2b3c4d017ac5" }) |cid| {
+        const info = try parseSdInfo(a, cid, "400e00325b5900003b377f800a40008d");
+        try testing.expectEqual(@as(usize, 0), info.object.count());
+    }
 }
 
-test "fuzz_hexDecodeAlloc: random bytes roundtrip" {
+test "fuzz parseSdInfo: arbitrary register text" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [64]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            const a = std.heap.smp_allocator;
-            // Build hex string manually.
-            var hex_buf: [128]u8 = undefined;
-            for (buf, 0..) |b, i| {
-                _ = std.fmt.bufPrint(hex_buf[2 * i .. 2 * i + 2], "{x:0>2}", .{b}) catch unreachable;
-            }
-            const decoded = hexDecodeAlloc(a, &hex_buf) catch return;
-            defer a.free(decoded);
-            try testing.expectEqual(buf.len, decoded.len);
-            for (buf, decoded) |orig, d| {
-                try testing.expectEqual(orig, d);
-            }
-        }
-    }.run, .{});
-}
-
-test "fuzz_hexParse: malformed hex never crashes" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [256]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            var cid: [34]u8 = undefined;
+            var csd: [34]u8 = undefined;
+            smith.bytesWithHash(&cid, 0);
+            smith.bytesWithHash(&csd, 1);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
-            const a = arena.allocator();
-            const n = @min(buf.len, @as(usize, @intCast(smith.valueRangeAtMostWithHash(u8, 0, 128, 1))));
-            _ = hexDecodeAlloc(a, buf[0..n]) catch {};
-            if (buf.len >= 2) {
-                _ = std.fmt.parseInt(u8, buf[0..2], 16) catch {};
-            }
-            if (buf.len >= 4) {
-                _ = std.fmt.parseInt(u16, buf[0..4], 16) catch {};
-            }
+            const info = try parseSdInfo(arena.allocator(), &cid, &csd);
+            const n = info.object.count();
+            try testing.expect(n == 0 or n == 9);
+            _ = parseCsdCapacity(csd[0..32]);
         }
     }.run, .{});
 }
@@ -3466,31 +3451,6 @@ test "sudo handlers never spawn when a command runner is installed" {
     try testing.expectEqual(@as(?bool, null), c.sudo_validated);
     const info = try handleSudoInfo(@ptrCast(&c), try objParams(a, "{\"check_access\":true}"), a);
     try testing.expect(info.object.get("sudo_access").? == .null);
-}
-
-test "hex decoding frees invalid inputs and uses standard byte decoding" {
-    const alloc = std.testing.allocator;
-    for ([_][]const u8{ "xx", "00xy", "012" }) |raw| {
-        if (hexDecodeAlloc(alloc, raw)) |bytes| {
-            alloc.free(bytes);
-            return error.ExpectedInvalidHex;
-        } else |_| {}
-    }
-    const bytes = try hexDecodeAlloc(alloc, "00AbFF");
-    defer alloc.free(bytes);
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0xab, 0xff }, bytes);
-}
-
-test "fuzz hex decoding handles arbitrary bounded strings" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) !void {
-            var raw: [32]u8 = undefined;
-            smith.bytesWithHash(&raw, 0);
-            const bytes = hexDecodeAlloc(std.testing.allocator, &raw) catch return;
-            defer std.testing.allocator.free(bytes);
-            try std.testing.expectEqual(@as(usize, 16), bytes.len);
-        }
-    }.run, .{});
 }
 
 test "process CPU samples belong to each machine context" {
