@@ -287,7 +287,7 @@ fn run(init: std.process.Init) !void {
 
     // Select the DataStore backend from `[database] backend` (sqlite | file).
     const db_backend = try resolveDbBackend(alloc, aio, config_path);
-    const db_path = try resolveDbPath(alloc, init.arena.allocator(), aio, config_path, data_path);
+    const db_path = try resolveDbPath(alloc, init.arena.allocator(), aio, config_path);
     std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(db_backend), if (db_path) |p| p else "" });
 
     if (data_path) |dp| std.debug.print("phobos: data path = {s}\n", .{dp});
@@ -339,16 +339,13 @@ pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]con
     return error.InvalidDatabaseBackend;
 }
 
-/// Read `[database] path` when the config sets it. Otherwise, a `-d` data
-/// path opens `<data>/database/moonraker-sql.db`, which is where Moonraker
-/// stores the printer database. Null (no `[database] path`, no `-d`) puts it in
-/// the temporary datadir that `App.deinit` deletes.
+/// Read an explicit `[database] path`. Null delegates the backend-specific
+/// path under the datadir to `App.initWithStore`.
 pub fn resolveDbPath(
     gpa: std.mem.Allocator,
     arena_alloc: std.mem.Allocator,
     aio: std.Io,
     config_path: ?[]const u8,
-    data_path: ?[]const u8,
 ) !?[]const u8 {
     if (config_path) |path| {
         var cfg = config.ConfigParser.init(gpa);
@@ -358,8 +355,7 @@ pub fn resolveDbPath(
             if (v.len > 0) return try arena_alloc.dupe(u8, v);
         }
     }
-    const dp = data_path orelse return null;
-    return try std.fs.path.join(arena_alloc, &.{ dp, "database", "moonraker-sql.db" });
+    return null;
 }
 
 /// Resolve the bind address from a config file (or defaults).
@@ -801,7 +797,7 @@ test "extractBindAddr: enabled boolean has no effect on bind addr" {
     try std.testing.expectEqual(@as(u16, 7125), port);
 }
 
-test "resolveDbPath: -d uses moonraker-sql.db unless the config sets a path" {
+test "resolveDbPath: absent override delegates the backend default to App" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -814,15 +810,13 @@ test "resolveDbPath: -d uses moonraker-sql.db unless the config sets a path" {
     const base = try std.fmt.allocPrint(a, "{s}/{s}", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     try tmp.dir.createDirPath(aio, "config");
     try tmp.dir.writeFile(aio, .{ .sub_path = "config/moonraker.conf", .data = "[server]\nport: 7125\n" });
-    const implied = (try resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/moonraker.conf" }), base)).?;
-    try std.testing.expect(std.mem.endsWith(u8, implied, "/database/moonraker-sql.db"));
-    try std.testing.expect(std.mem.indexOf(u8, implied, base) != null);
+    try std.testing.expect((try resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/moonraker.conf" }))) == null);
 
     try tmp.dir.writeFile(aio, .{ .sub_path = "config/override.conf", .data = "[database]\npath: /var/lib/moonraker-sql.db\n" });
-    const over = (try resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/override.conf" }), base)).?;
+    const over = (try resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/override.conf" }))).?;
     try std.testing.expectEqualStrings("/var/lib/moonraker-sql.db", over);
 
-    try std.testing.expect((try resolveDbPath(alloc, a, aio, null, null)) == null);
+    try std.testing.expect((try resolveDbPath(alloc, a, aio, null)) == null);
 }
 
 test "startup resolvers reject invalid config instead of choosing defaults" {
@@ -834,7 +828,7 @@ test "startup resolvers reject invalid config instead of choosing defaults" {
     const path = try tmp.dir.realPathFileAlloc(aio, "bad.conf", alloc);
     defer alloc.free(path);
     try std.testing.expectError(error.ParseError, resolveDbBackend(alloc, aio, path));
-    try std.testing.expectError(error.ParseError, resolveDbPath(alloc, alloc, aio, path, "/unused"));
+    try std.testing.expectError(error.ParseError, resolveDbPath(alloc, alloc, aio, path));
     try std.testing.expectError(error.ParseError, resolveBindAddr(alloc, alloc, aio, path));
     try tmp.dir.writeFile(aio, .{ .sub_path = "bad.conf", .data = "[database]\nbackend: misspelled\n" });
     try std.testing.expectError(error.InvalidDatabaseBackend, resolveDbBackend(alloc, aio, path));
@@ -857,7 +851,7 @@ test "fuzz startup resolvers reject malformed config consistently" {
             const path = try tmp.dir.realPathFileAlloc(std.testing.io, "bad.conf", std.testing.allocator);
             defer std.testing.allocator.free(path);
             try std.testing.expectError(error.ParseError, resolveDbBackend(std.testing.allocator, std.testing.io, path));
-            try std.testing.expectError(error.ParseError, resolveDbPath(std.testing.allocator, std.testing.allocator, std.testing.io, path, null));
+            try std.testing.expectError(error.ParseError, resolveDbPath(std.testing.allocator, std.testing.allocator, std.testing.io, path));
             try std.testing.expectError(error.ParseError, resolveBindAddr(std.testing.allocator, std.testing.allocator, std.testing.io, path));
         }
     }.run, .{});

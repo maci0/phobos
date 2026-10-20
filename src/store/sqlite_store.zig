@@ -39,6 +39,7 @@ pub const SqliteStore = struct {
     }
 
     pub fn open(io: std.Io, path: [:0]const u8) Error!SqliteStore {
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return Error.BackendError;
         if (std.fs.path.dirname(path)) |parent| {
             var parent_dir = std.Io.Dir.cwd().createDirPathOpen(io, parent, .{}) catch return Error.BackendError;
             parent_dir.close(io);
@@ -141,19 +142,25 @@ pub const SqliteStore = struct {
     }
 
     fn decodeRecord(arena: std.mem.Allocator, bytes: []const u8) Error!json.Value {
-        if (bytes.len == 0) return .null;
+        if (bytes.len == 0) return Error.BackendError;
         switch (bytes[0]) {
             0 => return .null,
-            '?' => return .{ .bool = if (bytes.len >= 2) bytes[1] != 0 else false },
+            '?' => {
+                if (bytes.len != 2) return Error.BackendError;
+                return .{ .bool = bytes[1] != 0 };
+            },
             'q' => {
-                if (bytes.len < 9) return Error.BackendError;
+                if (bytes.len != 9) return Error.BackendError;
                 return .{ .integer = std.mem.readInt(i64, bytes[1..9], .little) };
             },
             'd' => {
-                if (bytes.len < 9) return Error.BackendError;
+                if (bytes.len != 9) return Error.BackendError;
                 return .{ .float = @bitCast(std.mem.readInt(u64, bytes[1..9], .little)) };
             },
-            's' => return .{ .string = try arena.dupe(u8, bytes[1..]) },
+            's' => {
+                if (!std.unicode.utf8ValidateSlice(bytes[1..])) return Error.BackendError;
+                return .{ .string = try arena.dupe(u8, bytes[1..]) };
+            },
             '[', '{' => return json.parseFromSliceLeaky(json.Value, arena, bytes, .{}) catch |err| switch (err) {
                 error.OutOfMemory => Error.OutOfMemory,
                 else => Error.BackendError,
@@ -186,7 +193,8 @@ pub const SqliteStore = struct {
             defer _ = c.sqlite3_finalize(stmt);
             try bindText(stmt, 1, namespace);
             try bindText(stmt, 2, record_key);
-            _ = c.sqlite3_bind_blob(stmt, 3, v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT);
+            if (c.sqlite3_bind_blob(stmt, 3, v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK)
+                return Error.BackendError;
             if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return Error.BackendError;
         } else {
             const stmt = try self.prepare("DELETE FROM namespace_store WHERE namespace=?1 AND key=?2");
@@ -380,7 +388,7 @@ pub const SqliteStore = struct {
         if (!try self.hasTable("job_history")) return null;
         const stmt = try self.prepare(job_history_select ++ " WHERE job_id=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        _ = c.sqlite3_bind_int64(stmt, 1, jid);
+        if (c.sqlite3_bind_int64(stmt, 1, jid) != c.SQLITE_OK) return Error.BackendError;
         return switch (c.sqlite3_step(stmt)) {
             c.SQLITE_ROW => if (try mapJobRow(arena, stmt)) |row| row.value else null,
             c.SQLITE_DONE => null,
@@ -394,7 +402,7 @@ pub const SqliteStore = struct {
         const job = (try self.historyJobFromTable(arena, job_key)) orelse return null;
         const stmt = try self.prepare("DELETE FROM job_history WHERE job_id=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        _ = c.sqlite3_bind_int64(stmt, 1, jobRowId(job_key).?);
+        if (c.sqlite3_bind_int64(stmt, 1, jobRowId(job_key).?) != c.SQLITE_OK) return Error.BackendError;
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return Error.BackendError;
         return job;
     }
@@ -524,6 +532,40 @@ fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!?MappedJob {
 
 const testing = std.testing;
 
+test "SqliteStore.open rejects embedded NUL before creating database parents" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/new-parent/db\x00ignored", .{root}, 0);
+    if (SqliteStore.open(testing.io, path)) |opened| {
+        var store = opened;
+        store.deinit();
+        return error.TestUnexpectedSuccess;
+    } else |err| try testing.expectEqual(Error.BackendError, err);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "new-parent", .{}));
+}
+
+test "fuzz SqliteStore.open rejects every embedded NUL position" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+            defer testing.allocator.free(root);
+            var name: [12]u8 = undefined;
+            smith.bytesWithHash(&name, 0);
+            for (&name) |*byte| byte.* = 'a' + byte.* % 26;
+            name[smith.valueRangeAtMostWithHash(u8, 0, name.len - 1, 1)] = 0;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = try std.fmt.bufPrintSentinel(&buf, "{s}/new-parent/{s}", .{ root, name }, 0);
+            try testing.expectError(Error.BackendError, SqliteStore.open(testing.io, path));
+            try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "new-parent", .{}));
+        }
+    }.run, .{});
+}
+
 test "SqliteStore.open creates missing database parents" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -605,6 +647,39 @@ test "SqliteStore: binding errors propagate before executing a query" {
     try SqliteStore.bindText(stmt, 1, "value");
     try testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stmt));
     try testing.expectEqualStrings("value", colTextRaw(stmt, 0).?);
+}
+
+test "SqliteStore: malformed scalar records are backend errors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const bad = [_][]const u8{
+        "", "?", "?\x00\x01", "q", "d", "q\x00\x00\x00\x00\x00\x00\x00\x00\x00", "d\x00\x00\x00\x00\x00\x00\x00\x00\x00", "s\xff",
+    };
+    for (bad) |bytes| try testing.expectError(Error.BackendError, SqliteStore.decodeRecord(a, bytes));
+    try testing.expectEqualStrings("", (try SqliteStore.decodeRecord(a, "s")).string);
+    try testing.expectEqualStrings("é", (try SqliteStore.decodeRecord(a, "sé")).string);
+}
+
+test "fuzz SqliteStore: scalar encoding round-trips values" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const integer = std.mem.readInt(i64, bytes[0..8], .little);
+            const floating: f64 = @floatFromInt(integer);
+            var text: [32]u8 = undefined;
+            for (&text, bytes) |*out, byte| out.* = 'a' + byte % 26;
+            const cases = [_]json.Value{ .null, .{ .bool = bytes[0] & 1 != 0 }, .{ .integer = integer }, .{ .float = floating }, .{ .string = &text } };
+            for (cases) |value| {
+                const decoded = try SqliteStore.decodeRecord(a, try SqliteStore.encodeRecord(a, value));
+                try testing.expectEqualDeep(value, decoded);
+            }
+        }
+    }.run, .{});
 }
 
 /// Moonraker's `job_history` schema with rows 1, 2 and a foreign negative id.

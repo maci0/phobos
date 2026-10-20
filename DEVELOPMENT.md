@@ -234,3 +234,8 @@ History totals and auxiliary fields propagate allocation and store failures;
 reset builds the response before changing either persisted or auxiliary totals.
 Configuration wildcard matching uses an iterative last-star retry, so repeated
 wildcards cannot consume recursive stack space or exponential retry work.
+Only an explicit `[database] path` overrides the backend defaults under the
+datadir: `database/moonraker-sql.db` for SQLite, `database` for the file backend.
+SQLite scalar records require their exact encoded length and UTF-8 strings;
+corrupt values produce a backend error instead of a substituted value.
+SQLite paths reject embedded NUL before creating parents or entering the C API.
