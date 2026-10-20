@@ -2,16 +2,17 @@
 //! database component semantics (see
 //! `vendor/moonraker/moonraker/components/database.py`).
 //!
-//! Moonraker stores data as a set of *namespaces*. In the SQLite backend each
-//! namespace is a named sub-database (dbi). A namespace maps top-level record
-//! keys to *encoded records*. A record's logical value is a JSON value
-//! (object, array, string, number, bool, or null).
+//! Moonraker stores data as a set of *namespaces*. The SQLite backend keeps
+//! every namespace in the `namespace_store` table; the file backend keeps one
+//! JSON file per namespace. A namespace maps top-level record keys to
+//! *encoded records*. A record's logical value is a JSON value (object,
+//! array, string, number, bool, or null).
 //!
 //! Keys passed to get/insert/update/delete are *dotted paths*: the first
 //! segment selects the top-level record within the namespace; subsequent
 //! segments index into the decoded JSON tree of that record. This file owns
-//! the dotted-path tree-walking semantics; concrete backends (see
-//! backends (sqlite_store.zig / file_store.zig) own persistence + encoding.
+//! the dotted-path tree-walking semantics; the backends (sqlite_store.zig,
+//! file_store.zig) own persistence and encoding.
 //!
 //! Dotted-key semantics replicated from database.py `SqliteProvider`:
 //!   * parse_namespace_key: split on '.'; empty key or any empty segment is
@@ -80,7 +81,6 @@ pub fn parseKey(key: []const u8) Error!ParsedKey {
         pk.segments[pk.len] = seg;
         pk.len += 1;
     }
-    if (pk.len == 0) return Error.InvalidKey;
     return pk;
 }
 
@@ -102,8 +102,8 @@ pub fn getPath(root: json.Value, segments: []const []const u8) Error!json.Value 
 
 /// Ensure `obj[field]` exists and is an object, creating an empty object if
 /// absent (mirrors database.py `getitem_with_default`). Returns a pointer to
-/// the child value so callers can recurse. Errors if `field` exists but is
-/// not an object only when `strict` is set.
+/// the child value so callers can recurse; an existing non-object value is
+/// returned unchanged for the caller to reject.
 fn getOrCreateObject(
     alloc: std.mem.Allocator,
     obj: *json.ObjectMap,
@@ -270,9 +270,9 @@ pub fn deletePath(
 // DataStore interface (vtable)
 // ---------------------------------------------------------------------------
 
-/// A DataStore is a backend-agnostic handle to a namespaced JSON store. The
-/// Each backend (SQLite / file) provides one via `dataStore()`. All ops
-/// allocate results in the supplied `arena`.
+/// A DataStore is a backend-agnostic handle to a namespaced JSON store. Each
+/// backend (SQLite / file) provides one via `dataStore()`. All ops allocate
+/// results in the supplied `arena`.
 pub const VTable = struct {
     getItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value,
     insertItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void,

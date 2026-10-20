@@ -236,11 +236,11 @@ fn handleItemGet(
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
     const value: std.json.Value = if (key_opt) |key| blk: {
-        const v = try c.store.getItem(alloc, ns_z, key);
+        const v = c.store.getItem(alloc, ns_z, key) catch |err| return requestError(err);
         break :blk v orelse return error.MissingDbKey;
     } else blk: {
         if (!try namespaceKnown(c, alloc, namespace)) return error.UnknownDbNamespace;
-        break :blk try c.store.getNamespace(alloc, ns_z);
+        break :blk c.store.getNamespace(alloc, ns_z) catch |err| return requestError(err);
     };
 
     return buildItemResponse(alloc, namespace, key_opt, value);
@@ -291,7 +291,7 @@ fn handleItemPost(
     if (jv.exceedsDepth(value, jv.max_value_depth)) return error.InvalidParams;
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
-    try c.store.insertItem(alloc, ns_z, key, value);
+    c.store.insertItem(alloc, ns_z, key, value) catch |err| return requestError(err);
     return buildItemResponse(alloc, namespace, key, value);
 }
 
@@ -325,9 +325,16 @@ fn handleItemDelete(
 
     const removed = c.store.deleteItem(alloc, ns_z, key) catch |err| switch (err) {
         ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
-        else => return err,
+        else => return requestError(err),
     };
     return buildItemResponse(alloc, namespace, key, removed);
+}
+
+/// Moonraker answers a malformed key with a 400 `ServerError`
+/// (database.py `parse_namespace_key`); the file backend also rejects a
+/// namespace that would name a path outside its directory.
+fn requestError(err: ds.Error) anyerror {
+    return if (err == ds.Error.InvalidKey) error.InvalidParams else err;
 }
 
 // ---------------------------------------------------------------------------
@@ -725,6 +732,30 @@ test "handlePostItem: rejects a pathologically deep value (guards the serializer
     // A shallow value in the same namespace still works (guard is not over-broad).
     const ok_params = try mkParams(a, "{\"namespace\":\"testns\",\"key\":\"shallow\",\"value\":{\"a\":[1,2,3]}}");
     _ = try handlePostItem(@ptrCast(&ctx), ok_params, a);
+}
+
+test "item handlers on a FileStore reject a namespace outside the database directory" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    var fs = try @import("../store/file_store.zig").FileStore.open(io, try std.fs.path.join(a, &.{ root, "database" }));
+    defer fs.deinit();
+    var ctx: DbCtx = .{ .store = fs.dataStore() };
+
+    const bad = "{\"namespace\":\"../escape\",\"key\":\"k\",\"value\":1}";
+    try testing.expectError(error.InvalidParams, handlePostItem(@ptrCast(&ctx), try mkParams(a, bad), a));
+    try testing.expectError(error.InvalidParams, handleGetItem(@ptrCast(&ctx), try mkParams(a, bad), a));
+    try testing.expectError(error.InvalidParams, handleDeleteItem(@ptrCast(&ctx), try mkParams(a, bad), a));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "escape.json", .{}));
+
+    const good = "{\"namespace\":\"fluidd\",\"key\":\"k\",\"value\":1}";
+    _ = try handlePostItem(@ptrCast(&ctx), try mkParams(a, good), a);
+    const got = try handleGetItem(@ptrCast(&ctx), try mkParams(a, good), a);
+    try testing.expectEqual(@as(i64, 1), got.object.get("value").?.integer);
 }
 
 test "handleDeleteItem: removes key and returns removed value" {

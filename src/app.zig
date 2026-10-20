@@ -369,7 +369,7 @@ pub const App = struct {
                 const FileStore = @import("store/file_store.zig").FileStore;
                 const store_ptr = try alloc.create(FileStore);
                 errdefer alloc.destroy(store_ptr);
-                store_ptr.* = FileStore.open(alloc, aio, store_path) catch return error.BackendOpenFailed;
+                store_ptr.* = FileStore.open(aio, store_path) catch return error.BackendOpenFailed;
                 break :blk .{ .file = store_ptr };
             },
         };
@@ -2704,6 +2704,6 @@ test "startup accepts symlinked file roots and database parents" {
     const FileStore = @import("store/file_store.zig").FileStore;
     const path = try std.fs.path.join(alloc, &.{ root, "config" });
     defer alloc.free(path);
-    var store = try FileStore.open(alloc, aio, path);
+    var store = try FileStore.open(aio, path);
     defer store.deinit();
 }
