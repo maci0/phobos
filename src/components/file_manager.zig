@@ -96,15 +96,20 @@ fn isGcodeExt(name: []const u8) bool {
 const MetaEntry = struct {
     size: u64,
     mtime: f64,
+    /// Arena capacity, counted against `metadata_cache_max_bytes`.
+    bytes: usize,
     arena: std.heap.ArenaAllocator,
     value: std.json.Value,
 };
 
-/// Metadata cache cap. `server.files.metadata` re-reads up to 256 KiB + re-parses
+/// Metadata cache caps. `server.files.metadata` re-reads up to 256 KiB + re-parses
 /// the gcode header on every call; Mainsail/Fluidd request it for every file in a
-/// listing, so on slow eMMC this is a real, repeated stall. Bounded; cleared
-/// wholesale on overflow (simple, and the working set is small in practice).
+/// listing, so on slow eMMC this is a real, repeated stall. Entries carry base64
+/// thumbnails (tens of KiB each), so the cache is bounded by entries and by
+/// arena bytes and cleared wholesale on overflow. A record larger than the byte
+/// cap is not cached.
 const metadata_cache_cap = 256;
+const metadata_cache_max_bytes = 512 * 1024;
 
 pub const FileCtx = struct {
     gpa: std.mem.Allocator,
@@ -116,6 +121,8 @@ pub const FileCtx = struct {
     io: ?std.Io = null,
     /// Parsed-metadata cache keyed by absolute path (key owned by gpa).
     metadata_cache: std.StringHashMapUnmanaged(MetaEntry) = .empty,
+    /// Sum of `MetaEntry.bytes` in `metadata_cache`.
+    metadata_cache_bytes: usize = 0,
     /// Guards metadata_cache. metadata runs under Core today, but lock anyway so
     /// the cache stays correct if it ever moves off-Core. No-op when io unset.
     metadata_cache_mutex: std.Io.Mutex = .init,
@@ -173,11 +180,7 @@ pub const FileCtx = struct {
             self.excludes = &.{};
             self.excludes_owned = false;
         }
-        var it = self.metadata_cache.iterator();
-        while (it.next()) |e| {
-            e.value_ptr.arena.deinit();
-            self.gpa.free(e.key_ptr.*);
-        }
+        self.evictMetadata();
         self.metadata_cache.deinit(self.gpa);
     }
 
@@ -213,28 +216,41 @@ pub const FileCtx = struct {
             arena.deinit();
             return;
         };
-        if (self.metadata_cache.getPtr(abs)) |slot| {
+        const bytes = arena.queryCapacity();
+        if (self.metadata_cache.fetchRemove(abs)) |old| {
             // Replace: free the old arena only now that the new copy is in hand.
-            slot.arena.deinit();
-            slot.* = .{ .size = size, .mtime = mtime, .arena = arena, .value = copy };
+            self.metadata_cache_bytes -= old.value.bytes;
+            var old_arena = old.value.arena;
+            old_arena.deinit();
+            self.gpa.free(old.key);
+        }
+        if (bytes > metadata_cache_max_bytes) {
+            arena.deinit();
             return;
         }
-        if (self.metadata_cache.count() >= metadata_cache_cap) {
-            var it = self.metadata_cache.iterator();
-            while (it.next()) |e| {
-                e.value_ptr.arena.deinit();
-                self.gpa.free(e.key_ptr.*);
-            }
-            self.metadata_cache.clearRetainingCapacity();
+        if (self.metadata_cache.count() >= metadata_cache_cap or self.metadata_cache_bytes + bytes > metadata_cache_max_bytes) {
+            self.evictMetadata();
         }
         const key = self.gpa.dupe(u8, abs) catch {
             arena.deinit();
             return;
         };
-        self.metadata_cache.put(self.gpa, key, .{ .size = size, .mtime = mtime, .arena = arena, .value = copy }) catch {
+        self.metadata_cache.put(self.gpa, key, .{ .size = size, .mtime = mtime, .bytes = bytes, .arena = arena, .value = copy }) catch {
             self.gpa.free(key);
             arena.deinit();
+            return;
         };
+        self.metadata_cache_bytes += bytes;
+    }
+
+    fn evictMetadata(self: *FileCtx) void {
+        var it = self.metadata_cache.iterator();
+        while (it.next()) |e| {
+            e.value_ptr.arena.deinit();
+            self.gpa.free(e.key_ptr.*);
+        }
+        self.metadata_cache.clearRetainingCapacity();
+        self.metadata_cache_bytes = 0;
     }
 
     pub fn findRoot(self: *const FileCtx, name: []const u8) ?Root {
@@ -2041,6 +2057,35 @@ test "handleMetadata: cache hit returns same record; file change invalidates" {
     try tr.writeFile("gcodes/c.gcode", "G28\nG1 X10\nG1 Y10\nG1 Z5\n");
     const r3 = try handleMetadata(@ptrCast(&c), p, a);
     try testing.expect(r3.object.get("size").?.integer != size1);
+}
+
+test "handleMetadata: thumbnail-heavy records keep the cache under its byte cap" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    var c = tr.ctx();
+    defer c.deinit();
+    const thumb_len = 200 * 1024;
+    const body = try a.alloc(u8, thumb_len);
+    @memset(body, 'A');
+    const gcode = try std.fmt.allocPrint(a, "; thumbnail begin 1x1 {d}\n; {s}\n; thumbnail end\n", .{ thumb_len, body });
+    const names = [_][]const u8{ "t0.gcode", "t1.gcode", "t2.gcode", "t3.gcode" };
+    for (names) |name| try tr.writeFile(try std.fmt.allocPrint(a, "gcodes/{s}", .{name}), gcode);
+    for (names) |name| {
+        const params = try objParams(a, try std.fmt.allocPrint(a, "{{\"filename\":\"{s}\"}}", .{name}));
+        for (0..2) |_| {
+            const md = try handleMetadata(@ptrCast(&c), params, a);
+            try testing.expectEqual(@as(usize, thumb_len), md.object.get("thumbnails").?.array.items[0].object.get("data").?.string.len);
+        }
+        try testing.expect(c.metadata_cache_bytes <= metadata_cache_max_bytes);
+        var sum: usize = 0;
+        var it = c.metadata_cache.valueIterator();
+        while (it.next()) |e| sum += e.bytes;
+        try testing.expectEqual(sum, c.metadata_cache_bytes);
+    }
+    try testing.expect(c.metadata_cache.count() < names.len);
 }
 
 test "handleMetadata: missing file → MetadataNotAvailable" {
