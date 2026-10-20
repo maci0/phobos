@@ -36,11 +36,11 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/debug/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/table` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/notifiers/test` | POST | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
-| `/machine/device_power/device` | GET, POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `/machine/device_power/devices` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `/machine/device_power/off` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `/machine/device_power/on` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `/machine/device_power/status` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `/machine/device_power/device` | GET, POST | HTTP, WEBSOCKET, INTERNAL | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `/machine/device_power/devices` | GET | HTTP, WEBSOCKET, INTERNAL | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `/machine/device_power/off` | POST | HTTP, WEBSOCKET, INTERNAL | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `/machine/device_power/on` | POST | HTTP, WEBSOCKET, INTERNAL | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `/machine/device_power/status` | GET | HTTP, WEBSOCKET, INTERNAL | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
 | `/machine/peripherals/canbus` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | Returns an empty `can_uuids` list; no SocketCAN query. |
 | `/machine/peripherals/serial` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/peripherals/usb` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | No usb.ids database: class, subclass and protocol are null, and names come only from Moonraker's built-in 1d50 (Klipper, Katapult) entries. |
@@ -54,8 +54,8 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/sudo/info` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/sudo/password` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/system_info` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
-| `/machine/td1/data` | GET | HTTP, WEBSOCKET, INTERNAL | td1 | ✅ Full | Matches Moonraker. |
-| `/machine/td1/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | td1 | ✅ Full | Matches Moonraker. |
+| `/machine/td1/data` | GET | HTTP, WEBSOCKET, INTERNAL | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
+| `/machine/td1/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
 | `/machine/update/client` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented. |
 | `/machine/update/klipper` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
@@ -137,7 +137,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 | `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 
-_Endpoints: 109 full, 14 partial, 2 no-op, 0 missing._
+_Endpoints: 102 full, 21 partial, 2 no-op, 0 missing._
 
 ## JSON-RPC methods
 
@@ -163,12 +163,12 @@ _Endpoints: 109 full, 14 partial, 2 no-op, 0 missing._
 | `debug.database.post_item` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.table` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.notifiers.test` |  | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
-| `machine.device_power.devices` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `machine.device_power.get_device` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `machine.device_power.off` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `machine.device_power.on` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `machine.device_power.post_device` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `machine.device_power.status` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
+| `machine.device_power.devices` |  | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `machine.device_power.get_device` |  | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `machine.device_power.off` |  | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `machine.device_power.on` |  | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `machine.device_power.post_device` |  | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
+| `machine.device_power.status` |  | power | ⚠️ Partial | http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md). |
 | `machine.peripherals.canbus` |  | machine | ⚠️ Partial | Returns an empty `can_uuids` list; no SocketCAN query. |
 | `machine.peripherals.serial` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.peripherals.usb` |  | machine | ⚠️ Partial | No usb.ids database: class, subclass and protocol are null, and names come only from Moonraker's built-in 1d50 (Klipper, Katapult) entries. |
@@ -182,8 +182,8 @@ _Endpoints: 109 full, 14 partial, 2 no-op, 0 missing._
 | `machine.sudo.info` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.sudo.password` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.system_info` |  | machine | ✅ Full | Matches Moonraker. |
-| `machine.td1.data` |  | td1 | ✅ Full | Matches Moonraker. |
-| `machine.td1.reboot` |  | td1 | ✅ Full | Matches Moonraker. |
+| `machine.td1.data` |  | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
+| `machine.td1.reboot` |  | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
 | `machine.update.client` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.full` |  | update_manager | ⚠️ Partial | Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented. |
 | `machine.update.klipper` |  | update_manager | ✅ Full | Matches Moonraker. |
@@ -283,7 +283,7 @@ _Endpoints: 109 full, 14 partial, 2 no-op, 0 missing._
 | `notify_announcement_dismissed` | announcements | ✅ Full | Matches Moonraker. |
 | `notify_announcement_update` | announcements | ✅ Full | Matches Moonraker. |
 | `notify_announcement_wake` | announcements | ✅ Full | Matches Moonraker. |
-| `notify_button_event` | button | ✅ Full | Matches Moonraker. |
+| `notify_button_event` | button | ❌ Missing | Never emitted: `[button]` sections and templates are not implemented (TODO.md). |
 | `notify_cpu_throttled` | proc_stats | ✅ Full | Matches Moonraker. |
 | `notify_filelist_changed` | file_manager | ✅ Full | Matches Moonraker. |
 | `notify_gcode_response` | server | ✅ Full | Matches Moonraker. |
@@ -339,9 +339,9 @@ Calls phobos registers that the static baseline lists don't enumerate. Most are 
 | `process_status_update` | klippy_connection | ✅ Full | Matches Moonraker. |
 | `publish_mqtt_topic` | mqtt | ✅ Full | Matches Moonraker. |
 | `reboot_machine` | machine | ✅ Full | Matches Moonraker. |
-| `set_device_power` | power | ✅ Full | Matches Moonraker. |
-| `set_wled` | wled | ✅ Full | Matches Moonraker. |
-| `set_wled_state` | wled | ✅ Full | Matches Moonraker. |
+| `set_device_power` | power | ❌ Missing | Not registered with Klippy (TODO.md). |
+| `set_wled` | wled | ⚠️ Partial | Client JSON-RPC method only; not registered with Klippy (TODO.md). |
+| `set_wled_state` | wled | ⚠️ Partial | Client JSON-RPC method only; not registered with Klippy (TODO.md). |
 | `shutdown_machine` | machine | ✅ Full | Matches Moonraker. |
 | `spoolman_set_active_spool` | spoolman | ✅ Full | Matches Moonraker. |
 | `start_job_queue` | job_queue | ✅ Full | Matches Moonraker. |

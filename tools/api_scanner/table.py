@@ -49,7 +49,15 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     "machine.peripherals.canbus": (S_PARTIAL, "Returns an empty `can_uuids` list; no SocketCAN query."),
     "notify:notify_service_state_changed": (S_PARTIAL, "Sent after API service actions only; Moonraker also sends it from its periodic service-state poll."),
     # --- Power --------------------------------------------------------------
-    "component:power": (S_FULL, "http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented)."),
+    "component:power": (S_PARTIAL, "http / gpio (sysfs `pin`) / tasmota / shelly devices do real I/O with Core released. tplink_smartplug and homeseer track state in-memory only. Shutdown/queue hooks, bound services, timers and http templates are not implemented (TODO.md)."),
+    "remote:set_device_power": (S_MISSING, "Not registered with Klippy (TODO.md)."),
+    # --- WLED ---------------------------------------------------------------
+    "remote:set_wled_state": (S_PARTIAL, "Client JSON-RPC method only; not registered with Klippy (TODO.md)."),
+    "remote:set_wled": (S_PARTIAL, "Client JSON-RPC method only; not registered with Klippy (TODO.md)."),
+    # --- Button -------------------------------------------------------------
+    "notify:notify_button_event": (S_MISSING, "Never emitted: `[button]` sections and templates are not implemented (TODO.md)."),
+    # --- TD-1 ---------------------------------------------------------------
+    "component:td1": (S_PARTIAL, "Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md)."),
     # --- Sensors ------------------------------------------------------------
     "component:sensor": (S_FULL, "MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance)."),
     # --- Klippy-proxied printer.* ------------------------------------------
