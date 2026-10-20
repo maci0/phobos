@@ -28,6 +28,7 @@ pub const ws_client = @import("components/ws_client.zig");
 pub const sensor_template = @import("components/sensor_template.zig");
 pub const paneldue = @import("components/paneldue.zig");
 pub const feather_updates = @import("components/feather_updates.zig");
+pub const announcements = @import("components/announcements.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
 pub const testutil_klippy_sim = @import("testutil/klippy_sim.zig");
@@ -304,12 +305,25 @@ fn run(init: std.process.Init) !void {
     try server_app.klippy_ctx.start();
     try server_app.data_store_ctx.startSampler();
     server_app.update_ctx.startAutoRefresh();
+    // Moonraker fetches announcements at startup; the refresh worker first
+    // waits its interval. Fetch in the background so the listener starts now.
+    var startup_announcements = try aio.concurrent(refreshAnnouncements, .{ &server_app, aio });
+    defer startup_announcements.cancel(aio);
 
     var listener = try io.Listener.bind(aio, host, bind_port);
     defer listener.deinit(aio);
 
     std.debug.print("phobos listening on http://{s}:{d}\n", .{ host, bind_port });
     try listener.serveWith(aio, @ptrCast(&srv), http_transport.connHandler);
+}
+
+/// Fetch every announcement feed once, under Core like the refresh worker.
+/// A failed fetch is logged; the worker retries on its interval.
+fn refreshAnnouncements(server_app: *app.App, aio: std.Io) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    _ = server_app.core.run(aio, announcements.handleUpdate, .{ @as(*anyopaque, server_app.announcements_ctx), std.json.Value.null, arena.allocator() }) catch |err|
+        std.debug.print("phobos: warning: startup announcements refresh failed: {}\n", .{err});
 }
 
 /// Read `[database] backend` (sqlite | file) from the config; defaults to sqlite.
