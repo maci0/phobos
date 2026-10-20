@@ -1565,7 +1565,7 @@ fn runDiscardingOutput(ctx: *MachineCtx, alloc: std.mem.Allocator, argv: []const
 /// `ServiceAction` and no allowed name is a host power word.
 fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allocator, action: ServiceAction) !std.json.Value {
     const name = try getStr(params, "service");
-    if (!isServiceAllowed(name)) return error.Forbidden;
+    if (!isServiceAllowed(name)) return error.ServiceNotAllowed;
     // This action changes service_state, so the cached system_info is now stale —
     // drop it (covers every exit below). Runs under Core, same as handleSystemInfo.
     defer invalidateSystemInfo(ctx);
@@ -2862,7 +2862,7 @@ test "handleReboot/handleShutdown: ack ok (io null)" {
     try testing.expectEqualStrings("ok", (try handleShutdown(@ptrCast(&c), .null, a)).string);
 }
 
-test "service handlers: start/stop/restart update state; disallowed Forbidden" {
+test "service handlers: start/stop/restart update state; disallowed names refused" {
     var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2887,9 +2887,9 @@ test "service handlers: start/stop/restart update state; disallowed Forbidden" {
     try testing.expectEqualStrings("running", c.services.get("klipper").?.sub_state);
 
     // disallowed service
-    try testing.expectError(error.Forbidden, handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
-    try testing.expectError(error.Forbidden, handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
-    try testing.expectError(error.Forbidden, handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
+    try testing.expectError(error.ServiceNotAllowed, handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
+    try testing.expectError(error.ServiceNotAllowed, handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
+    try testing.expectError(error.ServiceNotAllowed, handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"sshd\"}"), a));
 
     // missing param
     try testing.expectError(error.InvalidParams, handleServiceStart(@ptrCast(&c), .null, a));
@@ -2897,7 +2897,7 @@ test "service handlers: start/stop/restart update state; disallowed Forbidden" {
     try testing.expectError(error.InvalidParams, handleServiceRestart(@ptrCast(&c), .null, a));
 
     // A phobos component name is not a systemd unit to restart.
-    try testing.expectError(error.Forbidden, handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"history\"}"), a));
+    try testing.expectError(error.ServiceNotAllowed, handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"history\"}"), a));
     try testing.expect(c.services.get("history") == null);
 }
 

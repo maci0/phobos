@@ -93,10 +93,20 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.MqttTimeout => .{ .gateway_timeout, "MQTT Subscribe Timed Out" },
         error.ServiceUnavailable, error.NotReady => .{ .service_unavailable, "Service Unavailable" },
         error.UpdateRefusedPrinting => .{ .service_unavailable, "Update Refused: Klippy is printing" },
-        error.PrinterLocked => .{ .service_unavailable, "Printer is busy" },
+        // power.py process_request with locked_while_printing.
+        error.PrinterLocked => .{ .bad_request, try std.fmt.allocPrint(alloc, "Unable to change power for {s} while printing", .{paramStr(params, "device")}) },
+        // power.py _send_power_request failure, or wled.py _send_wled_command.
+        error.DeviceRequestFailed => .{ .bad_request, if (paramStr(params, "strip").len > 0)
+            "WLED: Error"
+        else
+            try std.fmt.allocPrint(alloc, "Error Setting Device Status: {s} to {s}", .{ paramStr(params, "device"), paramStr(params, "action") }) },
+        // machine.py _handle_service_request.
+        error.ServiceNotAllowed => .{ .bad_request, try std.fmt.allocPrint(alloc, "Service '{s}' not allowed", .{paramStr(params, "service")}) },
+        // loghelper.py rollover.
+        error.UnknownApplication => .{ .bad_request, try std.fmt.allocPrint(alloc, "Unknown application {s}", .{paramStr(params, "application")}) },
+        // system_deploy.py without a package provider.
+        error.NoPackageProvider => .{ .bad_request, "Cannot upgrade packages, no provider set" },
         error.AgentNotConnected => .{ .bad_request, "Agent not connected" },
-        error.AgentRpcNotSupported => .{ .bad_request, "Agent method not supported" },
-        error.AgentAlreadyRegistered => .{ .bad_request, "Agent already registered" },
         error.ReservedEvent => .{ .bad_request, "Reserved event name" },
         error.EstimatorNotAvailable => .{ .bad_request, "Estimator not available" },
         // Klippy rejected the command (bad gcode, unknown mcu command): a
@@ -620,6 +630,26 @@ test "errorReply maps statuses to Moonraker JSON-RPC codes" {
     try std.testing.expectEqual(@as(i64, 500), unknown.rpc_code);
     // A missing namespace param does not crash the message builder.
     try std.testing.expectEqualStrings("Namespace  not found", (try errorReply(error.UnknownDbNamespace, .null, a)).message);
+
+    // Moonraker's ServerError texts for service, log, power and WLED requests.
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"service":"sshd","application":"x","device":"psu","action":"on"}
+    , .{});
+    const cases = [_]struct { err: anyerror, message: []const u8 }{
+        .{ .err = error.ServiceNotAllowed, .message = "Service 'sshd' not allowed" },
+        .{ .err = error.UnknownApplication, .message = "Unknown application x" },
+        .{ .err = error.PrinterLocked, .message = "Unable to change power for psu while printing" },
+        .{ .err = error.DeviceRequestFailed, .message = "Error Setting Device Status: psu to on" },
+        .{ .err = error.NoPackageProvider, .message = "Cannot upgrade packages, no provider set" },
+    };
+    for (cases) |c| {
+        const reply = try errorReply(c.err, params, a);
+        try std.testing.expectEqual(@as(i64, 400), reply.rpc_code);
+        try std.testing.expectEqualStrings(c.message, reply.message);
+    }
+    var strip: std.json.ObjectMap = .empty;
+    try strip.put(a, "strip", .{ .string = "lights" });
+    try std.testing.expectEqualStrings("WLED: Error", (try errorReply(error.DeviceRequestFailed, .{ .object = strip }, a)).message);
 }
 
 test "fuzz requestParams never keeps a client-supplied transport key" {

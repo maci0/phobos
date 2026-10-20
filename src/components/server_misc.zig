@@ -45,16 +45,16 @@ const klipper_rollover_error = "Unable to detect Klipper Service, cannot perform
 
 /// POST /server/logs/rollover → {"rolled_over": [], "failed": {...}}
 /// Every requested application fails with Moonraker's text for its missing
-/// log or service. A present `application` other than "moonraker" or
-/// "klipper" (including null or a number, which Moonraker str()-converts) is
-/// error.InvalidParams.
+/// log or service. Another string `application` is error.UnknownApplication
+/// ("Unknown application <app>"); null or a number, which Moonraker
+/// str()-converts, is error.InvalidParams.
 pub fn handleLogsRollover(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const app: ?std.json.Value = if (params == .object) params.object.get("application") else null;
     const want_moonraker, const want_klipper = if (app) |v| blk: {
         if (v != .string) return error.InvalidParams;
         if (std.mem.eql(u8, v.string, "moonraker")) break :blk .{ true, false };
         if (std.mem.eql(u8, v.string, "klipper")) break :blk .{ false, true };
-        return error.InvalidParams;
+        return error.UnknownApplication;
     } else .{ true, true };
 
     var failed_obj: std.json.ObjectMap = .empty;
@@ -151,14 +151,14 @@ test "handleLogsRollover: application=klipper → only klipper in failed" {
     try testing.expect(failed.get("moonraker") == null);
 }
 
-test "handleLogsRollover: unknown application → InvalidParams" {
+test "handleLogsRollover: unknown application is refused" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = ServerMiscCtx{};
 
-    // Moonraker str()-converts the value, so null and numbers are unknown too.
-    for ([_][]const u8{ "{\"application\":\"unknown_app\"}", "{\"application\":null}", "{\"application\":5}" }) |body| {
+    try testing.expectError(error.UnknownApplication, handleLogsRollover(@ptrCast(&ctx), try mkParams(a, "{\"application\":\"unknown_app\"}"), a));
+    for ([_][]const u8{ "{\"application\":null}", "{\"application\":5}" }) |body| {
         try testing.expectError(error.InvalidParams, handleLogsRollover(@ptrCast(&ctx), try mkParams(a, body), a));
     }
 }
