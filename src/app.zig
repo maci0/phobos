@@ -464,10 +464,10 @@ pub const App = struct {
         errdefer alloc.destroy(mqtt_ctx);
         mqtt_ctx.* = MqttCtx.init(alloc);
 
-        // --- Extensions context (agent registry) ---
+        // --- Extensions context (stateless, no agent connections) ---
         const extensions_ctx = try alloc.create(ExtensionsCtx);
         errdefer alloc.destroy(extensions_ctx);
-        extensions_ctx.* = ExtensionsCtx.init(alloc);
+        extensions_ctx.* = .{};
 
         // --- Analysis context (klipper_estimator stubs) ---
         const analysis_ctx = try alloc.create(AnalysisCtx);
@@ -1126,7 +1126,6 @@ pub const App = struct {
         // users to the DataStore).
         self.auth_ctx.deinit();
         self.alloc.destroy(self.auth_ctx);
-        self.extensions_ctx.deinit();
         self.alloc.destroy(self.extensions_ctx);
         for (self.file_roots) |r| self.alloc.free(r.path);
         self.alloc.free(self.file_roots);

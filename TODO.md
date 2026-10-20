@@ -456,3 +456,4 @@ Keep the coverage gate at 100% and the full suite green after every step.
 - `access.logout` and user deletion do not mark other WebSocket connections of that user `need_auth` (Moonraker `WebsocketManager._process_logout`, `src/transport/ws.zig`).
 - `cors_domains` does not fall back to trusted client IPs in the Origin host (Moonraker `Authorization.check_cors`, `src/http_transport.zig` `corsOriginAllowed`).
 - The config file is parsed three times at startup (bind address, store backend, database path in `src/main.zig`) before `App.setConfig` parses it again.
+- Extension agents: `server.connection.identify` does not register `agent` clients, `server.extensions.list` is always empty, `server.extensions.request` is always `AgentNotConnected`, and `connection.register_remote_method`/`send_event` register nothing and emit no `notify_agent_event` (`src/components/extensions.zig`).
