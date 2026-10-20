@@ -1111,15 +1111,20 @@ pub const App = struct {
                     // optional state_response_template. Subscribed on MQTT connect.
                     const sname = sect["sensor ".len..];
                     if (sname.len == 0) continue;
-                    const stype = cfg.get(sect, "type") orelse "mqtt";
-                    _ = self.sensor_ctx.addSensor(sname, stype) catch |err| {
+                    const store_size = std.math.cast(usize, cfg.getInt(sect, "sensor_store_size") catch sensor_component.default_store_size) orelse {
+                        std.debug.print("phobos: warning: sensor '{s}' not added: negative sensor_store_size\n", .{sname});
+                        continue;
+                    };
+                    _ = self.sensor_ctx.addSensor(sname, .{
+                        .type = cfg.get(sect, "type") orelse "mqtt",
+                        .name = cfg.get(sect, "name"),
+                        .store_size = store_size,
+                        .state_topic = cfg.get(sect, "state_topic"),
+                        .state_response_template = cfg.get(sect, "state_response_template"),
+                    }) catch |err| {
                         std.debug.print("phobos: warning: failed to add sensor '{s}': {}\n", .{ sname, err });
                         continue;
                     };
-                    if (cfg.get(sect, "state_topic")) |t| self.sensor_ctx.setSensorTopic(sname, t) catch |err|
-                        std.debug.print("phobos: warning: sensor '{s}' state_topic not set: {} — sensor will not update\n", .{ sname, err });
-                    if (cfg.get(sect, "state_response_template")) |tm| self.sensor_ctx.setSensorTemplate(sname, tm) catch |err|
-                        std.debug.print("phobos: warning: sensor '{s}' template not set: {}\n", .{ sname, err });
                 }
             }
         } else |_| {}
@@ -2281,6 +2286,8 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[sensor chamber]\n" ++
         "type: mqtt\n" ++
         "state_topic: test/chamber\n" ++
+        "name: Chamber Air\n" ++
+        "sensor_store_size: 5\n" ++
         "state_response_template: {% set d = payload|fromjson %}{ set_result(\"temp\", d.t|float) }\n" });
 
     var app = try testApp(alloc, io, &tmp);
@@ -2291,6 +2298,8 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
     const s = app.sensor_ctx.findSensor("chamber") orelse return error.SensorNotRegistered;
     try std.testing.expectEqualStrings("test/chamber", s.state_topic.?);
     try std.testing.expect(s.state_response_template != null);
+    try std.testing.expectEqualStrings("Chamber Air", s.name);
+    try std.testing.expectEqual(@as(usize, 5), s.store_size);
 
     // A payload on its topic flows through the template into a measurement.
     var arena = std.heap.ArenaAllocator.init(alloc);

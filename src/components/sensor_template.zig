@@ -5,17 +5,15 @@
 //!   * `{ ... }`    expressions   (rendered into the output text)
 //!   * `{# ... #}`  comments
 //!
-//! Two entry points share one engine:
-//!   * `render(arena, tmpl, payload, out)` — the MQTT-sensor path. Provides
-//!     `payload` + a `set_result(name, value)` callable that records numeric
-//!     measurements into `out`; the rendered text is discarded.
-//!   * `renderText(arena, tmpl, vars, payload)` — general path (e.g. future
-//!     notifier title/body templates): returns the rendered text, with caller
-//!     supplied context variables.
+//! `Template.init` parses the statement structure once (a malformed template
+//! fails there, like Moonraker's `config.gettemplate`); `Template.render` is
+//! the MQTT-sensor path: it provides `payload` + a `set_result(name, value)`
+//! callable that records numeric measurements, and discards the text.
+//! Expressions are parsed and evaluated together on each render.
 //!
 //! This is NOT full Jinja (no inheritance/macros/imports/sandbox); it implements
-//! the language subset Moonraker realistically uses. Everything is arena-scoped
-//! per render, so it costs nothing between renders and fits phobos's budget.
+//! the language subset Moonraker realistically uses. Render state is
+//! arena-scoped per render; a template keeps only its source and statement tree.
 
 const std = @import("std");
 const jv = @import("../json/value.zig");
@@ -27,32 +25,33 @@ pub const RenderError = error{ ParseError, EvalError, OutOfMemory };
 // Public API
 // ===========================================================================
 
-/// MQTT-sensor render: execute `tmpl` with `payload` + `set_result`, recording
-/// measurements into `out` (name → .integer/.float). Output text is discarded.
-pub fn render(arena: std.mem.Allocator, tmpl: []const u8, payload: []const u8, out: *std.json.ObjectMap) RenderError!void {
-    const nodes = try parse(arena, tmpl);
-    var ctx = Ctx{ .arena = arena, .out = out };
-    try ctx.vars.put(arena, "payload", .{ .string = payload });
-    var sink = std.Io.Writer.Discarding.init(&.{});
-    try exec(&ctx, nodes, &sink.writer);
-}
+/// A parsed template. Owns a copy of its source and its statement tree.
+pub const Template = struct {
+    arena: std.heap.ArenaAllocator,
+    nodes: []const Node,
 
-/// General render: execute `tmpl` with caller `vars` (+ optional `payload`) and
-/// return the rendered text (arena-owned). `set_result` is unavailable here.
-pub fn renderText(
-    arena: std.mem.Allocator,
-    tmpl: []const u8,
-    vars: []const struct { []const u8, Value },
-    payload: ?[]const u8,
-) RenderError![]const u8 {
-    const nodes = try parse(arena, tmpl);
-    var ctx = Ctx{ .arena = arena, .out = null };
-    if (payload) |p| try ctx.vars.put(arena, "payload", .{ .string = p });
-    for (vars) |kv| try ctx.vars.put(arena, kv[0], kv[1]);
-    var aw = std.Io.Writer.Allocating.init(arena);
-    try exec(&ctx, nodes, &aw.writer);
-    return aw.written();
-}
+    pub fn init(gpa: std.mem.Allocator, src: []const u8) RenderError!Template {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        const nodes = try parse(a, try a.dupe(u8, src));
+        return .{ .arena = arena, .nodes = nodes };
+    }
+
+    pub fn deinit(self: *Template) void {
+        self.arena.deinit();
+    }
+
+    /// Execute with `payload` + `set_result`, recording measurements into
+    /// `out` (name → .integer/.float). Output text is discarded. All render
+    /// state lives in `arena`.
+    pub fn render(self: *const Template, arena: std.mem.Allocator, payload: []const u8, out: *std.json.ObjectMap) RenderError!void {
+        var ctx = Ctx{ .arena = arena, .out = out };
+        try ctx.vars.put(arena, "payload", .{ .string = payload });
+        var sink = std.Io.Writer.Discarding.init(&.{});
+        try exec(&ctx, self.nodes, &sink.writer);
+    }
+};
 
 // ===========================================================================
 // AST
@@ -79,7 +78,8 @@ const Token = union(enum) {
     stmt: []const u8, // inner of {% ... %}
 };
 
-const TokList = struct { items: []Token, pos: usize = 0 };
+/// `depth` counts open if/for blocks; parsing rejects nesting past `Ctx.max_depth`.
+const TokList = struct { items: []Token, pos: usize = 0, depth: u16 = 0 };
 
 fn tokenize(arena: std.mem.Allocator, src: []const u8) RenderError![]Token {
     var list: std.ArrayList(Token) = .empty;
@@ -139,10 +139,11 @@ fn parseNodes(arena: std.mem.Allocator, tl: *TokList, stop: []const []const u8) 
                 tl.pos += 1;
                 if (std.mem.eql(u8, kw, "set")) {
                     try nodes.append(arena, try parseSet(s));
-                } else if (std.mem.eql(u8, kw, "if")) {
-                    try nodes.append(arena, try parseIf(arena, tl, s));
-                } else if (std.mem.eql(u8, kw, "for")) {
-                    try nodes.append(arena, try parseFor(arena, tl, s));
+                } else if (std.mem.eql(u8, kw, "if") or std.mem.eql(u8, kw, "for")) {
+                    tl.depth += 1;
+                    defer tl.depth -= 1;
+                    if (tl.depth > Ctx.max_depth) return error.ParseError;
+                    try nodes.append(arena, try if (kw[0] == 'i') parseIf(arena, tl, s) else parseFor(arena, tl, s));
                 } else {
                     try nodes.append(arena, .{ .expr_stmt = s });
                 }
@@ -326,20 +327,31 @@ fn evalExprSrc(ctx: *Ctx, src: []const u8) RenderError!Value {
 //   or      := and ('or' and)*
 //   and     := not_ ('and' not_)*
 //   not_    := 'not' not_ | cmp
-//   cmp     := concat (('=='|'!='|'<'|'<='|'>'|'>='|'in') concat | 'is' test)?
+//   cmp     := concat (('=='|'!='|'<'|'<='|'>'|'>='|'in'|'not' 'in') concat | 'is' test)?
 //   concat  := add ('~' add)*
 //   add     := mul (('+'|'-') mul)*
 //   mul     := unary (('*'|'/'|'//'|'%') unary)*
-//   unary   := '-' unary | postfix
-//   postfix := primary ('.' ident | '[' expr ']' | '(' args ')' | '|' filter)*
-//   primary := number | string | '[' list ']' | ident | '(' expr ')'
+//   unary   := '-' unary_nofilter filters | postfix
+//   postfix := primary ('.' ident | '[' expr ']' | '|' filter)*
+//   primary := number | string | '[' list ']' | ident | ident '(' args ')' | '(' expr ')'
+//
+// Jinja binds filters looser than unary minus (`-5|abs` is 5), and `and`/`or`
+// return the deciding operand without evaluating the other one.
 // ===========================================================================
+
+/// Nesting bound for recursive expression rules (parentheses, lists, `not`,
+/// unary minus).
+const max_expr_depth = 64;
 
 const Parser = struct {
     src: []const u8,
     pos: usize = 0,
     ctx: *Ctx,
     rdepth: u16 = 0,
+    /// Nonzero while parsing an operand that short-circuiting leaves
+    /// unevaluated: syntax is still checked, operations yield `.null`, and
+    /// `set_result` records nothing.
+    skip: u16 = 0,
 
     fn skipWs(self: *Parser) void {
         self.pos = std.mem.findNonePos(u8, self.src, self.pos, " \t") orelse self.src.len;
@@ -365,31 +377,44 @@ const Parser = struct {
         return true;
     }
 
+    /// Arithmetic unless skipping.
+    fn binop(self: *Parser, op: u8, l: Value, r: Value) RenderError!Value {
+        return if (self.skip > 0) .null else arith(op, l, r);
+    }
+
+    /// Parse an operand that short-circuiting leaves unevaluated.
+    fn skipOperand(self: *Parser, comptime rule: fn (*Parser) RenderError!Value) RenderError!void {
+        self.skip += 1;
+        defer self.skip -= 1;
+        _ = try rule(self);
+    }
+
     fn parseExpr(self: *Parser) RenderError!Value {
         self.rdepth += 1;
         defer self.rdepth -= 1;
-        if (self.rdepth > 64) return error.ParseError;
+        if (self.rdepth > max_expr_depth) return error.ParseError;
         return self.parseOr();
     }
 
     fn parseOr(self: *Parser) RenderError!Value {
         var v = try self.parseAnd();
         while (self.match("or")) {
-            const r = try self.parseAnd();
-            v = .{ .bool = truthy(v) or truthy(r) };
+            if (truthy(v)) try self.skipOperand(parseAnd) else v = try self.parseAnd();
         }
         return v;
     }
     fn parseAnd(self: *Parser) RenderError!Value {
         var v = try self.parseNot();
         while (self.match("and")) {
-            const r = try self.parseNot();
-            v = .{ .bool = truthy(v) and truthy(r) };
+            if (!truthy(v)) try self.skipOperand(parseNot) else v = try self.parseNot();
         }
         return v;
     }
     fn parseNot(self: *Parser) RenderError!Value {
         if (self.match("not")) {
+            self.rdepth += 1;
+            defer self.rdepth -= 1;
+            if (self.rdepth > max_expr_depth) return error.ParseError;
             const r = try self.parseNot();
             return .{ .bool = !truthy(r) };
         }
@@ -403,11 +428,16 @@ const Parser = struct {
             const res = try self.parseTest(l);
             return .{ .bool = if (negate) !res else res };
         }
+        if (self.match("not")) {
+            if (!self.match("in")) return error.ParseError;
+            const r = try self.parseConcat();
+            return .{ .bool = self.skip == 0 and !try contains(r, l) };
+        }
         const ops = [_][]const u8{ "==", "!=", "<=", ">=", "<", ">", "in" };
         inline for (ops) |op| {
             if (self.match(op)) {
                 const r = try self.parseConcat();
-                return .{ .bool = try compare(op, l, r) };
+                return .{ .bool = self.skip == 0 and try compare(op, l, r) };
             }
         }
         return l;
@@ -416,6 +446,7 @@ const Parser = struct {
         var v = try self.parseAdd();
         while (self.match("~")) {
             const r = try self.parseAdd();
+            if (self.skip > 0) continue;
             const a = try toString(self.ctx.arena, v);
             const b = try toString(self.ctx.arena, r);
             v = .{ .string = std.fmt.allocPrint(self.ctx.arena, "{s}{s}", .{ a, b }) catch return error.OutOfMemory };
@@ -426,71 +457,59 @@ const Parser = struct {
         var v = try self.parseMul();
         while (true) {
             if (self.match("+")) {
-                v = try arith('+', v, try self.parseMul());
-            } else if (self.matchMinus()) {
-                v = try arith('-', v, try self.parseMul());
+                v = try self.binop('+', v, try self.parseMul());
+            } else if (self.match("-")) {
+                v = try self.binop('-', v, try self.parseMul());
             } else break;
         }
         return v;
-    }
-    /// Match a binary '-' (not a unary minus starting a new term — handled by
-    /// only being called in the binary position).
-    fn matchMinus(self: *Parser) bool {
-        self.skipWs();
-        if (self.pos < self.src.len and self.src[self.pos] == '-') {
-            self.pos += 1;
-            return true;
-        }
-        return false;
     }
     fn parseMul(self: *Parser) RenderError!Value {
-        var v = try self.parseUnary();
+        var v = try self.parseUnary(true);
         while (true) {
             if (self.match("//")) {
-                v = try arith('F', v, try self.parseUnary()); // floor div
+                v = try self.binop('F', v, try self.parseUnary(true)); // floor div
             } else if (self.match("*")) {
-                v = try arith('*', v, try self.parseUnary());
+                v = try self.binop('*', v, try self.parseUnary(true));
             } else if (self.match("/")) {
-                v = try arith('/', v, try self.parseUnary());
+                v = try self.binop('/', v, try self.parseUnary(true));
             } else if (self.match("%")) {
-                v = try arith('%', v, try self.parseUnary());
+                v = try self.binop('%', v, try self.parseUnary(true));
             } else break;
         }
         return v;
     }
-    fn parseUnary(self: *Parser) RenderError!Value {
-        if (self.peek() == '-') {
-            // Distinguish unary minus from a number literal "-5".
-            const save = self.pos;
-            self.pos += 1;
-            self.skipWs();
-            if (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) {
-                self.pos = save;
-                return self.parsePostfix();
-            }
-            const r = try self.parseUnary();
-            return arith('-', .{ .integer = 0 }, r);
-        }
-        return self.parsePostfix();
+    fn parseUnary(self: *Parser, with_filter: bool) RenderError!Value {
+        if (!self.match("-")) return self.parsePostfix(with_filter);
+        self.rdepth += 1;
+        defer self.rdepth -= 1;
+        if (self.rdepth > max_expr_depth) return error.ParseError;
+        const v = try self.binop('-', .{ .integer = 0 }, try self.parseUnary(false));
+        return if (with_filter) self.postfixOps(v, true) else v;
     }
 
-    fn parsePostfix(self: *Parser) RenderError!Value {
-        var v = try self.parsePrimary();
+    fn parsePostfix(self: *Parser, with_filter: bool) RenderError!Value {
+        return self.postfixOps(try self.parsePrimary(), with_filter);
+    }
+
+    fn postfixOps(self: *Parser, start: Value, with_filter: bool) RenderError!Value {
+        var v = start;
         while (self.peek()) |c| {
             switch (c) {
                 '.' => {
                     self.pos += 1;
                     const name = try self.parseIdent();
-                    v = try member(v, name);
+                    v = if (self.skip > 0) .null else try member(v, name);
                 },
                 '[' => {
                     self.pos += 1;
                     const idx = try self.parseExpr();
                     if (self.peek() != ']') return error.ParseError;
                     self.pos += 1;
-                    v = try indexValue(v, idx);
+                    v = if (self.skip > 0) .null else try indexValue(v, idx);
                 },
                 '|' => {
+                    if (!with_filter) break;
                     self.pos += 1;
                     v = try self.applyFilter(v);
                 },
@@ -511,14 +530,9 @@ const Parser = struct {
         }
         if (c == '[') return self.parseListLiteral();
         if (c == '"' or c == '\'') return self.parseString();
-        // `-` only reaches here as the start of a negative number literal
-        // (parseUnary handles unary minus on non-literals); parseNumber consumes it.
-        if (c == '-' or std.ascii.isDigit(c)) return self.parseNumber();
+        if (std.ascii.isDigit(c)) return self.parseNumber();
         const name = try self.parseIdent();
         if (self.peek() == '(') return self.parseCall(name);
-        if (std.mem.eql(u8, name, "payload")) {
-            return self.ctx.vars.get("payload") orelse error.EvalError;
-        }
         if (std.mem.eql(u8, name, "none") or std.mem.eql(u8, name, "None")) return .null;
         if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "True")) return .{ .bool = true };
         if (std.mem.eql(u8, name, "false") or std.mem.eql(u8, name, "False")) return .{ .bool = false };
@@ -569,10 +583,9 @@ const Parser = struct {
         return .{ .string = s };
     }
 
+    /// Unsigned literal; a leading `-` is unary minus.
     fn parseNumber(self: *Parser) RenderError!Value {
-        self.skipWs();
         const start = self.pos;
-        if (self.pos < self.src.len and self.src[self.pos] == '-') self.pos += 1;
         var is_float = false;
         while (self.pos < self.src.len) {
             const ch = self.src[self.pos];
@@ -607,6 +620,7 @@ const Parser = struct {
             }
         }
         self.pos += 1; // ')'
+        if (self.skip > 0) return .null;
         if (std.mem.eql(u8, name, "set_result")) {
             const out = self.ctx.out orelse return error.EvalError;
             if (n != 2) return error.EvalError;
@@ -641,6 +655,7 @@ const Parser = struct {
 
     fn parseTest(self: *Parser, v: Value) RenderError!bool {
         const name = try self.parseIdent();
+        if (self.skip > 0) return false;
         if (std.mem.eql(u8, name, "defined")) return v != .null;
         if (std.mem.eql(u8, name, "undefined")) return v == .null;
         if (std.mem.eql(u8, name, "none")) return v == .null;
@@ -670,6 +685,7 @@ const Parser = struct {
             if (self.peek() != ')') return error.ParseError;
             self.pos += 1;
         }
+        if (self.skip > 0) return .null;
         return applyNamedFilter(self.ctx.arena, name, v, arg, arg2);
     }
 };
@@ -682,9 +698,14 @@ fn applyNamedFilter(arena: std.mem.Allocator, name: []const u8, v: Value, arg: ?
         };
         return std.json.parseFromSliceLeaky(Value, arena, s, .{}) catch return error.EvalError;
     } else if (std.mem.eql(u8, name, "float")) {
-        return .{ .float = toFloat(v) orelse if (arg) |a| toFloat(a) orelse 0 else return error.EvalError };
+        // A failed conversion yields the default (the argument as given, else
+        // 0). Undefined (`.null` here) without a default is an error, as
+        // Jinja's Undefined raises on float().
+        if (toFloat(v)) |f| return .{ .float = f };
+        return arg orelse if (v == .null) error.EvalError else .{ .float = 0 };
     } else if (std.mem.eql(u8, name, "int")) {
-        return .{ .integer = toInt(v) orelse if (arg) |a| toInt(a) orelse 0 else return error.EvalError };
+        if (toInt(v)) |i| return .{ .integer = i };
+        return arg orelse if (v == .null) error.EvalError else .{ .integer = 0 };
     } else if (std.mem.eql(u8, name, "abs")) {
         return absValue(v);
     } else if (std.mem.eql(u8, name, "round")) {
@@ -913,7 +934,12 @@ fn toString(arena: std.mem.Allocator, v: Value) RenderError![]const u8 {
         .string => |s| s,
         .number_string => |s| s,
         .integer => |i| std.fmt.allocPrint(arena, "{d}", .{i}) catch error.OutOfMemory,
-        .float => |f| std.fmt.allocPrint(arena, "{d}", .{f}) catch error.OutOfMemory,
+        .float => |f| blk: {
+            const s = std.fmt.allocPrint(arena, "{d}", .{f}) catch return error.OutOfMemory;
+            // Python's str() marks an integral float with ".0" (21.0, not 21).
+            if (std.mem.indexOfAny(u8, s, ".ein") != null) break :blk s;
+            break :blk std.fmt.allocPrint(arena, "{s}.0", .{s}) catch error.OutOfMemory;
+        },
         .bool => |b| if (b) "True" else "False",
         .null => "",
         else => error.EvalError,
@@ -956,9 +982,21 @@ fn joinArray(arena: std.mem.Allocator, v: Value, sep: []const u8) RenderError![]
 const testing = std.testing;
 
 fn renderToMap(arena: std.mem.Allocator, tmpl: []const u8, payload: []const u8) !std.json.ObjectMap {
+    const t = try Template.init(arena, tmpl);
     var out: std.json.ObjectMap = .empty;
-    try render(arena, tmpl, payload, &out);
+    try t.render(arena, payload, &out);
     return out;
+}
+
+/// Render `tmpl` with caller variables and return the text (tests only: the
+/// sensor path discards text).
+fn renderTextForTest(arena: std.mem.Allocator, tmpl: []const u8, vars: []const struct { []const u8, Value }) RenderError![]const u8 {
+    const nodes = try parse(arena, tmpl);
+    var ctx = Ctx{ .arena = arena, .out = null };
+    for (vars) |kv| try ctx.vars.put(arena, kv[0], kv[1]);
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try exec(&ctx, nodes, &aw.writer);
+    return aw.written();
 }
 
 test "sensor: fromjson + member + float, single-brace and statements" {
@@ -983,15 +1021,30 @@ test "sensor: single-brace { set_result(...) } expression form" {
     try testing.expectEqual(@as(i64, 1234), out.get("p").?.integer);
 }
 
+test "Template: parsed once, rendered many times, owns its source" {
+    var src_buf = "{% set d = payload|fromjson %}{ set_result(\"t\", d.t) }".*;
+    var t = try Template.init(testing.allocator, &src_buf);
+    defer t.deinit();
+    @memset(&src_buf, ' '); // the template keeps its own copy
+    for ([_][]const u8{ "{\"t\":1}", "{\"t\":2.5}" }, [_]f64{ 1, 2.5 }) |payload, want| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var out: std.json.ObjectMap = .empty;
+        try t.render(arena.allocator(), payload, &out);
+        try testing.expectEqual(want, toFloat(out.get("t").?).?);
+    }
+    try testing.expectError(error.ParseError, Template.init(testing.allocator, "{% if x %}no end"));
+}
+
 test "renderText: variable interpolation + arithmetic + concat" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const s = try renderText(a, "T={ a + b }C, name={ who|upper }", &.{
+    const s = try renderTextForTest(a, "T={ a + b }C, name={ who|upper }", &.{
         .{ "a", .{ .integer = 20 } },
         .{ "b", .{ .integer = 5 } },
         .{ "who", .{ .string = "bed" } },
-    }, null);
+    });
     try testing.expectEqualStrings("T=25C, name=BED", s);
 }
 
@@ -1000,21 +1053,18 @@ test "renderText: if/elif/else" {
     defer arena.deinit();
     const a = arena.allocator();
     const tmpl = "{% if t > 100 %}hot{% elif t > 50 %}warm{% else %}cold{% endif %}";
-    const hot = try renderText(a, tmpl, &.{.{ "t", .{ .integer = 120 } }}, null);
-    try testing.expectEqualStrings("hot", hot);
-    const warm = try renderText(a, tmpl, &.{.{ "t", .{ .integer = 60 } }}, null);
-    try testing.expectEqualStrings("warm", warm);
-    const cold = try renderText(a, tmpl, &.{.{ "t", .{ .integer = 10 } }}, null);
-    try testing.expectEqualStrings("cold", cold);
+    try testing.expectEqualStrings("hot", try renderTextForTest(a, tmpl, &.{.{ "t", .{ .integer = 120 } }}));
+    try testing.expectEqualStrings("warm", try renderTextForTest(a, tmpl, &.{.{ "t", .{ .integer = 60 } }}));
+    try testing.expectEqualStrings("cold", try renderTextForTest(a, tmpl, &.{.{ "t", .{ .integer = 10 } }}));
 }
 
 test "renderText: for loop with loop.index, else branch, range()" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const s = try renderText(a, "{% for x in range(1, 4) %}{ loop.index }:{ x } {% endfor %}", &.{}, null);
+    const s = try renderTextForTest(a, "{% for x in range(1, 4) %}{ loop.index }:{ x } {% endfor %}", &.{});
     try testing.expectEqualStrings("1:1 2:2 3:3 ", s);
-    const empty = try renderText(a, "{% for x in items %}x{% else %}none{% endfor %}", &.{.{ "items", .{ .array = .init(a) } }}, null);
+    const empty = try renderTextForTest(a, "{% for x in items %}x{% else %}none{% endfor %}", &.{.{ "items", .{ .array = .init(a) } }});
     try testing.expectEqualStrings("none", empty);
 }
 
@@ -1022,11 +1072,55 @@ test "renderText: comparison, logical, membership, is-tests" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("yes", try renderText(a, "{% if a == 1 and b != 2 %}yes{% endif %}", &.{ .{ "a", .{ .integer = 1 } }, .{ "b", .{ .integer = 3 } } }, null));
-    try testing.expectEqualStrings("in", try renderText(a, "{% if \"x\" in s %}in{% endif %}", &.{.{ "s", .{ .string = "axb" } }}, null));
-    try testing.expectEqualStrings("def", try renderText(a, "{% if v is defined %}def{% endif %}", &.{.{ "v", .{ .integer = 0 } }}, null));
-    try testing.expectEqualStrings("even", try renderText(a, "{% if n is even %}even{% endif %}", &.{.{ "n", .{ .integer = 4 } }}, null));
-    try testing.expectEqualStrings("none", try renderText(a, "{% if m is not defined %}none{% endif %}", &.{}, null));
+    try testing.expectEqualStrings("yes", try renderTextForTest(a, "{% if a == 1 and b != 2 %}yes{% endif %}", &.{ .{ "a", .{ .integer = 1 } }, .{ "b", .{ .integer = 3 } } }));
+    try testing.expectEqualStrings("in", try renderTextForTest(a, "{% if \"x\" in s %}in{% endif %}", &.{.{ "s", .{ .string = "axb" } }}));
+    try testing.expectEqualStrings("def", try renderTextForTest(a, "{% if v is defined %}def{% endif %}", &.{.{ "v", .{ .integer = 0 } }}));
+    try testing.expectEqualStrings("even", try renderTextForTest(a, "{% if n is even %}even{% endif %}", &.{.{ "n", .{ .integer = 4 } }}));
+    try testing.expectEqualStrings("none", try renderTextForTest(a, "{% if m is not defined %}none{% endif %}", &.{}));
+}
+
+test "and/or return the deciding operand and short-circuit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("fallback", try renderTextForTest(a, "{ missing or \"fallback\" }", &.{}));
+    try testing.expectEqualStrings("3", try renderTextForTest(a, "{ 3 or x.y }", &.{}));
+    try testing.expectEqualStrings("0", try renderTextForTest(a, "{ 0 and x.y }", &.{}));
+    try testing.expectEqualStrings("b", try renderTextForTest(a, "{ \"a\" and \"b\" }", &.{}));
+    // The usual MQTT guard: the right side is not evaluated when x is undefined.
+    try testing.expectEqualStrings("no", try renderTextForTest(a, "{% if x is defined and x.a > 1 %}yes{% else %}no{% endif %}", &.{}));
+    // A skipped set_result records nothing.
+    const out = try renderToMap(a, "{ true or set_result(\"skipped\", 1) }{ false and set_result(\"also\", 2) }", "");
+    try testing.expectEqual(@as(usize, 0), out.count());
+    // Syntax errors in a skipped operand still fail.
+    try testing.expectError(error.ParseError, renderTextForTest(a, "{ true or (1 }", &.{}));
+}
+
+test "unary minus with spaces, filters after negation, and not in" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("-5", try renderTextForTest(a, "{ - 5 }", &.{}));
+    try testing.expectEqualStrings("5", try renderTextForTest(a, "{ -5|abs }", &.{}));
+    try testing.expectEqualStrings("-2.5", try renderTextForTest(a, "{ -x }", &.{.{ "x", .{ .float = 2.5 } }}));
+    try testing.expectEqualStrings("7", try renderTextForTest(a, "{ 2 - -5 }", &.{}));
+    try testing.expectEqualStrings("True", try renderTextForTest(a, "{ 1 not in [2] }", &.{}));
+    try testing.expectEqualStrings("False", try renderTextForTest(a, "{ 2 not in [2] }", &.{}));
+    try testing.expectError(error.ParseError, renderTextForTest(a, "{ 1 not [2] }", &.{}));
+}
+
+test "float/int filters default on failed conversion; floats print like Python" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("0.0", try renderTextForTest(a, "{ \"abc\"|float }", &.{}));
+    try testing.expectEqualStrings("0", try renderTextForTest(a, "{ \"abc\"|int }", &.{}));
+    try testing.expectEqualStrings("x", try renderTextForTest(a, "{ \"abc\"|int(\"x\") }", &.{}));
+    try testing.expectEqualStrings("1.5", try renderTextForTest(a, "{ missing|float(1.5) }", &.{}));
+    try testing.expectError(error.EvalError, renderTextForTest(a, "{ missing|int }", &.{}));
+    try testing.expectEqualStrings("21.0", try renderTextForTest(a, "{ 21.0 }", &.{}));
+    try testing.expectEqualStrings("21.5", try renderTextForTest(a, "{ 21.5 }", &.{}));
+    try testing.expectEqualStrings("-3.0", try renderTextForTest(a, "{ -3.0 }", &.{}));
 }
 
 test "filters: replace, length, join, round, default, capitalize, comment" {
@@ -1036,27 +1130,26 @@ test "filters: replace, length, join, round, default, capitalize, comment" {
     var lst: std.json.Array = .init(a);
     try lst.append(.{ .string = "a" });
     try lst.append(.{ .string = "b" });
-    try testing.expectEqualStrings("a-b", try renderText(a, "{ xs|join(\"-\") }", &.{.{ "xs", .{ .array = lst } }}, null));
-    try testing.expectEqualStrings("2", try renderText(a, "{ xs|length }", &.{.{ "xs", .{ .array = lst } }}, null));
-    try testing.expectEqualStrings("heLLo", try renderText(a, "{ s|replace(\"l\",\"L\") }", &.{.{ "s", .{ .string = "hello" } }}, null));
-    try testing.expectEqualStrings("3.14", try renderText(a, "{ x|round(2) }", &.{.{ "x", .{ .float = 3.14159 } }}, null));
-    try testing.expectEqualStrings("fallback", try renderText(a, "{ missing|default(\"fallback\") }", &.{}, null));
-    try testing.expectEqualStrings("Hello", try renderText(a, "{ s|capitalize }", &.{.{ "s", .{ .string = "hello" } }}, null));
-    try testing.expectEqualStrings("ab", try renderText(a, "a{# this is a comment #}b", &.{}, null));
+    try testing.expectEqualStrings("a-b", try renderTextForTest(a, "{ xs|join(\"-\") }", &.{.{ "xs", .{ .array = lst } }}));
+    try testing.expectEqualStrings("2", try renderTextForTest(a, "{ xs|length }", &.{.{ "xs", .{ .array = lst } }}));
+    try testing.expectEqualStrings("heLLo", try renderTextForTest(a, "{ s|replace(\"l\",\"L\") }", &.{.{ "s", .{ .string = "hello" } }}));
+    try testing.expectEqualStrings("3.14", try renderTextForTest(a, "{ x|round(2) }", &.{.{ "x", .{ .float = 3.14159 } }}));
+    try testing.expectEqualStrings("fallback", try renderTextForTest(a, "{ missing|default(\"fallback\") }", &.{}));
+    try testing.expectEqualStrings("Hello", try renderTextForTest(a, "{ s|capitalize }", &.{.{ "s", .{ .string = "hello" } }}));
+    try testing.expectEqualStrings("ab", try renderTextForTest(a, "a{# this is a comment #}b", &.{}));
 }
 
 test "malformed templates error, never crash" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var out: std.json.ObjectMap = .empty;
-    try testing.expectError(error.ParseError, render(a, "{% if x %}no end", "{}", &out));
-    try testing.expectError(error.ParseError, render(a, "{ unclosed", "{}", &out));
-    try testing.expectError(error.ParseError, render(a, "{% for %}{% endfor %}", "{}", &out));
+    try testing.expectError(error.ParseError, Template.init(a, "{% if x %}no end"));
+    try testing.expectError(error.ParseError, Template.init(a, "{ unclosed"));
+    try testing.expectError(error.ParseError, renderToMap(a, "{% for %}{% endfor %}", "{}"));
     // Operating on undefined errors (member access on the undefined value)...
-    try testing.expectError(error.EvalError, render(a, "{ undefined_var.attr }", "{}", &out));
+    try testing.expectError(error.EvalError, renderToMap(a, "{ undefined_var.attr }", "{}"));
     // ...but a bare undefined name renders empty (Jinja undefined), not an error.
-    try testing.expectEqualStrings("", try renderText(a, "{ undefined_var }", &.{}, null));
+    try testing.expectEqualStrings("", try renderTextForTest(a, "{ undefined_var }", &.{}));
 }
 
 test "i64.min edge cases don't overflow (abs, range, // -1, % -1)" {
@@ -1065,28 +1158,38 @@ test "i64.min edge cases don't overflow (abs, range, // -1, % -1)" {
     const a = arena.allocator();
     const min = std.math.minInt(i64);
     // abs(i64.min) promotes to float instead of overflowing.
-    const s = try renderText(a, "{ x|abs }", &.{.{ "x", .{ .integer = min } }}, null);
+    const s = try renderTextForTest(a, "{ x|abs }", &.{.{ "x", .{ .integer = min } }});
     try testing.expect(s.len > 0);
     // range with i64.min lower bound is rejected by the bound check, not a crash.
-    var out: std.json.ObjectMap = .empty;
-    try testing.expectError(error.EvalError, render(a, "{ set_result(\"r\", range(-9223372036854775808, 1)|length) }", "{}", &out));
+    try testing.expectError(error.EvalError, renderToMap(a, "{ set_result(\"r\", range(-9223372036854775807 - 1, 1)|length) }", "{}"));
     // minInt // -1 and minInt % -1 error rather than overflow.
-    try testing.expectError(error.EvalError, renderText(a, "{ x // -1 }", &.{.{ "x", .{ .integer = min } }}, null));
-    try testing.expectError(error.EvalError, renderText(a, "{ x % -1 }", &.{.{ "x", .{ .integer = min } }}, null));
+    try testing.expectError(error.EvalError, renderTextForTest(a, "{ x // -1 }", &.{.{ "x", .{ .integer = min } }}));
+    try testing.expectError(error.EvalError, renderTextForTest(a, "{ x % -1 }", &.{.{ "x", .{ .integer = min } }}));
+    // Negating i64.min wraps like the other integer operators.
+    try testing.expectEqualStrings("-9223372036854775808", try renderTextForTest(a, "{ -x }", &.{.{ "x", .{ .integer = min } }}));
 }
 
-test "deeply nested expression errors instead of overflowing the stack" {
+test "deeply nested expressions and blocks error instead of overflowing the stack" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var buf: std.ArrayList(u8) = .empty;
-    try buf.appendSlice(a, "{ ");
-    try buf.appendNTimes(a, '(', 500);
-    try buf.appendSlice(a, "1");
-    try buf.appendNTimes(a, ')', 500);
-    try buf.appendSlice(a, " }");
-    var out: std.json.ObjectMap = .empty;
-    try testing.expectError(error.ParseError, render(a, buf.items, "{}", &out));
+    const Nest = struct {
+        fn build(alloc: std.mem.Allocator, open: []const u8, inner: []const u8, close: []const u8, n: usize) ![]const u8 {
+            var buf: std.ArrayList(u8) = .empty;
+            for (0..n) |_| try buf.appendSlice(alloc, open);
+            try buf.appendSlice(alloc, inner);
+            for (0..n) |_| try buf.appendSlice(alloc, close);
+            return buf.items;
+        }
+    };
+    const depth = 100_000;
+    try testing.expectError(error.ParseError, renderToMap(a, try std.mem.concat(a, u8, &.{ "{ ", try Nest.build(a, "(", "1", ")", depth), " }" }), "{}"));
+    try testing.expectError(error.ParseError, renderTextForTest(a, try std.mem.concat(a, u8, &.{ "{ ", try Nest.build(a, "not ", "1", "", depth), " }" }), &.{}));
+    try testing.expectError(error.ParseError, renderTextForTest(a, try std.mem.concat(a, u8, &.{ "{ ", try Nest.build(a, "- ", "1", "", depth), " }" }), &.{}));
+    try testing.expectError(error.ParseError, Template.init(a, try Nest.build(a, "{% if 1 %}", "x", "{% endif %}", depth)));
+    try testing.expectError(error.ParseError, Template.init(a, try Nest.build(a, "{% for x in [1] %}", "x", "{% endfor %}", depth)));
+    // Nesting within the bound still works.
+    try testing.expectEqualStrings("x", try renderTextForTest(a, try Nest.build(a, "{% if 1 %}", "x", "{% endif %}", Ctx.max_depth - 1), &.{}));
 }
 
 test "fuzz render: arbitrary templates + payloads never crash" {
@@ -1101,9 +1204,28 @@ test "fuzz render: arbitrary templates + payloads never crash" {
             const pn = smith.valueRangeAtMostWithHash(u32, 0, 128, 1);
             smith.bytesWithHash(tbuf[0..tn], 2);
             smith.bytesWithHash(pbuf[0..pn], 3);
+            var t = Template.init(testing.allocator, tbuf[0..tn]) catch return;
+            defer t.deinit();
             var out: std.json.ObjectMap = .empty;
-            render(a, tbuf[0..tn], pbuf[0..pn], &out) catch {};
-            _ = renderText(a, tbuf[0..tn], &.{}, pbuf[0..pn]) catch {};
+            t.render(a, pbuf[0..pn], &out) catch {};
+            _ = renderTextForTest(a, tbuf[0..tn], &.{}) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz expressions: operator soup never crashes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const atoms = [_][]const u8{ "1", "-", " - ", "not ", " and ", " or ", " in ", " not in ", "x", ".y", "(", ")", "[", "]", ",", "|int", "|float", "\"s\"", "2.5", " is defined", "~", "//", "%" };
+            var src: std.ArrayList(u8) = .empty;
+            try src.appendSlice(a, "{ ");
+            const n = smith.valueRangeAtMostWithHash(u8, 0, 24, 0);
+            for (0..n) |i| try src.appendSlice(a, atoms[smith.valueRangeAtMostWithHash(u8, 0, atoms.len - 1, @intCast(i + 1))]);
+            try src.appendSlice(a, " }");
+            _ = renderTextForTest(a, src.items, &.{.{ "x", .{ .integer = 3 } }}) catch {};
         }
     }.run, .{});
 }
