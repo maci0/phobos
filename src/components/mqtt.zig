@@ -115,6 +115,7 @@ const Waiter = struct {
 pub const MqttCtx = struct {
     gpa: std.mem.Allocator,
     config: ?MqttConfig = null,
+    home_directory: ?[]const u8 = null,
     keepalive_s: u16 = default_keepalive_s,
     /// Live Io handle; null in `--dump-api` and unit tests without a broker.
     io: ?Io = null,
@@ -156,11 +157,20 @@ pub const MqttCtx = struct {
         return .{ .gpa = gpa };
     }
 
+    /// Startup HOME copy for credential file expansion, independent of environment lifetime.
+    pub fn setHomeDirectory(self: *MqttCtx, home: ?[]const u8) !void {
+        const replacement = if (home) |path| try self.gpa.dupe(u8, path) else null;
+        if (self.home_directory) |previous| self.gpa.free(previous);
+        self.home_directory = replacement;
+    }
+
     /// Stop the supervisor, wake pending subscribers and free the config.
     pub fn deinit(self: *MqttCtx) void {
         if (self.io) |io| self.stop(io);
         if (self.config) |*cfg| cfg.arena.deinit();
         self.config = null;
+        if (self.home_directory) |home| self.gpa.free(home);
+        self.home_directory = null;
     }
 
     /// Validate and copy `[mqtt]` options. Replaces the previous config only on
@@ -1527,4 +1537,22 @@ test "refused connects retry and free each attempt" {
     ctx.start();
     try waitConnected(&ctx, io);
     try testing.expectEqual(@as(u32, 2), attempts.load(.acquire));
+}
+
+test "MQTT home directory owns replacement and preserves it on allocation failure" {
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    var home = [_]u8{ 'h', 'o', 'm', 'e' };
+    try ctx.setHomeDirectory(&home);
+    home[0] = 'x';
+    try testing.expectEqualStrings("home", ctx.home_directory.?);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    ctx.gpa = failing.allocator();
+    try testing.expectError(error.OutOfMemory, ctx.setHomeDirectory("new"));
+    ctx.gpa = testing.allocator;
+    try testing.expectEqualStrings("home", ctx.home_directory.?);
+    try ctx.setHomeDirectory("replaced");
+    try testing.expectEqualStrings("replaced", ctx.home_directory.?);
+    try ctx.setHomeDirectory(null);
+    try testing.expect(ctx.home_directory == null);
 }
