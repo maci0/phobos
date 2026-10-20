@@ -787,19 +787,29 @@ pub const App = struct {
     /// Parse and apply a config file. Parse errors leave configuration unset.
     pub fn setConfig(self: *App, aio: std.Io, config_path: []const u8) !void {
         if (self.cfg != null) return error.ConfigAlreadyLoaded;
-        const cfg = try self.alloc.create(config_helper.ConfigParser);
-        errdefer self.alloc.destroy(cfg);
-        cfg.* = config_helper.ConfigParser.init(self.alloc);
-        errdefer cfg.deinit();
-        try cfg.parseFile(aio, config_path);
+        const cfg = parsed: {
+            const cfg = try self.alloc.create(config_helper.ConfigParser);
+            errdefer self.alloc.destroy(cfg);
+            cfg.* = config_helper.ConfigParser.init(self.alloc);
+            errdefer cfg.deinit();
+            try cfg.parseFile(aio, config_path);
+            break :parsed cfg;
+        };
         try self.setParsedConfig(aio, config_path, cfg);
     }
 
-    /// Takes ownership of cfg on success. It must use self.alloc.
+    /// Consumes cfg, including on error. It must use self.alloc. A component
+    /// error retains its borrowed config until App teardown; discard the App.
     pub fn setParsedConfig(self: *App, aio: std.Io, config_path: []const u8, cfg: *config_helper.ConfigParser) !void {
+        var published = false;
+        errdefer if (!published) {
+            cfg.deinit();
+            self.alloc.destroy(cfg);
+        };
         if (self.cfg != null) return error.ConfigAlreadyLoaded;
         const owned_path = try self.alloc.dupe(u8, config_path);
         self.cfg = cfg;
+        published = true;
         self.config_path_owned = owned_path;
         self.info.cfg = cfg;
         self.info.config_file_path = owned_path;
@@ -1848,6 +1858,24 @@ test "setConfig [server] use_xheaders false is what httpServer serves" {
     try app.setConfig(io, cfg_path);
     const after = app.httpServer(io);
     try std.testing.expect(!after.use_xheaders);
+}
+
+test "a late config error retains borrowed configuration until App teardown" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const aio = std.testing.io;
+    try tmp.dir.writeFile(aio, .{ .sub_path = "invalid.cfg", .data = "[job_queue]\nload_on_startup: invalid\n" });
+    const path = try tmp.dir.realPathFileAlloc(aio, "invalid.cfg", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const data_path = try tmp.dir.realPathFileAlloc(aio, ".", std.testing.allocator);
+    defer std.testing.allocator.free(data_path);
+    var server_app = try App.init(std.testing.allocator, aio, data_path);
+    defer server_app.deinit(aio);
+    try std.testing.expectError(error.InvalidValue, server_app.setConfig(aio, path));
+    try std.testing.expect(server_app.cfg != null);
+    try std.testing.expectEqualStrings("invalid", server_app.cfg.?.get("job_queue", "load_on_startup").?);
+    try std.testing.expect(server_app.info.cfg == server_app.cfg);
+    try std.testing.expectEqualStrings(path, server_app.config_path_owned.?);
 }
 
 test "setConfig loads trusted clients, update sources, and feather_updates" {
@@ -3040,7 +3068,7 @@ test "fuzz remoteMethodRequest: any method and kwargs give valid JSON or null" {
     }.run, .{});
 }
 
-test "setParsedConfig keeps caller ownership when path allocation fails" {
+test "setParsedConfig consumes the parser when path allocation fails" {
     const aio = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3049,14 +3077,11 @@ test "setParsedConfig keeps caller ownership when path allocation fails" {
     var app = try testApp(alloc, aio, &tmp);
     defer app.deinit(aio);
     const cfg = try alloc.create(config_helper.ConfigParser);
-    defer alloc.destroy(cfg);
     cfg.* = config_helper.ConfigParser.init(alloc);
-    defer cfg.deinit();
     try cfg.parseString("[server]\nuse_xheaders: false\n", "startup.conf");
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, app.setParsedConfig(aio, "startup.conf", cfg));
     try std.testing.expect(app.cfg == null);
     try std.testing.expect(app.info.cfg == null);
     try std.testing.expect(app.use_xheaders);
-    try std.testing.expectEqualStrings("false", cfg.get("server", "use_xheaders").?);
 }

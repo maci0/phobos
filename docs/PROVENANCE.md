@@ -391,3 +391,25 @@ device-I/O or child-process fixtures. Startup bounded LLVM fuzzing completed
 with `--fuzz=100`; separately compiled uninstrumented C objects avoided the
 installed native fuzz backend's sanitizer-link failure. No physical printer,
 real update, service restart, camera or CAN interface was used in these checks.
+
+## 2026-10-21: retain published configuration on application errors
+
+Requested by the user while finishing TODOs. New strict component options
+exposed an ownership defect: `App.setConfig` published its parser, but a later
+error still ran the caller's parser cleanup. App retained a dangling pointer
+and could free it again during teardown. Clearing that pointer alone would
+leave borrowed component strings dangling too.
+
+`setParsedConfig` now consumes its parser on every call. Errors before
+publication free it immediately; errors afterward retain the parser until App
+teardown. A failed component application requires discarding App. `setConfig`
+limits parse cleanup to its lexical parse block, and `StartupConfig.createApp`
+clears its owner before transfer. This supersedes the success-only ownership
+contract recorded for `edc92a6`.
+
+Evidence: `src/app.zig:setConfig`, `setParsedConfig`, the late-invalid-option
+regression and path-allocation failure regression; `src/main.zig:createApp`.
+The before-fix regression failed on the stale published parser. After the fix,
+98 config-focused tests passed with 10 bounded fuzz harnesses. The full Debug
+standalone suite passed: 1474 passed, 1 skipped, 0 failed; 274 bounded fuzz
+harnesses. `zig fmt` and `git diff --check` passed. No printer was contacted.

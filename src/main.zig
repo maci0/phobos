@@ -355,8 +355,8 @@ const StartupConfig = struct {
         errdefer result.deinit(aio);
         try result.mqtt_ctx.setHomeDirectory(home_directory);
         if (self.cfg) |cfg| {
-            try result.setParsedConfig(aio, self.path.?, cfg);
             self.cfg = null;
+            try result.setParsedConfig(aio, self.path.?, cfg);
         }
         return result;
     }

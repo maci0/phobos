@@ -84,6 +84,9 @@ primitives are gone, so use `std.Io.Mutex`.
 
 - Make ownership explicit:
     - a function that allocates documents who frees
+    - `App.setParsedConfig` consumes the parser even on error. A component
+      configuration failure requires App teardown; the published parser stays
+      alive until then because components borrow configuration strings.
     - caller-provided buffers for hot paths and config serialization
     - `defer` / `errdefer` throughout
     - known bugs, each hit in this codebase:
