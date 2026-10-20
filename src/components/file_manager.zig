@@ -475,10 +475,11 @@ pub const Resolved = struct {
 
 const max_path_links = 40;
 
-// Dir.Walker reopens directories with symlink following enabled.
+// Dir.Walker reopens directories with symlink following enabled. This walker
+// opens each subdirectory from its checked parent handle without following
+// links; entry names are single components. Links are reported, not entered.
 const RootWalker = struct {
     alloc: std.mem.Allocator,
-    base: Resolved,
     stack: std.ArrayList(Frame) = .empty,
     last_path: ?[]u8 = null,
 
@@ -490,7 +491,7 @@ const RootWalker = struct {
         errdefer dir.close(io);
         const prefix = try alloc.dupe(u8, "");
         errdefer alloc.free(prefix);
-        var self: RootWalker = .{ .alloc = alloc, .base = base };
+        var self: RootWalker = .{ .alloc = alloc };
         errdefer self.stack.deinit(alloc);
         try self.stack.append(alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
         return self;
@@ -519,17 +520,20 @@ const RootWalker = struct {
             };
             const path = try std.fs.path.join(self.alloc, &.{ top.prefix, entry.name });
             errdefer self.alloc.free(path);
-            const kind = entry.kind;
             const parent_dir = top.dir;
+            // DT_UNKNOWN: ask the filesystem without following a link.
+            const kind = if (entry.kind != .unknown) entry.kind else if (parent_dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |st| st.kind else |_| .unknown;
             if (kind == .directory) {
-                const child = try childResolved(self.alloc, self.base, path);
-                defer self.alloc.free(child.rel);
-                defer self.alloc.free(child.abs);
-                const dir = try child.openDirectory(io, self.alloc);
-                errdefer dir.close(io);
-                const prefix = try self.alloc.dupe(u8, path);
-                errdefer self.alloc.free(prefix);
-                try self.stack.append(self.alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
+                if (parent_dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false })) |dir| {
+                    errdefer dir.close(io);
+                    const prefix = try self.alloc.dupe(u8, path);
+                    errdefer self.alloc.free(prefix);
+                    try self.stack.append(self.alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
+                } else |err| switch (err) {
+                    // os.walk skips a directory it cannot list.
+                    error.AccessDenied, error.PermissionDenied => {},
+                    else => return err,
+                }
             }
             self.last_path = path;
             return .{ .path = path, .kind = kind, .dir = parent_dir, .basename = std.fs.path.basename(path) };
@@ -716,16 +720,37 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
         else => return err,
     };
     defer walker.deinit(io);
+    const gcodes_only = std.mem.eql(u8, root_name, "gcodes");
     while (try walker.next(io)) |entry| {
-        if (entry.kind != .file) continue;
+        if (entry.kind == .directory) continue;
+        // get_file_list lists only gcode extensions in the gcodes root.
+        if (gcodes_only and !isGcodeExt(entry.basename)) continue;
         if (FileCtx.pathExcluded(ctx.excludes, root_name, entry.path)) continue;
         const rel = try alloc.dupe(u8, entry.path);
-        const stat = entry.dir.statFile(io, entry.basename, .{ .follow_symlinks = false }) catch null;
+        const stat = try entryStat(io, alloc, entry.dir, entry.basename, entry.kind, .{ .root = root, .rel = rel, .abs = "" }) orelse continue;
+        if (stat.kind != .file) continue;
         var info = try buildPathInfo(alloc, stat, root);
         try info.object.put(alloc, "path", .{ .string = rel });
         try arr.append(info);
     }
+    // Moonraker sorts by `str.lower`; std.mem.sort is stable like `sorted`.
+    std.mem.sort(std.json.Value, arr.items, {}, struct {
+        fn lessThan(_: void, a: std.json.Value, b: std.json.Value) bool {
+            return std.ascii.orderIgnoreCase(a.object.get("path").?.string, b.object.get("path").?.string) == .lt;
+        }
+    }.lessThan);
     return .{ .array = arr };
+}
+
+/// Stat a listed entry. In-root links are followed; a link that escapes the
+/// root, dangles or loops yields null, as os.path.exists does for a broken
+/// link. `child` is the entry's path from the root.
+fn entryStat(io: std.Io, alloc: std.mem.Allocator, dir: Dir, name: []const u8, kind: std.Io.File.Kind, child: Resolved) !?std.Io.File.Stat {
+    if (kind != .sym_link and kind != .unknown) return dir.statFile(io, name, .{ .follow_symlinks = false }) catch null;
+    return child.stat(io, alloc) catch |err| switch (accessError(err)) {
+        error.NotFound, error.Forbidden => null,
+        else => |e| e,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -752,9 +777,10 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     while (try it.next(io)) |entry| {
         const child_rel = if (resolved.rel.len == 0) entry.name else try std.fmt.allocPrint(alloc, "{s}/{s}", .{ resolved.rel, entry.name });
         if (FileCtx.pathExcluded(ctx.excludes, resolved.root.name, child_rel)) continue;
-        const stat = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch null;
+        const child: Resolved = .{ .root = resolved.root, .rel = child_rel, .abs = "" };
+        const stat = try entryStat(io, alloc, dir, entry.name, entry.kind, child) orelse continue;
         var info = try buildPathInfo(alloc, stat, resolved.root);
-        switch (entry.kind) {
+        switch (stat.kind) {
             .directory => {
                 try info.object.put(alloc, "dirname", .{ .string = try alloc.dupe(u8, entry.name) });
                 try dirs.append(info);
@@ -763,12 +789,14 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
                 if (extended and std.mem.eql(u8, resolved.root.name, "gcodes") and isGcodeExt(entry.name)) {
                     var metadata_params: std.json.ObjectMap = .empty;
                     try metadata_params.put(alloc, "filename", .{ .string = child_rel });
-                    const metadata = handleMetadata(ctx_ptr, .{ .object = metadata_params }, alloc) catch |err| switch (err) {
-                        error.MetadataNotAvailable => continue,
+                    // A file without metadata is still listed (`gcode_metadata.get(rel, {})`).
+                    if (handleMetadata(ctx_ptr, .{ .object = metadata_params }, alloc)) |metadata| {
+                        var fields = metadata.object.iterator();
+                        while (fields.next()) |field| try info.object.put(alloc, field.key_ptr.*, field.value_ptr.*);
+                    } else |err| switch (err) {
+                        error.MetadataNotAvailable => {},
                         else => return err,
-                    };
-                    var fields = metadata.object.iterator();
-                    while (fields.next()) |field| try info.object.put(alloc, field.key_ptr.*, field.value_ptr.*);
+                    }
                 }
                 try info.object.put(alloc, "filename", .{ .string = try alloc.dupe(u8, entry.name) });
                 try files.append(info);
@@ -960,6 +988,10 @@ fn copyTree(io: std.Io, alloc: std.mem.Allocator, source: Resolved, destination:
                 try parent.dir.createDirPath(io, parent.name);
             },
             .file => try from.copyTo(io, alloc, to),
+            // shutil.copytree copies the target of a linked file.
+            .sym_link => if (try entryStat(io, alloc, entry.dir, entry.basename, entry.kind, from)) |st| {
+                if (st.kind == .file) try from.copyTo(io, alloc, to);
+            },
             else => {},
         }
     }
@@ -1499,6 +1531,69 @@ test "root traversal and copies release partial allocations" {
             try copyTree(aio, gpa, from, to);
         }
     }.run, .{ tr.io, source, destination });
+}
+
+test "listings follow in-root links and skip escaping or dangling ones" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tr = try TestRoots.init(alloc);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("gcodes/real/file.gcode", "G1\n");
+    try tr.writeFile("gcodes/Zeta.gcode", "G1\n");
+    try tr.writeFile("gcodes/notes.txt", "x\n");
+    try tr.writeFile("config/secret.gcode", "secret\n");
+    try tr.tmp.dir.symLink(tr.io, "real", "gcodes/alias", .{});
+    try tr.tmp.dir.symLink(tr.io, "real/file.gcode", "gcodes/link.gcode", .{});
+    try tr.tmp.dir.symLink(tr.io, "file.gcode", "gcodes/real/inner.gcode", .{});
+    try tr.tmp.dir.symLink(tr.io, "missing.gcode", "gcodes/dangling.gcode", .{});
+    try tr.tmp.dir.symLink(tr.io, tr.roots[1].path, "gcodes/outside", .{});
+    const secret = try std.fs.path.join(alloc, &.{ tr.roots[1].path, "secret.gcode" });
+    try tr.tmp.dir.symLink(tr.io, secret, "gcodes/escape.gcode", .{});
+
+    const listing = try handleGetDirectory(@ptrCast(&ctx), try objParams(alloc, "{\"path\":\"gcodes\"}"), alloc);
+    var names: std.ArrayList(u8) = .empty;
+    for (listing.object.get("dirs").?.array.items) |d| try names.print(alloc, "d:{s} ", .{d.object.get("dirname").?.string});
+    for (listing.object.get("files").?.array.items) |f| try names.print(alloc, "f:{s} ", .{f.object.get("filename").?.string});
+    for ([_][]const u8{ "d:real ", "d:alias ", "f:link.gcode ", "f:Zeta.gcode " }) |want| {
+        try testing.expect(std.mem.indexOf(u8, names.items, want) != null);
+    }
+    for ([_][]const u8{ "dangling", "escape", "outside" }) |hidden| {
+        try testing.expect(std.mem.indexOf(u8, names.items, hidden) == null);
+    }
+
+    // server.files.list: gcode extensions only, sorted case-insensitively;
+    // linked directories are not descended.
+    const list = try handleList(@ptrCast(&ctx), try objParams(alloc, "{\"root\":\"gcodes\"}"), alloc);
+    const expected = [_][]const u8{ "link.gcode", "real/file.gcode", "real/inner.gcode", "Zeta.gcode" };
+    try testing.expectEqual(expected.len, list.array.items.len);
+    for (expected, list.array.items) |want, got| try testing.expectEqualStrings(want, got.object.get("path").?.string);
+    try testing.expectEqual(@as(i64, 3), list.array.items[2].object.get("size").?.integer);
+
+    _ = try handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/copied\"}"), alloc);
+    const inner = try std.fs.path.join(alloc, &.{ tr.roots[0].path, "copied/inner.gcode" });
+    try testing.expectEqualStrings("G1\n", try Dir.cwd().readFileAlloc(tr.io, inner, alloc, .limited(16)));
+}
+
+test "server.files.list skips a directory it cannot open" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tr = try TestRoots.init(alloc);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    try tr.writeFile("gcodes/open.gcode", "G1\n");
+    try tr.writeFile("gcodes/locked/hidden.gcode", "G1\n");
+    try tr.tmp.dir.setFilePermissions(tr.io, "gcodes/locked", .fromMode(0), .{});
+    defer tr.tmp.dir.setFilePermissions(tr.io, "gcodes/locked", .default_dir, .{}) catch {};
+    const list = try handleList(@ptrCast(&ctx), try objParams(alloc, "{\"root\":\"gcodes\"}"), alloc);
+    var saw_open = false;
+    for (list.array.items) |item| {
+        if (std.mem.eql(u8, item.object.get("path").?.string, "open.gcode")) saw_open = true;
+    }
+    try testing.expect(saw_open);
 }
 
 test "fuzz root file access: links cannot expose another registered root" {
