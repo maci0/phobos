@@ -46,6 +46,7 @@ const notify = @import("../server/notify.zig");
 const webreq = @import("../json/params.zig");
 const rss = @import("rss.zig");
 const http_get = @import("http_get.zig");
+const json_value = @import("../json/value.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -59,6 +60,15 @@ const UPDATE_CHECK_TIME: u64 = 1800;
 const FETCH_TIMEOUT: std.Io.Duration = .fromSeconds(15);
 /// `wake_at` value when no dismissed entry has a wake time.
 const no_wake = std.math.maxInt(u32);
+const notification_delay_ns = 50 * std.time.ns_per_ms;
+const max_pending_notifications = 128;
+const max_feed_bytes = 16 * 1024 * 1024;
+
+const PendingNotification = struct {
+    deadline: i96,
+    method: []const u8,
+    params: std.json.Value,
+};
 
 // ---------------------------------------------------------------------------
 // Context
@@ -91,15 +101,32 @@ pub const AnnouncementsCtx = struct {
     /// `[announcements] enable_moonlight`. Moonraker default is true. When
     /// false, remote Moonlight fetches return no XML.
     moonlight_enabled: bool = true,
-    /// `[announcements] dev_mode`. When set, feeds are not fetched from Moonlight.
+    /// `[announcements] dev_mode` reads XML from the data directory.
     dev_mode: bool = false,
+    /// Borrowed from App; lives until this context has stopped.
+    data_path: ?[]const u8 = null,
+    local_mtimes: std.StringHashMapUnmanaged(i96) = .empty,
+    pending: std.ArrayList(PendingNotification) = .empty,
+    notification_wake: std.Io.Event = .unset,
+    notification_thread: ?std.Io.Future(void) = null,
 
     pub fn setIo(self: *AnnouncementsCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    /// Daemon-only timers. Tests perform refreshes and notification ticks directly.
+    pub fn startWorkers(self: *AnnouncementsCtx) !void {
         if (self.refresh_thread != null) return;
+        const io = self.io orelse return error.IoNotSet;
         self.refresh_stop.reset();
-        // Start the periodic RSS refresh timer (30 minute interval).
-        self.refresh_thread = io.concurrent(announcementsRefreshTimerThread, .{self}) catch null;
+        self.notification_wake.reset();
+        self.refresh_thread = try io.concurrent(announcementsRefreshTimerThread, .{self});
+        errdefer {
+            self.refresh_stop.set(io);
+            self.refresh_thread.?.cancel(io);
+            self.refresh_thread = null;
+        }
+        self.notification_thread = try io.concurrent(notificationThread, .{self});
     }
 
     /// Built-in feeds (always present, cannot be deleted).
@@ -127,6 +154,9 @@ pub const AnnouncementsCtx = struct {
 
     pub fn deinit(self: *AnnouncementsCtx) void {
         self.refresh_stop.set(self.clock_io);
+        self.notification_wake.set(self.clock_io);
+        if (self.notification_thread) |*worker| worker.cancel(self.clock_io);
+        self.notification_thread = null;
         if (self.refresh_thread) |*th| {
             th.cancel(self.io.?);
             self.refresh_thread = null;
@@ -136,6 +166,11 @@ pub const AnnouncementsCtx = struct {
         self.configured.deinit(self.gpa);
         for (self.stored.items) |f| self.gpa.free(f);
         self.stored.deinit(self.gpa);
+        var mtimes = self.local_mtimes.keyIterator();
+        while (mtimes.next()) |name| self.gpa.free(name.*);
+        self.local_mtimes.deinit(self.gpa);
+        for (self.pending.items) |event| json_value.free(self.gpa, event.params);
+        self.pending.deinit(self.gpa);
     }
 
     fn loadStoredFeeds(self: *AnnouncementsCtx) !void {
@@ -230,16 +265,18 @@ pub const AnnouncementsCtx = struct {
     }
 
     fn fetchEnabled(self: *const AnnouncementsCtx) bool {
-        return self.moonlight_enabled and !self.dev_mode and self.io != null;
+        return self.moonlight_enabled and self.io != null;
     }
 
     /// Fetch `names` from Moonlight and store new entries; returns true when
     /// entries were added or removed. The caller holds the Core lock; it is
     /// released during the downloads, so feed lists may change meanwhile.
-    /// Does nothing without io, with Moonlight disabled, or in dev_mode.
+    /// Development feeds are read locally. Disabled Moonlight or missing I/O
+    /// leaves the store unchanged.
     fn refreshFeeds(self: *AnnouncementsCtx, arena: std.mem.Allocator, names: []const []const u8) !bool {
         if (!self.fetchEnabled() or names.len == 0) return false;
         const io = self.io.?;
+        if (self.dev_mode) return self.refreshLocalFeeds(arena, names);
         const downloads = try arena.alloc(Download, names.len);
         const urls = try arena.alloc([]const u8, names.len);
         for (downloads, urls, names) |*d, *url, name| {
@@ -262,6 +299,37 @@ pub const AnnouncementsCtx = struct {
             self.storeEtag(arena, d.name, resp.etag);
             if (index == null) index = try EntryIndex.load(self, arena);
             changed = (self.applyFeed(arena, &index.?, d.name, resp.body) catch false) or changed;
+        }
+        return changed;
+    }
+
+    fn refreshLocalFeeds(self: *AnnouncementsCtx, arena: std.mem.Allocator, names: []const []const u8) !bool {
+        const io = self.io orelse return false;
+        const data_path = self.data_path orelse return false;
+        const folder = try std.fs.path.join(arena, &.{ data_path, "development", "announcements" });
+        try std.Io.Dir.cwd().createDirPath(io, folder);
+        var index: ?EntryIndex = null;
+        var changed = false;
+        for (names) |name| {
+            if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            const path = try std.fmt.allocPrint(arena, "{s}/{s}.xml", .{ folder, name });
+            var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch continue;
+            defer file.close(io);
+            const stat = file.stat(io) catch continue;
+            if (stat.kind != .file) continue;
+            const mtime = stat.mtime.nanoseconds;
+            if (mtime <= (self.local_mtimes.get(name) orelse 0)) continue;
+            var read_buf: [4096]u8 = undefined;
+            var reader = file.reader(io, &read_buf);
+            const body = reader.interface.allocRemaining(arena, .limited(max_feed_bytes)) catch continue;
+            if (!std.unicode.utf8ValidateSlice(body)) continue;
+            {
+                const key = try self.gpa.dupe(u8, name);
+                errdefer self.gpa.free(key);
+                if (try self.local_mtimes.fetchPut(self.gpa, key, mtime)) |_| self.gpa.free(key);
+            }
+            if (index == null) index = try EntryIndex.load(self, arena);
+            changed = (self.applyFeed(arena, &index.?, name, body) catch false) or changed;
         }
         return changed;
     }
@@ -350,14 +418,64 @@ pub const AnnouncementsCtx = struct {
     }
 
     /// Emit notify_announcement_update with current entries. Core must be held.
-    fn notifyUpdate(self: *AnnouncementsCtx, arena: std.mem.Allocator) void {
+    fn notifyUpdate(self: *AnnouncementsCtx, arena: std.mem.Allocator, delayed: bool) void {
         const io = self.io orelse return;
         const entries = self.listEntries(arena, true) catch return;
         var map: std.json.ObjectMap = .empty;
         map.put(arena, "entries", .{ .array = entries }) catch return;
         var params: std.json.Array = .init(arena);
         params.append(.{ .object = map }) catch return;
-        self.bus.emitLocked(io, notify.names.announcement_update, .{ .array = params }) catch {};
+        if (delayed) self.queueNotification(notify.names.announcement_update, .{ .array = params }) else self.bus.emitLocked(io, notify.names.announcement_update, .{ .array = params }) catch {};
+    }
+
+    fn queueNotification(self: *AnnouncementsCtx, method: []const u8, params: std.json.Value) void {
+        const io = self.io orelse return;
+        if (self.pending.items.len >= max_pending_notifications) {
+            std.debug.print("phobos: warning: announcement notification queue full\n", .{});
+            return;
+        }
+        if (json_value.exceedsDepth(params, json_value.max_value_depth)) return;
+        const owned = json_value.deepCopy(self.gpa, params) catch return;
+        self.pending.append(self.gpa, .{
+            .deadline = std.Io.Clock.awake.now(self.clock_io).nanoseconds +| notification_delay_ns,
+            .method = method,
+            .params = owned,
+        }) catch {
+            json_value.free(self.gpa, owned);
+            return;
+        };
+        self.notification_wake.set(io);
+    }
+
+    /// Deliver due callbacks under Core. Tests supply the tick time explicitly.
+    pub fn dispatchNotifications(self: *AnnouncementsCtx, now: i96) void {
+        const io = self.io orelse return;
+        while (self.pending.items.len > 0 and self.pending.items[0].deadline <= now) {
+            const event = self.pending.orderedRemove(0);
+            defer json_value.free(self.gpa, event.params);
+            self.bus.emitLocked(io, event.method, event.params) catch {};
+        }
+    }
+
+    fn prepareNotificationWait(self: *AnnouncementsCtx) ?std.Io.Clock.Timestamp {
+        self.notification_wake.reset();
+        self.dispatchNotifications(std.Io.Clock.awake.now(self.clock_io).nanoseconds);
+        if (self.pending.items.len == 0) return null;
+        return .{ .clock = .awake, .raw = .{ .nanoseconds = self.pending.items[0].deadline } };
+    }
+
+    fn notificationThread(self: *AnnouncementsCtx) void {
+        const io = self.io.?;
+        while (!self.refresh_stop.isSet()) {
+            const deadline = self.bus.core.run(io, prepareNotificationWait, .{self});
+            if (self.refresh_stop.isSet()) return;
+            if (deadline) |at| {
+                self.notification_wake.waitTimeout(io, .{ .deadline = at }) catch |err| switch (err) {
+                    error.Timeout => {},
+                    error.Canceled => return,
+                };
+            } else self.notification_wake.wait(io) catch return;
+        }
     }
 };
 
@@ -493,7 +611,7 @@ fn checkWakes(self: *AnnouncementsCtx, arena: std.mem.Allocator) void {
 /// Refresh every subscription and notify on change. Runs under the Core lock.
 fn refreshAll(self: *AnnouncementsCtx, arena: std.mem.Allocator) void {
     const names = self.feedNames(arena) catch return;
-    if (self.refreshFeeds(arena, names) catch false) self.notifyUpdate(arena);
+    if (self.refreshFeeds(arena, names) catch false) self.notifyUpdate(arena, false);
 }
 
 fn announcementsRefreshTimerThread(self: *AnnouncementsCtx) void {
@@ -557,7 +675,7 @@ pub fn handleUpdate(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
     for (names) |name| if (!c.hasFeed(name)) return error.InvalidParams;
 
     const changed = try c.refreshFeeds(alloc, names);
-    if (changed) c.notifyUpdate(alloc);
+    if (changed) c.notifyUpdate(alloc, true);
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "entries", .{ .array = try c.listEntries(alloc, true) });
@@ -612,7 +730,8 @@ fn emitAnnouncementDismissed(ctx: *AnnouncementsCtx, alloc: std.mem.Allocator, e
     inner.put(alloc, "entry_id", .{ .string = entry_id }) catch return;
     var params: std.json.Array = .init(alloc);
     params.append(.{ .object = inner }) catch return;
-    ctx.bus.emitLocked(io, notify.names.announcement_dismissed, .{ .array = params }) catch {};
+    _ = io;
+    ctx.queueNotification(notify.names.announcement_dismissed, .{ .array = params });
 }
 
 /// GET /server/announcements/feeds
@@ -637,7 +756,7 @@ pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
     }
     try appendOwned(c.gpa, &c.stored, name);
     try c.saveStoredFeeds(alloc);
-    if (try c.refreshFeeds(alloc, &.{name})) c.notifyUpdate(alloc);
+    if (try c.refreshFeeds(alloc, &.{name})) c.notifyUpdate(alloc, true);
     try obj.put(alloc, "action", .{ .string = "added" });
     return .{ .object = obj };
 }
@@ -655,8 +774,9 @@ pub fn handleDeleteFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     if (contains(c.configured.items, name)) return error.InvalidParams;
 
     c.gpa.free(c.stored.orderedRemove(i));
+    if (c.local_mtimes.fetchRemove(name)) |removed| c.gpa.free(removed.key);
     try c.saveStoredFeeds(alloc);
-    if (try pruneEntriesByFeed(c, alloc, name)) c.notifyUpdate(alloc);
+    if (try pruneEntriesByFeed(c, alloc, name)) c.notifyUpdate(alloc, true);
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "feed", .{ .string = name });
@@ -930,7 +1050,7 @@ test "handleListFeeds: returns built-in feeds" {
     try testing.expect(found_kl);
 }
 
-test "addSubscription: configured feed is listed and dev_mode skips fetch" {
+test "addSubscription: configured feed is listed and a missing development path skips fetch" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1649,6 +1769,7 @@ const TestEnv = struct {
 
     /// `params` of the only recorded frame, after checking its method.
     fn onlyParams(self: *TestEnv, method: []const u8) !std.json.Array {
+        self.ctx.dispatchNotifications(std.math.maxInt(i96));
         try testing.expectEqual(@as(usize, 1), self.frames.items.len);
         const frame = try std.json.parseFromSliceLeaky(std.json.Value, self.arena, self.frames.items[0], .{});
         try testing.expectEqualStrings(method, frame.object.get("method").?.string);
@@ -1770,11 +1891,158 @@ test "notifyUpdate: params is [{entries: [...]}]" {
     try insertEntry(&env.mem, a, "000001",
         \\{"entry_id":"e1","dismissed":false,"date":100.0,"feed":"moonraker"}
     );
-    env.ctx.notifyUpdate(a);
+    env.ctx.notifyUpdate(a, true);
     const params = try env.onlyParams(notify.names.announcement_update);
     const entries = params.items[0].object.get("entries").?.array;
     try testing.expectEqual(@as(usize, 1), entries.items.len);
     try testing.expectEqualStrings("e1", entries.items[0].object.get("entry_id").?.string);
+}
+
+test "dev_mode reads local RSS once per modification and delays the handler notification" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: TestEnv = undefined;
+    try env.init(a, testing.io);
+    defer env.deinit(testing.io);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    env.ctx.data_path = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    try tmp.dir.createDirPath(testing.io, "development/announcements");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "development/announcements/moonraker.xml", .data = feed_xml });
+    const result = try handleUpdate(&env.ctx, .null, a);
+    try testing.expect(result.object.get("modified").?.bool);
+    try testing.expectEqual(@as(usize, 2), result.object.get("entries").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), env.frames.items.len);
+    try testing.expectEqual(@as(usize, 1), env.ctx.pending.items.len);
+    const due = env.ctx.pending.items[0].deadline;
+    env.ctx.dispatchNotifications(due - 1);
+    try testing.expectEqual(@as(usize, 0), env.frames.items.len);
+    env.ctx.dispatchNotifications(due);
+    _ = try env.onlyParams(notify.names.announcement_update);
+    const unchanged = try handleUpdate(&env.ctx, .null, a);
+    try testing.expect(!unchanged.object.get("modified").?.bool);
+    try testing.expectEqual(@as(usize, 0), env.ctx.pending.items.len);
+    try testing.expect(env.ctx.local_mtimes.contains("moonraker"));
+    const previous_mtime = env.ctx.local_mtimes.get("moonraker").?;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "development/announcements/moonraker.xml", .data = "<rss><channel><title>Moonraker</title><item><guid>moonraker/2024/c</guid><title>C</title></item></channel></rss>" });
+    var modified_file = try tmp.dir.openFile(testing.io, "development/announcements/moonraker.xml", .{});
+    defer modified_file.close(testing.io);
+    try modified_file.setTimestamps(testing.io, .{ .modify_timestamp = .{ .new = .{ .nanoseconds = previous_mtime + std.time.ns_per_s } } });
+    const modified = try handleUpdate(&env.ctx, .null, a);
+    try testing.expect(modified.object.get("modified").?.bool);
+    const entries = modified.object.get("entries").?.array.items;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("moonraker/2024/c", entries[0].object.get("entry_id").?.string);
+
+    // The local reader must not attempt HTTP when a development file is absent.
+    try env.ctx.addSubscription("missing");
+    try testing.expect(!(try env.ctx.refreshFeeds(a, &.{"missing"})));
+}
+
+test "delayed announcement callbacks own request data until the 50 ms deadline" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: TestEnv = undefined;
+    try env.init(a, testing.io);
+    defer env.deinit(testing.io);
+    try insertEntry(&env.mem, a, "000001", "{\"entry_id\":\"e1\",\"dismissed\":false,\"date\":100,\"feed\":\"moonraker\"}");
+    const before = std.Io.Clock.awake.now(testing.io).nanoseconds;
+    {
+        var request = std.heap.ArenaAllocator.init(testing.allocator);
+        defer request.deinit();
+        const params = try mkParams(request.allocator(), "{\"entry_id\":\"e1\"}");
+        const response = try handleDismiss(&env.ctx, params, request.allocator());
+        try testing.expectEqualStrings("e1", response.object.get("entry_id").?.string);
+        try testing.expectEqual(@as(usize, 0), env.frames.items.len);
+    }
+    const deadline = env.ctx.pending.items[0].deadline;
+    try testing.expect(deadline >= before + notification_delay_ns);
+    env.ctx.dispatchNotifications(deadline - 1);
+    try testing.expectEqual(@as(usize, 0), env.frames.items.len);
+    env.ctx.dispatchNotifications(deadline);
+    const params = try env.onlyParams(notify.names.announcement_dismissed);
+    try testing.expectEqualStrings("e1", params.items[0].object.get("entry_id").?.string);
+}
+
+test "fuzz delayed announcement callbacks preserve payloads and drain in order" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var env: TestEnv = undefined;
+            try env.init(arena.allocator(), testing.io);
+            defer env.deinit(testing.io);
+            var bytes: [8]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            for (bytes) |byte| {
+                var request = std.heap.ArenaAllocator.init(testing.allocator);
+                defer request.deinit();
+                const id = try std.fmt.allocPrint(request.allocator(), "e{d}", .{byte});
+                emitAnnouncementDismissed(&env.ctx, request.allocator(), id);
+            }
+            try testing.expectEqual(bytes.len, env.ctx.pending.items.len);
+            env.ctx.dispatchNotifications(std.math.maxInt(i96));
+            try testing.expectEqual(bytes.len, env.frames.items.len);
+            try testing.expectEqual(@as(usize, 0), env.ctx.pending.items.len);
+            for (bytes, env.frames.items) |byte, frame| {
+                const expected = try std.fmt.allocPrint(arena.allocator(), "e{d}", .{byte});
+                const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), frame, .{});
+                try testing.expectEqualStrings(expected, parsed.object.get("params").?.array.items[0].object.get("entry_id").?.string);
+            }
+        }
+    }.run, .{});
+}
+
+test "announcement workers are opt-in, deliver delayed callbacks and join before teardown" {
+    const alloc = std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(io, ":memory:");
+    defer db.deinit();
+    var core = NullCore.init();
+    var conns = NullConns.init(alloc, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    const Recorder = struct {
+        io: std.Io,
+        done: std.Io.Event = .unset,
+        arrived: i96 = 0,
+        bytes: [1024]u8 = undefined,
+        len: usize = 0,
+        fn write(raw: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (bytes.len > self.bytes.len) return error.FrameTooLarge;
+            @memcpy(self.bytes[0..bytes.len], bytes);
+            self.len = bytes.len;
+            self.arrived = std.Io.Clock.awake.now(self.io).nanoseconds;
+            self.done.set(self.io);
+        }
+    };
+    var recorder = Recorder{ .io = io };
+    conns.attachWriter(io, try conns.add(io, false), &recorder, Recorder.write);
+    const before = std.Io.Clock.awake.now(io).nanoseconds;
+    {
+        var ctx = try AnnouncementsCtx.init(alloc, io, db.dataStore(), &bus);
+        defer ctx.deinit();
+        try testing.expectError(error.IoNotSet, ctx.startWorkers());
+        ctx.setIo(io);
+        try testing.expect(ctx.refresh_thread == null and ctx.notification_thread == null);
+        try ctx.startWorkers();
+        {
+            var request = std.heap.ArenaAllocator.init(alloc);
+            defer request.deinit();
+            core.run(io, emitAnnouncementDismissed, .{ &ctx, request.allocator(), @as([]const u8, "owned-entry") });
+        }
+        try testing.expect(sleep.untilStopped(io, .fromSeconds(2), &recorder.done));
+    }
+    try testing.expect(recorder.arrived >= before + notification_delay_ns);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const frame = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), recorder.bytes[0..recorder.len], .{});
+    try testing.expectEqualStrings("owned-entry", frame.object.get("params").?.array.items[0].object.get("entry_id").?.string);
 }
 
 test "handleDismiss: emits [{entry_id}] and schedules the wake" {

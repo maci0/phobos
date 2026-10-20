@@ -41,6 +41,7 @@ const parseBool = backend.parseBool;
 const Section = struct {
     name: []const u8, // owned by alloc
     options: std.StringHashMap([]const u8), // key → value (alloc-owned)
+    option_order: std.ArrayList([]const u8) = .empty, // borrows map keys
 };
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,7 @@ pub const ConfigParser = struct {
                 self.alloc.free(opt.value_ptr.*);
             }
             entry.value_ptr.options.deinit();
+            entry.value_ptr.option_order.deinit(self.alloc);
             // Section name is owned; free it.  section_order also holds a
             // pointer to the same string, so only free once here.
             self.alloc.free(entry.key_ptr.*);
@@ -287,12 +289,13 @@ pub const ConfigParser = struct {
         const sec = self.sections_map.getPtr(section_name) orelse return;
         const joined = std.mem.join(self.alloc, "\n", value_parts.items) catch return ConfigError.OutOfMemory;
         errdefer self.alloc.free(joined);
+        if (!sec.options.contains(key)) sec.option_order.ensureUnusedCapacity(self.alloc, 1) catch return ConfigError.OutOfMemory;
         const gop = sec.options.getOrPut(key) catch return ConfigError.OutOfMemory;
         if (gop.found_existing) {
             // Overwrite: free old value and the new key (map keeps old key pointer).
             self.alloc.free(gop.value_ptr.*);
             self.alloc.free(key);
-        }
+        } else sec.option_order.appendAssumeCapacity(gop.key_ptr.*);
         // If new entry, key is now owned by the map; value is set below.
         gop.value_ptr.* = joined;
     }
@@ -414,14 +417,7 @@ pub const ConfigParser = struct {
     /// Caller owns the returned slice but NOT the strings.
     pub fn optionNames(self: *const ConfigParser, section: []const u8, alloc: std.mem.Allocator) ConfigError![][]const u8 {
         const sec = self.sections_map.get(section) orelse return ConfigError.NoSection;
-        const out = alloc.alloc([]const u8, sec.options.count()) catch return ConfigError.OutOfMemory;
-        var it = sec.options.keyIterator();
-        var i: usize = 0;
-        while (it.next()) |k| {
-            out[i] = k.*;
-            i += 1;
-        }
-        return out;
+        return alloc.dupe([]const u8, sec.option_order.items) catch ConfigError.OutOfMemory;
     }
 };
 
@@ -805,6 +801,40 @@ test "optionNames: returns all option names" {
     const names = try p.optionNames("sec", std.testing.allocator);
     defer std.testing.allocator.free(names);
     try std.testing.expectEqual(@as(usize, 2), names.len);
+}
+
+test "optionNames preserves insertion order across overrides and additional files" {
+    var parser = ConfigParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.parseString("[sensor env]\nparameter_z: 1\nhistory_field_a: 2\nparameter_b: 3\n", "first.cfg");
+    try parser.parseString("[sensor env]\nparameter_z: replaced\nparameter_c: 4\n", "second.cfg");
+    const names = try parser.optionNames("sensor env", std.testing.allocator);
+    defer std.testing.allocator.free(names);
+    const expected = [_][]const u8{ "parameter_z", "history_field_a", "parameter_b", "parameter_c" };
+    try std.testing.expectEqual(expected.len, names.len);
+    for (expected, names) |want, actual| try std.testing.expectEqualStrings(want, actual);
+}
+
+test "fuzz optionNames keeps the first insertion when values are replaced" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var parser = ConfigParser.init(std.testing.allocator);
+            defer parser.deinit();
+            const count = smith.valueRangeAtMostWithHash(u8, 1, 16, 0);
+            for (0..count) |index| {
+                var buf: [80]u8 = undefined;
+                const text = try std.fmt.bufPrint(&buf, "[s]\np{d}: {d}\n", .{ index, index });
+                try parser.parseString(text, "sensor.cfg");
+            }
+            const replace = smith.valueRangeAtMostWithHash(u8, 0, count - 1, 1);
+            var buf: [80]u8 = undefined;
+            try parser.parseString(try std.fmt.bufPrint(&buf, "[s]\np{d}: changed\n", .{replace}), "override.cfg");
+            const names = try parser.optionNames("s", std.testing.allocator);
+            defer std.testing.allocator.free(names);
+            try std.testing.expectEqual(count, names.len);
+            for (names, 0..) |name, index| try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buf, "p{d}", .{index}), name);
+        }
+    }.run, .{});
 }
 
 test "optionNames: missing section returns NoSection" {

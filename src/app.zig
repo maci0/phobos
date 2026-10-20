@@ -561,6 +561,7 @@ pub const App = struct {
         const announcements_ctx = try alloc.create(AnnouncementsCtx);
         errdefer alloc.destroy(announcements_ctx);
         announcements_ctx.* = try AnnouncementsCtx.init(alloc, aio, db_ctx.store, bus);
+        announcements_ctx.data_path = datadir;
         errdefer announcements_ctx.deinit();
 
         // --- Data store context (gcode_store + temperature_store) ---
@@ -1229,6 +1230,8 @@ pub const App = struct {
                         .store_size = store_size,
                         .state_topic = cfg.get(sect, "state_topic"),
                         .state_response_template = cfg.get(sect, "state_response_template"),
+                        .config = cfg,
+                        .section = sect,
                     }) catch |err| {
                         std.debug.print("phobos: warning: failed to add sensor '{s}': {}\n", .{ sname, err });
                         continue;
@@ -1258,6 +1261,7 @@ pub const App = struct {
         while (self.remote_calls.getOneUncancelable(io)) |req| self.alloc.free(req) else |_| {}
         self.update_ctx.deinit();
         self.data_store_ctx.stopSampler();
+        self.sensor_ctx.stopSampler();
         self.klippy_ctx.stop(io);
         self.job_queue_ctx.cancelDelayTimer();
         self.announcements_ctx.deinit();
@@ -1749,6 +1753,8 @@ pub const App = struct {
         self.mqtt_ctx.api_dispatch_ctx = self;
         self.mqtt_ctx.on_connected = SensorMqttBridge.onConnected;
         self.mqtt_ctx.on_connected_ctx = &self.sensor_mqtt_bridge;
+        self.mqtt_ctx.on_connection = SensorMqttBridge.onConnection;
+        self.mqtt_ctx.on_connection_ctx = &self.sensor_mqtt_bridge;
         self.mqtt_ctx.start();
         // Wire connections and io into ServerInfo so server.info reports live
         // websocket_count.
@@ -1812,6 +1818,13 @@ fn spoolmanSpoolDeleted(ctx: *anyopaque, spool_id: i64) void {
 pub const SensorMqttBridge = struct {
     app: *App = undefined,
 
+    pub fn onConnection(ctx: *anyopaque, connected: bool) void {
+        const self: *SensorMqttBridge = @ptrCast(@alignCast(ctx));
+        const app = self.app;
+        const io = app.mqtt_ctx.io orelse return;
+        app.core.run(io, SensorCtx.onMqttConnection, .{ app.sensor_ctx, connected });
+    }
+
     /// MQTT inbound-message hook. Runs sensor ingestion under the Core lock.
     pub fn onMessage(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
         const self: *SensorMqttBridge = @ptrCast(@alignCast(ctx));
@@ -1825,10 +1838,24 @@ pub const SensorMqttBridge = struct {
     /// MQTT post-connect hook: subscribe every MQTT sensor's state topic.
     pub fn onConnected(ctx: *anyopaque) void {
         const self: *SensorMqttBridge = @ptrCast(@alignCast(ctx));
+        const app = self.app;
+        const io = app.mqtt_ctx.io orelse return;
+        var arena = std.heap.ArenaAllocator.init(app.alloc);
+        defer arena.deinit();
+        const topics = app.core.run(io, copyTopics, .{ self, arena.allocator() }) catch |err| {
+            std.debug.print("phobos: warning: sensor topics not subscribed: {}\n", .{err});
+            return;
+        };
+        for (topics) |topic| app.mqtt_ctx.subscribeTopicLive(topic, null);
+    }
+
+    fn copyTopics(self: *SensorMqttBridge, alloc: std.mem.Allocator) ![][]const u8 {
+        var topics: std.ArrayList([]const u8) = .empty;
         var it = self.app.sensor_ctx.sensors.valueIterator();
         while (it.next()) |s| {
-            if (s.state_topic) |topic| self.app.mqtt_ctx.subscribeTopicLive(topic, null);
+            if (s.state_topic) |topic| try topics.append(alloc, try alloc.dupe(u8, topic));
         }
+        return topics.toOwnedSlice(alloc);
     }
 };
 
@@ -2761,6 +2788,8 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
         "state_topic: test/chamber\n" ++
         "name: Chamber Air\n" ++
         "sensor_store_size: 5\n" ++
+        "parameter_temp:\n  units = C\n  description = Chamber temperature\n" ++
+        "history_field_peak:\n  parameter = temp\n  strategy = maximum\n  units = C\n  init_tracker = true\n  exclude_paused = true\n  report_total = true\n  report_maximum = true\n  precision = 2\n" ++
         "state_response_template: {% set d = payload|fromjson %}{ set_result(\"temp\", d.t|float) }\n" });
 
     var app = try testApp(alloc, io, &tmp);
@@ -2779,6 +2808,118 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
     defer arena.deinit();
     app.sensor_ctx.ingestMqttMessage("test/chamber", "{\"t\": 42.5}", arena.allocator());
     try std.testing.expectEqual(@as(f64, 42.5), s.last_measurements.get("temp").?);
+    const a = arena.allocator();
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"sensor\":\"chamber\",\"extended\":true}", .{});
+    const extended = try sensor_component.handleSensorInfo(app.sensor_ctx, params, a);
+    const parameter = extended.object.get("parameter_info").?.array.items[0].object;
+    try std.testing.expectEqualStrings("Chamber temperature", parameter.get("description").?.string);
+    const field = extended.object.get("history_fields").?.array.items[0].object;
+    try std.testing.expectEqualStrings("sensor chamber", field.get("provider").?.string);
+    try std.testing.expectEqualStrings("temp", field.get("parameter").?.string);
+    try std.testing.expect(field.get("init_tracker").?.bool);
+    try std.testing.expect(!app.history_ctx.aux_fields.items[0].has_value);
+
+    const Event = @import("components/job_state.zig").JobEvent;
+    app.history_ctx.onJobStateChanged(Event.started, .empty, .empty);
+    app.sensor_ctx.ingestMqttMessage("test/chamber", "{\"t\":40}", a);
+    app.history_ctx.onJobStateChanged(Event.paused, .empty, .empty);
+    app.sensor_ctx.ingestMqttMessage("test/chamber", "{\"t\":99}", a);
+    app.history_ctx.onJobStateChanged(Event.resumed, .empty, .empty);
+    app.sensor_ctx.ingestMqttMessage("test/chamber", "{\"t\":43.123}", a);
+    app.history_ctx.onJobStateChanged(Event.complete, .empty, .empty);
+    const totals = try history_component.handleTotals(app.history_ctx, .null, a);
+    const aux = totals.object.get("auxiliary_totals").?.array.items[0].object;
+    try std.testing.expectEqualStrings("peak", aux.get("field").?.string);
+    try std.testing.expectEqual(@as(f64, 43.12), aux.get("total").?.float);
+    try std.testing.expectEqual(@as(f64, 43.12), aux.get("maximum").?.float);
+}
+
+test "live MQTT sensor bridge replaces readings, samples history and reports broker disconnect" {
+    const alloc = std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Broker = @import("components/mqtt_client.zig").TestBroker;
+    var broker = try Broker.bind(io);
+    defer broker.deinit();
+    const Fixture = struct {
+        fn brokerRun(server: *Broker, done: *std.Io.Event) void {
+            defer done.set(server.io);
+            server.run(2); // Online status and the sensor's subscription.
+        }
+        fn received(instance: *App, expected: f64) bool {
+            const sensor = instance.sensor_ctx.findSensor("env").?;
+            return (sensor.last_measurements.get("temperature") orelse return false) == expected;
+        }
+        fn disconnected(instance: *App) bool {
+            const sensor = instance.sensor_ctx.findSensor("env").?;
+            return std.mem.eql(u8, sensor.error_state orelse return false, "MQTT Disconnected") and sensor.last_measurements.count() == 0;
+        }
+        fn sampled(instance: *App) bool {
+            const sensor = instance.sensor_ctx.findSensor("env").?;
+            return if (sensor.history.get("temperature")) |ring| ring.len > 0 else false;
+        }
+    };
+    var broker_done: std.Io.Event = .unset;
+    var task = try io.concurrent(Fixture.brokerRun, .{ &broker, &broker_done });
+    defer task.cancel(io);
+    var instance = try testApp(alloc, io, &tmp);
+    defer instance.deinit(io);
+    instance.td1_ctx.tty_root = instance.datadir;
+    instance.td1_ctx.dev_prefix = instance.datadir;
+    _ = try instance.sensor_ctx.addSensor("env", .{ .type = "mqtt", .state_topic = "test/environment", .store_size = 3 });
+    try instance.mqtt_ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "sensor-fixture", .enable_moonraker_api = false });
+    _ = instance.httpServer(io);
+    try std.testing.expect(@import("util/sleep.zig").untilStopped(io, .fromSeconds(2), &broker_done));
+    task.await(io);
+    try std.testing.expectEqualStrings("test/environment", broker.last_subscribe[0..broker.last_subscribe_len]);
+
+    var request = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer request.deinit();
+    const a = request.allocator();
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"sensor\":\"env\"}", .{});
+    for ([_][]const u8{ "{\"temperature\":20,\"humidity\":40}", "{\"temperature\":21}" }, [_]f64{ 20, 21 }) |payload, expected| {
+        try broker.injectPublish("test/environment", payload);
+        var received = false;
+        for (0..400) |_| {
+            received = instance.core.run(io, Fixture.received, .{ &instance, expected });
+            if (received) break;
+            try io.sleep(.fromMilliseconds(5), .awake);
+        }
+        try std.testing.expect(received);
+    }
+    const info = try instance.core.run(io, sensor_component.handleSensorInfo, .{ @as(*anyopaque, instance.sensor_ctx), params, a });
+    try std.testing.expectEqual(@as(f64, 21), info.object.get("values").?.object.get("temperature").?.float);
+    try std.testing.expect(info.object.get("values").?.object.get("humidity") == null);
+    const before = try instance.core.run(io, sensor_component.handleSensorMeasurements, .{ @as(*anyopaque, instance.sensor_ctx), params, a });
+    try std.testing.expectEqual(@as(usize, 0), before.object.get("env").?.object.count());
+    try instance.sensor_ctx.startSampler();
+    var timer_sampled = false;
+    for (0..600) |_| {
+        timer_sampled = instance.core.run(io, Fixture.sampled, .{&instance});
+        if (timer_sampled) break;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    instance.sensor_ctx.stopSampler();
+    try std.testing.expect(timer_sampled);
+    instance.core.run(io, SensorCtx.sampleSensors, .{ instance.sensor_ctx, a });
+    instance.core.run(io, SensorCtx.sampleSensors, .{ instance.sensor_ctx, a });
+    const sampled = try instance.core.run(io, sensor_component.handleSensorMeasurements, .{ @as(*anyopaque, instance.sensor_ctx), params, a });
+    const readings = sampled.object.get("env").?.object.get("temperature").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), readings.len);
+    try std.testing.expectEqual(@as(f64, 21), readings[1].float);
+    try broker.stream.?.shutdown(io, .both);
+    var disconnected = false;
+    for (0..400) |_| {
+        disconnected = instance.core.run(io, Fixture.disconnected, .{&instance});
+        if (disconnected) break;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try std.testing.expect(disconnected);
+    const after = try instance.core.run(io, sensor_component.handleSensorInfo, .{ @as(*anyopaque, instance.sensor_ctx), params, a });
+    try std.testing.expectEqual(@as(usize, 0), after.object.get("values").?.object.count());
 }
 
 test "initWithStore: file backend builds + database round-trips" {

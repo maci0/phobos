@@ -69,11 +69,43 @@ pub const AuxStrategy = enum {
     minimum,
     average, // mean of recorded values
     delta, // last - first
+    collect,
 
     pub fn fromString(s: []const u8) AuxStrategy {
         return std.meta.stringToEnum(AuxStrategy, s) orelse .basic;
     }
 };
+
+pub const AuxOptions = struct {
+    description: ?[]const u8 = null,
+    init_tracker: bool = false,
+    exclude_paused: bool = false,
+    report_total: bool = true,
+    report_maximum: bool = false,
+    precision: ?i64 = null,
+    sensor_config: bool = false,
+};
+const max_collected_values = 100;
+
+fn auxRounded(value: f64, precision: ?i64) f64 {
+    const digits = precision orelse return value;
+    if (digits > 323) return value;
+    if (digits < -308) return std.math.copysign(@as(f64, 0), value);
+    var exponent: u16 = @intCast(@abs(digits));
+    var base: f128 = 10;
+    var scale: f128 = 1;
+    while (exponent != 0) : (exponent >>= 1) {
+        if (exponent & 1 != 0) scale *= base;
+        base *= base;
+    }
+    if (digits < 0) scale = 1 / scale;
+    const scaled = @as(f128, value) * scale;
+    const lower = @floor(scaled);
+    const fraction = scaled - lower;
+    const rounded = if (fraction < 0.5 or (fraction == 0.5 and @mod(lower, 2) == 0)) lower else lower + 1;
+    const result: f64 = @floatCast(std.math.copysign(@abs(rounded / scale), value));
+    return if (std.math.isFinite(result)) result else value;
+}
 
 /// One sensor-provided auxiliary field tracked across a print job and totalled
 /// across jobs (Moonraker `[history_field]` / sensor history_field config).
@@ -83,6 +115,14 @@ pub const AuxField = struct {
     field: []const u8, // parameter within the provider
     units: ?[]const u8,
     strategy: AuxStrategy,
+    options: AuxOptions = .{},
+    latest: ?f64 = null,
+    delta_previous: ?f64 = null,
+    delta_total: f64 = 0,
+    collected: ?*[max_collected_values]f64 = null,
+    collected_count: usize = 0,
+    total_maximum: f64 = 0,
+    has_totals_value: bool = false,
     // Per-job accumulators (reset at job start):
     has_value: bool = false,
     count: u64 = 0,
@@ -95,6 +135,7 @@ pub const AuxField = struct {
     total: f64 = 0,
 
     pub fn resetJob(self: *AuxField) void {
+        if (self.options.sensor_config and self.strategy == .basic and !self.options.init_tracker) return;
         self.has_value = false;
         self.count = 0;
         self.sum = 0;
@@ -102,9 +143,32 @@ pub const AuxField = struct {
         self.min = 0;
         self.first = 0;
         self.last = 0;
+        self.delta_previous = null;
+        self.delta_total = 0;
+        self.collected_count = 0;
+        if (self.options.init_tracker) {
+            const value = self.latest orelse 0;
+            if (self.strategy == .collect) return;
+            if (self.strategy == .average) {
+                self.has_value = true;
+                self.last = value;
+            } else self.record(value);
+        }
     }
 
     pub fn record(self: *AuxField, value: f64) void {
+        self.latest = value;
+        if (self.delta_previous) |previous| self.delta_total += value - previous;
+        self.delta_previous = value;
+        if (self.collected) |values| {
+            for (values[0..self.collected_count]) |old| if (old == value) return;
+            if (self.collected_count == values.len) {
+                std.mem.copyForwards(f64, values[0 .. values.len - 1], values[1..]);
+                self.collected_count -= 1;
+            }
+            values[self.collected_count] = value;
+            self.collected_count += 1;
+        }
         if (!self.has_value) {
             self.has_value = true;
             self.first = value;
@@ -127,8 +191,9 @@ pub const AuxField = struct {
             .accumulate => self.sum,
             .maximum => self.max,
             .minimum => self.min,
-            .average => if (self.count > 0) self.sum / @as(f64, @floatFromInt(self.count)) else 0,
-            .delta => self.last - self.first,
+            .average => if (self.count > 0) self.sum / @as(f64, @floatFromInt(self.count)) else self.last,
+            .delta => self.delta_total,
+            .collect => 0,
         };
     }
 
@@ -136,6 +201,15 @@ pub const AuxField = struct {
     /// max strategy).
     pub fn accumulateTotal(self: *AuxField) void {
         const v = self.jobValue();
+        if (self.options.sensor_config) {
+            if (self.strategy != .collect) {
+                if (self.strategy == .basic and !self.has_value) return;
+                if (self.options.report_total) self.total += v;
+                if (self.options.report_maximum) self.total_maximum = if (self.has_totals_value) @max(self.total_maximum, v) else v;
+                self.has_totals_value = true;
+            }
+            return;
+        }
         switch (self.strategy) {
             .maximum => if (v > self.total) {
                 self.total = v;
@@ -170,6 +244,7 @@ pub const HistoryCtx = struct {
     job_user: []const u8,
     /// Registered auxiliary fields (sensor-provided), owned by gpa.
     aux_fields: std.ArrayList(AuxField) = .empty,
+    aux_paused: bool = false,
     /// Allocator for aux-field registrations.
     gpa: std.mem.Allocator = std.heap.smp_allocator,
     /// Does "gcodes/<filename>" exist (file_manager.gcodeExistsErased)? Sets a
@@ -209,17 +284,30 @@ pub const HistoryCtx = struct {
     }
 
     pub fn deinit(self: *HistoryCtx) void {
-        for (self.aux_fields.items) |f| {
+        self.truncateAuxFields(0);
+        self.aux_fields.deinit(self.gpa);
+    }
+
+    /// Roll back registrations after a sensor fails to configure.
+    pub fn truncateAuxFields(self: *HistoryCtx, count: usize) void {
+        for (self.aux_fields.items[count..]) |f| {
             self.gpa.free(f.provider);
             self.gpa.free(f.name);
             self.gpa.free(f.field);
             if (f.units) |u| self.gpa.free(u);
+            if (f.options.description) |description| self.gpa.free(description);
+            if (f.collected) |values| self.gpa.destroy(values);
         }
-        self.aux_fields.deinit(self.gpa);
+        self.aux_fields.shrinkRetainingCapacity(count);
     }
 
     /// Register a sensor-provided auxiliary history field.
     pub fn registerAuxField(self: *HistoryCtx, provider: []const u8, name: []const u8, field: []const u8, units: ?[]const u8, strategy: AuxStrategy) !void {
+        return self.registerAuxFieldOptions(provider, name, field, units, strategy, .{});
+    }
+
+    pub fn registerAuxFieldOptions(self: *HistoryCtx, provider: []const u8, name: []const u8, field: []const u8, units: ?[]const u8, strategy: AuxStrategy, options: AuxOptions) !void {
+        for (self.aux_fields.items) |registered| if (std.mem.eql(u8, registered.provider, provider) and std.mem.eql(u8, registered.name, name)) return error.DuplicateField;
         const owned_provider = try self.gpa.dupe(u8, provider);
         errdefer self.gpa.free(owned_provider);
         const owned_name = try self.gpa.dupe(u8, name);
@@ -228,27 +316,60 @@ pub const HistoryCtx = struct {
         errdefer self.gpa.free(owned_field);
         const owned_units = if (units) |u| try self.gpa.dupe(u8, u) else null;
         errdefer if (owned_units) |u| self.gpa.free(u);
+        var owned_options = options;
+        owned_options.description = if (options.description) |description| try self.gpa.dupe(u8, description) else null;
+        errdefer if (owned_options.description) |description| self.gpa.free(description);
+        const collected = if (strategy == .collect) try self.gpa.create([max_collected_values]f64) else null;
+        errdefer if (collected) |values| self.gpa.destroy(values);
         try self.aux_fields.append(self.gpa, .{
             .provider = owned_provider,
             .name = owned_name,
             .field = owned_field,
             .units = owned_units,
             .strategy = strategy,
+            .options = owned_options,
+            .collected = collected,
         });
     }
 
     /// Record a value for any aux field matching (provider, field).
     pub fn recordAuxValue(self: *HistoryCtx, provider: []const u8, field: []const u8, value: f64) void {
+        const active = self.getCurrentJobId() != null;
         self.lockAux();
         defer self.unlockAux();
         for (self.aux_fields.items) |*f| {
-            if (std.mem.eql(u8, f.provider, provider) and std.mem.eql(u8, f.field, field)) f.record(value);
+            if (!std.mem.eql(u8, f.provider, provider) or !std.mem.eql(u8, f.field, field)) continue;
+            f.latest = value;
+            if (f.options.sensor_config and (!active or (f.options.exclude_paused and self.aux_paused))) {
+                if (f.strategy == .delta) f.delta_previous = value;
+                continue;
+            }
+            f.record(value);
+        }
+    }
+
+    /// Keep reset callbacks in step with the complete latest MQTT message.
+    pub fn recordSensorValues(self: *HistoryCtx, provider: []const u8, values: ?*const std.StringHashMap(f64)) void {
+        const active = self.getCurrentJobId() != null;
+        self.lockAux();
+        defer self.unlockAux();
+        for (self.aux_fields.items) |*f| {
+            if (!f.options.sensor_config or !std.mem.eql(u8, f.provider, provider)) continue;
+            const value = if (values) |map| map.get(f.field) else null;
+            f.latest = value orelse 0;
+            const reading = value orelse continue;
+            if (!active or (f.options.exclude_paused and self.aux_paused)) {
+                if (f.strategy == .delta) f.delta_previous = reading;
+                continue;
+            }
+            f.record(reading);
         }
     }
 
     fn resetAuxJob(self: *HistoryCtx) void {
         self.lockAux();
         defer self.unlockAux();
+        self.aux_paused = false;
         for (self.aux_fields.items) |*f| f.resetJob();
     }
 
@@ -258,12 +379,20 @@ pub const HistoryCtx = struct {
         defer self.unlockAux();
         var arr: std.json.Array = .init(alloc);
         for (self.aux_fields.items) |*f| {
-            if (!f.has_value) continue;
+            if (!f.has_value and !f.options.sensor_config) continue;
             var o: std.json.ObjectMap = .empty;
             try o.put(alloc, "provider", .{ .string = f.provider });
             try o.put(alloc, "name", .{ .string = f.name });
-            try o.put(alloc, "value", .{ .float = f.jobValue() });
+            if (f.strategy == .collect) {
+                var values: std.json.Array = .init(alloc);
+                if (f.collected) |items| for (items[0..f.collected_count]) |value| try values.append(.{ .float = value });
+                try o.put(alloc, "value", .{ .array = values });
+            } else {
+                const value: std.json.Value = if (!f.has_value and f.strategy == .basic) .null else .{ .float = auxRounded(f.jobValue(), f.options.precision) };
+                try o.put(alloc, "value", value);
+            }
             try o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null);
+            if (f.options.description) |description| try o.put(alloc, "description", .{ .string = description });
             try arr.append(.{ .object = o });
         }
         return arr;
@@ -281,10 +410,13 @@ pub const HistoryCtx = struct {
         defer self.unlockAux();
         var arr: std.json.Array = .init(alloc);
         for (self.aux_fields.items) |*f| {
+            if (f.strategy == .collect or (f.options.sensor_config and !f.options.report_total and !f.options.report_maximum)) continue;
+            if (f.options.sensor_config and f.strategy == .basic and !f.has_value and !f.has_totals_value) continue;
             var o: std.json.ObjectMap = .empty;
             try o.put(alloc, "provider", .{ .string = f.provider });
-            try o.put(alloc, "name", .{ .string = f.name });
-            try o.put(alloc, "total", .{ .float = f.total });
+            try o.put(alloc, if (f.options.sensor_config) "field" else "name", .{ .string = f.name });
+            try o.put(alloc, "total", if (f.options.report_total) .{ .float = auxRounded(f.total, f.options.precision) } else .null);
+            if (f.options.sensor_config) try o.put(alloc, "maximum", if (f.options.report_maximum) .{ .float = auxRounded(f.total_maximum, f.options.precision) } else .null);
             try o.put(alloc, "units", if (f.units) |u| .{ .string = u } else .null);
             try arr.append(.{ .object = o });
         }
@@ -294,13 +426,22 @@ pub const HistoryCtx = struct {
     fn resetAuxTotals(self: *HistoryCtx) void {
         self.lockAux();
         defer self.unlockAux();
-        for (self.aux_fields.items) |*f| f.total = 0;
+        for (self.aux_fields.items) |*f| {
+            f.total = 0;
+            f.total_maximum = 0;
+            f.has_totals_value = true;
+        }
     }
 
     /// Called by JobStateCtx (under Core) when a job state transition is
     /// detected. Store failures are logged: an event has no caller to report to.
     pub fn onJobStateChanged(self: *HistoryCtx, event: anytype, prev_ps: std.json.ObjectMap, new_ps: std.json.ObjectMap) void {
         switch (event) {
+            .paused, .resumed => {
+                self.lockAux();
+                defer self.unlockAux();
+                self.aux_paused = event == .paused;
+            },
             .started => {
                 // Finish any previous in-progress job.
                 if (self.getCurrentJobId() != null) self.finishOrWarn("cancelled", prev_ps);
@@ -311,7 +452,6 @@ pub const HistoryCtx = struct {
             .@"error" => self.finishOrWarn("error", new_ps),
             .cancelled => self.finishOrWarn("cancelled", prev_ps),
             .standby => self.finishOrWarn("cancelled", prev_ps),
-            else => {},
         }
     }
 
@@ -1001,6 +1141,97 @@ test "AuxField: total accumulation across jobs" {
     try testing.expectEqual(@as(f64, 7), mx.total); // max across jobs
 }
 
+test "sensor history trackers honor initial readings, pauses, collection and report flags" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "", .gpa = testing.allocator };
+    defer ctx.deinit();
+    try ctx.registerAuxFieldOptions("sensor env", "usage", "value", "g", .delta, .{ .sensor_config = true, .init_tracker = true, .exclude_paused = true, .description = "Material", .report_total = true, .report_maximum = true, .precision = 1 });
+    try ctx.registerAuxFieldOptions("sensor env", "values", "value", null, .collect, .{ .sensor_config = true, .exclude_paused = true, .report_total = false });
+    ctx.recordAuxValue("sensor env", "value", 10);
+    ctx.resetAuxJob();
+    ctx.setCurrentJobId(1);
+    ctx.recordAuxValue("sensor env", "value", 14);
+    ctx.onJobStateChanged(@import("job_state.zig").JobEvent.paused, .empty, .empty);
+    ctx.recordAuxValue("sensor env", "value", 30);
+    ctx.onJobStateChanged(@import("job_state.zig").JobEvent.resumed, .empty, .empty);
+    ctx.recordAuxValue("sensor env", "value", 33);
+    const data = try ctx.buildAuxData(a);
+    try testing.expectEqual(@as(f64, 7), data.items[0].object.get("value").?.float);
+    try testing.expectEqualStrings("Material", data.items[0].object.get("description").?.string);
+    const collection = data.items[1].object.get("value").?.array.items;
+    try testing.expectEqual(@as(usize, 2), collection.len);
+    try testing.expectEqual(@as(f64, 14), collection[0].float);
+    try testing.expectEqual(@as(f64, 33), collection[1].float);
+    ctx.accumulateAux();
+    const totals = try ctx.buildAuxTotals(a);
+    try testing.expectEqual(@as(usize, 1), totals.items.len);
+    try testing.expectEqualStrings("usage", totals.items[0].object.get("field").?.string);
+    try testing.expectEqual(@as(f64, 7), totals.items[0].object.get("maximum").?.float);
+}
+
+test "sensor history precision rounds exact ties to even without losing the original binary value" {
+    try testing.expectEqual(@as(f64, 2), auxRounded(2.5, 0));
+    try testing.expectEqual(@as(f64, 4), auxRounded(3.5, 0));
+    try testing.expectEqual(@as(f64, -2), auxRounded(-2.5, 0));
+    try testing.expectEqual(@as(f64, 2.67), auxRounded(2.675, 2));
+    try testing.expectEqual(@as(f64, 43.12), auxRounded(43.125, 2));
+    try testing.expectEqual(@as(f64, 120), auxRounded(125, -1));
+    try testing.expectEqual(@as(f64, 0), auxRounded(5e-324, 309));
+    try testing.expectEqual(@as(u64, 1) << 63, @as(u64, @bitCast(auxRounded(-1, -400))));
+}
+
+test "sensor history maximum starts from the first completed value even when negative" {
+    var field = AuxField{ .provider = "sensor env", .name = "low", .field = "temp", .units = null, .strategy = .maximum, .options = .{ .sensor_config = true, .report_total = false, .report_maximum = true } };
+    field.record(-10);
+    field.accumulateTotal();
+    try testing.expectEqual(@as(f64, -10), field.total_maximum);
+    field.resetJob();
+    field.record(-20);
+    field.accumulateTotal();
+    try testing.expectEqual(@as(f64, -10), field.total_maximum);
+}
+
+test "fuzz configured sensor trackers produce bounded history values and totals" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var bus: NotifyBus = undefined;
+            var ctx = HistoryCtx{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = 1, .job_user = "", .gpa = testing.allocator };
+            defer ctx.deinit();
+            var bytes: [24]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const strategies = std.enums.values(AuxStrategy);
+            try ctx.registerAuxFieldOptions("sensor env", "field", "value", null, strategies[bytes[0] % strategies.len], .{
+                .sensor_config = true,
+                .init_tracker = bytes[1] & 1 == 0,
+                .exclude_paused = bytes[1] & 2 == 0,
+                .report_total = bytes[1] & 4 == 0,
+                .report_maximum = bytes[1] & 8 == 0,
+                .precision = @as(i64, bytes[2] % 7) - 3,
+            });
+            for (bytes[3..]) |byte| {
+                ctx.aux_paused = byte & 1 == 0;
+                ctx.recordAuxValue("sensor env", "value", @floatFromInt(byte));
+                if (byte & 2 == 0) ctx.resetAuxJob();
+            }
+            ctx.accumulateAux();
+            const data = try ctx.buildAuxData(a);
+            _ = try std.json.Stringify.valueAlloc(a, std.json.Value{ .array = data }, .{});
+            _ = try std.json.Stringify.valueAlloc(a, std.json.Value{ .array = try ctx.buildAuxTotals(a) }, .{});
+            try testing.expect(ctx.aux_fields.items[0].collected_count <= 100);
+        }
+    }.run, .{});
+}
+
 test "history aux fields: record → job auxiliary_data → totals" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1616,7 +1847,7 @@ test "onJobStateChanged error: finishes job with error status" {
     try testing.expectEqualStrings("error", stored.?.object.get("status").?.string);
 }
 
-test "onJobStateChanged paused/resumed: no-op in history" {
+test "onJobStateChanged paused/resumed: preserves the current job and toggles auxiliary tracking" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1631,13 +1862,13 @@ test "onJobStateChanged paused/resumed: no-op in history" {
     ctx.onJobStateChanged(JobEvent.started, .empty, ps);
     const job_id = ctx.current_job_id.?;
 
-    // Pause — should be no-op (current_job_id stays set, no new storage).
     ctx.onJobStateChanged(JobEvent.paused, ps, ps);
     try testing.expect(ctx.current_job_id != null);
+    try testing.expect(ctx.aux_paused);
 
-    // Resume — also no-op.
     ctx.onJobStateChanged(JobEvent.resumed, ps, ps);
     try testing.expect(ctx.current_job_id != null);
+    try testing.expect(!ctx.aux_paused);
 
     // Job is still in_progress.
     var id_buf: [16]u8 = undefined;
