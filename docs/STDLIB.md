@@ -284,6 +284,13 @@ consuming a large message restores the original small buffer when the remaining
 buffered input fits. Pongs are discarded before checking the following frame's
 capacity because the native reader otherwise skips them internally.
 
+Fragmented messages share the same 10 MiB aggregate limit. The adapter validates
+fragment sequencing and presents each fragment to the native complete-frame
+reader for masking and payload decoding. Ping and pong frames may interrupt a
+message without becoming part of it. Assembly storage grows geometrically within
+the limit and is released before the next message; close and allocation failure
+release partial storage during session cleanup.
+
 Agent RPC waits use native semaphores with absolute deadlines outside Core.
 Connection ids carry no pointers; registry pins keep a selected connection alive
 across a write. Response correlation checks the owning connection and copies the

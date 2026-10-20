@@ -80,9 +80,12 @@ pub const WsTestConn = struct {
 
     /// Send a masked client frame with the given opcode and payload.
     pub fn sendFrame(self: *WsTestConn, op: Opcode, payload: []const u8) !void {
+        return self.sendFragment(op, payload, true);
+    }
+
+    pub fn sendFragment(self: *WsTestConn, op: Opcode, payload: []const u8, final: bool) !void {
         const w = &self.writer.interface;
-        // FIN=1, opcode.
-        try w.writeByte(0x80 | @as(u8, @backingInt(op)));
+        try w.writeByte(@as(u8, if (final) 0x80 else 0) | @as(u8, @backingInt(op)));
         // MASK=1 plus length.
         const mask: [4]u8 = self.nextMask();
         if (payload.len < 126) {
@@ -279,6 +282,36 @@ test "WS: rejects an announced message above ten MiB without reading its payload
         return;
     };
     return error.ExpectedClosedSocket;
+}
+
+test "WS: accepts fragmented large JSON requests with interleaved ping and pong" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const client = try connect(ts, alloc);
+    defer client.close();
+    const prefix = "{\"jsonrpc\":\"2.0\",\"method\":\"server.info\",\"params\":{\"padding\":\"";
+    const suffix = "\"},\"id\":9}";
+    const payload = try alloc.alloc(u8, @import("../util/ws_message.zig").max_message_size);
+    defer alloc.free(payload);
+    @memcpy(payload[0..prefix.len], prefix);
+    @memset(payload[prefix.len .. payload.len - suffix.len], 'a');
+    @memcpy(payload[payload.len - suffix.len ..], suffix);
+    try client.sendFragment(.text, payload[0..1024], false);
+    try client.sendFrame(.ping, "probe");
+    try client.sendFrame(.pong, "ignored");
+    try client.sendFragment(.continuation, payload[1024 .. 32 * 1024], false);
+    try client.sendFragment(.continuation, payload[32 * 1024 ..], true);
+    const pong = try nextDataFrame(client);
+    defer alloc.free(pong.data);
+    try std.testing.expectEqual(Opcode.pong, pong.opcode);
+    try std.testing.expectEqualStrings("probe", pong.data);
+    const response = try nextDataFrame(client);
+    defer alloc.free(response.data);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response.data, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 9), parsed.value.object.get("id").?.integer);
+    try std.testing.expect(parsed.value.object.contains("result"));
 }
 
 test "WS agents register, list, emit events, forward Klippy methods and clean up on close" {
