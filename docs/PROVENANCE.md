@@ -305,3 +305,89 @@ states, seeded/pushed status and gcode callbacks, and a real local third
 subscription refresh retaining the client's current objects. `zig fmt` and
 `git diff --check` passed. The skipped test requires real Klippy. ARM and physical
 runtime verification were not performed for this slice; no printer was contacted.
+
+## 2026-10-21: transport limits, serial deadlines and provider polling
+
+Requested by the user: finish all remaining TODOs. The first integrated group
+ends at `bb4d666`, after the queue lifecycle change. It includes:
+
+- `7da97d4`: `util/ws_message.zig` grows the native WebSocket reader lazily to
+  10 MiB, rejects larger announced lengths before allocation and restores the
+  small buffer afterward. Both regular and raw Klippy bridge sockets use it.
+- `c5f257d`: HTTP heads, including partial and keepalive requests, share an
+  absolute receive deadline. The deadline is removed before bodies and upgrades.
+  Configured CORS domains also allow trusted Origin IPv4 addresses, matching
+  the pin's fallback without accepting userinfo or hostname lookalikes.
+- `e8aba80`: serial read/write deadlines use native selection, cancellation and
+  joining. The PTY fixture verifies silent reads, stalled writes and subsequent
+  byte-exact reads without touching physical serial devices.
+- `da28b4b`: the existing bounded template evaluator renders text and supports
+  injected native positional/keyword callbacks. Full Jinja2 remains excluded.
+- `dd67e84`: provider service queries and actions release Core for I/O and
+  provider-lock waits. Supervisord substates match the lowercased vendor state;
+  periodic polling publishes only changes. `docs/MACHINE.md` records the API.
+- `bb4d666`: MQTT owns the startup HOME value before credential rendering,
+  preserves the old value on allocation failure and releases replacements.
+
+Evidence: the integrated commits and their regression tests; Moonraker
+`900848584374`, authorization, machine/provider and component implementations;
+the installed Zig 0.17 HTTP codec and `std.Io` cancellation APIs.
+
+The complete merged Debug suite at `bb4d666` passed: 1450 passed, 1 skipped,
+0 failed; 268 bounded fuzz harnesses. The individual transport and serial slices
+also built static ARM. No physical printer or external broker was used. Native
+WebSocket framing retains its existing fragmented-message limitation; hardware
+runtime validation is still outstanding.
+
+During later button development, one lifecycle test omitted its temporary GPIO
+root and briefly requested line 2 on host `/dev/gpiochip0` as an input. Closing
+the request released it; no output value was sent. The fixture now assigns its
+temporary root before startup. The remaining GPIO tests were checked: adapter
+opens use temporary roots, and fake event, allocation-failure and fuzz tests do
+not open physical GPIO devices. This exception was reported to the user; it is
+not included in a claim that all host hardware was untouched.
+
+## 2026-10-21: startup, peripheral queries, thumbnails and update services
+
+Requested by the user: finish the TODO list. Integrated sources through
+`205bf4b` add the following behavior:
+
+- `edc92a6`: startup loads one ConfigParser before opening storage, derives
+  bind/backend/path from it, then transfers ownership to App. HOME is copied
+  before MQTT configuration. Parse and allocation failures retain one owner.
+- `1326399`: webcam URLs resolve against native local network state; UDP
+  connect obtains the selected source address without sending a packet.
+  Wildcard local listeners and bounded DNS support `convert_local`, preserving
+  URI credentials, query and fragment. No route-text parser was added.
+- `f89beb9`: update refresh windows use local civil time, including future DST.
+  The installed `std.Tz` cannot evaluate POSIX footer rules, so C owns the
+  `localtime_r` ABI. Isolated child environments test timezone behavior without
+  changing the test process environment.
+- `500efde` and `b0b6013`: typed V4L2 format/resolution enumeration and bounded
+  CAN unassigned-node queries. Transfers, ioctl operations, cancellation and
+  close use native I/O; only CAN socket creation/binding lacks a native address
+  API. Missing CAN remains an empty result. Service discovery now retries a
+  failed initial provider query.
+- `65b6b4b`: decoded thumbnail files are replaced atomically under checked
+  `.thumbs` paths. Metadata and listings advertise image paths; the HTTP route
+  serves exact image bytes with the image MIME type. Base64 payloads no longer
+  remain in metadata cache entries.
+- `205bf4b`: changed Git sources and successful recovery/rollback restart their
+  configured managed services through the validated machine API. Unchanged
+  clean sources do not restart. Package runners remain uninjected in the daemon.
+
+Daemon startup enables service polling. A Core-held Klippy startup callback now
+precedes initial subscription snapshots, while final readiness remains after
+handshake completion. The callback regression checks this startup event too.
+The TODO entries above were removed or narrowed to their remaining work.
+Owning documents are linked from README. The existing GPL-3.0-only choice now
+has its license text copied verbatim from the pinned Moonraker LICENSE.
+
+Verification: the combined standalone Debug suite passed with the daemon/hook
+wiring: 1473 passed, 1 skipped, 0 failed; 274 bounded fuzz harnesses. Individual
+slices passed static ARM builds and local HTTP, temporary-repository, injected
+device-I/O or child-process fixtures. Startup bounded LLVM fuzzing completed
+523 runs (29 unique inputs), webcam fuzzing 138 runs (19 unique inputs), both
+with `--fuzz=100`; separately compiled uninstrumented C objects avoided the
+installed native fuzz backend's sanitizer-link failure. No physical printer,
+real update, service restart, camera or CAN interface was used in these checks.

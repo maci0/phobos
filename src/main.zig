@@ -279,6 +279,7 @@ fn run(init: std.process.Init) !void {
     try server_app.update_ctx.setGitEnvironment(init.environ_map);
 
     var srv = server_app.httpServer(aio);
+    server_app.machine_ctx.startServicePolling();
 
     // Start the background Klippy Unix-socket bridge. Only the real daemon
     // path calls start(); tests go through App.init/httpServer which only

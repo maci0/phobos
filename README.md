@@ -120,8 +120,11 @@ Change and verification history: [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 - [`docs/api/COVERAGE_HEATMAP.md`](docs/api/COVERAGE_HEATMAP.md): coverage method and verification limits.
 - [`docs/MEMORY.md`](docs/MEMORY.md), [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): measurements and how to reproduce them.
 - [`docs/STDLIB.md`](docs/STDLIB.md): Zig 0.17 std APIs in use and where local code remains.
+- [`docs/FILE_MANAGEMENT.md`](docs/FILE_MANAGEMENT.md): file and thumbnail contracts.
+- [`docs/MACHINE.md`](docs/MACHINE.md): service providers and peripheral queries.
+- [`docs/UPDATES.md`](docs/UPDATES.md): managed services and update behavior.
 - [`docs/TEST_RUN_FINDINGS.md`](docs/TEST_RUN_FINDINGS.md): why Moonraker's own test suite cannot be the parity oracle.
 
 ## License
 
-GPL-3.0-only, matching Moonraker. No LICENSE file is committed yet. SQLite is public domain.
+[GPL-3.0-only](LICENSE), matching Moonraker. SQLite is public domain.

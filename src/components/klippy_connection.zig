@@ -436,7 +436,12 @@ pub const KlippyCtx = struct {
         self.stream = s;
         self.write_mutex.unlock(io);
         self.reader = s.reader(io, &self.read_buffer);
+        self.bus.core.run(io, streamStartedLocked, .{ self, io });
+    }
+
+    fn streamStartedLocked(self: *KlippyCtx, io: std.Io) void {
         _ = self.setState(.startup);
+        if (self.on_state) |callback| if (self.event_ctx) |ctx| callback(ctx, io, .startup);
     }
 
     /// Null the stream under `write_mutex` (no write can be in flight on it),
@@ -1296,11 +1301,13 @@ test "processStatusUpdate: live shutdown sets state and emits once" {
 test "Klippy component hooks see initial status, pushes, state and gcode" {
     const Capture = struct {
         status_count: usize = 0,
+        startup_count: usize = 0,
         shutdown_count: usize = 0,
         disconnected_count: usize = 0,
         gcode_count: usize = 0,
         fn state(raw: *anyopaque, _: std.Io, value: State) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
+            if (value == .startup) self.startup_count += 1;
             if (value == .shutdown) self.shutdown_count += 1;
             if (value == .disconnected) self.disconnected_count += 1;
         }
@@ -1327,6 +1334,7 @@ test "Klippy component hooks see initial status, pushes, state and gcode" {
     ctx.on_state = Capture.state;
     ctx.on_status = Capture.status;
     ctx.on_gcode = Capture.gcode;
+    ctx.bus.core.run(std.testing.io, KlippyCtx.streamStartedLocked, .{ &ctx, std.testing.io });
     ctx.seedSubscribedStatus(std.testing.io, "{\"result\":{\"status\":{\"toolhead\":{\"position\":[0,0,0,2]}},\"eventtime\":1.5}}");
     _ = ctx.setState(.ready);
     ctx.connected.store(true, .release);
@@ -1336,6 +1344,7 @@ test "Klippy component hooks see initial status, pushes, state and gcode" {
     try ctx.dispatchRemoteMethod(std.testing.io, "process_gcode_response", try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"params\":{\"response\":\"ok\"}}", .{}));
     ctx.disconnectedLocked(std.testing.io);
     try std.testing.expectEqual(@as(usize, 3), capture.status_count);
+    try std.testing.expectEqual(@as(usize, 1), capture.startup_count);
     try std.testing.expectEqual(@as(usize, 1), capture.shutdown_count);
     try std.testing.expectEqual(@as(usize, 1), capture.disconnected_count);
     try std.testing.expectEqual(@as(usize, 1), capture.gcode_count);
