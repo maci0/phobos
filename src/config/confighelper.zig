@@ -363,11 +363,17 @@ pub const ConfigParser = struct {
     // -----------------------------------------------------------------------
 
     /// Option names match ASCII case-insensitively (configparser
-    /// `optionxform`); names longer than `max_lookup_option` match exactly.
+    /// `optionxform`). Long names use a scan to keep lookup allocation-free.
     pub fn get(self: *const ConfigParser, section: []const u8, option: []const u8) ?[]const u8 {
         const sec = self.sections_map.get(section) orelse return null;
         var buf: [max_lookup_option]u8 = undefined;
-        return sec.options.get(lookupKey(&buf, option));
+        if (option.len <= buf.len)
+            return sec.options.get(std.ascii.lowerString(buf[0..option.len], option));
+        var it = sec.options.iterator();
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, option)) return entry.value_ptr.*;
+        }
+        return null;
     }
 
     pub fn hasSection(self: *const ConfigParser, section: []const u8) bool {
@@ -444,12 +450,6 @@ pub fn freeLines(alloc: std.mem.Allocator, lines: [][]const u8) void {
 
 /// Longest option name `get` lowercases on the stack.
 const max_lookup_option = 128;
-
-/// `option` lowercased into `buf`, or unchanged when it does not fit.
-fn lookupKey(buf: *[max_lookup_option]u8, option: []const u8) []const u8 {
-    if (option.len > buf.len) return option;
-    return std.ascii.lowerString(buf[0..option.len], option);
-}
 
 fn freeKeys(alloc: std.mem.Allocator, set: *std.StringHashMapUnmanaged(void)) void {
     var it = set.keyIterator();
@@ -918,6 +918,38 @@ test "parse: option names are case-insensitive, section names are not" {
     const names = try p.optionNames("Server", std.testing.allocator);
     defer std.testing.allocator.free(names);
     try std.testing.expectEqualStrings("port", names[0]);
+}
+
+test "get: long option names stay case-insensitive without allocating" {
+    const upper: [256]u8 = @splat('A');
+    var lower: [upper.len]u8 = undefined;
+    _ = std.ascii.lowerString(&lower, &upper);
+    var p = ConfigParser.init(std.testing.allocator);
+    defer p.deinit();
+    var source_buf: [288]u8 = undefined;
+    const source = try std.fmt.bufPrint(&source_buf, "[section]\n{s}: configured\n", .{upper});
+    try p.parseString(source, "test");
+    try std.testing.expectEqualStrings("configured", p.get("section", &upper).?);
+    try std.testing.expectEqualStrings("configured", p.get("section", &lower).?);
+    try std.testing.expect(p.hasOption("section", &upper));
+    try std.testing.expect(p.get("section", upper[0 .. upper.len - 1]) == null);
+}
+
+test "fuzz get: case-insensitive lookup covers short and long names" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var key: [256]u8 = undefined;
+            const len = smith.valueRangeAtMostWithHash(u16, 1, key.len, 0);
+            smith.bytesWithHash(key[0..len], 1);
+            for (key[0..len]) |*byte| byte.* = 'A' + byte.* % 26;
+            var source_buf: [288]u8 = undefined;
+            const source = try std.fmt.bufPrint(&source_buf, "[section]\n{s}: configured\n", .{key[0..len]});
+            var p = ConfigParser.init(std.testing.allocator);
+            defer p.deinit();
+            try p.parseString(source, "test");
+            try std.testing.expectEqualStrings("configured", p.get("section", key[0..len]).?);
+        }
+    }.run, .{});
 }
 
 test "parse: rejects what Moonraker's parser rejects" {

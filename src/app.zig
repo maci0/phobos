@@ -765,15 +765,14 @@ pub const App = struct {
     /// Parse a config file and wire it into server.config responses. Safe to
     /// call even when no --config flag was given; in that case the config
     /// objects stay empty (server.config still returns the correct shape).
-    pub fn setConfig(self: *App, aio: std.Io, config_path: []const u8) void {
-        const cfg = self.alloc.create(config_helper.ConfigParser) catch {
-            std.debug.print("phobos: warning: OOM parsing config\n", .{});
-            return;
-        };
+    /// Parse errors leave configuration unset and fail startup.
+    pub fn setConfig(self: *App, aio: std.Io, config_path: []const u8) !void {
+        if (self.cfg != null) return error.ConfigAlreadyLoaded;
+        const cfg = try self.alloc.create(config_helper.ConfigParser);
+        errdefer self.alloc.destroy(cfg);
         cfg.* = config_helper.ConfigParser.init(self.alloc);
-        cfg.parseFile(aio, config_path) catch |err| {
-            std.debug.print("phobos: warning: could not parse config '{s}': {}\n", .{ config_path, err });
-        };
+        errdefer cfg.deinit();
+        try cfg.parseFile(aio, config_path);
         self.cfg = cfg;
         self.info.cfg = cfg;
         self.info.config_file_path = config_path;
@@ -1789,7 +1788,7 @@ test "setConfig [server] use_xheaders false is what httpServer serves" {
     defer app.deinit(io);
     const before = app.httpServer(io);
     try std.testing.expect(before.use_xheaders);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     const after = app.httpServer(io);
     try std.testing.expect(!after.use_xheaders);
 }
@@ -1835,7 +1834,7 @@ test "setConfig loads trusted clients, update sources, and feather_updates" {
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
 
     const addr = try std.Io.net.IpAddress.parse("8.8.8.8", 0);
     try std.testing.expect(app.auth_ctx.trusted.isTrusted(addr));
@@ -1928,7 +1927,7 @@ test "dispatchFrame: id-less reset uses the daemon runner and does not spawn git
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     app.bindFeather();
     // No package runner: apt and pip updates are refused before they start.
     try std.testing.expect(app.update_ctx.shell == null);
@@ -2030,7 +2029,7 @@ test "setConfig loads announcement subscriptions and gcode store size" {
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     try std.testing.expect(app.announcements_ctx.dev_mode);
     try std.testing.expectEqual(@as(usize, 2), app.data_store_ctx.gcode_ring.entries.buffer.len);
     try std.testing.expectEqual(@as(usize, 3), app.data_store_ctx.temp_capacity);
@@ -2071,7 +2070,7 @@ test "setConfig [octoprint_compat] is what /api/settings returns" {
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const settings = try octoprint_component.handleSettings(@ptrCast(app.octoprint_ctx), .null, arena.allocator());
@@ -2119,7 +2118,7 @@ test "setConfig loads [webcam name] cameras into the list" {
         try w.interface.writeAll("a48b28888e484d4fac9b7bc09e068dea");
         try w.interface.flush();
     }
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -2161,7 +2160,7 @@ test "setConfig [machine] provider simple restarts through script_path and does 
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     try std.testing.expectEqualStrings("simple", app.machine_ctx.provider_name);
     try std.testing.expectEqualStrings("/no/such/scripts", app.machine_ctx.script_path);
     try std.testing.expectEqual(@as(f64, 12), app.machine_ctx.script_timeout_s);
@@ -2230,7 +2229,7 @@ test "setConfig loads auto-refresh, excludes, and hidden objects" {
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     try std.testing.expect(!app.update_ctx.auto_refresh);
     try std.testing.expectEqual(@as(i64, 168), app.update_ctx.refresh_interval_hours);
     try std.testing.expectEqual(@as(i64, 0), app.update_ctx.refresh_window_start);
@@ -2272,7 +2271,7 @@ test "setConfig [power] reads pin and protocol URLs without leaking" {
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     const psu = app.power_ctx.findDevice("psu").?;
     try std.testing.expectEqual(@as(?u32, 23), psu.gpio_pin);
     try std.testing.expect(psu.gpio_active_low);
@@ -2313,7 +2312,7 @@ test "setConfig [wled] builds http and serial transports and rejects bad strips"
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     const desk = app.wled_ctx.findStrip("desk").?;
     try std.testing.expectEqualStrings("http://10.0.0.5:80/json", desk.transport.http);
     try std.testing.expectEqual(@as(usize, 3), desk.chain_count);
@@ -2339,7 +2338,7 @@ test "setConfig [paneldue] processPanelDueLine strips checksummed file commands"
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
 
     const body = "N10 M32  plate.gco  ";
     var sum: u8 = 0;
@@ -2376,7 +2375,7 @@ test "setConfig [paneldue] keeps checksums on for a malformed enable_checksum" {
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nenable_checksum: maybe\n" });
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     try std.testing.expect(app.paneldue.enable_checksum);
 }
 
@@ -2404,7 +2403,7 @@ test "setConfig loads an analysis platform and a notifier record" {
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_path, "klipper_estimator_linux"));
     try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_config, "default_estimator_cfg.json"));
 
@@ -2445,7 +2444,7 @@ test "setConfig reads Moonraker's [mqtt] address and defaults" {
     });
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
     const mqtt = app.mqtt_ctx.config.?;
     try std.testing.expectEqualStrings("broker.lan", mqtt.address);
     try std.testing.expectEqual(@as(u16, 1883), mqtt.port);
@@ -2458,7 +2457,7 @@ test "setConfig reads Moonraker's [mqtt] address and defaults" {
     var app2 = try testApp(alloc, io, &tmp);
     defer app2.deinit(io);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[mqtt]\nhost: broker.lan\n" });
-    app2.setConfig(io, cfg_path);
+    try app2.setConfig(io, cfg_path);
     try std.testing.expect(app2.mqtt_ctx.config == null);
 }
 
@@ -2531,7 +2530,7 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
-    app.setConfig(io, cfg_path);
+    try app.setConfig(io, cfg_path);
 
     // Sensor registered with its topic + template.
     const s = app.sensor_ctx.findSensor("chamber") orelse return error.SensorNotRegistered;
@@ -2878,6 +2877,25 @@ test "App initialization frees partial state on allocation failure" {
         } else |_| {}
         try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
+}
+
+test "setConfig rejects a partial parse without applying any options" {
+    const aio = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(alloc, aio, &tmp);
+    defer app.deinit(aio);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "bad.conf", .data = "[server]\nklippy_uds_address: /unwanted\n[broken\n" });
+    const path = try tmp.dir.realPathFileAlloc(aio, "bad.conf", alloc);
+    defer alloc.free(path);
+    try std.testing.expectError(error.ParseError, app.setConfig(aio, path));
+    try std.testing.expect(app.cfg == null);
+    try std.testing.expect(app.info.cfg == null);
+    try std.testing.expect(!app.klippy_uds_owned);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "bad.conf", .data = "[server]\n" });
+    try app.setConfig(aio, path);
+    try std.testing.expectError(error.ConfigAlreadyLoaded, app.setConfig(aio, path));
 }
 
 test "startup accepts symlinked file roots and database parents" {

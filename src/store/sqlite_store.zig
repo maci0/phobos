@@ -26,11 +26,9 @@ const Error = ds.Error;
 pub const SqliteStore = struct {
     io: std.Io,
     db: *c.sqlite3,
-    /// Serializes read-modify-write so concurrent inserts to one top-level
-    /// record can't lose updates. SQLite's FULLMUTEX only serializes individual
-    /// C-API calls — it does NOT make the load-decode-modify-encode-store
-    /// sequence below atomic, so two writers racing on sub-keys of the same
-    /// record would clobber each other without this. Mirrors FileStore.
+    /// Serializes operations: FULLMUTEX covers individual C calls, not a whole
+    /// read-modify-write or the table/KV history transaction. Readers must not
+    /// observe that transaction before it commits. Mirrors FileStore.
     rmw_lock: std.Io.Mutex = .init,
 
     fn lockRmw(self: *SqliteStore) void {
@@ -93,30 +91,31 @@ pub const SqliteStore = struct {
         return stmt orelse Error.BackendError;
     }
 
-    fn bindText(stmt: *c.sqlite3_stmt, idx: c_int, s: []const u8) void {
-        _ = c.sqlite3_bind_text(stmt, idx, s.ptr, @intCast(s.len), c.SQLITE_TRANSIENT);
+    fn bindText(stmt: *c.sqlite3_stmt, idx: c_int, s: []const u8) Error!void {
+        if (c.sqlite3_bind_text(stmt, idx, s.ptr, @intCast(s.len), c.SQLITE_TRANSIENT) != c.SQLITE_OK)
+            return Error.BackendError;
     }
 
     // --- record encode/decode (Moonraker format) --------------------------
 
     fn encodeRecord(arena: std.mem.Allocator, value: json.Value) Error![]u8 {
         switch (value) {
-            .null => return arena.dupe(u8, &[_]u8{0}) catch Error.BackendError,
-            .bool => |b| return arena.dupe(u8, &[_]u8{ '?', @intFromBool(b) }) catch Error.BackendError,
+            .null => return arena.dupe(u8, &[_]u8{0}),
+            .bool => |b| return arena.dupe(u8, &[_]u8{ '?', @intFromBool(b) }),
             .integer => |i| {
-                var buf = arena.alloc(u8, 9) catch return Error.BackendError;
+                var buf = try arena.alloc(u8, 9);
                 buf[0] = 'q';
                 std.mem.writeInt(i64, buf[1..9], i, .little);
                 return buf;
             },
             .float => |f| {
-                var buf = arena.alloc(u8, 9) catch return Error.BackendError;
+                var buf = try arena.alloc(u8, 9);
                 buf[0] = 'd';
                 std.mem.writeInt(u64, buf[1..9], @bitCast(f), .little);
                 return buf;
             },
             .string => |s| {
-                var buf = arena.alloc(u8, s.len + 1) catch return Error.BackendError;
+                var buf = try arena.alloc(u8, s.len + 1);
                 buf[0] = 's';
                 @memcpy(buf[1..], s);
                 return buf;
@@ -135,7 +134,7 @@ pub const SqliteStore = struct {
                 // Raw JSON (begins '[' or '{') — matches Moonraker's list/dict.
                 var aw: std.Io.Writer.Allocating = .init(arena);
                 var jw: json.Stringify = .{ .writer = &aw.writer };
-                jw.write(value) catch return Error.BackendError;
+                jw.write(value) catch return Error.OutOfMemory;
                 return aw.written();
             },
         }
@@ -154,8 +153,11 @@ pub const SqliteStore = struct {
                 if (bytes.len < 9) return Error.BackendError;
                 return .{ .float = @bitCast(std.mem.readInt(u64, bytes[1..9], .little)) };
             },
-            's' => return .{ .string = arena.dupe(u8, bytes[1..]) catch return Error.BackendError },
-            '[', '{' => return json.parseFromSliceLeaky(json.Value, arena, bytes, .{}) catch Error.BackendError,
+            's' => return .{ .string = try arena.dupe(u8, bytes[1..]) },
+            '[', '{' => return json.parseFromSliceLeaky(json.Value, arena, bytes, .{}) catch |err| switch (err) {
+                error.OutOfMemory => Error.OutOfMemory,
+                else => Error.BackendError,
+            },
             // Moonraker `decode_record` raises on an unknown format byte.
             else => return Error.BackendError,
         }
@@ -166,8 +168,8 @@ pub const SqliteStore = struct {
     fn getRecordRaw(self: *SqliteStore, arena: std.mem.Allocator, namespace: []const u8, record_key: []const u8) Error!?[]u8 {
         const stmt = try self.prepare("SELECT value FROM namespace_store WHERE namespace=?1 AND key=?2");
         defer _ = c.sqlite3_finalize(stmt);
-        bindText(stmt, 1, namespace);
-        bindText(stmt, 2, record_key);
+        try bindText(stmt, 1, namespace);
+        try bindText(stmt, 2, record_key);
         const rc = c.sqlite3_step(stmt);
         if (rc == c.SQLITE_DONE) return null;
         if (rc != c.SQLITE_ROW) return Error.BackendError;
@@ -175,22 +177,22 @@ pub const SqliteStore = struct {
         if (n == 0) return try arena.alloc(u8, 0);
         const ptr = c.sqlite3_column_blob(stmt, 0) orelse return try arena.alloc(u8, 0);
         const src = @as([*]const u8, @ptrCast(ptr))[0..n];
-        return arena.dupe(u8, src) catch Error.BackendError;
+        return try arena.dupe(u8, src);
     }
 
     fn putRecordRaw(self: *SqliteStore, namespace: []const u8, record_key: []const u8, value: ?[]const u8) Error!void {
         if (value) |v| {
             const stmt = try self.prepare("INSERT OR REPLACE INTO namespace_store (namespace,key,value) VALUES (?1,?2,?3)");
             defer _ = c.sqlite3_finalize(stmt);
-            bindText(stmt, 1, namespace);
-            bindText(stmt, 2, record_key);
+            try bindText(stmt, 1, namespace);
+            try bindText(stmt, 2, record_key);
             _ = c.sqlite3_bind_blob(stmt, 3, v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT);
             if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return Error.BackendError;
         } else {
             const stmt = try self.prepare("DELETE FROM namespace_store WHERE namespace=?1 AND key=?2");
             defer _ = c.sqlite3_finalize(stmt);
-            bindText(stmt, 1, namespace);
-            bindText(stmt, 2, record_key);
+            try bindText(stmt, 1, namespace);
+            try bindText(stmt, 2, record_key);
             if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return Error.BackendError;
         }
     }
@@ -198,6 +200,8 @@ pub const SqliteStore = struct {
     // --- DataStore API (shared dotted-key path helpers) -------------------
 
     pub fn getItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
+        self.lockRmw();
+        defer self.unlockRmw();
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse {
@@ -267,6 +271,16 @@ pub const SqliteStore = struct {
         const segs = pk.slice();
         self.lockRmw();
         defer self.unlockRmw();
+        const migrated_history = segs.len == 1 and std.mem.eql(u8, namespace, "history");
+        if (migrated_history) try self.execSql("BEGIN IMMEDIATE");
+        errdefer if (migrated_history) self.execSql("ROLLBACK") catch |err|
+            std.debug.print("phobos: warning: history deletion rollback failed: {}\n", .{err});
+        const removed = try self.deleteRecord(arena, namespace, segs);
+        if (migrated_history) try self.execSql("COMMIT");
+        return removed;
+    }
+
+    fn deleteRecord(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, segs: []const []const u8) Error!json.Value {
         // A migrated `job_history` row is a whole history record; delete it
         // with its key so it cannot reappear behind the removed KV record.
         const table_job: ?json.Value = if (segs.len == 1 and std.mem.eql(u8, namespace, "history"))
@@ -286,6 +300,8 @@ pub const SqliteStore = struct {
     }
 
     pub fn listNamespaces(self: *SqliteStore, arena: std.mem.Allocator) Error![][]const u8 {
+        self.lockRmw();
+        defer self.unlockRmw();
         const stmt = try self.prepare("SELECT DISTINCT namespace FROM namespace_store");
         defer _ = c.sqlite3_finalize(stmt);
         var out: std.ArrayList([]const u8) = .empty;
@@ -300,9 +316,11 @@ pub const SqliteStore = struct {
     }
 
     pub fn getNamespace(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8) Error!json.Value {
+        self.lockRmw();
+        defer self.unlockRmw();
         const stmt = try self.prepare("SELECT key, value FROM namespace_store WHERE namespace=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        bindText(stmt, 1, namespace);
+        try bindText(stmt, 1, namespace);
         var obj: json.ObjectMap = .empty;
         var rc = c.sqlite3_step(stmt);
         while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(stmt)) {
@@ -329,7 +347,7 @@ pub const SqliteStore = struct {
     fn hasTable(self: *SqliteStore, name: []const u8) Error!bool {
         const stmt = try self.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        bindText(stmt, 1, name);
+        try bindText(stmt, 1, name);
         return switch (c.sqlite3_step(stmt)) {
             c.SQLITE_ROW => true,
             c.SQLITE_DONE => false,
@@ -578,6 +596,17 @@ test "SqliteStore: record encode/decode round-trips every type" {
     try testing.expectError(Error.BackendError, SqliteStore.decodeRecord(a, "zzz"));
 }
 
+test "SqliteStore: binding errors propagate before executing a query" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    const stmt = try s.prepare("SELECT ?1");
+    defer _ = c.sqlite3_finalize(stmt);
+    try testing.expectError(Error.BackendError, SqliteStore.bindText(stmt, 2, "outside parameter range"));
+    try SqliteStore.bindText(stmt, 1, "value");
+    try testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stmt));
+    try testing.expectEqualStrings("value", colTextRaw(stmt, 0).?);
+}
+
 /// Moonraker's `job_history` schema with rows 1, 2 and a foreign negative id.
 fn createJobHistory(s: *SqliteStore) !void {
     try s.execSql(
@@ -633,6 +662,48 @@ test "SqliteStore: an unreadable job_history table is an error, not an empty his
     try s.execSql("CREATE TABLE job_history (unrelated TEXT);");
     try testing.expectError(Error.BackendError, s.getNamespace(a, "history"));
     try testing.expectError(Error.BackendError, s.getItem(a, "history", "000001"));
+}
+
+test "SqliteStore: failed history deletion rolls back both persisted copies" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    try s.insertItem(a, "history", "000001", .{ .string = "shadow" });
+    try s.execSql("CREATE TRIGGER prevent_delete BEFORE DELETE ON namespace_store BEGIN SELECT RAISE(ABORT,'record unavailable'); END;");
+    try testing.expectError(Error.BackendError, s.deleteItem(a, "history", "000001"));
+    try testing.expectEqualStrings("shadow", (try s.getItem(a, "history", "000001")).?.string);
+    try testing.expectEqualStrings("a.gcode", (try s.historyJobFromTable(a, "000001")).?.object.get("filename").?.string);
+    try s.execSql("DROP TRIGGER prevent_delete");
+    _ = try s.deleteItem(a, "history", "000001");
+    try testing.expect((try s.historyJobFromTable(a, "000001")) == null);
+}
+
+test "fuzz SqliteStore: history deletion commits or preserves both copies" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var s = try SqliteStore.open(testing.io, ":memory:");
+            defer s.deinit();
+            try createJobHistory(&s);
+            var bytes: [8]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            try s.insertItem(a, "history", "000001", .{ .integer = std.mem.readInt(i64, &bytes, .little) });
+            const fail = bytes[0] & 1 != 0;
+            if (fail) try s.execSql("CREATE TRIGGER prevent_delete BEFORE DELETE ON namespace_store BEGIN SELECT RAISE(ABORT,'record unavailable'); END;");
+            if (fail) {
+                try testing.expectError(Error.BackendError, s.deleteItem(a, "history", "000001"));
+            } else {
+                _ = try s.deleteItem(a, "history", "000001");
+            }
+            try testing.expectEqual(fail, (try s.getItem(a, "history", "000001")) != null);
+            try testing.expectEqual(fail, (try s.historyJobFromTable(a, "000001")) != null);
+        }
+    }.run, .{});
 }
 
 test "fuzz SqliteStore history keys: arbitrary job keys never panic" {

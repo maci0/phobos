@@ -113,7 +113,7 @@ pub const TestServer = struct {
         // Test clients connect from loopback without credentials. A config
         // with `[authorization] trusted_clients` replaces this table.
         try self.app.auth_ctx.setTrustedClients("127.0.0.1 ::1");
-        if (config_path) |path| self.app.setConfig(self.io, path);
+        if (config_path) |path| try self.app.setConfig(self.io, path);
 
         self.srv = try alloc.create(http_transport.Server);
         errdefer alloc.destroy(self.srv);

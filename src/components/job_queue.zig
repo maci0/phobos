@@ -134,8 +134,8 @@ pub const JobQueueCtx = struct {
             .delay_thread = null,
             .delay_cancel = .unset,
         };
-        ctx.loadFromStore() catch |err|
-            std.debug.print("phobos: warning: persisted job queue not loaded: {}\n", .{err});
+        errdefer ctx.deinit();
+        try ctx.loadFromStore();
         return ctx;
     }
 
@@ -539,27 +539,40 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
         if (!c.fileExists(filename)) return error.InvalidParams;
     }
 
+    var pending: std.ArrayList(QueuedJob) = .empty;
+    defer {
+        for (pending.items) |*job| job.deinit(c.gpa);
+        pending.deinit(c.gpa);
+    }
+    try pending.ensureTotalCapacity(c.gpa, files.len);
+    for (files) |file| {
+        const job_id = try genJobId(c.clock_io, c.gpa, c.job_seq.fetchAdd(1, .monotonic));
+        errdefer c.gpa.free(job_id);
+        const filename = try c.gpa.dupe(u8, file);
+        errdefer c.gpa.free(filename);
+        pending.appendAssumeCapacity(.{
+            .filename = filename,
+            .job_id = job_id,
+            .time_added = nowSecs(c.clock_io),
+        });
+    }
+
     var set_ready = false;
     {
         c.lockJobs();
         defer c.unlockJobs();
         if (reset) {
+            try c.jobs.ensureTotalCapacity(c.gpa, pending.items.len);
+        } else {
+            try c.jobs.ensureUnusedCapacity(c.gpa, pending.items.len);
+        }
+        if (reset) {
             for (c.jobs.items) |*j| j.deinit(c.gpa);
             c.jobs.clearRetainingCapacity();
         }
 
-        for (files) |filename| {
-            const job_id = try genJobId(c.clock_io, c.gpa, c.job_seq.fetchAdd(1, .monotonic));
-            errdefer c.gpa.free(job_id);
-            const fname_owned = try c.gpa.dupe(u8, filename);
-            errdefer c.gpa.free(fname_owned);
-            const time_added = nowSecs(c.clock_io);
-            try c.jobs.append(c.gpa, .{
-                .filename = fname_owned,
-                .job_id = job_id,
-                .time_added = time_added,
-            });
-        }
+        c.jobs.appendSliceAssumeCapacity(pending.items);
+        pending.clearRetainingCapacity();
         // Jobs queued during a print continue automatically after it.
         set_ready = c.automatic and !c.pause_requested and c.isPrinting();
     }
@@ -2364,8 +2377,36 @@ test "persisted queue loading cleans up partial jobs and rejects non-string fiel
     complete.deinit();
     for (0..count) |index| {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
-        var ctx = try JobQueueCtx.init(failing.allocator(), testing.io, db.dataStore(), &bus);
-        ctx.deinit();
+        if (JobQueueCtx.init(failing.allocator(), testing.io, db.dataStore(), &bus)) |loaded| {
+            var ctx = loaded;
+            ctx.deinit();
+        } else |err| try testing.expectEqual(error.OutOfMemory, err);
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
+}
+
+test "post_job allocation failures preserve the complete existing queue" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
+            defer db.deinit();
+            var bus: NotifyBus = undefined;
+            var ctx = try JobQueueCtx.init(alloc, testing.io, db.dataStore(), &bus);
+            defer ctx.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const first = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"filenames\":[\"original.gcode\"]}", .{});
+            _ = try handlePostJob(@ptrCast(&ctx), first, a);
+            const replacement = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"filenames\":[\"one.gcode\",\"two.gcode\"],\"reset\":true}", .{});
+            _ = handlePostJob(@ptrCast(&ctx), replacement, a) catch |err| {
+                try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
+                try testing.expectEqualStrings("original.gcode", ctx.jobs.items[0].filename);
+                return err;
+            };
+            try testing.expectEqual(@as(usize, 2), ctx.jobs.items.len);
+            try testing.expectEqualStrings("one.gcode", ctx.jobs.items[0].filename);
+            try testing.expectEqualStrings("two.gcode", ctx.jobs.items[1].filename);
+        }
+    }.run, .{});
 }

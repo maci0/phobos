@@ -529,7 +529,7 @@ pub const HistoryCtx = struct {
             const id = std.fmt.parseInt(u64, je.key, 16) catch continue;
             if (id > max_id) max_id = id;
         }
-        return max_id + 1;
+        return std.math.add(u64, max_id, 1) catch error.JobIdExhausted;
     }
 
     /// Increment the total_jobs counter in totals.
@@ -1789,6 +1789,44 @@ test "finishJob: a non-object history record clears the job instead of panicking
     ctx.onJobStateChanged(JobEvent.complete, ps, ps);
     try testing.expect(ctx.current_job_id == null);
     try testing.expectEqual(@as(i64, 1), (try mem.dataStore().getItem(a, ns_history, id_str)).?.integer);
+}
+
+test "history refuses an exhausted job id without overwriting history" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    try insertJob(&mem, a, "FFFFFFFFFFFFFFFF", "{\"filename\":\"last.gcode\"}");
+    try testing.expectError(error.JobIdExhausted, ctx.addJob(.empty));
+    try testing.expect(ctx.getCurrentJobId() == null);
+    const jobs = try loadAllJobs(&ctx, a);
+    try testing.expectEqual(@as(usize, 1), jobs.len);
+    try testing.expectEqualStrings("last.gcode", jobs[0].val.object.get("filename").?.string);
+}
+
+test "fuzz history job id increment checks overflow" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var bus: NotifyBus = undefined;
+            var ctx = HistoryCtx{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+            const id = smith.valueRangeAtMostWithHash(u64, 0, std.math.maxInt(u64), 0);
+            const key = try std.fmt.allocPrint(a, "{X:0>6}", .{id});
+            try insertJob(&mem, a, key, "{}");
+            if (id == std.math.maxInt(u64)) {
+                try testing.expectError(error.JobIdExhausted, ctx.nextJobId(a));
+            } else {
+                try testing.expectEqual(id + 1, try ctx.nextJobId(a));
+            }
+        }
+    }.run, .{});
 }
 
 test "handleList: start applies only with a positive limit and is clamped" {

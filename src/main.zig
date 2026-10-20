@@ -286,7 +286,7 @@ fn run(init: std.process.Init) !void {
     std.debug.print("phobos: bind host='{s}' port={d}\n", .{ host, bind_port });
 
     // Select the DataStore backend from `[database] backend` (sqlite | file).
-    const db_backend = resolveDbBackend(alloc, aio, config_path);
+    const db_backend = try resolveDbBackend(alloc, aio, config_path);
     const db_path = try resolveDbPath(alloc, init.arena.allocator(), aio, config_path, data_path);
     std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(db_backend), if (db_path) |p| p else "" });
 
@@ -295,7 +295,7 @@ fn run(init: std.process.Init) !void {
     defer server_app.deinit(aio);
 
     if (config_path) |path| {
-        server_app.setConfig(aio, path);
+        try server_app.setConfig(aio, path);
     }
 
     var srv = server_app.httpServer(aio);
@@ -328,14 +328,15 @@ fn refreshAnnouncements(server_app: *app.App, aio: std.Io) void {
 }
 
 /// Read `[database] backend` (sqlite | file) from the config; defaults to sqlite.
-pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]const u8) app.StoreBackend {
+pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]const u8) !app.StoreBackend {
     const path = config_path orelse return .sqlite;
     var cfg = config.ConfigParser.init(gpa);
     defer cfg.deinit();
-    cfg.parseFile(aio, path) catch return .sqlite;
+    try cfg.parseFile(aio, path);
     const v = cfg.get("database", "backend") orelse return .sqlite;
     if (std.mem.eql(u8, v, "file")) return .file;
-    return .sqlite;
+    if (std.mem.eql(u8, v, "sqlite")) return .sqlite;
+    return error.InvalidDatabaseBackend;
 }
 
 /// Read `[database] path` when the config sets it. Otherwise, a `-d` data
@@ -352,11 +353,10 @@ pub fn resolveDbPath(
     if (config_path) |path| {
         var cfg = config.ConfigParser.init(gpa);
         defer cfg.deinit();
-        if (cfg.parseFile(aio, path)) {
-            if (cfg.get("database", "path")) |v| {
-                if (v.len > 0) return try arena_alloc.dupe(u8, v);
-            }
-        } else |_| {}
+        try cfg.parseFile(aio, path);
+        if (cfg.get("database", "path")) |v| {
+            if (v.len > 0) return try arena_alloc.dupe(u8, v);
+        }
     }
     const dp = data_path orelse return null;
     return try std.fs.path.join(arena_alloc, &.{ dp, "database", "moonraker-sql.db" });
@@ -377,10 +377,7 @@ pub fn resolveBindAddr(
 
     var cfg = config.ConfigParser.init(gpa);
     defer cfg.deinit();
-    cfg.parseFile(aio, path) catch |err| {
-        std.debug.print("phobos: warning: could not parse config '{s}': {} — using defaults\n", .{ path, err });
-        return .{ default_host, default_port };
-    };
+    try cfg.parseFile(aio, path);
 
     const host, const port = try extractBindAddr(&cfg, default_host, default_port);
     // Duplicate into arena_alloc: cfg.deinit() frees the original.
@@ -826,6 +823,44 @@ test "resolveDbPath: -d uses moonraker-sql.db unless the config sets a path" {
     try std.testing.expectEqualStrings("/var/lib/moonraker-sql.db", over);
 
     try std.testing.expect((try resolveDbPath(alloc, a, aio, null, null)) == null);
+}
+
+test "startup resolvers reject invalid config instead of choosing defaults" {
+    const aio = std.testing.io;
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(aio, .{ .sub_path = "bad.conf", .data = "[database]\nbackend: file\npath: alternate\n[broken\n" });
+    const path = try tmp.dir.realPathFileAlloc(aio, "bad.conf", alloc);
+    defer alloc.free(path);
+    try std.testing.expectError(error.ParseError, resolveDbBackend(alloc, aio, path));
+    try std.testing.expectError(error.ParseError, resolveDbPath(alloc, alloc, aio, path, "/unused"));
+    try std.testing.expectError(error.ParseError, resolveBindAddr(alloc, alloc, aio, path));
+    try tmp.dir.writeFile(aio, .{ .sub_path = "bad.conf", .data = "[database]\nbackend: misspelled\n" });
+    try std.testing.expectError(error.InvalidDatabaseBackend, resolveDbBackend(alloc, aio, path));
+    try tmp.dir.writeFile(aio, .{ .sub_path = "bad.conf", .data = "[database]\nbackend: file\n" });
+    try std.testing.expectEqual(app.StoreBackend.file, try resolveDbBackend(alloc, aio, path));
+    try std.testing.expectEqual(app.StoreBackend.sqlite, try resolveDbBackend(alloc, aio, null));
+}
+
+test "fuzz startup resolvers reject malformed config consistently" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            for (&bytes) |*byte| byte.* = 'a' + byte.* % 26;
+            var buf: [128]u8 = undefined;
+            const data = try std.fmt.bufPrint(&buf, "[database]\nbackend: {s}\n[broken\n", .{bytes});
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.conf", .data = data });
+            const path = try tmp.dir.realPathFileAlloc(std.testing.io, "bad.conf", std.testing.allocator);
+            defer std.testing.allocator.free(path);
+            try std.testing.expectError(error.ParseError, resolveDbBackend(std.testing.allocator, std.testing.io, path));
+            try std.testing.expectError(error.ParseError, resolveDbPath(std.testing.allocator, std.testing.allocator, std.testing.io, path, null));
+            try std.testing.expectError(error.ParseError, resolveBindAddr(std.testing.allocator, std.testing.allocator, std.testing.io, path));
+        }
+    }.run, .{});
 }
 
 test {
