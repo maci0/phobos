@@ -131,34 +131,38 @@ pub const WsTestConn = struct {
         return .{ .opcode = opcode, .data = payload };
     }
 
-    /// Send a JSON-RPC text request and return the result payload as owned JSON
-    /// bytes (the full JSON-RPC response envelope). Caller frees with `alloc`.
+    /// Frames `callRaw` skips (pings and notifications) before it fails with
+    /// `error.NoResponse`.
+    const max_skipped_frames = 64;
+
+    /// Send a JSON-RPC text request and return the first frame that is not a
+    /// ping or a JSON-RPC notification (an object with no "id"), as owned
+    /// bytes. Caller frees with `alloc`.
     pub fn callRaw(self: *WsTestConn, alloc: std.mem.Allocator, request_json: []const u8) ![]u8 {
         self.read_deadline = .fromNow(self.io, .{ .raw = .fromSeconds(self.read_timeout_secs), .clock = .awake });
         defer self.read_deadline = null;
         try self.sendFrame(.text, request_json);
-        var frame = try self.readFrame();
-        // Tolerate interleaved server->client frames that are not the response.
-        // Limit retries to avoid infinite loops on a broken stream.
-        var retries: usize = 64;
-        while (retries > 0) {
-            retries -= 1;
-            // Handle ping frames: reply pong and read again.
-            while (frame.opcode == .ping) {
+        for (0..max_skipped_frames) |_| {
+            const frame = try self.readFrame();
+            defer self.alloc.free(frame.data);
+            if (frame.opcode == .ping) {
                 try self.sendFrame(.pong, frame.data);
-                self.alloc.free(frame.data);
-                frame = try self.readFrame();
+                continue;
             }
-            // Skip frames that lack an "id" (JSON-RPC notifications); the
-            // simplest check is a substring search for `"id"` since every
-            // valid JSON-RPC response/request MUST have an "id" key, while
-            // notifications omit it.
-            if (std.mem.indexOf(u8, frame.data, "\"id\"")) |_| break;
-            self.alloc.free(frame.data);
-            frame = try self.readFrame();
+            if (try isNotification(self.alloc, frame.data)) continue;
+            return alloc.dupe(u8, frame.data);
         }
-        defer self.alloc.free(frame.data);
-        return alloc.dupe(u8, frame.data);
+        return error.NoResponse;
+    }
+
+    fn isNotification(alloc: std.mem.Allocator, data: []const u8) !bool {
+        const parsed = std.json.parseFromSlice(std.json.Value, alloc, data, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // Not JSON, so not a notification: hand it to the caller to fail on.
+            else => return false,
+        };
+        defer parsed.deinit();
+        return parsed.value == .object and parsed.value.object.get("id") == null;
     }
 
     /// Convenience: issue `{"jsonrpc":"2.0","method":<method>,"params":<params>,"id":1}`
@@ -343,6 +347,46 @@ test "WS: unknown method returns -32601 over the WS channel" {
     try std.testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
 }
 
+test "WS: call skips a notification whose params carry an id key" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    var c = try connect(ts, alloc);
+    defer c.close();
+    alloc.free(try c.call(alloc, "server.websocket.id", null));
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var item: std.json.ObjectMap = .empty;
+    try item.put(aa, "id", .{ .integer = 7 });
+    var params: std.json.Array = .init(aa);
+    try params.append(.{ .object = item });
+    try ts.emit(notify.names.gcode_response, .{ .array = params });
+
+    const env = try c.call(alloc, "server.websocket.id", null);
+    defer alloc.free(env);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, env, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("result").?.object.get("websocket_id") != null);
+}
+
+test "WS: call fails instead of returning a notification when no response arrives" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    var c = try connect(ts, alloc);
+    defer c.close();
+    alloc.free(try c.call(alloc, "server.websocket.id", null));
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    for (0..WsTestConn.max_skipped_frames) |_| {
+        try ts.emit(notify.names.gcode_response, try arrayParam(arena.allocator(), "noise"));
+    }
+    try std.testing.expectError(error.NoResponse, c.call(alloc, "server.websocket.id", null));
+}
+
 test "WS: connection cleanup removes it from Connections after disconnect" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
@@ -388,27 +432,25 @@ test "fuzz_ws_client: arbitrary text frames never crash the server, always JSON 
             var raw: [200]u8 = undefined;
             smith.bytesWithHash(&raw, 0);
             const n = @as(usize, raw[0]) % raw.len;
-            const payload = raw[0..n];
 
-            // Send arbitrary bytes as a text frame. A notification or
-            // malformed-but-no-id request yields no response; anything with an
-            // id yields a JSON-RPC envelope. We can't know which, so send a
-            // well-formed wrapper request whose params carry the fuzz bytes
-            // base64-free (as a JSON string is unsafe), so instead embed length.
-            var req_buf: [256]u8 = undefined;
-            const req = std.fmt.bufPrint(
-                &req_buf,
-                "{{\"jsonrpc\":\"2.0\",\"method\":\"server.info\",\"id\":{d}}}",
-                .{n},
-            ) catch return;
-            _ = payload;
-
-            const env = try cx.c.callRaw(std.heap.smp_allocator, req);
-            defer std.heap.smp_allocator.free(env);
-            const parsed = std.json.parseFromSlice(std.json.Value, std.heap.smp_allocator, env, .{}) catch {
-                return error.FuzzResponseNotJson;
-            };
-            parsed.deinit();
+            // The fuzz bytes may or may not draw a reply (a notification or a
+            // no-id request draws none). The sentinel request after it always
+            // does, so every frame up to its reply must be JSON, and the
+            // connection must survive.
+            try cx.c.sendFrame(.text, raw[0..n]);
+            try cx.c.sendFrame(.text,
+                \\{"jsonrpc":"2.0","method":"server.websocket.id","id":"fuzz-sentinel"}
+            );
+            while (true) {
+                const frame = try nextDataFrame(cx.c);
+                defer cx.c.alloc.free(frame.data);
+                const parsed = std.json.parseFromSlice(std.json.Value, std.heap.smp_allocator, frame.data, .{}) catch
+                    return error.FuzzResponseNotJson;
+                defer parsed.deinit();
+                if (parsed.value != .object) continue;
+                const id = parsed.value.object.get("id") orelse continue;
+                if (id == .string and std.mem.eql(u8, id.string, "fuzz-sentinel")) break;
+            }
         }
     }.run, .{});
 }
@@ -442,20 +484,6 @@ fn nextDataFrame(c: *WsTestConn) anyerror!DataFrame {
     }
 }
 
-/// Like `nextDataFrame` but skips `notify_proc_stat_update` frames emitted by
-/// the machine component's background proc_stat timer. The skip is a substring
-/// match — avoids a full JSON parse on every frame.
-fn nextDataFrameSkipProcStat(c: *WsTestConn) anyerror!DataFrame {
-    while (true) {
-        const f = try nextDataFrame(c);
-        if (std.mem.indexOf(u8, f.data, "notify_proc_stat_update") != null) {
-            c.alloc.free(f.data);
-            continue;
-        }
-        return f;
-    }
-}
-
 test "WS: client receives a server-emitted notification with the Moonraker wire shape" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
@@ -473,7 +501,7 @@ test "WS: client receives a server-emitted notification with the Moonraker wire 
     defer arena.deinit();
     try ts.emit(notify.names.gcode_response, try arrayParam(arena.allocator(), "ok\n"));
 
-    const frame = try nextDataFrameSkipProcStat(c);
+    const frame = try nextDataFrame(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -508,7 +536,7 @@ test "WS: notifications arrive in emit order" {
 
     const want = [_][]const u8{ "first", "second", "third" };
     for (want) |w| {
-        const frame = try nextDataFrameSkipProcStat(c);
+        const frame = try nextDataFrame(c);
         defer alloc.free(frame.data);
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
         defer parsed.deinit();
@@ -563,8 +591,7 @@ test "WS: response and notifications never interleave (each frame is intact vali
     try fut.await(ts.io);
 
     // We expect notif_count notifications plus exactly one response (id:99),
-    // each a self-contained valid JSON object, in some order. Background
-    // proc_stat_update frames are skipped without counting.
+    // each a self-contained valid JSON object, in some order.
     var got_response = false;
     var got_notifs: usize = 0;
     while (got_notifs < notif_count or !got_response) {
@@ -578,8 +605,6 @@ test "WS: response and notifications never interleave (each frame is intact vali
             try std.testing.expectEqual(@as(i64, 99), idv.integer);
             try std.testing.expect(obj.get("result") != null);
             got_response = true;
-        } else if (std.mem.eql(u8, obj.get("method").?.string, "notify_proc_stat_update")) {
-            // Skip background proc_stat_update frames.
         } else {
             try std.testing.expectEqualStrings("notify_gcode_response", obj.get("method").?.string);
             got_notifs += 1;
@@ -598,21 +623,9 @@ test "WS: response and notifications never interleave (each frame is intact vali
 //
 // Notifications are emitted synchronously inside the handler (under the Core
 // lock), so the frame is already in the kernel buffer by the time the HTTP
-// response returns. We set a receive timeout on the underlying socket before
-// each read so a silent emission regression fails with `error.Timeout` instead
-// of hanging.
+// response returns. `nextDataFrame` reads under `read_timeout_secs`, so a
+// silent emission regression fails with `error.Timeout` instead of hanging.
 // ---------------------------------------------------------------------------
-
-/// Set a receive timeout on the WS client's underlying socket. The next read
-/// that blocks longer than `secs` seconds will return `error.Timeout`.
-fn setReadTimeout(c: *WsTestConn, secs: u32) void {
-    c.read_timeout_secs = secs;
-}
-
-/// Restore the default receive timeout.
-fn resetReadTimeout(c: *WsTestConn) void {
-    c.read_timeout_secs = WsTestConn.default_read_timeout_secs;
-}
 
 test "WS: spoolman POST spool_id emits notify_active_spool_set" {
     const alloc = std.testing.allocator;
@@ -633,9 +646,8 @@ test "WS: spoolman POST spool_id emits notify_active_spool_set" {
     defer alloc.free(body);
 
     // Bounded wait: set a 3-second receive timeout so a regression fails fast.
-    setReadTimeout(c, 3);
-    defer resetReadTimeout(c);
-    const frame = try nextDataFrameSkipProcStat(c);
+    c.read_timeout_secs = 3;
+    const frame = try nextDataFrame(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -665,9 +677,8 @@ test "WS: webcam POST item emits notify_webcams_changed" {
     );
     defer alloc.free(body);
 
-    setReadTimeout(c, 3);
-    defer resetReadTimeout(c);
-    const frame = try nextDataFrameSkipProcStat(c);
+    c.read_timeout_secs = 3;
+    const frame = try nextDataFrame(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -696,23 +707,22 @@ test "WS: job_queue POST job emits notify_job_queue_changed" {
     alloc.free(env);
 
     // The job queue now rejects nonexistent files, so create it first. The
-    // upload emits its own notify_filelist_changed; drain that (and any
-    // proc_stat) so the next read sees the job-queue notification cleanly.
+    // upload emits its own notify_filelist_changed; drain until a read times
+    // out so the next read sees the job-queue notification.
     const up = try ts.uploadFile(alloc, "gcodes", null, "test.gcode", "G28\n");
     alloc.free(up);
-    setReadTimeout(c, 1);
-    while (nextDataFrameSkipProcStat(c)) |f| {
+    c.read_timeout_secs = 1;
+    while (nextDataFrame(c)) |f| {
         alloc.free(f.data);
-    } else |_| {}
+    } else |err| if (err != error.Timeout) return err;
 
     const body = try ts.postJson(alloc, "/server/job_queue/job",
         \\{"filenames":["test.gcode"]}
     );
     defer alloc.free(body);
 
-    setReadTimeout(c, 3);
-    defer resetReadTimeout(c);
-    const frame = try nextDataFrameSkipProcStat(c);
+    c.read_timeout_secs = 3;
+    const frame = try nextDataFrame(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -748,9 +758,8 @@ test "WS: power device action=on emits notify_power_changed" {
     );
     defer alloc.free(body);
 
-    setReadTimeout(c, 3);
-    defer resetReadTimeout(c);
-    const frame = try nextDataFrameSkipProcStat(c);
+    c.read_timeout_secs = 3;
+    const frame = try nextDataFrame(c);
     defer alloc.free(frame.data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
@@ -774,12 +783,12 @@ test "WS deadline reads buffered frames and permits reuse after an idle timeout"
     @memcpy(client.reader.interface.buffer[0..3], &[_]u8{ 0x81, 1, 'x' });
     client.reader.interface.seek = 0;
     client.reader.interface.end = 3;
-    setReadTimeout(client, 0);
+    client.read_timeout_secs = 0;
     const frame = try nextDataFrame(client);
     defer std.testing.allocator.free(frame.data);
     try std.testing.expectEqualStrings("x", frame.data);
     try std.testing.expectError(error.Timeout, nextDataFrame(client));
-    resetReadTimeout(client);
+    client.read_timeout_secs = WsTestConn.default_read_timeout_secs;
     const response = try client.call(std.testing.allocator, "server.info", null);
     defer std.testing.allocator.free(response);
     try std.testing.expect(std.mem.indexOf(u8, response, "phobos") != null);
@@ -793,6 +802,6 @@ test "WS deadlines cover a stalled payload after a buffered header" {
     @memcpy(client.reader.interface.buffer[0..2], &[_]u8{ 0x81, 4 });
     client.reader.interface.seek = 0;
     client.reader.interface.end = 2;
-    setReadTimeout(client, 0);
+    client.read_timeout_secs = 0;
     try std.testing.expectError(error.Timeout, nextDataFrame(client));
 }
