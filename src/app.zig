@@ -609,7 +609,7 @@ pub const App = struct {
 
         const file_ctx = try alloc.create(FileCtx);
         errdefer alloc.destroy(file_ctx);
-        file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus, .job_state = job_state_ctx };
+        file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus, .job_state = job_state_ctx, .server_info = info };
         analysis_ctx.files = file_ctx;
 
         // --- Machine context (machine.* + machine.proc_stats) ---

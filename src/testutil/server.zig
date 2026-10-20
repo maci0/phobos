@@ -2220,14 +2220,18 @@ test "files: notify_filelist_changed emitted on upload with correct payload" {
 
 test "files: upload refuses to overwrite the gcode of an active print" {
     const alloc = std.testing.allocator;
+    var req_arena = std.heap.ArenaAllocator.init(alloc);
+    defer req_arena.deinit();
     const ts = try TestServer.init(alloc);
     defer ts.stop();
     const first = try ts.uploadFile(alloc, "gcodes", null, "busy.gcode", "G28\n");
     defer alloc.free(first);
     var ps: std.json.ObjectMap = .empty;
-    defer ps.deinit(alloc);
-    try ps.put(alloc, "state", .{ .string = "printing" });
-    try ps.put(alloc, "filename", .{ .string = "busy.gcode" });
+    try ps.put(req_arena.allocator(), "state", .{ .string = "printing" });
+    try ps.put(req_arena.allocator(), "filename", .{ .string = "busy.gcode" });
+    ts.app.info.state_mutex.lockUncancelable(ts.io);
+    ts.app.info.klippy_state = "ready";
+    ts.app.info.state_mutex.unlock(ts.io);
     const JobStateCtx = @import("../components/job_state.zig").JobStateCtx;
     ts.app.core.run(ts.io, JobStateCtx.statusUpdate, .{ ts.app.job_state_ctx, std.json.Value{ .object = ps } });
     const refused = try ts.uploadFile(alloc, "gcodes", null, "busy.gcode", "G1 X1\n");
@@ -2240,6 +2244,14 @@ test "files: upload refuses to overwrite the gcode of an active print" {
     const contents = try ts.get(alloc, "/server/files/gcodes/busy.gcode");
     defer alloc.free(contents);
     try std.testing.expectEqualStrings("G28\n", contents);
+    ts.app.info.state_mutex.lockUncancelable(ts.io);
+    ts.app.info.klippy_state = "shutdown";
+    ts.app.info.state_mutex.unlock(ts.io);
+    const unlocked = try ts.uploadFile(alloc, "gcodes", null, "busy.gcode", "G1 X1\n");
+    defer alloc.free(unlocked);
+    const replaced = try ts.get(alloc, "/server/files/gcodes/busy.gcode");
+    defer alloc.free(replaced);
+    try std.testing.expectEqualStrings("G1 X1\n", replaced);
 }
 
 test "Klipper remote methods run on the worker, not the Klippy reader" {

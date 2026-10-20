@@ -53,6 +53,7 @@ const confighelper = @import("../config/confighelper.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const gcode_metadata = @import("gcode_metadata.zig");
 const job_state_component = @import("job_state.zig");
+const ServerInfo = @import("../core/methods.zig").ServerInfo;
 
 const Registry = registry.Registry;
 const Dir = std.Io.Dir;
@@ -133,6 +134,8 @@ pub const FileCtx = struct {
     excludes_owned: bool = false,
     /// print_stats source for `checkInUse`. Borrowed; set by the App.
     job_state: ?*job_state_component.JobStateCtx = null,
+    /// Klippy readiness for the loaded-file lock. Borrowed; set by the App.
+    server_info: ?*ServerInfo = null,
 
     pub fn setIo(self: *FileCtx, io: std.Io) void {
         self.io = io;
@@ -271,10 +274,16 @@ pub const FileCtx = struct {
     }
 
     /// Moonraker `_handle_operation_check`: while a print is active (printing
-    /// or paused), refuse to change the loaded gcode file or, when `is_dir`,
-    /// a directory holding it. Reads job_state's snapshot, so call under Core.
+    /// or paused) and Klippy is ready, refuse to change the loaded gcode file
+    /// or, when `is_dir`, a directory holding it. Call under Core.
     pub fn checkInUse(self: *const FileCtx, path: Resolved, is_dir: bool) error{FileInUse}!void {
         if (!std.mem.eql(u8, path.root.name, "gcodes")) return;
+        if (self.server_info) |info| {
+            const aio = self.io orelse info.io;
+            if (aio) |i| info.state_mutex.lockUncancelable(i);
+            defer if (aio) |i| info.state_mutex.unlock(i);
+            if (!std.mem.eql(u8, info.klippy_state, "ready")) return;
+        }
         const js = self.job_state orelse return;
         if (!js.isActive()) return;
         const loaded = js.getLastStats().get("filename") orelse return;
@@ -440,25 +449,35 @@ pub const Resolved = struct {
 
 const max_path_links = 40;
 
-// Dir.Walker reopens directories with symlink following enabled. This walker
-// opens each subdirectory from its checked parent handle without following
-// links; entry names are single components. Links are reported, not entered.
+// Dir.Walker cannot accept checked child handles. Resolve linked directories
+// within the root, then open without following a replacement link.
 const RootWalker = struct {
     alloc: std.mem.Allocator,
+    base: Resolved,
+    mode: Mode,
     stack: std.ArrayList(Frame) = .empty,
+    visited: std.StringHashMapUnmanaged(void) = .empty,
+    directories: usize = 1,
     last_path: ?[]u8 = null,
 
-    const Frame = struct { dir: Dir, iter: Dir.Iterator, prefix: []u8 };
+    const max_directories = 4096;
+    const Mode = union(enum) { list, copy: []const u8 };
+    const Frame = struct { dir: Dir, iter: Dir.Iterator, prefix: []u8, canonical: []u8 };
     const Entry = struct { path: []const u8, kind: std.Io.File.Kind, dir: Dir, basename: []const u8 };
 
-    fn init(io: std.Io, alloc: std.mem.Allocator, base: Resolved) !RootWalker {
+    fn init(io: std.Io, alloc: std.mem.Allocator, base: Resolved, mode: Mode) !RootWalker {
         const dir = try base.openDirectory(io, alloc);
         errdefer dir.close(io);
         const prefix = try alloc.dupe(u8, "");
         errdefer alloc.free(prefix);
-        var self: RootWalker = .{ .alloc = alloc };
+        var canonical_buf: [Dir.max_path_bytes]u8 = undefined;
+        const canonical = try alloc.dupe(u8, canonical_buf[0..try dir.realPath(io, &canonical_buf)]);
+        errdefer alloc.free(canonical);
+        var self: RootWalker = .{ .alloc = alloc, .base = base, .mode = mode };
         errdefer self.stack.deinit(alloc);
-        try self.stack.append(alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
+        errdefer self.visited.deinit(alloc);
+        if (mode == .list) try self.visited.put(alloc, canonical, {});
+        try self.stack.append(alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix, .canonical = canonical });
         return self;
     }
 
@@ -466,9 +485,13 @@ const RootWalker = struct {
         while (self.stack.pop()) |frame| {
             frame.dir.close(io);
             self.alloc.free(frame.prefix);
+            if (self.mode == .copy) self.alloc.free(frame.canonical);
         }
         if (self.last_path) |path| self.alloc.free(path);
         self.stack.deinit(self.alloc);
+        var keys = self.visited.keyIterator();
+        while (keys.next()) |key| self.alloc.free(key.*);
+        self.visited.deinit(self.alloc);
     }
 
     /// Entry storage remains valid until the next call or deinit.
@@ -481,22 +504,63 @@ const RootWalker = struct {
                 const frame = self.stack.pop().?;
                 frame.dir.close(io);
                 self.alloc.free(frame.prefix);
+                if (self.mode == .copy) self.alloc.free(frame.canonical);
                 continue;
             };
             const path = try std.fs.path.join(self.alloc, &.{ top.prefix, entry.name });
             errdefer self.alloc.free(path);
             const parent_dir = top.dir;
             // DT_UNKNOWN: ask the filesystem without following a link.
-            const kind = if (entry.kind != .unknown) entry.kind else if (parent_dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |st| st.kind else |_| .unknown;
+            var kind = if (entry.kind != .unknown) entry.kind else if (parent_dir.statFile(io, entry.name, .{ .follow_symlinks = false })) |st| st.kind else |_| .unknown;
+            const linked = kind == .sym_link;
+            if (linked) {
+                const child = try childResolved(self.alloc, self.base, path);
+                defer self.alloc.free(child.rel);
+                defer self.alloc.free(child.abs);
+                const st = if (self.mode == .copy) try child.stat(io, self.alloc) else try entryStat(io, self.alloc, parent_dir, entry.name, kind, child) orelse {
+                    self.alloc.free(path);
+                    continue;
+                };
+                if (st.kind == .directory) kind = .directory;
+            }
             if (kind == .directory) {
-                if (parent_dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false })) |dir| {
+                const opened = if (linked) blk: {
+                    const child = try childResolved(self.alloc, self.base, path);
+                    defer self.alloc.free(child.rel);
+                    defer self.alloc.free(child.abs);
+                    break :blk child.openDirectory(io, self.alloc);
+                } else parent_dir.openDir(io, entry.name, .{ .iterate = true, .follow_symlinks = false });
+                if (opened) |dir| enter: {
                     errdefer dir.close(io);
+                    var canonical_buf: [Dir.max_path_bytes]u8 = undefined;
+                    const canonical = try self.alloc.dupe(u8, canonical_buf[0..try dir.realPath(io, &canonical_buf)]);
+                    errdefer self.alloc.free(canonical);
+                    if (self.mode == .list) {
+                        if (self.visited.contains(canonical)) {
+                            self.alloc.free(canonical);
+                            dir.close(io);
+                            break :enter;
+                        }
+                    } else for (self.stack.items) |frame| {
+                        if (std.mem.eql(u8, frame.canonical, canonical)) return error.InvalidParams;
+                    }
+                    if (self.mode == .copy) {
+                        const destination = self.mode.copy;
+                        if (std.mem.eql(u8, destination, canonical) or
+                            (std.mem.startsWith(u8, destination, canonical) and destination.len > canonical.len and destination[canonical.len] == '/') or
+                            (std.mem.startsWith(u8, canonical, destination) and canonical.len > destination.len and canonical[destination.len] == '/')) return error.InvalidParams;
+                    }
+                    if (self.directories >= max_directories) return error.InvalidParams;
                     const prefix = try self.alloc.dupe(u8, path);
                     errdefer self.alloc.free(prefix);
-                    try self.stack.append(self.alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix });
+                    if (self.mode == .list) try self.visited.put(self.alloc, canonical, {});
+                    errdefer {
+                        if (self.mode == .list) _ = self.visited.remove(canonical);
+                    }
+                    try self.stack.append(self.alloc, .{ .dir = dir, .iter = dir.iterate(), .prefix = prefix, .canonical = canonical });
+                    self.directories += 1;
                 } else |err| switch (err) {
-                    // os.walk skips a directory it cannot list.
-                    error.AccessDenied, error.PermissionDenied => {},
+                    error.AccessDenied, error.PermissionDenied, error.NotFound, error.FileNotFound, error.NotDir, error.Forbidden => if (self.mode == .copy) return err,
                     else => return err,
                 }
             }
@@ -585,12 +649,12 @@ fn mtimeSecs(st: std.Io.File.Stat) f64 {
 
 /// Build a `{ "modified", "size", "permissions" }` object for a path, matching
 /// Moonraker's `get_path_info`. On stat failure returns the zeroed shape.
-fn buildPathInfo(alloc: std.mem.Allocator, st: ?std.Io.File.Stat, root: Root) !std.json.Value {
+fn buildPathInfo(alloc: std.mem.Allocator, st: ?std.Io.File.Stat, permissions: []const u8) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     if (st) |s| {
         try obj.put(alloc, "modified", .{ .float = mtimeSecs(s) });
         try obj.put(alloc, "size", .{ .integer = @intCast(s.size) });
-        try obj.put(alloc, "permissions", .{ .string = root.permissions() });
+        try obj.put(alloc, "permissions", .{ .string = permissions });
     } else {
         try obj.put(alloc, "modified", .{ .integer = 0 });
         try obj.put(alloc, "size", .{ .integer = 0 });
@@ -619,7 +683,7 @@ fn buildNotifyInfo(
     source: ?SourceItem,
 ) !std.json.Value {
     const resolved: Resolved = .{ .root = root, .rel = rel, .abs = abs };
-    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, root);
+    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, root.permissions());
     try item.object.put(alloc, "path", .{ .string = rel });
     try item.object.put(alloc, "root", .{ .string = root.name });
 
@@ -680,7 +744,7 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 
     var arr: std.json.Array = .init(alloc);
     const base: Resolved = .{ .root = root, .rel = "", .abs = root.path };
-    var walker = RootWalker.init(io, alloc, base) catch |err| switch (err) {
+    var walker = RootWalker.init(io, alloc, base, .list) catch |err| switch (err) {
         error.FileNotFound, error.NotFound, error.NotDir => return .{ .array = arr },
         else => return err,
     };
@@ -694,7 +758,7 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
         const rel = try alloc.dupe(u8, entry.path);
         const stat = try entryStat(io, alloc, entry.dir, entry.basename, entry.kind, .{ .root = root, .rel = rel, .abs = "" }) orelse continue;
         if (stat.kind != .file) continue;
-        var info = try buildPathInfo(alloc, stat, root);
+        var info = try buildPathInfo(alloc, stat, if (entry.kind == .sym_link) "r" else root.permissions());
         try info.object.put(alloc, "path", .{ .string = rel });
         try arr.append(info);
     }
@@ -713,7 +777,7 @@ pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 fn entryStat(io: std.Io, alloc: std.mem.Allocator, dir: Dir, name: []const u8, kind: std.Io.File.Kind, child: Resolved) !?std.Io.File.Stat {
     if (kind != .sym_link and kind != .unknown) return dir.statFile(io, name, .{ .follow_symlinks = false }) catch null;
     return child.stat(io, alloc) catch |err| switch (accessError(err)) {
-        error.NotFound, error.Forbidden => null,
+        error.NotFound, error.Forbidden, error.InvalidParams => null,
         else => |e| e,
     };
 }
@@ -740,11 +804,12 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
+        const kind = if (entry.kind == .unknown) (dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch continue).kind else entry.kind;
         const child_rel = if (resolved.rel.len == 0) entry.name else try std.fmt.allocPrint(alloc, "{s}/{s}", .{ resolved.rel, entry.name });
         if (FileCtx.pathExcluded(ctx.excludes, resolved.root.name, child_rel)) continue;
         const child: Resolved = .{ .root = resolved.root, .rel = child_rel, .abs = "" };
-        const stat = try entryStat(io, alloc, dir, entry.name, entry.kind, child) orelse continue;
-        var info = try buildPathInfo(alloc, stat, resolved.root);
+        const stat = try entryStat(io, alloc, dir, entry.name, kind, child) orelse continue;
+        var info = try buildPathInfo(alloc, stat, if (kind == .sym_link and stat.kind == .file) "r" else resolved.root.permissions());
         switch (stat.kind) {
             .directory => {
                 try info.object.put(alloc, "dirname", .{ .string = try alloc.dupe(u8, entry.name) });
@@ -939,7 +1004,7 @@ fn copyTree(io: std.Io, alloc: std.mem.Allocator, source: Resolved, destination:
     if (std.mem.eql(u8, source_real, target_real) or
         (std.mem.startsWith(u8, target_real, source_real) and target_real.len > source_real.len and target_real[source_real.len] == '/')) return error.InvalidParams;
     try target.dir.createDirPath(io, target.name);
-    var walker = try RootWalker.init(io, alloc, source);
+    var walker = try RootWalker.init(io, alloc, source, .{ .copy = target_real });
     defer walker.deinit(io);
     while (try walker.next(io)) |entry| {
         const from = try childResolved(alloc, source, entry.path);
@@ -1186,7 +1251,7 @@ pub fn handleZip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const resolved = try resolveRequestPath(ctx, alloc, dest);
     if (!resolved.root.full_access) return error.Forbidden;
 
-    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, resolved.root);
+    var item = try buildPathInfo(alloc, resolved.stat(io, alloc) catch null, resolved.root.permissions());
     try item.object.put(alloc, "path", .{ .string = resolved.rel });
     try item.object.put(alloc, "root", .{ .string = resolved.root.name });
 
@@ -1490,7 +1555,7 @@ test "root traversal and copies release partial allocations" {
     const destination = try resolveRequestPath(&ctx, alloc, "gcodes/destination");
     try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn run(gpa: std.mem.Allocator, aio: std.Io, from: Resolved, to: Resolved) !void {
-            var walker = try RootWalker.init(aio, gpa, from);
+            var walker = try RootWalker.init(aio, gpa, from, .list);
             defer walker.deinit(aio);
             var count: usize = 0;
             while (try walker.next(aio)) |_| count += 1;
@@ -1508,6 +1573,15 @@ test "listings follow in-root links and skip escaping or dangling ones" {
     defer tr.deinit();
     var ctx = tr.ctx();
     defer ctx.deinit();
+    var vtable = testing.io.vtable.*;
+    vtable.dirRead = struct {
+        fn read(userdata: ?*anyopaque, reader: *Dir.Reader, entries: []Dir.Entry) Dir.Reader.Error!usize {
+            const count = try testing.io.vtable.dirRead(userdata, reader, entries);
+            for (entries[0..count]) |*entry| entry.kind = .unknown;
+            return count;
+        }
+    }.read;
+    ctx.io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
     try tr.writeFile("gcodes/real/file.gcode", "G1\n");
     try tr.writeFile("gcodes/Zeta.gcode", "G1\n");
     try tr.writeFile("gcodes/notes.txt", "x\n");
@@ -1516,6 +1590,9 @@ test "listings follow in-root links and skip escaping or dangling ones" {
     try tr.tmp.dir.symLink(tr.io, "real/file.gcode", "gcodes/link.gcode", .{});
     try tr.tmp.dir.symLink(tr.io, "file.gcode", "gcodes/real/inner.gcode", .{});
     try tr.tmp.dir.symLink(tr.io, "missing.gcode", "gcodes/dangling.gcode", .{});
+    var long_component: [Dir.max_name_bytes + 1]u8 = undefined;
+    @memset(&long_component, 'x');
+    try tr.tmp.dir.symLink(tr.io, &long_component, "gcodes/too-long.gcode", .{});
     try tr.tmp.dir.symLink(tr.io, tr.roots[1].path, "gcodes/outside", .{});
     const secret = try std.fs.path.join(alloc, &.{ tr.roots[1].path, "secret.gcode" });
     try tr.tmp.dir.symLink(tr.io, secret, "gcodes/escape.gcode", .{});
@@ -1523,21 +1600,24 @@ test "listings follow in-root links and skip escaping or dangling ones" {
     const listing = try handleGetDirectory(@ptrCast(&ctx), try objParams(alloc, "{\"path\":\"gcodes\"}"), alloc);
     var names: std.ArrayList(u8) = .empty;
     for (listing.object.get("dirs").?.array.items) |d| try names.print(alloc, "d:{s} ", .{d.object.get("dirname").?.string});
-    for (listing.object.get("files").?.array.items) |f| try names.print(alloc, "f:{s} ", .{f.object.get("filename").?.string});
+    for (listing.object.get("files").?.array.items) |f| {
+        try names.print(alloc, "f:{s} ", .{f.object.get("filename").?.string});
+        if (std.mem.eql(u8, f.object.get("filename").?.string, "link.gcode")) try testing.expectEqualStrings("r", f.object.get("permissions").?.string);
+    }
     for ([_][]const u8{ "d:real ", "d:alias ", "f:link.gcode ", "f:Zeta.gcode " }) |want| {
         try testing.expect(std.mem.indexOf(u8, names.items, want) != null);
     }
-    for ([_][]const u8{ "dangling", "escape", "outside" }) |hidden| {
+    for ([_][]const u8{ "dangling", "escape", "outside", "too-long" }) |hidden| {
         try testing.expect(std.mem.indexOf(u8, names.items, hidden) == null);
     }
 
-    // server.files.list: gcode extensions only, sorted case-insensitively;
-    // linked directories are not descended.
+    // Directory aliases are visited once; gcode paths are sorted case-insensitively.
     const list = try handleList(@ptrCast(&ctx), try objParams(alloc, "{\"root\":\"gcodes\"}"), alloc);
     const expected = [_][]const u8{ "link.gcode", "real/file.gcode", "real/inner.gcode", "Zeta.gcode" };
     try testing.expectEqual(expected.len, list.array.items.len);
     for (expected, list.array.items) |want, got| try testing.expectEqualStrings(want, got.object.get("path").?.string);
     try testing.expectEqual(@as(i64, 3), list.array.items[2].object.get("size").?.integer);
+    try testing.expectEqualStrings("r", list.array.items[0].object.get("permissions").?.string);
 
     _ = try handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/copied\"}"), alloc);
     const inner = try std.fs.path.join(alloc, &.{ tr.roots[0].path, "copied/inner.gcode" });
@@ -1553,14 +1633,130 @@ test "server.files.list skips a directory it cannot open" {
     var ctx = tr.ctx();
     try tr.writeFile("gcodes/open.gcode", "G1\n");
     try tr.writeFile("gcodes/locked/hidden.gcode", "G1\n");
-    try tr.tmp.dir.setFilePermissions(tr.io, "gcodes/locked", .fromMode(0), .{});
-    defer tr.tmp.dir.setFilePermissions(tr.io, "gcodes/locked", .default_dir, .{}) catch {};
+    var vtable = testing.io.vtable.*;
+    vtable.dirOpenDir = struct {
+        fn open(userdata: ?*anyopaque, dir: Dir, name: []const u8, options: Dir.OpenOptions) Dir.OpenError!Dir {
+            if (std.mem.eql(u8, name, "locked")) return error.AccessDenied;
+            return testing.io.vtable.dirOpenDir(userdata, dir, name, options);
+        }
+    }.open;
+    ctx.io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
     const list = try handleList(@ptrCast(&ctx), try objParams(alloc, "{\"root\":\"gcodes\"}"), alloc);
     var saw_open = false;
     for (list.array.items) |item| {
         if (std.mem.eql(u8, item.object.get("path").?.string, "open.gcode")) saw_open = true;
+        try testing.expect(!std.mem.endsWith(u8, item.object.get("path").?.string, "hidden.gcode"));
     }
     try testing.expect(saw_open);
+}
+
+test "linked directories are listed once and copied with their contents" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("gcodes/target/file.gcode", "G28\n");
+    try tr.tmp.dir.createDirPath(tr.io, "gcodes/source");
+    try tr.tmp.dir.symLink(tr.io, "../target", "gcodes/source/alias", .{});
+    try tr.tmp.dir.symLink(tr.io, "../target", "gcodes/source/second", .{});
+    const list = try handleList(@ptrCast(&ctx), try objParams(a, "{\"root\":\"gcodes\"}"), a);
+    try testing.expectEqual(@as(usize, 1), list.array.items.len);
+    const listed = list.array.items[0].object.get("path").?.string;
+    try testing.expect(std.mem.eql(u8, listed, "source/alias/file.gcode") or std.mem.eql(u8, listed, "source/second/file.gcode") or std.mem.eql(u8, listed, "target/file.gcode"));
+    _ = try handleCopy(@ptrCast(&ctx), try objParams(a, "{\"source\":\"gcodes/source\",\"dest\":\"gcodes/copy\"}"), a);
+    const copied = try std.fs.path.join(a, &.{ tr.roots[0].path, "copy/alias/file.gcode" });
+    try testing.expectEqualStrings("G28\n", try Dir.cwd().readFileAlloc(tr.io, copied, a, .limited(32)));
+    const second = try std.fs.path.join(a, &.{ tr.roots[0].path, "copy/second/file.gcode" });
+    try testing.expectEqualStrings("G28\n", try Dir.cwd().readFileAlloc(tr.io, second, a, .limited(32)));
+}
+
+test "linked copy cycles and links into the output are rejected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("gcodes/source/file.gcode", "G28\n");
+    try tr.tmp.dir.symLink(tr.io, ".", "gcodes/source/loop", .{});
+    const list = try handleList(@ptrCast(&ctx), try objParams(a, "{\"root\":\"gcodes\"}"), a);
+    try testing.expectEqual(@as(usize, 1), list.array.items.len);
+    try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&ctx), try objParams(a, "{\"source\":\"gcodes/source\",\"dest\":\"gcodes/copy\"}"), a));
+    try tr.tmp.dir.deleteFile(tr.io, "gcodes/source/loop");
+    try tr.tmp.dir.symLink(tr.io, "../copy", "gcodes/source/output", .{});
+    try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&ctx), try objParams(a, "{\"source\":\"gcodes/source\",\"dest\":\"gcodes/copy\"}"), a));
+}
+
+test "root traversal refuses directories beyond its work limit" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    try tr.writeFile("gcodes/sub/file.gcode", "G28\n");
+    const base = try resolveRequestPath(&ctx, a, "gcodes");
+    var walker = try RootWalker.init(tr.io, testing.allocator, base, .list);
+    defer walker.deinit(tr.io);
+    walker.directories = RootWalker.max_directories;
+    try testing.expectError(error.InvalidParams, walker.next(tr.io));
+}
+
+test "fuzz root traversal: linked directories cannot escape or recurse forever" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var tr = try TestRoots.init(a);
+            defer tr.deinit();
+            var ctx = tr.ctx();
+            defer ctx.deinit();
+            try tr.writeFile("gcodes/source/local.gcode", "inside\n");
+            try tr.writeFile("gcodes/target/linked.gcode", "linked\n");
+            try tr.writeFile("config/secret.gcode", "outside\n");
+            const targets = [_][]const u8{ "../target", ".", "..", "../../config", "missing", "../copy" };
+            const target = targets[smith.value(u8) % targets.len];
+            try tr.tmp.dir.symLink(tr.io, target, "gcodes/source/alias", .{});
+            const list = try handleList(@ptrCast(&ctx), try objParams(a, "{\"root\":\"gcodes\"}"), a);
+            try testing.expectEqual(@as(usize, 2), list.array.items.len);
+            for (list.array.items) |item| try testing.expect(!std.mem.endsWith(u8, item.object.get("path").?.string, "secret.gcode"));
+            const params = try objParams(a, "{\"source\":\"gcodes/source\",\"dest\":\"gcodes/copy\"}");
+            if (handleCopy(@ptrCast(&ctx), params, a)) |_| {
+                try testing.expectEqualStrings("../target", target);
+                const path = try std.fs.path.join(a, &.{ tr.roots[0].path, "copy/alias/linked.gcode" });
+                try testing.expectEqualStrings("linked\n", try Dir.cwd().readFileAlloc(tr.io, path, a, .limited(32)));
+            } else |err| switch (err) {
+                error.InvalidParams, error.NotFound, error.FileNotFound, error.Forbidden => {},
+                else => return err,
+            }
+        }
+    }.run, .{});
+}
+
+test "file changes unlock a paused gcode after Klippy shutdown" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/print.gcode", "G28\n");
+    var js = job_state_component.JobStateCtx.init(testing.allocator);
+    defer js.deinit();
+    var info: ServerInfo = .{ .klippy_state = "ready", .io = tr.io };
+    var ctx = tr.ctx();
+    ctx.job_state = &js;
+    ctx.server_info = &info;
+    js.statusUpdate(try objParams(a, "{\"state\":\"paused\",\"filename\":\"print.gcode\"}"));
+    const params = try objParams(a, "{\"path\":\"gcodes/print.gcode\"}");
+    try testing.expectError(error.FileInUse, handleDeleteFile(@ptrCast(&ctx), params, a));
+    info.klippy_state = "shutdown";
+    _ = try handleDeleteFile(@ptrCast(&ctx), params, a);
+    try testing.expectEqual(StatKind.missing, tr.exists("gcodes/print.gcode"));
 }
 
 test "fuzz root file access: links cannot expose another registered root" {
@@ -1924,10 +2120,15 @@ test "file changes refuse the gcode loaded by an active print" {
 test "fuzz checkInUse: only an active print blocks its file and parent directories" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
             var js = job_state_component.JobStateCtx.init(testing.allocator);
             defer js.deinit();
             const roots = [_]Root{.{ .name = "gcodes", .path = "/srv/gcodes", .full_access = true }};
-            const c: FileCtx = .{ .gpa = testing.allocator, .roots = &roots, .bus = null, .job_state = &js };
+            const ready = smith.value(bool);
+            var info: ServerInfo = .{ .klippy_state = if (ready) "ready" else "shutdown" };
+            const c: FileCtx = .{ .gpa = testing.allocator, .roots = &roots, .bus = null, .job_state = &js, .server_info = &info };
             const alphabet = "ab/";
             var lbuf: [6]u8 = undefined;
             var rbuf: [6]u8 = undefined;
@@ -1938,14 +2139,13 @@ test "fuzz checkInUse: only an active print blocks its file and parent directori
             const states = [_][]const u8{ "printing", "paused", "standby", "complete" };
             const state = states[smith.value(u8) % states.len];
             var ps: std.json.ObjectMap = .empty;
-            defer ps.deinit(testing.allocator);
-            try ps.put(testing.allocator, "state", .{ .string = state });
-            try ps.put(testing.allocator, "filename", .{ .string = loaded });
+            try ps.put(a, "state", .{ .string = state });
+            try ps.put(a, "filename", .{ .string = loaded });
             js.statusUpdate(.{ .object = ps });
             const is_dir = smith.value(bool);
             const blocked = if (c.checkInUse(.{ .root = roots[0], .rel = rel, .abs = "" }, is_dir)) |_| false else |_| true;
             const name = std.mem.trimStart(u8, loaded, "/");
-            if (!js.isActive() or name.len == 0) return testing.expect(!blocked);
+            if (!ready or !js.isActive() or name.len == 0) return testing.expect(!blocked);
             if (!is_dir) return testing.expectEqual(std.mem.eql(u8, name, rel), blocked);
             if (blocked and rel.len > 0) try testing.expect(std.mem.startsWith(u8, name, rel));
             if (std.mem.eql(u8, name, rel)) try testing.expect(!blocked);

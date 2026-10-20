@@ -72,7 +72,13 @@ reopened relative to the retained root without following unchecked links. The
 `resolve_beneath` option alone is insufficient because the installed Linux
 backend ignores it. The private root walker uses `Dir.Iterator`: `Dir.Walker`
 reopens directories with symlink following enabled and cannot accept a checked
-child handle. Disk capacity uses `fstatvfs` on the checked directory handle.
+child handle. The private walker follows checked in-root directory links.
+Listings visit each canonical directory once; copies expand each alias and
+reject ancestor cycles or links into the output tree. Traversal permits 4096
+directory visits, including the root, then returns a parameter error. Canonical
+paths do not identify bind-mount aliases; those remain subject to the visit
+limit because `File.Stat` exposes no device ID. Disk capacity uses `fstatvfs`
+on the checked directory handle.
 Unlink, rename and atomic replacement operate on the final entry itself rather
 than following its link target.
 
@@ -90,6 +96,9 @@ flowchart TD
 Copies and uploads use `File.Atomic` replacement. A truncated upload file part
 discards its temporary file and preserves the existing destination. Each file
 part commits when its separator arrives; the multipart form is not a transaction.
+Directory copies also preserve completed entries if a later entry fails. A
+loaded gcode file is protected from mutation only while Klippy is ready and
+print_stats is printing or paused. Listed linked files have read-only permissions.
 
 ## Protocol and ownership code
 
