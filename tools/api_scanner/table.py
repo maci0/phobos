@@ -31,8 +31,8 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     # --- Deliberate host-safety no-ops -------------------------------------
     "machine.reboot": (S_NOOP, "Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box)."),
     "machine.shutdown": (S_NOOP, "Deliberate no-op: returns ok but never shuts the host down."),
-    "machine.update.system": (S_PARTIAL, "Builds apt-get commands for an injected shell. The default runner rejects apt/pip; no package manager runs by default."),
-    "machine.update.full": (S_PARTIAL, "Git-repo update paths run when configured. Package updates require an injected shell; web/zip installation remains unimplemented."),
+    "machine.update.system": (S_PARTIAL, "Builds apt-get commands for an injected shell. The daemon installs none, so the update is refused with NoPackageProvider before it starts."),
+    "machine.update.full": (S_PARTIAL, "Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented."),
     # --- External-tool integrations (stubbed; no binary/service in-tree) ----
     "component:analysis": (S_PARTIAL, "Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence."),
     "component:notifier": (S_PARTIAL, "List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked."),
@@ -41,9 +41,13 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     # --- Spoolman -----------------------------------------------------------
     "server.spoolman.proxy": (S_FULL, "Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted."),
     # --- Machine services / init providers ---------------------------------
-    "machine.services.start": (S_FULL, "Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), or in-memory (none). Real init-system control is VM-tested, not run on the dev host."),
-    "machine.services.stop": (S_FULL, "See machine.services.start — provider-dispatched (systemctl/supervisorctl/none)."),
-    "machine.services.restart": (S_FULL, "See machine.services.start — provider-dispatched (systemctl/supervisorctl/none)."),
+    "machine.services.start": (S_PARTIAL, "Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), `<script_path>/<service>` (simple), or in-memory (none). A name outside Moonraker's allow-list returns 403 \"Forbidden\" (Moonraker: 400 \"Service '<name>' not allowed\"); an allowed but undiscovered service is not refused as \"not installed\"."),
+    "machine.services.stop": (S_PARTIAL, "See machine.services.start."),
+    "machine.services.restart": (S_PARTIAL, "See machine.services.start."),
+    "machine.peripherals.usb": (S_PARTIAL, "No usb.ids database: class, subclass and protocol are null, and names come only from Moonraker's built-in 1d50 (Klipper, Katapult) entries."),
+    "machine.peripherals.video": (S_PARTIAL, "`modes` is always [] (no format enumeration) and `libcamera_devices` is always []."),
+    "machine.peripherals.canbus": (S_PARTIAL, "Returns an empty `can_uuids` list; no SocketCAN query."),
+    "notify:notify_service_state_changed": (S_PARTIAL, "Sent after API service actions only; Moonraker also sends it from its periodic service-state poll."),
     # --- Power --------------------------------------------------------------
     "component:power": (S_FULL, "http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented)."),
     # --- Sensors ------------------------------------------------------------

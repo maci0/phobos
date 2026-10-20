@@ -41,15 +41,15 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/device_power/off` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `/machine/device_power/on` | POST | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `/machine/device_power/status` | GET | HTTP, WEBSOCKET, INTERNAL | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `/machine/peripherals/canbus` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
+| `/machine/peripherals/canbus` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | Returns an empty `can_uuids` list; no SocketCAN query. |
 | `/machine/peripherals/serial` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
-| `/machine/peripherals/usb` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
-| `/machine/peripherals/video` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
+| `/machine/peripherals/usb` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | No usb.ids database: class, subclass and protocol are null, and names come only from Moonraker's built-in 1d50 (Klipper, Katapult) entries. |
+| `/machine/peripherals/video` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | `modes` is always [] (no format enumeration) and `libcamera_devices` is always []. |
 | `/machine/proc_stats` | GET | HTTP, WEBSOCKET, INTERNAL | proc_stats | ✅ Full | Matches Moonraker. |
 | `/machine/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | machine | 🚫 No-op | Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box). |
-| `/machine/services/restart` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
-| `/machine/services/start` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), or in-memory (none). Real init-system control is VM-tested, not run on the dev host. |
-| `/machine/services/stop` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
+| `/machine/services/restart` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | See machine.services.start. |
+| `/machine/services/start` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), `<script_path>/<service>` (simple), or in-memory (none). A name outside Moonraker's allow-list returns 403 "Forbidden" (Moonraker: 400 "Service '<name>' not allowed"); an allowed but undiscovered service is not refused as "not installed". |
+| `/machine/services/stop` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | See machine.services.start. |
 | `/machine/shutdown` | POST | HTTP, WEBSOCKET, INTERNAL | machine | 🚫 No-op | Deliberate no-op: returns ok but never shuts the host down. |
 | `/machine/sudo/info` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
 | `/machine/sudo/password` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
@@ -57,14 +57,14 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/td1/data` | GET | HTTP, WEBSOCKET, INTERNAL | td1 | ✅ Full | Matches Moonraker. |
 | `/machine/td1/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | td1 | ✅ Full | Matches Moonraker. |
 | `/machine/update/client` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
-| `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Git-repo update paths run when configured. Package updates require an injected shell; web/zip installation remains unimplemented. |
+| `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented. |
 | `/machine/update/klipper` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/moonraker` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/recover` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/refresh` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/rollback` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/status` | GET | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
-| `/machine/update/system` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Builds apt-get commands for an injected shell. The default runner rejects apt/pip; no package manager runs by default. |
+| `/machine/update/system` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Builds apt-get commands for an injected shell. The daemon installs none, so the update is refused with NoPackageProvider before it starts. |
 | `/machine/update/upgrade` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/wled/off` | POST | HTTP, WEBSOCKET, INTERNAL | wled | ✅ Full | Matches Moonraker. |
 | `/machine/wled/on` | POST | HTTP, WEBSOCKET, INTERNAL | wled | ✅ Full | Matches Moonraker. |
@@ -137,7 +137,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 | `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 
-_Endpoints: 115 full, 8 partial, 2 no-op, 0 missing._
+_Endpoints: 109 full, 14 partial, 2 no-op, 0 missing._
 
 ## JSON-RPC methods
 
@@ -169,15 +169,15 @@ _Endpoints: 115 full, 8 partial, 2 no-op, 0 missing._
 | `machine.device_power.on` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `machine.device_power.post_device` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
 | `machine.device_power.status` |  | power | ✅ Full | http / gpio (sysfs) / tasmota / shelly devices do real I/O (derived URLs for tasmota/shelly). tplink_smartplug and homeseer track state in-memory only (no device-specific protocol implemented). |
-| `machine.peripherals.canbus` |  | machine | ✅ Full | Matches Moonraker. |
+| `machine.peripherals.canbus` |  | machine | ⚠️ Partial | Returns an empty `can_uuids` list; no SocketCAN query. |
 | `machine.peripherals.serial` |  | machine | ✅ Full | Matches Moonraker. |
-| `machine.peripherals.usb` |  | machine | ✅ Full | Matches Moonraker. |
-| `machine.peripherals.video` |  | machine | ✅ Full | Matches Moonraker. |
+| `machine.peripherals.usb` |  | machine | ⚠️ Partial | No usb.ids database: class, subclass and protocol are null, and names come only from Moonraker's built-in 1d50 (Klipper, Katapult) entries. |
+| `machine.peripherals.video` |  | machine | ⚠️ Partial | `modes` is always [] (no format enumeration) and `libcamera_devices` is always []. |
 | `machine.proc_stats` |  | proc_stats | ✅ Full | Matches Moonraker. |
 | `machine.reboot` |  | machine | 🚫 No-op | Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box). |
-| `machine.services.restart` |  | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
-| `machine.services.start` |  | machine | ✅ Full | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), or in-memory (none). Real init-system control is VM-tested, not run on the dev host. |
-| `machine.services.stop` |  | machine | ✅ Full | See machine.services.start — provider-dispatched (systemctl/supervisorctl/none). |
+| `machine.services.restart` |  | machine | ⚠️ Partial | See machine.services.start. |
+| `machine.services.start` |  | machine | ⚠️ Partial | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), `<script_path>/<service>` (simple), or in-memory (none). A name outside Moonraker's allow-list returns 403 "Forbidden" (Moonraker: 400 "Service '<name>' not allowed"); an allowed but undiscovered service is not refused as "not installed". |
+| `machine.services.stop` |  | machine | ⚠️ Partial | See machine.services.start. |
 | `machine.shutdown` |  | machine | 🚫 No-op | Deliberate no-op: returns ok but never shuts the host down. |
 | `machine.sudo.info` |  | machine | ✅ Full | Matches Moonraker. |
 | `machine.sudo.password` |  | machine | ✅ Full | Matches Moonraker. |
@@ -185,14 +185,14 @@ _Endpoints: 115 full, 8 partial, 2 no-op, 0 missing._
 | `machine.td1.data` |  | td1 | ✅ Full | Matches Moonraker. |
 | `machine.td1.reboot` |  | td1 | ✅ Full | Matches Moonraker. |
 | `machine.update.client` |  | update_manager | ✅ Full | Matches Moonraker. |
-| `machine.update.full` |  | update_manager | ⚠️ Partial | Git-repo update paths run when configured. Package updates require an injected shell; web/zip installation remains unimplemented. |
+| `machine.update.full` |  | update_manager | ⚠️ Partial | Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented. |
 | `machine.update.klipper` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.moonraker` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.recover` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.refresh` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.rollback` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.status` |  | update_manager | ✅ Full | Matches Moonraker. |
-| `machine.update.system` |  | update_manager | ⚠️ Partial | Builds apt-get commands for an injected shell. The default runner rejects apt/pip; no package manager runs by default. |
+| `machine.update.system` |  | update_manager | ⚠️ Partial | Builds apt-get commands for an injected shell. The daemon installs none, so the update is refused with NoPackageProvider before it starts. |
 | `machine.update.upgrade` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.wled.get_strip` |  | wled | ✅ Full | Matches Moonraker. |
 | `machine.wled.off` |  | wled | ✅ Full | Matches Moonraker. |
@@ -295,7 +295,7 @@ _Endpoints: 115 full, 8 partial, 2 no-op, 0 missing._
 | `notify_power_changed` | power | ✅ Full | Matches Moonraker. |
 | `notify_proc_stat_update` | proc_stats | ✅ Full | Matches Moonraker. |
 | `notify_sensor_update` | sensor | ✅ Full | Matches Moonraker. |
-| `notify_service_state_changed` | machine | ✅ Full | Matches Moonraker. |
+| `notify_service_state_changed` | machine | ⚠️ Partial | Sent after API service actions only; Moonraker also sends it from its periodic service-state poll. |
 | `notify_spoolman_status_changed` | spoolman | ✅ Full | Matches Moonraker. |
 | `notify_status_update` | common | ✅ Full | Matches Moonraker. |
 | `notify_sudo_alert` | machine | ✅ Full | Matches Moonraker. |
