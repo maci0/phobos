@@ -28,6 +28,15 @@ S_MISSING = "❌ Missing"
 MATCHES = "Matches Moonraker."
 
 DELTAS: Dict[str, Tuple[str, str]] = {
+    # --- Extensions (agents) ------------------------------------------------
+    "component:extensions": (S_PARTIAL, "No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md)."),
+    "notify:notify_agent_event": (S_MISSING, "Never emitted: no agent clients are registered (TODO.md)."),
+    # --- Thumbnails ---------------------------------------------------------
+    "server.files.thumbnails": (S_PARTIAL, "Returns base64 `data` from the gcode header; no `.thumbs/*.png` files, so `relative_path`/`thumbnail_path` are missing (TODO.md)."),
+    "path:/server/files/thumbnails": (S_PARTIAL, "See server.files.thumbnails."),
+    # --- PanelDue -----------------------------------------------------------
+    "component:paneldue": (S_PARTIAL, "No serial device or panel responses; only the line parser and its checksum exist (TODO.md)."),
+    "remote:paneldue_beep": (S_MISSING, "No PanelDue serial device, so the beep is never sent (TODO.md)."),
     # --- Deliberate host-safety no-ops -------------------------------------
     "machine.reboot": (S_NOOP, "Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box)."),
     "machine.shutdown": (S_NOOP, "Deliberate no-op: returns ok but never shuts the host down."),

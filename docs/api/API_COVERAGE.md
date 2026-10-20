@@ -30,8 +30,8 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/api/server` | GET | HTTP | octoprint_compat | ✅ Full | Matches Moonraker. |
 | `/api/settings` | GET | HTTP | octoprint_compat | ✅ Full | Matches Moonraker. |
 | `/api/version` | GET | HTTP | octoprint_compat | ✅ Full | Matches Moonraker. |
-| `/connection/register_remote_method` | POST | WEBSOCKET | extensions | ✅ Full | Matches Moonraker. |
-| `/connection/send_event` | POST | WEBSOCKET | extensions | ✅ Full | Matches Moonraker. |
+| `/connection/register_remote_method` | POST | WEBSOCKET | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
+| `/connection/send_event` | POST | WEBSOCKET | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
 | `/debug/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/debug/database/table` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
@@ -94,8 +94,8 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/server/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
 | `/server/database/restore` | POST | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
-| `/server/extensions/list` | GET | HTTP, WEBSOCKET, INTERNAL | extensions | ✅ Full | Matches Moonraker. |
-| `/server/extensions/request` | POST | HTTP, WEBSOCKET, INTERNAL | extensions | ✅ Full | Matches Moonraker. |
+| `/server/extensions/list` | GET | HTTP, WEBSOCKET, INTERNAL | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
+| `/server/extensions/request` | POST | HTTP, WEBSOCKET, INTERNAL | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
 | `/server/files/copy` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/delete_file` | DELETE | WEBSOCKET | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/directory` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
@@ -104,7 +104,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/files/metascan` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/move` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/roots` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
-| `/server/files/thumbnails` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
+| `/server/files/thumbnails` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ⚠️ Partial | Returns base64 `data` from the gcode header; no `.thumbs/*.png` files, so `relative_path`/`thumbnail_path` are missing (TODO.md). |
 | `/server/files/zip` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/gcode_store` | GET | HTTP, WEBSOCKET, INTERNAL | data_store | ✅ Full | Matches Moonraker. |
 | `/server/history/job` | GET, DELETE | HTTP, WEBSOCKET, INTERNAL | history | ✅ Full | Matches Moonraker. |
@@ -137,7 +137,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 | `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
 
-_Endpoints: 102 full, 21 partial, 2 no-op, 0 missing._
+_Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 
 ## JSON-RPC methods
 
@@ -155,8 +155,8 @@ _Endpoints: 102 full, 21 partial, 2 no-op, 0 missing._
 | `access.refresh_jwt` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.user.password` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.users.list` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
-| `connection.register_remote_method` |  | extensions | ✅ Full | Matches Moonraker. |
-| `connection.send_event` |  | extensions | ✅ Full | Matches Moonraker. |
+| `connection.register_remote_method` |  | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
+| `connection.send_event` |  | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
 | `debug.database.delete_item` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.get_item` |  | database | ✅ Full | Matches Moonraker. |
 | `debug.database.list` |  | database | ✅ Full | Matches Moonraker. |
@@ -227,8 +227,8 @@ _Endpoints: 102 full, 21 partial, 2 no-op, 0 missing._
 | `server.database.post_backup` |  | database | ✅ Full | Matches Moonraker. |
 | `server.database.post_item` |  | database | ✅ Full | Matches Moonraker. |
 | `server.database.restore` |  | database | ✅ Full | Matches Moonraker. |
-| `server.extensions.list` |  | extensions | ✅ Full | Matches Moonraker. |
-| `server.extensions.request` |  | extensions | ✅ Full | Matches Moonraker. |
+| `server.extensions.list` |  | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
+| `server.extensions.request` |  | extensions | ⚠️ Partial | No agent registry: `identify` does not register agent clients, so the list is empty, requests fail with AgentNotConnected, and remote methods and events go nowhere (TODO.md). |
 | `server.files.copy` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.delete_directory` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.delete_file` |  | file_manager | ✅ Full | Matches Moonraker. |
@@ -239,7 +239,7 @@ _Endpoints: 102 full, 21 partial, 2 no-op, 0 missing._
 | `server.files.move` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.post_directory` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.roots` |  | file_manager | ✅ Full | Matches Moonraker. |
-| `server.files.thumbnails` |  | file_manager | ✅ Full | Matches Moonraker. |
+| `server.files.thumbnails` |  | file_manager | ⚠️ Partial | Returns base64 `data` from the gcode header; no `.thumbs/*.png` files, so `relative_path`/`thumbnail_path` are missing (TODO.md). |
 | `server.files.zip` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.gcode_store` |  | data_store | ✅ Full | Matches Moonraker. |
 | `server.history.delete_job` |  | history | ✅ Full | Matches Moonraker. |
@@ -279,7 +279,7 @@ _Endpoints: 102 full, 21 partial, 2 no-op, 0 missing._
 | Notification | Component | Status | Notes |
 |---|---|---|---|
 | `notify_active_spool_set` | spoolman | ✅ Full | Matches Moonraker. |
-| `notify_agent_event` | extensions | ✅ Full | Matches Moonraker. |
+| `notify_agent_event` | extensions | ❌ Missing | Never emitted: no agent clients are registered (TODO.md). |
 | `notify_announcement_dismissed` | announcements | ✅ Full | Matches Moonraker. |
 | `notify_announcement_update` | announcements | ✅ Full | Matches Moonraker. |
 | `notify_announcement_wake` | announcements | ✅ Full | Matches Moonraker. |
@@ -333,7 +333,7 @@ Calls phobos registers that the static baseline lists don't enumerate. Most are 
 |---|---|---|---|
 | `<dynamic>` | server | ✅ Full | Matches Moonraker. |
 | `notify` | notifier | ✅ Full | Matches Moonraker. |
-| `paneldue_beep` | paneldue | ✅ Full | Matches Moonraker. |
+| `paneldue_beep` | paneldue | ❌ Missing | No PanelDue serial device, so the beep is never sent (TODO.md). |
 | `pause_job_queue` | job_queue | ✅ Full | Matches Moonraker. |
 | `process_gcode_response` | klippy_connection | ✅ Full | Matches Moonraker. |
 | `process_status_update` | klippy_connection | ✅ Full | Matches Moonraker. |
