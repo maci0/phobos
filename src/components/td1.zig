@@ -21,6 +21,7 @@
 //! and a persistent per-device connection. On-hardware timing is unverified.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const serial_mod = @import("serial.zig");
 
@@ -386,23 +387,6 @@ pub const Td1Ctx = struct {
 // Param helpers
 // ---------------------------------------------------------------------------
 
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
 // ---------------------------------------------------------------------------
 // GET /machine/td1/data → machine.td1.data
 // ---------------------------------------------------------------------------
@@ -440,7 +424,7 @@ pub fn handleGetData(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 /// reboot, shutdown, or poweroff. Doing so halts the machine that runs the tests.
 pub fn handleReboot(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *Td1Ctx = @ptrCast(@alignCast(ctx_ptr));
-    const serial = try getStr(params, "serial");
+    const serial = try webreq.required([]const u8, params, "serial");
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "status", .{ .string = if (ctx.removeConnection(serial)) "ok" else "serial_error" });
     return .{ .object = out };

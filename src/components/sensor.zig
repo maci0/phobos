@@ -30,7 +30,7 @@
 const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
-const database = @import("database.zig");
+const webreq = @import("../json/params.zig");
 const sensor_template = @import("sensor_template.zig");
 
 const Registry = registry.Registry;
@@ -381,7 +381,7 @@ pub fn handleSensorList(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.A
 /// GET /server/sensors/info → sensor info for a named sensor
 pub fn handleSensorInfo(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *SensorCtx = @ptrCast(@alignCast(ctx_ptr));
-    const sensor_name = try database.getStr(params, "sensor");
+    const sensor_name = try webreq.required([]const u8, params, "sensor");
     const s = ctx.findSensor(sensor_name) orelse return error.InvalidParams;
     return s.getSensorInfo(alloc);
 }
@@ -389,7 +389,7 @@ pub fn handleSensorInfo(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
 /// GET /server/sensors/measurements → measurement history
 pub fn handleSensorMeasurements(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *SensorCtx = @ptrCast(@alignCast(ctx_ptr));
-    const sensor_name = (try database.getOptStr(params, "sensor")) orelse "";
+    const sensor_name = (try webreq.optional([]const u8, params, "sensor")) orelse "";
     if (sensor_name.len > 0) {
         const s = ctx.findSensor(sensor_name) orelse return error.InvalidParams;
         // Moonraker wraps the result under the sensor name (sensor.py:331).

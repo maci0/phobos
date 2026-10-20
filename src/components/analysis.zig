@@ -17,6 +17,7 @@
 //! dump_config validates `dest_config` the same way. See TODO.md.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const file_manager = @import("file_manager.zig");
 
@@ -47,12 +48,6 @@ fn fileExists(io: std.Io, path: []const u8) bool {
     const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
     f.close(io);
     return true;
-}
-
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    if (params != .object) return null;
-    const v = params.object.get(field) orelse return null;
-    return if (v == .string) v.string else null;
 }
 
 /// Moonraker rejects `..` path segments in estimator_config and dest_config.
@@ -88,11 +83,11 @@ pub fn handleStatus(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
 /// estimator_config (optional, under the config root).
 pub fn handleEstimate(ctx_ptr: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *AnalysisCtx = @ptrCast(@alignCast(ctx_ptr));
-    const raw = getOptStr(params, "filename") orelse return error.InvalidParams;
+    const raw = (try webreq.optional([]const u8, params, "filename")) orelse return error.InvalidParams;
     const filename = std.mem.trim(u8, raw, "/");
     const files = ctx.files orelse return error.GcodeNotFound;
     if (!files.fileExists("gcodes", filename)) return error.GcodeNotFound;
-    if (getOptStr(params, "estimator_config")) |cfg| {
+    if ((try webreq.optional([]const u8, params, "estimator_config"))) |cfg| {
         if (hasDotDot(cfg)) return error.InvalidParams;
     }
     return error.EstimatorNotAvailable;
@@ -100,7 +95,7 @@ pub fn handleEstimate(ctx_ptr: *anyopaque, params: std.json.Value, _: std.mem.Al
 
 /// POST /server/analysis/dump_config. params: dest_config (optional).
 pub fn handleDumpConfig(_: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    if (getOptStr(params, "dest_config")) |dest| {
+    if ((try webreq.optional([]const u8, params, "dest_config"))) |dest| {
         if (hasDotDot(dest)) return error.InvalidParams;
     }
     return error.EstimatorNotAvailable;

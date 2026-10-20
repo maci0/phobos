@@ -30,6 +30,7 @@
 //! on connect.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const jv = @import("../json/value.zig");
 const sleep = @import("../util/sleep.zig");
 const registry = @import("../server/registry.zig");
@@ -344,54 +345,6 @@ pub const SpoolmanCtx = struct {
 // Parameter helpers
 // ---------------------------------------------------------------------------
 
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
-fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
-}
-
-fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .integer => |i| i,
-                .null => null,
-                .float => |f| jv.floatToInt(f),
-                .string => |s| std.fmt.parseInt(i64, s, 10) catch null,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -426,7 +379,7 @@ pub fn handleSpoolId(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     };
 
     if (is_post) {
-        const new_id = getOptInt(params, "spool_id");
+        const new_id = (try webreq.optional(i64, params, "spool_id"));
         c.setSpoolId(new_id);
     }
 
@@ -463,14 +416,14 @@ fn errNotAvailable(alloc: std.mem.Allocator, use_v2: bool) anyerror!std.json.Val
 /// "response_headers", "error"} and reports Spoolman HTTP errors in "error".
 pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
-    const method = proxy_methods.get(try getStr(params, "request_method")) orelse return error.InvalidParams;
-    const path = try getStr(params, "path");
-    const query = getOptStr(params, "query");
+    const method = proxy_methods.get(try webreq.required([]const u8, params, "request_method")) orelse return error.InvalidParams;
+    const path = try webreq.required([]const u8, params, "path");
+    const query = (try webreq.optional([]const u8, params, "query"));
     const body: ?std.json.Value = if (params == .object) switch (params.object.get("body") orelse .null) {
         .null => null,
         else => |b| b,
     } else null;
-    const use_v2 = getOptBool(params, "use_v2_response", false);
+    const use_v2 = ((try webreq.optional(bool, params, "use_v2_response")) orelse false);
     if (body != null and method == .GET) return error.InvalidParams;
     if (!std.mem.startsWith(u8, path, "/v1/")) return error.InvalidParams;
     if (body) |b| if (jv.exceedsDepth(b, jv.max_value_depth)) return error.InvalidParams;
@@ -625,15 +578,11 @@ pub fn registerSpoolman(reg: *Registry, ctx: *SpoolmanCtx) !void {
 pub fn handleSetActiveSpool(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     _ = alloc;
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx_ptr));
-    const sid: ?i64 = switch (params) {
-        .object => |o| switch (o.get("spool_id") orelse .null) {
-            .integer => |i| i,
-            .float => |f| jv.floatToInt(f) orelse return error.InvalidParams,
-            else => null,
-        },
+    const value = if (params == .object) (try webreq.optional(std.json.Value, params, "spool_id")) orelse .null else params;
+    const sid: ?i64 = switch (value) {
         .integer => |i| i,
-        .float => |f| jv.floatToInt(f) orelse return error.InvalidParams,
-        else => null,
+        .null => null,
+        else => return error.InvalidParams,
     };
     c.setSpoolId(sid);
     return .null;
@@ -951,6 +900,11 @@ test "handleSetActiveSpool: remote method sets/clears the active spool" {
     _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 7}"), a);
     try testing.expectEqual(@as(i64, 7), (try handleSpoolId(@ptrCast(&ctx), .null, a)).object.get("spool_id").?.integer);
 
+    for ([_][]const u8{ "{\"spool_id\":\"bad\"}", "{\"spool_id\":true}", "{\"spool_id\":1.5}", "{\"spool_id\":{}}" }) |json| {
+        try testing.expectError(error.InvalidParams, handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, json), a));
+        try testing.expectEqual(@as(?i64, 7), ctx.getSpoolId());
+    }
+
     // Clear via the remote method (spool_id null).
     _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": null, \"_method\": \"POST\"}"), a);
     try testing.expectEqual(std.json.Value.null, (try handleSpoolId(@ptrCast(&ctx), .null, a)).object.get("spool_id").?);
@@ -974,7 +928,7 @@ test "fuzz handleSetActiveSpool: arbitrary params never crash" {
     }.run, .{});
 }
 
-test "handleSpoolId POST: set to null clears active spool" {
+test "handleSpoolId POST: invalid values preserve spool, absent field clears" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -988,8 +942,13 @@ test "handleSpoolId POST: set to null clears active spool" {
     const set_params = try mkParams(a, "{\"spool_id\": 5, \"_method\": \"POST\"}");
     _ = try handleSpoolId(@ptrCast(&ctx), set_params, a);
 
-    // Clear (spool_id: null)
-    const clear_params = try mkParams(a, "{\"spool_id\": null, \"_method\": \"POST\"}");
+    for ([_][]const u8{ "null", "\"bad\"", "{}" }) |value| {
+        const json = try std.fmt.allocPrint(a, "{{\"spool_id\":{s},\"_method\":\"POST\"}}", .{value});
+        try testing.expectError(error.InvalidParams, handleSpoolId(@ptrCast(&ctx), try mkParams(a, json), a));
+        try testing.expectEqual(@as(?i64, 5), ctx.getSpoolId());
+    }
+    // WebRequest.get_int defaults only when the key is absent.
+    const clear_params = try mkParams(a, "{\"_method\": \"POST\"}");
     const result = try handleSpoolId(@ptrCast(&ctx), clear_params, a);
     try testing.expectEqual(.null, result.object.get("spool_id").?);
 }

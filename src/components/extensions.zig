@@ -18,18 +18,13 @@
 //! Klippy method or emitting `notify_agent_event`. See TODO.md.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 
 const Registry = registry.Registry;
 
 /// Stateless: there is no agent registry.
 pub const ExtensionsCtx = struct {};
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    if (params != .object) return error.InvalidParams;
-    const v = params.object.get(field) orelse return error.InvalidParams;
-    return if (v == .string) v.string else error.InvalidParams;
-}
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -45,21 +40,21 @@ pub fn handleList(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) an
 /// POST /server/extensions/request. params: agent, method (str, required).
 /// No agent is ever connected.
 pub fn handleRequest(_: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    _ = try getStr(params, "agent");
-    _ = try getStr(params, "method");
+    _ = try webreq.required([]const u8, params, "agent");
+    _ = try webreq.required([]const u8, params, "method");
     return error.AgentNotConnected;
 }
 
 /// POST /connection/register_remote_method (WS-only) → "ok".
 pub fn handleRegisterRemoteMethod(_: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    _ = try getStr(params, "method_name");
+    _ = try webreq.required([]const u8, params, "method_name");
     return .{ .string = "ok" };
 }
 
 /// POST /connection/send_event (WS-only) → "ok". "connected" and
 /// "disconnected" are reserved (extensions.py).
 pub fn handleSendEvent(_: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    const event_name = try getStr(params, "event");
+    const event_name = try webreq.required([]const u8, params, "event");
     if (std.mem.eql(u8, event_name, "connected") or std.mem.eql(u8, event_name, "disconnected")) {
         return error.ReservedEvent;
     }

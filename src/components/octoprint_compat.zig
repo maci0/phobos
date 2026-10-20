@@ -26,6 +26,7 @@
 //! everything else → "Error".
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const printer_component = @import("printer.zig");
 
@@ -319,13 +320,13 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
 /// that case is 409 Conflict like Moonraker without the upload queue.
 pub fn handleSelectFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
-    const command = try getParamStr(params, "command");
-    const rel_path = std.mem.trim(u8, try getParamStr(params, "relative_path"), "/");
+    const command = try webreq.required([]const u8, params, "command");
+    const rel_path = std.mem.trim(u8, try webreq.required([]const u8, params, "relative_path"), "/");
     const slash = std.mem.indexOfScalar(u8, rel_path, '/') orelse return error.InvalidParams;
     const root = rel_path[0..slash];
     const filename = rel_path[slash + 1 ..];
     if (!std.mem.eql(u8, command, "select")) return error.UnsupportedCommand;
-    if (!paramBool(params, "print")) return .null;
+    if (!((try webreq.optional(bool, params, "print")) orelse false)) return .null;
     if (!std.mem.eql(u8, root, "gcodes")) return error.SelectNotGcodes;
     const files = ctx.files orelse return error.FileDoesNotExist;
     if (!files.fileExists("gcodes", filename)) return error.FileDoesNotExist;
@@ -337,22 +338,6 @@ pub fn handleSelectFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
         else => return error.Conflict,
     };
     return .null;
-}
-
-fn getParamStr(params: std.json.Value, key: []const u8) error{InvalidParams}![]const u8 {
-    if (params != .object) return error.InvalidParams;
-    const v = params.object.get(key) orelse return error.InvalidParams;
-    return if (v == .string) v.string else error.InvalidParams;
-}
-
-/// WebRequest.get_boolean: a JSON bool or a "true"/"false" query string.
-fn paramBool(params: std.json.Value, key: []const u8) bool {
-    if (params != .object) return false;
-    return switch (params.object.get(key) orelse return false) {
-        .bool => |b| b,
-        .string => |s| std.ascii.eqlIgnoreCase(s, "true"),
-        else => false,
-    };
 }
 
 // ---------------------------------------------------------------------------

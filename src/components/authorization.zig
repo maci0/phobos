@@ -47,6 +47,7 @@
 //!   is keyed by username and carries the UserInfo fields.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
@@ -819,31 +820,6 @@ fn nowSecondsInt(io: std.Io) i64 {
 // Param helpers
 // ---------------------------------------------------------------------------
 
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    const obj = switch (params) {
-        .object => |o| o,
-        else => return error.InvalidParams,
-    };
-    const v = obj.get(field) orelse return error.InvalidParams;
-    return switch (v) {
-        .string => |s| s,
-        else => error.InvalidParams,
-    };
-}
-
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Login / user creation core
 // ---------------------------------------------------------------------------
@@ -869,9 +845,9 @@ fn loginOrCreate(
     alloc: std.mem.Allocator,
     new_user: bool,
 ) anyerror!std.json.Value {
-    const username = getStr(params, "username") catch return error.InvalidParams;
-    const password = getStr(params, "password") catch return error.InvalidParams;
-    const source_in = getOptStr(params, "source") orelse c.default_source;
+    const username = webreq.required([]const u8, params, "username") catch return error.InvalidParams;
+    const password = webreq.required([]const u8, params, "password") catch return error.InvalidParams;
+    const source_in = (try webreq.optional([]const u8, params, "source")) orelse c.default_source;
     // Lowercase the source.
     var src_buf: [32]u8 = undefined;
     const source = std.ascii.lowerString(src_buf[0..@min(source_in.len, src_buf.len)], source_in[0..@min(source_in.len, src_buf.len)]);
@@ -1010,7 +986,7 @@ pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const c = ctxOf(ctx);
     c.mutex.lockUncancelable(c.io);
     defer c.mutex.unlock(c.io);
-    const refresh_token = getStr(params, "refresh_token") catch return error.InvalidParams;
+    const refresh_token = webreq.required([]const u8, params, "refresh_token") catch return error.InvalidParams;
 
     // Resolve kid → public key, verify the refresh token.
     const kid = jwtKid(alloc, refresh_token) orelse return error.Unauthorized;
@@ -1105,7 +1081,7 @@ pub fn handleUserDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const c = ctxOf(ctx);
     c.mutex.lockUncancelable(c.io);
     defer c.mutex.unlock(c.io);
-    const username = getStr(params, "username") catch return error.InvalidParams;
+    const username = webreq.required([]const u8, params, "username") catch return error.InvalidParams;
     if (currentUser(params)) |cur| {
         if (std.mem.eql(u8, cur, username)) return error.Forbidden;
     }
@@ -1150,8 +1126,8 @@ pub fn handlePasswordReset(ctx: *anyopaque, params: std.json.Value, alloc: std.m
     const c = ctxOf(ctx);
     c.mutex.lockUncancelable(c.io);
     defer c.mutex.unlock(c.io);
-    const password = getStr(params, "password") catch return error.InvalidParams;
-    const new_password = getStr(params, "new_password") catch return error.InvalidParams;
+    const password = webreq.required([]const u8, params, "password") catch return error.InvalidParams;
+    const new_password = webreq.required([]const u8, params, "new_password") catch return error.InvalidParams;
     const username = currentUser(params) orelse return error.NotFound;
     if (isReservedUser(username)) return error.Forbidden;
     const u = c.users.getPtr(username) orelse return error.NotFound;

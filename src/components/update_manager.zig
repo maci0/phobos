@@ -45,6 +45,7 @@
 //! `setIo`; emission is a no-op until then (pure unit tests).
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const sleep = @import("../util/sleep.zig");
 const clock = @import("../util/clock.zig");
 const registry = @import("../server/registry.zig");
@@ -384,38 +385,6 @@ fn autoRefreshThread(ctx: *UpdateCtx) void {
 // ---------------------------------------------------------------------------
 // Param helpers
 // ---------------------------------------------------------------------------
-
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
-fn getBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Git child-process helper
@@ -855,7 +824,7 @@ fn nextProcId() i64 {
 /// emits `notify_update_refreshed` so subscribers see the refresh completion.
 pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    const refresh = getBool(params, "refresh", false);
+    const refresh = ((try webreq.optional(bool, params, "refresh")) orelse false);
     if (refresh) {
         for (ctx.sources) |src| {
             if (src.type == .git_repo and src.repo_path.len > 0) {
@@ -880,7 +849,7 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// (unit tests) or repo_path is empty (dev workstation).
 pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    const name = getOptStr(params, "name");
+    const name = (try webreq.optional([]const u8, params, "name"));
     if (name) |n| {
         if (ctx.findSource(n) == null) return error.InvalidParams;
     }
@@ -988,7 +957,7 @@ pub fn handleUpdateSystem(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem
 /// Moonraker treats it as a full update; phobos does likewise.
 pub fn handleUpdateClient(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    const name = getOptStr(params, "name") orelse return runFullUpdate(ctx, alloc);
+    const name = (try webreq.optional([]const u8, params, "name")) orelse return runFullUpdate(ctx, alloc);
     return runUpdate(ctx, alloc, name);
 }
 
@@ -997,7 +966,7 @@ pub fn handleUpdateClient(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
 /// where app in ("upgrade","client") routes to full when name is None).
 pub fn handleUpgrade(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    const name = getOptStr(params, "name") orelse return runFullUpdate(ctx, alloc);
+    const name = (try webreq.optional([]const u8, params, "name")) orelse return runFullUpdate(ctx, alloc);
     return runUpdate(ctx, alloc, name);
 }
 
@@ -1043,9 +1012,9 @@ pub fn handleFull(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocat
 pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
-    const app = try getStr(params, "name");
-    const hard = getBool(params, "hard", false);
-    _ = getBool(params, "update_deps", false);
+    const app = try webreq.required([]const u8, params, "name");
+    const hard = ((try webreq.optional(bool, params, "hard")) orelse false);
+    _ = ((try webreq.optional(bool, params, "update_deps")) orelse false);
     const src = ctx.findSource(app) orelse return error.NotFound;
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
@@ -1089,7 +1058,7 @@ fn recoverRepo(io: std.Io, alloc: std.mem.Allocator, src: Source, hard: bool) !v
 pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
-    const app = try getStr(params, "name");
+    const app = try webreq.required([]const u8, params, "name");
     const src = ctx.findSource(app) orelse return error.NotFound;
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
@@ -1514,15 +1483,16 @@ test "buildResponseNotification: exact CommandHelper shape" {
 
 // ---- param helpers ----
 
-test "getBool: parses bool/string/int/default" {
+test "request booleans accept bools and strings and reject integers" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expect(getBool(try objParams(a, "{\"x\":true}"), "x", false));
-    try testing.expect(getBool(try objParams(a, "{\"x\":\"true\"}"), "x", false));
-    try testing.expect(getBool(try objParams(a, "{\"x\":1}"), "x", false));
-    try testing.expect(!getBool(try objParams(a, "{\"x\":false}"), "x", true));
-    try testing.expect(getBool(.null, "x", true));
+    var ctx = testCtx();
+    try testing.expect(((try webreq.optional(bool, try objParams(a, "{\"x\":true}"), "x")) orelse false));
+    try testing.expect(((try webreq.optional(bool, try objParams(a, "{\"x\":\"true\"}"), "x")) orelse false));
+    try testing.expectError(error.InvalidParams, handleStatus(&ctx, try objParams(a, "{\"refresh\":1}"), a));
+    try testing.expect(!((try webreq.optional(bool, try objParams(a, "{\"x\":false}"), "x")) orelse true));
+    try testing.expect(((try webreq.optional(bool, .null, "x")) orelse true));
 }
 
 test "registerUpdateManager: wires expected routes and JSON-RPC methods" {

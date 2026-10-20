@@ -23,6 +23,7 @@ vendored libraries retain their upstream implementations.
 | HTTP percent decoding | `std.Uri.Component.toRawMaybeAlloc`; form queries also replace `+` with a space |
 | Calendar rules and UTC formatting | `std.time.epoch` and `std.fmt` |
 | JSON parsing and serialization | `std.json` |
+| Request arguments | `json/params.zig` over standard numeric parsers and ASCII helpers |
 | Text searches, case conversion, hex and Base64 | `std.mem`, `std.ascii`, `std.fmt`, `std.base64` |
 | Test directories and allocation failures | `std.testing.tmpDir` and `checkAllAllocationFailures` |
 
@@ -84,6 +85,14 @@ discards its temporary file and preserves the existing destination. Each file
 part commits when its separator arrives; the multipart form is not a transaction.
 
 ## Protocol and ownership code
+
+HTTP query and JSON-RPC handlers share `json/params.zig`. Optional readers use
+defaults only for absent keys; present invalid values, including null, return
+400. Boolean arguments accept booleans or case-insensitive `true`/`false`
+strings. Numeric arguments follow Moonraker's decimal conversions, including
+integer truncation and boolean numbers. Text arguments require strings rather
+than Python representations of objects. String lists accept arrays of strings
+or trimmed comma-separated text. Handler-specific validation follows conversion.
 
 Keep application grammars that have no standard implementation: Moonraker
 configuration, RSS/XML and RFC 2822 syntax, G-code comments, multipart

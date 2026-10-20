@@ -38,13 +38,12 @@
 //!   notify_announcement_wake      [{"entry_id": str}]
 
 const std = @import("std");
-const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
-const database = @import("database.zig");
+const webreq = @import("../json/params.zig");
 const rss = @import("rss.zig");
 const http_get = @import("http_get.zig");
 
@@ -526,48 +525,13 @@ const ns_moonraker: [:0]const u8 = "moonraker";
 const stored_feeds_key = "announcements.stored_feeds";
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn getOptBool(params: std.json.Value, field: []const u8, default: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default,
-            };
-        },
-        else => return default,
-    }
-}
-
-fn getOptInt(params: std.json.Value, field: []const u8, default: ?i64) ?i64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default;
-            return switch (v) {
-                .integer => |i| i,
-                .float => |f| jv.floatToInt(f) orelse default,
-                .string => |s| std.fmt.parseInt(i64, s, 10) catch default,
-                .null => null,
-                else => default,
-            };
-        },
-        else => return default,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
 /// GET /server/announcements/list
 pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
-    const include_dismissed = getOptBool(params, "include_dismissed", true);
+    const include_dismissed = (try webreq.optional(bool, params, "include_dismissed")) orelse true;
     const entries = try c.listEntries(alloc, include_dismissed);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "entries", .{ .array = entries });
@@ -586,16 +550,8 @@ fn feedsJson(c: *AnnouncementsCtx, alloc: std.mem.Allocator) !std.json.Value {
 /// Returns current entries and whether any were added/modified.
 pub fn handleUpdate(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
-    const requested: ?std.json.Value = if (params == .object) params.object.get("subscriptions") else null;
-    const names = if (requested) |r| blk: {
-        if (r != .array) return error.InvalidParams;
-        const list = try alloc.alloc([]const u8, r.array.items.len);
-        for (list, r.array.items) |*name, sv| {
-            if (sv != .string or !c.hasFeed(sv.string)) return error.InvalidParams;
-            name.* = sv.string;
-        }
-        break :blk list;
-    } else try c.feedNames(alloc);
+    const names = (try webreq.optionalList(alloc, params, "subscriptions")) orelse try c.feedNames(alloc);
+    for (names) |name| if (!c.hasFeed(name)) return error.InvalidParams;
 
     const changed = try c.refreshFeeds(alloc, names);
     if (changed) c.notifyUpdate(alloc);
@@ -609,8 +565,8 @@ pub fn handleUpdate(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
 /// POST /server/announcements/dismiss
 pub fn handleDismiss(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
-    const entry_id = try database.getStr(params, "entry_id");
-    const wake_time = getOptInt(params, "wake_time", null);
+    const entry_id = try webreq.required([]const u8, params, "entry_id");
+    const wake_time = try webreq.optional(i64, params, "wake_time");
 
     // Unknown entry: Moonraker raises a plain ServerError (400).
     const index = try EntryIndex.load(c, alloc);
@@ -668,7 +624,7 @@ pub fn handleListFeeds(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Alloca
 pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
     // Normalize to lowercase (matches announcements.py `name.lower()`)
-    const name = try std.ascii.allocLowerString(alloc, try database.getStr(params, "name"));
+    const name = try std.ascii.allocLowerString(alloc, try webreq.required([]const u8, params, "name"));
 
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "feed", .{ .string = name });
@@ -686,7 +642,7 @@ pub fn handlePostFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 /// DELETE /server/announcements/feed — remove a stored feed
 pub fn handleDeleteFeed(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *AnnouncementsCtx = @ptrCast(@alignCast(ctx));
-    const name = try std.ascii.allocLowerString(alloc, try database.getStr(params, "name"));
+    const name = try std.ascii.allocLowerString(alloc, try webreq.required([]const u8, params, "name"));
 
     // Moonraker: "Feed '<name>' not stored" and "exists in the configuration,
     // cannot remove" are plain ServerErrors (400).
@@ -1978,7 +1934,7 @@ test "feeds: stored feeds persist under moonraker and configured feeds cannot be
     try testing.expect(reloaded.hasFeed("other"));
 }
 
-test "handleUpdate: explicit empty list and unknown names" {
+test "handleUpdate: explicit empty list, comma-separated names and unknown names" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1991,6 +1947,10 @@ test "handleUpdate: explicit empty list and unknown names" {
     const result = try handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":[]}"), a);
     try testing.expect(!result.object.get("modified").?.bool);
     try testing.expectError(error.InvalidParams, handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":[\"nope\"]}"), a));
-    try testing.expectError(error.InvalidParams, handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":\"klipper\"}"), a));
+    // Moonraker get_list: a string is a comma-separated list.
+    const csv = try handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":\"klipper, moonraker\"}"), a);
+    try testing.expect(!csv.object.get("modified").?.bool);
+    try testing.expectError(error.InvalidParams, handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":\"klipper,nope\"}"), a));
+    try testing.expectError(error.InvalidParams, handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":1}"), a));
     try testing.expectEqual(@as(usize, 0), env.frames.items.len);
 }

@@ -32,6 +32,7 @@
 //! info payload via `bus.emitLocked` — handlers run under the held Core lock.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
@@ -283,23 +284,6 @@ pub const PowerCtx = struct {
 // Param helpers
 // ---------------------------------------------------------------------------
 
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
 // ---------------------------------------------------------------------------
 // Device info shape
 // ---------------------------------------------------------------------------
@@ -462,7 +446,7 @@ pub fn handleDevices(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 /// POST → requires `action` in [on|off|toggle], returns { "<device>": "<new_state>" }.
 pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *PowerCtx = @ptrCast(@alignCast(ctx_ptr));
-    const dev_name = try getStr(params, "device");
+    const dev_name = try webreq.required([]const u8, params, "device");
     const dev = ctx.findDevice(dev_name) orelse {
         // Matches Moonraker: "No valid device named <x>"
         return error.NotFound;
@@ -470,9 +454,9 @@ pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     // GET = status query; POST applies `action` (on/off/toggle). Key on the
     // transport's injected `_method`, NOT on whether `action` is present —
     // otherwise `GET ...?action=on` would power the device on (unsafe method).
-    const is_post = if (getOptStr(params, "_method")) |m| std.mem.eql(u8, m, "POST") else false;
+    const is_post = if ((try webreq.optional([]const u8, params, "_method"))) |m| std.mem.eql(u8, m, "POST") else false;
     const action: []const u8 = if (is_post) blk: {
-        const a = getOptStr(params, "action") orelse return error.InvalidParams;
+        const a = (try webreq.optional([]const u8, params, "action")) orelse return error.InvalidParams;
         const al = std.ascii.allocLowerString(alloc, a) catch a;
         if (!std.mem.eql(u8, al, "on") and !std.mem.eql(u8, al, "off") and !std.mem.eql(u8, al, "toggle")) {
             return error.InvalidParams;

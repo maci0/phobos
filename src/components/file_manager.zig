@@ -45,6 +45,7 @@
 //! `error.NotReady` if invoked before io is wired.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
@@ -290,42 +291,6 @@ pub const FileCtx = struct {
 // ---------------------------------------------------------------------------
 // Param helpers
 // ---------------------------------------------------------------------------
-
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
-fn getStrDefault(params: std.json.Value, field: []const u8, default_val: []const u8) []const u8 {
-    return getOptStr(params, field) orelse default_val;
-}
-
-fn getBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Path resolution (SECURITY CRITICAL)
@@ -710,7 +675,7 @@ pub fn handleRoots(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloca
 pub fn handleList(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const root_name = getStrDefault(params, "root", "gcodes");
+    const root_name = ((try webreq.optional([]const u8, params, "root")) orelse "gcodes");
     const root = ctx.findRoot(root_name) orelse return error.InvalidParams;
 
     var arr: std.json.Array = .init(alloc);
@@ -763,8 +728,8 @@ fn entryStat(io: std.Io, alloc: std.mem.Allocator, dir: Dir, name: []const u8, k
 pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const path = getStrDefault(params, "path", "gcodes");
-    const extended = getBool(params, "extended", false);
+    const path = ((try webreq.optional([]const u8, params, "path")) orelse "gcodes");
+    const extended = ((try webreq.optional(bool, params, "extended")) orelse false);
     const resolved = try resolveRequestPath(ctx, alloc, path);
 
     var dirs: std.json.Array = .init(alloc);
@@ -842,7 +807,7 @@ extern "c" fn phobos_disk_usage(fd: c_int, total: *u64, used: *u64, available: *
 pub fn handlePostDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const path = try getStr(params, "path");
+    const path = try webreq.required([]const u8, params, "path");
     const resolved = try resolveRequestPath(ctx, alloc, path);
 
     if (!resolved.root.full_access) return error.Forbidden;
@@ -868,8 +833,8 @@ pub fn handlePostDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: s
 pub fn handleDeleteDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const path = try getStr(params, "path");
-    const force = getBool(params, "force", false);
+    const path = try webreq.required([]const u8, params, "path");
+    const force = ((try webreq.optional(bool, params, "force")) orelse false);
     const resolved = try resolveRequestPath(ctx, alloc, path);
 
     if (!resolved.root.full_access) return error.Forbidden;
@@ -904,8 +869,8 @@ pub fn handleCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator, is_move: bool) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const source = try getStr(params, "source");
-    const dest = try getStr(params, "dest");
+    const source = try webreq.required([]const u8, params, "source");
+    const dest = try webreq.required([]const u8, params, "dest");
     const src = try resolveRequestPath(ctx, alloc, source);
     const dst = try resolveRequestPath(ctx, alloc, dest);
     if (!dst.root.full_access) return error.Forbidden;
@@ -1012,7 +977,7 @@ fn childResolved(alloc: std.mem.Allocator, base: Resolved, child: []const u8) !R
 
 pub fn handleDeleteFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
-    const path = try getStr(params, "path");
+    const path = try webreq.required([]const u8, params, "path");
     return deleteFileImpl(ctx, alloc, path);
 }
 
@@ -1039,7 +1004,7 @@ pub fn deleteFileImpl(ctx: *FileCtx, alloc: std.mem.Allocator, path: []const u8)
 pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const filename = try getStr(params, "filename");
+    const filename = try webreq.required([]const u8, params, "filename");
 
     // Moonraker keeps metadata only for gcode files under the gcodes root;
     // anything else is 404 "Metadata not available for <filename>".
@@ -1173,7 +1138,7 @@ fn stableUuid(alloc: std.mem.Allocator, seed: []const u8) ![]const u8 {
 pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const filename = try getStr(params, "filename");
+    const filename = try webreq.required([]const u8, params, "filename");
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = try resolveRequestPath(ctx, alloc, req);
     const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
@@ -1194,7 +1159,7 @@ pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
     // Moonraker get_str("filename") is 400 "No data for argument: filename"
     // when the argument is absent. A present empty string looks up metadata
     // and returns an empty list.
-    const filename = getOptStr(params, "filename") orelse return error.MissingFilename;
+    const filename = (try webreq.optional([]const u8, params, "filename")) orelse return error.MissingFilename;
     if (filename.len == 0) return .{ .array = .init(alloc) };
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = try resolveRequestPath(ctx, alloc, req);
@@ -1217,7 +1182,7 @@ pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
 pub fn handleZip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
     const io = try ctx.requireIo();
-    const dest = getStrDefault(params, "dest", "config/collection.zip");
+    const dest = ((try webreq.optional([]const u8, params, "dest")) orelse "config/collection.zip");
     const resolved = try resolveRequestPath(ctx, alloc, dest);
     if (!resolved.root.full_access) return error.Forbidden;
 

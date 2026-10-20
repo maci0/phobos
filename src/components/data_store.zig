@@ -23,6 +23,7 @@
 //!   Default capacity: 1200 (matches data_store.py temperature_store_size default)
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const jv = @import("../json/value.zig");
 const sleep = @import("../util/sleep.zig");
 const registry = @import("../server/registry.zig");
@@ -319,36 +320,6 @@ pub const DataStoreCtx = struct {
 // Parameter helpers
 // ---------------------------------------------------------------------------
 
-fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .integer => |i| i,
-                .float => |f| jv.floatToInt(f),
-                .string => |s| std.fmt.parseInt(i64, s, 10) catch null,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -365,7 +336,7 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     // data_store.py returns `list(queue)[-count:]`: 0 keeps every entry and a
     // negative count drops the oldest |count|. lossyCast clamps i64 counts a
     // 32-bit usize cannot hold.
-    const first: usize = if (getOptInt(params, "count")) |cnt|
+    const first: usize = if ((try webreq.optional(i64, params, "count"))) |cnt|
         if (cnt > 0) n - @min(std.math.lossyCast(usize, cnt), n) else @min(std.math.lossyCast(usize, @abs(cnt)), n)
     else
         0;
@@ -393,7 +364,7 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// only temperatures — matching Moonraker's data_store.
 pub fn handleTempStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *DataStoreCtx = @ptrCast(@alignCast(ctx));
-    const include_monitors = getOptBool(params, "include_monitors", false);
+    const include_monitors = ((try webreq.optional(bool, params, "include_monitors")) orelse false);
 
     const io = c.io orelse return .{ .object = .empty };
     const scratch = try alloc.alloc(f64, @max(c.temp_capacity, 1));

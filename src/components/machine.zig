@@ -39,6 +39,7 @@
 //! are unavailable. The SHAPE of every response matches upstream exactly.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
@@ -503,27 +504,6 @@ fn buildMoonrakerStats(self: *MachineCtx, alloc: std.mem.Allocator, io: ?std.Io)
 // ---------------------------------------------------------------------------
 // Param helpers
 // ---------------------------------------------------------------------------
-
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
-fn getStrDefault(params: std.json.Value, field: []const u8, default_val: []const u8) []const u8 {
-    return getOptStr(params, field) orelse default_val;
-}
 
 // ---------------------------------------------------------------------------
 // File reading helper
@@ -1564,7 +1544,7 @@ fn runDiscardingOutput(ctx: *MachineCtx, alloc: std.mem.Allocator, argv: []const
 /// Reboot, shutdown and poweroff cannot reach a command: `action` is a
 /// `ServiceAction` and no allowed name is a host power word.
 fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allocator, action: ServiceAction) !std.json.Value {
-    const name = try getStr(params, "service");
+    const name = try webreq.required([]const u8, params, "service");
     if (!isServiceAllowed(name)) return error.ServiceNotAllowed;
     // This action changes service_state, so the cached system_info is now stale —
     // drop it (covers every exit below). Runs under Core, same as handleSystemInfo.
@@ -1721,7 +1701,7 @@ pub fn userForUid(text: []const u8, uid: u32) ?[]const u8 {
 /// If the password is invalid, clears storage and returns an error.
 pub fn handleSudoPassword(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
-    const pwd = try getStr(params, "password");
+    const pwd = try webreq.required([]const u8, params, "password");
 
     // Persist (replace) the password under the ctx allocator.
     if (ctx.sudo_password) |old| ctx.gpa.free(old);
@@ -2175,7 +2155,7 @@ fn videoIndex(name: []const u8) i64 {
 /// Querying CAN UUIDs requires opening a SocketCAN socket and running the
 /// Klipper admin protocol; phobos returns an empty list (no CAN bus probe).
 pub fn handleCanbus(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = getStrDefault(params, "interface", "can0"); // accepted, unused (stub)
+    _ = ((try webreq.optional([]const u8, params, "interface")) orelse "can0"); // accepted, unused (stub)
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "can_uuids", .{ .array = .init(alloc) });
     return .{ .object = obj };

@@ -16,6 +16,7 @@ pub const io = @import("io.zig");
 pub const core = @import("server/core.zig");
 pub const jsonrpc = @import("jsonrpc.zig");
 pub const json_value = @import("json/value.zig");
+pub const json_params = @import("json/params.zig");
 pub const registry = @import("server/registry.zig");
 pub const methods = @import("core/methods.zig");
 pub const http_transport = @import("http_transport.zig");

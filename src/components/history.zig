@@ -31,6 +31,7 @@
 //! delete_job (uid / all) → {"deleted_jobs": [...]}
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
@@ -632,67 +633,6 @@ pub const totals_key = "totals";
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn getOptStr(params: std.json.Value, field: []const u8) error{InvalidParams}!?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                .null => null,
-                else => error.InvalidParams,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getOptInt(params: std.json.Value, field: []const u8, default: i64) error{InvalidParams}!i64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default;
-            return switch (v) {
-                .integer => |i| i,
-                .float => |f| jv.floatToInt(f) orelse return error.InvalidParams,
-                .string => |s| std.fmt.parseInt(i64, s, 10) catch return default,
-                .null => default,
-                else => error.InvalidParams,
-            };
-        },
-        else => return default,
-    }
-}
-
-fn getOptFloat(params: std.json.Value, field: []const u8, default: f64) error{InvalidParams}!f64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default;
-            return switch (v) {
-                .float => |f| f,
-                .integer => |i| @floatFromInt(i),
-                .string => |s| std.fmt.parseFloat(f64, s) catch return default,
-                .null => default,
-                else => error.InvalidParams,
-            };
-        },
-        else => return default,
-    }
-}
-
-fn getOptBool(params: std.json.Value, field: []const u8, default: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default,
-            };
-        },
-        else => return default,
-    }
-}
-
 /// Build a base-totals JSON object (zero-valued).
 fn buildBaseTotals(alloc: std.mem.Allocator) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
@@ -783,11 +723,11 @@ fn prepJob(c: *const HistoryCtx, alloc: std.mem.Allocator, job_val: std.json.Val
 pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *HistoryCtx = @ptrCast(@alignCast(ctx));
 
-    const limit_raw = try getOptInt(params, "limit", 50);
-    const start = try getOptInt(params, "start", 0);
-    const since = try getOptFloat(params, "since", -1.0);
-    const before = try getOptFloat(params, "before", -1.0);
-    const order_str_raw = (try getOptStr(params, "order")) orelse "desc";
+    const limit_raw = ((try webreq.optional(i64, params, "limit")) orelse 50);
+    const start = ((try webreq.optional(i64, params, "start")) orelse 0);
+    const since = ((try webreq.optional(f64, params, "since")) orelse -1.0);
+    const before = ((try webreq.optional(f64, params, "before")) orelse -1.0);
+    const order_str_raw = ((try webreq.optional([]const u8, params, "order"))) orelse "desc";
     // Normalize: uppercase
     var order_buf: [8]u8 = undefined;
     const order_len = @min(order_str_raw.len, order_buf.len);
@@ -883,7 +823,7 @@ pub fn handleResetTotals(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 /// GET /server/history/job — get by uid
 pub fn handleGetJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *HistoryCtx = @ptrCast(@alignCast(ctx));
-    const uid_raw = (try getOptStr(params, "uid")) orelse return error.InvalidParams;
+    const uid_raw = ((try webreq.optional([]const u8, params, "uid"))) orelse return error.InvalidParams;
     // Normalize uid to 6-char uppercase hex
     const job_id_int = std.fmt.parseInt(u64, uid_raw, 16) catch return error.InvalidParams;
     var id_buf: [16]u8 = undefined;
@@ -918,7 +858,7 @@ pub fn handleJobDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
 /// DELETE /server/history/job — delete by uid or all=true
 pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *HistoryCtx = @ptrCast(@alignCast(ctx));
-    const all = getOptBool(params, "all", false);
+    const all = ((try webreq.optional(bool, params, "all")) orelse false);
 
     var deleted: std.json.Array = .init(alloc);
 
@@ -934,7 +874,7 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
             emitHistoryChanged(c, alloc, "deleted", prepped);
         }
     } else {
-        const uid_raw = (try getOptStr(params, "uid")) orelse return error.InvalidParams;
+        const uid_raw = ((try webreq.optional([]const u8, params, "uid"))) orelse return error.InvalidParams;
         const job_id_int = std.fmt.parseInt(u64, uid_raw, 16) catch return error.InvalidParams;
         var id_buf: [16]u8 = undefined;
         const job_id_tmp = std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_int}) catch return error.InvalidParams;

@@ -34,6 +34,7 @@
 //! status → {"queued_jobs": [...], "queue_state": str}
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const sleep = @import("../util/sleep.zig");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
@@ -459,52 +460,6 @@ fn genJobId(io: std.Io, alloc: std.mem.Allocator, seq: u32) ![]u8 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn getOptStr(params: std.json.Value, field: []const u8) error{InvalidParams}!?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                .null => null,
-                else => error.InvalidParams,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return (try getOptStr(params, field)) orelse error.InvalidParams;
-}
-
-fn getOptBool(params: std.json.Value, field: []const u8, default: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default,
-            };
-        },
-        else => return default,
-    }
-}
-
-fn getStrList(params: std.json.Value, field: []const u8) error{InvalidParams}![]const std.json.Value {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return &.{};
-            return switch (v) {
-                .array => |a| a.items,
-                else => error.InvalidParams,
-            };
-        },
-        else => return &.{},
-    }
-}
-
 fn buildQueueObj(alloc: std.mem.Allocator, jobs_arr: std.json.Value, state: []const u8) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "queued_jobs", jobs_arr);
@@ -574,15 +529,14 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
     // `filenames` is required (Moonraker's get_list raises when absent) — without
     // this an empty POST silently enqueues nothing and returns 200.
-    if (params != .object or params.object.get("filenames") == null) return error.InvalidParams;
-    const files = try getStrList(params, "filenames");
-    const reset = getOptBool(params, "reset", false);
+    const files = (try webreq.optionalList(alloc, params, "filenames")) orelse return error.InvalidParams;
+    const reset = ((try webreq.optional(bool, params, "reset")) orelse false);
 
     // Validate every file before touching the queue (job_queue.py queue_job):
     // a rejected request leaves the queue unchanged. Reject files that don't
     // exist under the gcodes root; no checker wired → accept.
-    for (files) |fv| {
-        if (fv != .string or !c.fileExists(fv.string)) return error.InvalidParams;
+    for (files) |filename| {
+        if (!c.fileExists(filename)) return error.InvalidParams;
     }
 
     var set_ready = false;
@@ -594,10 +548,10 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
             c.jobs.clearRetainingCapacity();
         }
 
-        for (files) |fv| {
+        for (files) |filename| {
             const job_id = try genJobId(c.clock_io, c.gpa, c.job_seq.fetchAdd(1, .monotonic));
             errdefer c.gpa.free(job_id);
-            const fname_owned = try c.gpa.dupe(u8, fv.string);
+            const fname_owned = try c.gpa.dupe(u8, filename);
             errdefer c.gpa.free(fname_owned);
             const time_added = nowSecs(c.clock_io);
             try c.jobs.append(c.gpa, .{
@@ -620,7 +574,7 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
 /// DELETE /server/job_queue/job — remove job(s) by job_ids or all=true
 pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
-    const all = getOptBool(params, "all", false);
+    const all = ((try webreq.optional(bool, params, "all")) orelse false);
 
     if (all) {
         {
@@ -632,7 +586,7 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
         c.saveToStore(alloc);
         emitQueueChanged(c, alloc, "jobs_removed", true);
     } else {
-        const job_ids = try getStrList(params, "job_ids");
+        const job_ids = (try webreq.optionalList(alloc, params, "job_ids")) orelse &.{};
         if (job_ids.len == 0) {
             // Nothing deleted — return current state without notification
             return buildResponse(c, alloc);
@@ -644,11 +598,7 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
             while (i < c.jobs.items.len) {
                 const j = &c.jobs.items[i];
                 var found = false;
-                for (job_ids) |idv| {
-                    const id = switch (idv) {
-                        .string => |s| s,
-                        else => continue,
-                    };
+                for (job_ids) |id| {
                     if (std.mem.eql(u8, j.job_id, id)) {
                         found = true;
                         break;
@@ -723,7 +673,7 @@ pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
 /// POST /server/job_queue/jump — move job_id to front of queue
 pub fn handleJump(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
-    const job_id = try getStr(params, "job_id");
+    const job_id = try webreq.required([]const u8, params, "job_id");
 
     {
         c.lockJobs();

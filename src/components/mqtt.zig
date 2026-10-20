@@ -29,6 +29,7 @@
 //! "payload": p}. Known gaps are listed in TODO.md ("Known Moonraker gaps").
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const sleep = @import("../util/sleep.zig");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
@@ -448,31 +449,6 @@ pub const MqttCtx = struct {
 // Parameter helpers
 // ---------------------------------------------------------------------------
 
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    if (params != .object) return error.InvalidParams;
-    const v = params.object.get(field) orelse return error.InvalidParams;
-    return if (v == .string) v.string else error.InvalidParams;
-}
-
-fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    if (params != .object) return default_val;
-    return switch (params.object.get(field) orelse return default_val) {
-        .bool => |b| b,
-        .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-        else => default_val,
-    };
-}
-
-fn getOptFloat(params: std.json.Value, field: []const u8) ?f64 {
-    if (params != .object) return null;
-    return switch (params.object.get(field) orelse return null) {
-        .float => |f| f,
-        .integer => |i| @floatFromInt(i),
-        .string => |s| std.fmt.parseFloat(f64, s) catch null,
-        else => null,
-    };
-}
-
 /// Validate a QoS value: 0, 1 or 2 (mqtt.py raises otherwise).
 fn qosValue(qos: i64) error{InvalidParams}!u2 {
     if (qos < 0 or qos > 2) return error.InvalidParams;
@@ -481,13 +457,7 @@ fn qosValue(qos: i64) error{InvalidParams}!u2 {
 
 /// The request's `qos` (default `default_qos`), with 0 meaning `default_qos`.
 fn requestQos(cfg: *const MqttConfig, params: std.json.Value) error{InvalidParams}!u2 {
-    const raw: i64 = if (params == .object) switch (params.object.get("qos") orelse std.json.Value{ .integer = cfg.default_qos }) {
-        .integer => |i| i,
-        .float => |f| jv.floatToInt(f) orelse return error.InvalidParams,
-        .string => |s| std.fmt.parseInt(i64, s, 10) catch return error.InvalidParams,
-        .null => cfg.default_qos,
-        else => return error.InvalidParams,
-    } else cfg.default_qos;
+    const raw = (try webreq.optional(i64, params, "qos")) orelse cfg.default_qos;
     return cfg.effectiveQos(try qosValue(raw));
 }
 
@@ -516,7 +486,7 @@ fn validateTopic(topic: []const u8) error{InvalidParams}!void {
 fn publishParams(ctx: *MqttCtx, topic: []const u8, params: std.json.Value) !void {
     const cfg = &(ctx.config orelse return error.MqttNotConfigured);
     const qos = try requestQos(cfg, params);
-    const retain = getOptBool(params, "retain", false);
+    const retain = ((try webreq.optional(bool, params, "retain")) orelse false);
     const payload = if (params == .object) params.object.get("payload") orelse .null else .null;
     var aw: std.Io.Writer.Allocating = .init(ctx.gpa);
     defer aw.deinit();
@@ -536,7 +506,7 @@ fn publishParams(ctx: *MqttCtx, topic: []const u8, params: std.json.Value) !void
 /// acknowledgement.
 pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
-    const topic = try getStr(params, "topic");
+    const topic = try webreq.required([]const u8, params, "topic");
     try publishParams(ctx, topic, params);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "topic", .{ .string = topic });
@@ -548,11 +518,11 @@ pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 /// expiry returns error.MqttTimeout.
 pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
-    const topic = try getStr(params, "topic");
+    const topic = try webreq.required([]const u8, params, "topic");
     try validateTopic(topic);
     const cfg = &(ctx.config orelse return error.MqttNotConfigured);
     const qos = try requestQos(cfg, params);
-    const timeout = getOptFloat(params, "timeout");
+    const timeout = (try webreq.optional(f64, params, "timeout"));
     const io = ctx.io orelse return error.ServiceUnavailable;
 
     var waiter: Waiter = .{ .topic = topic, .qos = qos };
@@ -583,9 +553,9 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
 /// Response: {"topic": <published topic>}.
 pub fn handlePublishPrefixed(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
-    const raw_topic = try getStr(params, "topic");
+    const raw_topic = try webreq.required([]const u8, params, "topic");
     const cfg = &(ctx.config orelse return error.MqttNotConfigured);
-    const topic = if (getOptBool(params, "use_prefix", false))
+    const topic = if (((try webreq.optional(bool, params, "use_prefix")) orelse false))
         try std.fmt.allocPrint(alloc, "{s}/{s}", .{ cfg.instance_name, std.mem.trimStart(u8, raw_topic, "/") })
     else
         raw_topic;

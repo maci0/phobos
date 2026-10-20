@@ -44,7 +44,7 @@ const std = @import("std");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const sleep = @import("../util/sleep.zig");
-const database = @import("database.zig");
+const webreq = @import("../json/params.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 
@@ -547,31 +547,10 @@ fn freeWebcam(alloc: std.mem.Allocator, cam: *Webcam) void {
 // Parameter helpers
 // ---------------------------------------------------------------------------
 
-/// Moonraker `get_boolean`: a bool, or "true"/"false" in any case. Absent → default.
-fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) error{InvalidParams}!bool {
-    const v = (if (params == .object) params.object.get(field) else null) orelse return default_val;
-    return switch (v) {
-        .bool => |b| b,
-        .string => |s| if (std.ascii.eqlIgnoreCase(s, "true")) true else if (std.ascii.eqlIgnoreCase(s, "false")) false else error.InvalidParams,
-        else => error.InvalidParams,
-    };
-}
-
-/// Moonraker `get_int`: an integer, an integral float or a decimal string.
-/// Absent → default.
-fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) error{InvalidParams}!i64 {
-    const v = (if (params == .object) params.object.get(field) else null) orelse return default_val;
-    return switch (v) {
-        .integer => |i| i,
-        .float => |f| jv.floatToInt(f) orelse error.InvalidParams,
-        .string => |s| std.fmt.parseInt(i64, s, 10) catch error.InvalidParams,
-        else => error.InvalidParams,
-    };
-}
-
-/// `extra_data`: an object, absent → empty.
+/// `extra_data`: Moonraker `get("extra_data", {})`. Phobos stores an object,
+/// so another type is rejected. Absent → empty.
 fn getOptObj(params: std.json.Value, field: []const u8) error{InvalidParams}!std.json.ObjectMap {
-    const v = (if (params == .object) params.object.get(field) else null) orelse return .empty;
+    const v = (try webreq.optional(std.json.Value, params, field)) orelse return .empty;
     return if (v == .object) v.object else error.InvalidParams;
 }
 
@@ -619,7 +598,7 @@ pub fn handleWebcamPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
         existing.* = updated;
         break :blk existing;
     } else blk: {
-        const name = try database.getStr(params, "name");
+        const name = try webreq.required([]const u8, params, "name");
         if (c.findByName(name) != null) return error.InvalidParams;
         var uid_buf: [36]u8 = undefined;
         var new_cam = try camFromWebRequest(c.gpa, params, c.newUid(&uid_buf));
@@ -753,27 +732,27 @@ pub fn handleWebcamTest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// (else 404); otherwise `name` selects one (null when absent from the table).
 /// Neither param: `error.MissingWebcamName`.
 fn lookupCamera(c: *WebcamCtx, params: std.json.Value) !?*Webcam {
-    if (try database.getOptStr(params, "uid")) |uid| return c.findByUid(uid) orelse error.NotFound;
-    const name = (try database.getOptStr(params, "name")) orelse return error.MissingWebcamName;
+    if (try webreq.optional([]const u8, params, "uid")) |uid| return c.findByUid(uid) orelse error.NotFound;
+    const name = (try webreq.optional([]const u8, params, "name")) orelse return error.MissingWebcamName;
     return c.findByName(name);
 }
 
 /// Create a new Webcam from web request params (from_web_request equivalent).
 fn camFromWebRequest(alloc: std.mem.Allocator, params: std.json.Value, uid: []const u8) !Webcam {
     return (Webcam{
-        .name = try database.getStr(params, "name"),
-        .enabled = try getOptBool(params, "enabled", true),
-        .icon = try database.getOptStr(params, "icon") orelse "mdiWebcam",
-        .aspect_ratio = try database.getOptStr(params, "aspect_ratio") orelse "4:3",
-        .target_fps = try getOptInt(params, "target_fps", 15),
-        .target_fps_idle = try getOptInt(params, "target_fps_idle", 5),
-        .location = try database.getOptStr(params, "location") orelse "printer",
-        .service = try database.getOptStr(params, "service") orelse "mjpegstreamer",
-        .stream_url = try database.getStr(params, "stream_url"),
-        .snapshot_url = try database.getOptStr(params, "snapshot_url") orelse "",
-        .flip_horizontal = try getOptBool(params, "flip_horizontal", false),
-        .flip_vertical = try getOptBool(params, "flip_vertical", false),
-        .rotation = try getOptInt(params, "rotation", 0),
+        .name = try webreq.required([]const u8, params, "name"),
+        .enabled = (try webreq.optional(bool, params, "enabled")) orelse true,
+        .icon = try webreq.optional([]const u8, params, "icon") orelse "mdiWebcam",
+        .aspect_ratio = try webreq.optional([]const u8, params, "aspect_ratio") orelse "4:3",
+        .target_fps = (try webreq.optional(i64, params, "target_fps")) orelse 15,
+        .target_fps_idle = (try webreq.optional(i64, params, "target_fps_idle")) orelse 5,
+        .location = try webreq.optional([]const u8, params, "location") orelse "printer",
+        .service = try webreq.optional([]const u8, params, "service") orelse "mjpegstreamer",
+        .stream_url = try webreq.required([]const u8, params, "stream_url"),
+        .snapshot_url = try webreq.optional([]const u8, params, "snapshot_url") orelse "",
+        .flip_horizontal = (try webreq.optional(bool, params, "flip_horizontal")) orelse false,
+        .flip_vertical = (try webreq.optional(bool, params, "flip_vertical")) orelse false,
+        .rotation = (try webreq.optional(i64, params, "rotation")) orelse 0,
         .source = "database",
         .extra_data = try getOptObj(params, "extra_data"),
         .uid = uid,
@@ -785,7 +764,7 @@ fn camFromWebRequest(alloc: std.mem.Allocator, params: std.json.Value, uid: []co
 /// copy; the caller frees it on error.
 fn updateCamFromParams(c: *WebcamCtx, cam: *Webcam, params: std.json.Value) !void {
     inline for (.{ "name", "icon", "aspect_ratio", "location", "service", "stream_url", "snapshot_url" }) |field| {
-        if (try database.getOptStr(params, field)) |value| {
+        if (try webreq.optional([]const u8, params, field)) |value| {
             if (!std.mem.eql(u8, @field(cam, field), value)) {
                 if (comptime std.mem.eql(u8, field, "name")) {
                     if (c.findByName(value) != null) return error.InvalidParams;
@@ -797,10 +776,10 @@ fn updateCamFromParams(c: *WebcamCtx, cam: *Webcam, params: std.json.Value) !voi
         }
     }
     inline for (.{ "enabled", "flip_horizontal", "flip_vertical" }) |field| {
-        @field(cam, field) = try getOptBool(params, field, @field(cam, field));
+        @field(cam, field) = (try webreq.optional(bool, params, field)) orelse @field(cam, field);
     }
     inline for (.{ "target_fps", "target_fps_idle", "rotation" }) |field| {
-        @field(cam, field) = try getOptInt(params, field, @field(cam, field));
+        @field(cam, field) = (try webreq.optional(i64, params, field)) orelse @field(cam, field);
     }
     if (params == .object and params.object.contains("extra_data")) {
         const extra = (try jv.deepCopy(c.gpa, .{ .object = try getOptObj(params, "extra_data") })).object;

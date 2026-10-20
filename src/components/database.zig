@@ -37,6 +37,7 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const jv = @import("../json/value.zig");
+const webreq = @import("../json/params.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -83,48 +84,6 @@ fn namespaceListed(c: *DbCtx, alloc: std.mem.Allocator, policy: []const u8, name
         if (name == .string and std.mem.eql(u8, name.string, namespace)) return true;
     }
     return false;
-}
-
-// ---------------------------------------------------------------------------
-// Parameter extraction helpers
-// ---------------------------------------------------------------------------
-
-/// Required string param. Returns `error.InvalidParams` if absent or non-string.
-pub fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    const obj = switch (params) {
-        .object => |o| o,
-        else => return error.InvalidParams,
-    };
-    const v = obj.get(field) orelse return error.InvalidParams;
-    return switch (v) {
-        .string => |s| s,
-        else => error.InvalidParams,
-    };
-}
-
-/// Optional string param. Returns null when the field is absent or null.
-pub fn getOptStr(params: std.json.Value, field: []const u8) error{InvalidParams}!?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                .null => null,
-                else => error.InvalidParams,
-            };
-        },
-        else => return null,
-    }
-}
-
-/// The `value` param — any JSON value is accepted. Returns `error.InvalidParams`
-/// when the key is absent.
-pub fn getValue(params: std.json.Value) error{InvalidParams}!std.json.Value {
-    const obj = switch (params) {
-        .object => |o| o,
-        else => return error.InvalidParams,
-    };
-    return obj.get("value") orelse error.InvalidParams;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,10 +188,16 @@ fn handleItemGet(
     alloc: std.mem.Allocator,
     is_debug: bool,
 ) anyerror!std.json.Value {
-    const namespace = try getStr(params, "namespace");
+    const namespace = try webreq.required([]const u8, params, "namespace");
     if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
 
-    const key_opt = try getOptStr(params, "key");
+    // database.py reads `key` with a raw `get("key", None)`: JSON null selects
+    // the whole namespace like an absent key. List keys are not supported.
+    const key_opt: ?[]const u8 = switch ((try webreq.optional(std.json.Value, params, "key")) orelse .null) {
+        .null => null,
+        .string => |s| s,
+        else => return error.InvalidParams,
+    };
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
     const value: std.json.Value = if (key_opt) |key| blk: {
@@ -279,12 +244,12 @@ fn handleItemPost(
     alloc: std.mem.Allocator,
     is_debug: bool,
 ) anyerror!std.json.Value {
-    const namespace = try getStr(params, "namespace");
+    const namespace = try webreq.required([]const u8, params, "namespace");
     if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
     if (!is_debug and (isProtected(namespace) or try namespaceListed(c, alloc, "protected_namespaces", namespace))) return error.Forbidden;
 
-    const key = try getStr(params, "key");
-    const value = try getValue(params);
+    const key = try webreq.required([]const u8, params, "key");
+    const value = try webreq.required(std.json.Value, params, "value");
     // Reject pathologically-nested values: storing one would let a later GET
     // serialize it through std.json.Stringify's fixed 256-level nesting stack,
     // which panics / corrupts memory past its limit. Real data is shallow.
@@ -316,11 +281,11 @@ fn handleItemDelete(
     alloc: std.mem.Allocator,
     is_debug: bool,
 ) anyerror!std.json.Value {
-    const namespace = try getStr(params, "namespace");
+    const namespace = try webreq.required([]const u8, params, "namespace");
     if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
     if (!is_debug and (isProtected(namespace) or try namespaceListed(c, alloc, "protected_namespaces", namespace))) return error.Forbidden;
 
-    const key = try getStr(params, "key");
+    const key = try webreq.required([]const u8, params, "key");
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
     const removed = c.store.deleteItem(alloc, ns_z, key) catch |err| switch (err) {
@@ -343,7 +308,7 @@ fn requestError(err: ds.Error) anyerror {
 // Stub: compact/backup/restore not implemented. Registered for API-surface coverage.
 
 pub fn handleTableDebug(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const table = try getStr(params, "table");
+    const table = try webreq.required([]const u8, params, "table");
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "table_name", .{ .string = table });
     try obj.put(alloc, "rows", .{ .array = .init(alloc) });
@@ -903,6 +868,10 @@ test "handleGetItem: no key → whole namespace returned" {
     const params = try mkParams(a, "{\"namespace\":\"wholens\"}");
     const result = try handleGetItem(@ptrCast(&ctx), params, a);
     try testing.expect(result.object.get("value").? == .object);
+    // A raw `get("key", None)`: null reads the namespace, other non-strings fail.
+    const null_key = try handleGetItem(@ptrCast(&ctx), try mkParams(a, "{\"namespace\":\"wholens\",\"key\":null}"), a);
+    try testing.expectEqual(2, null_key.object.get("value").?.object.count());
+    try testing.expectError(error.InvalidParams, handleGetItem(@ptrCast(&ctx), try mkParams(a, "{\"namespace\":\"wholens\",\"key\":1}"), a));
 }
 
 test "handleCompact: response shape" {
@@ -952,39 +921,6 @@ test "isForbidden/isProtected match database.py defaults" {
     try testing.expect(isProtected("moonraker"));
     try testing.expect(!isProtected("database"));
     try testing.expect(!isProtected("myns"));
-}
-
-test "getStr: returns string or InvalidParams" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const p = try mkParams(a, "{\"namespace\":\"ns\"}");
-    try testing.expectEqualStrings("ns", try getStr(p, "namespace"));
-    try testing.expectError(error.InvalidParams, getStr(p, "missing"));
-    try testing.expectError(error.InvalidParams, getStr(.null, "x"));
-}
-
-test "getOptStr: optional field semantics" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const p = try mkParams(a, "{\"namespace\":\"ns\",\"key\":\"k\"}");
-    const k = try getOptStr(p, "key");
-    try testing.expectEqualStrings("k", k.?);
-    try testing.expect((try getOptStr(p, "missing")) == null);
-    try testing.expect((try getOptStr(.null, "x")) == null);
-}
-
-test "getValue: returns value or InvalidParams" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const p = try mkParams(a, "{\"value\":99}");
-    try testing.expectEqual(@as(i64, 99), (try getValue(p)).integer);
-    try testing.expectError(error.InvalidParams, getValue(.null));
 }
 
 test "registerDatabase: wires expected routes and JSON-RPC methods" {

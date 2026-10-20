@@ -29,6 +29,7 @@
 //! Strip-specific requests return a not-found error.
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const Core = @import("../server/core.zig").Core;
@@ -400,54 +401,6 @@ pub const WledCtx = struct {
 // Param helpers
 // ---------------------------------------------------------------------------
 
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                else => null,
-            };
-        },
-        else => return null,
-    }
-}
-
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
-fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .integer => |i| i,
-                .float => |f| jv.floatToInt(f) orelse default_val,
-                .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
-}
-
-/// A numeric param as f64; 0 when absent or not a number (Moonraker defaults).
-fn getOptFloat(params: std.json.Value, field: []const u8) f64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return 0;
-            return switch (v) {
-                .float => |f| f,
-                .integer => |i| @floatFromInt(i),
-                .string => |s| std.fmt.parseFloat(f64, s) catch 0,
-                else => 0,
-            };
-        },
-        else => return 0,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Strip info shape
 // ---------------------------------------------------------------------------
@@ -523,14 +476,14 @@ pub fn handleStrips(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
 /// request's preset/brightness/intensity/speed; returns { "<strip>": strip_info }.
 pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
-    const strip_name = try getStr(params, "strip");
+    const strip_name = try webreq.required([]const u8, params, "strip");
     // Matches Moonraker: "No valid strip named <x>"
     if (ctx.findStrip(strip_name) == null) return error.NotFound;
     // GET is read-only: only POST reads `action` (Moonraker
     // _handle_single_wled_request), so GET ?action=on cannot drive hardware.
-    const is_post = if (getOptStr(params, "_method")) |m| std.mem.eql(u8, m, "POST") else false;
+    const is_post = if ((try webreq.optional([]const u8, params, "_method"))) |m| std.mem.eql(u8, m, "POST") else false;
     if (is_post) {
-        const a = getOptStr(params, "action") orelse return error.InvalidParams;
+        const a = (try webreq.optional([]const u8, params, "action")) orelse return error.InvalidParams;
         const action = try std.ascii.allocLowerString(alloc, a);
         if (!std.mem.eql(u8, action, "on") and
             !std.mem.eql(u8, action, "off") and
@@ -544,10 +497,10 @@ pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
             alloc,
             strip_name,
             action,
-            getOptInt(params, "preset", -1),
-            getOptInt(params, "brightness", -1),
-            getOptInt(params, "intensity", -1),
-            getOptInt(params, "speed", -1),
+            ((try webreq.optional(i64, params, "preset")) orelse -1),
+            ((try webreq.optional(i64, params, "brightness")) orelse -1),
+            ((try webreq.optional(i64, params, "intensity")) orelse -1),
+            ((try webreq.optional(i64, params, "speed")) orelse -1),
         );
     }
     const strip = ctx.findStrip(strip_name) orelse return error.NotFound;
@@ -612,7 +565,7 @@ pub fn handleBatchToggle(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
 /// Full control of WLED strip from GCode macros (SET_WLED_STATE).
 pub fn handleSetWledState(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
-    const strip_name = try getStr(params, "strip");
+    const strip_name = try webreq.required([]const u8, params, "strip");
     if (ctx.findStrip(strip_name) == null) return error.NotFound;
 
     // `state` may be a bool or a string; "true"/"false" map to on/off.
@@ -626,10 +579,10 @@ pub fn handleSetWledState(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
         else => {},
     };
 
-    const preset = getOptInt(params, "preset", -1);
-    const brightness = getOptInt(params, "brightness", -1);
-    const intensity = getOptInt(params, "intensity", -1);
-    const speed = getOptInt(params, "speed", -1);
+    const preset = ((try webreq.optional(i64, params, "preset")) orelse -1);
+    const brightness = ((try webreq.optional(i64, params, "brightness")) orelse -1);
+    const intensity = ((try webreq.optional(i64, params, "intensity")) orelse -1);
+    const speed = ((try webreq.optional(i64, params, "speed")) orelse -1);
 
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "status", .{ .string = "ok" });
@@ -652,19 +605,19 @@ pub fn handleSetWledState(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
 /// the chain is rejected.
 pub fn handleSetWled(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
-    const strip_name = try getStr(params, "strip");
+    const strip_name = try webreq.required([]const u8, params, "strip");
     const strip = ctx.findStrip(strip_name) orelse return error.NotFound;
 
-    const index_raw = getOptInt(params, "index", -1);
+    const index_raw = ((try webreq.optional(i64, params, "index")) orelse -1);
     const index: ?usize = if (index_raw < 0) null else std.math.cast(usize, index_raw) orelse return error.InvalidParams;
     if (index) |i| if (i == 0 or i > strip.chain_count) return error.InvalidParams;
     const color = [4]f64{
-        getOptFloat(params, "red"),
-        getOptFloat(params, "green"),
-        getOptFloat(params, "blue"),
-        getOptFloat(params, "white"),
+        ((try webreq.optional(f64, params, "red")) orelse 0),
+        ((try webreq.optional(f64, params, "green")) orelse 0),
+        ((try webreq.optional(f64, params, "blue")) orelse 0),
+        ((try webreq.optional(f64, params, "white")) orelse 0),
     };
-    try ctx.setWled(alloc, strip_name, color, index, getOptInt(params, "transmit", 1) == 1);
+    try ctx.setWled(alloc, strip_name, color, index, ((try webreq.optional(i64, params, "transmit")) orelse 1) == 1);
 
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "status", .{ .string = "ok" });
@@ -1002,15 +955,15 @@ test "updateColorData: whole chain, one pixel, out-of-range index ignored" {
     try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0, 0, 0, 255, 0 }, strip.chain_data);
 }
 
-test "getOptFloat: numbers, numeric strings, defaults" {
+test "request floats accept numbers, numeric strings and booleans" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const p = try objParams(arena.allocator(), "{\"a\":0.25,\"b\":1,\"c\":\"0.5\",\"d\":true}");
-    try testing.expectEqual(@as(f64, 0.25), getOptFloat(p, "a"));
-    try testing.expectEqual(@as(f64, 1), getOptFloat(p, "b"));
-    try testing.expectEqual(@as(f64, 0.5), getOptFloat(p, "c"));
-    try testing.expectEqual(@as(f64, 0), getOptFloat(p, "d"));
-    try testing.expectEqual(@as(f64, 0), getOptFloat(p, "missing"));
+    try testing.expectEqual(@as(f64, 0.25), ((try webreq.optional(f64, p, "a")) orelse 0));
+    try testing.expectEqual(@as(f64, 1), ((try webreq.optional(f64, p, "b")) orelse 0));
+    try testing.expectEqual(@as(f64, 0.5), ((try webreq.optional(f64, p, "c")) orelse 0));
+    try testing.expectEqual(@as(f64, 1), ((try webreq.optional(f64, p, "d")) orelse 0));
+    try testing.expectEqual(@as(f64, 0), ((try webreq.optional(f64, p, "missing")) orelse 0));
 }
 
 test "fuzz WLED handlers: arbitrary actions and params never crash" {

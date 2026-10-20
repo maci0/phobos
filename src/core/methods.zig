@@ -7,6 +7,7 @@
 //! reported component set is the full static list phobos registers (see `components`).
 
 const std = @import("std");
+const webreq = @import("../json/params.zig");
 const build_options = @import("build_options");
 const registry = @import("../server/registry.zig");
 const config_mod = @import("../config/confighelper.zig");
@@ -89,23 +90,6 @@ pub const ServerInfo = struct {
         return @ptrCast(self);
     }
 };
-
-/// Read `raw` boolean from JSON-RPC params (object form) or query-string-style
-/// values. Defaults to false, matching `web_request.get_boolean("raw", False)`.
-fn getRawParam(params: std.json.Value) bool {
-    switch (params) {
-        .object => |o| {
-            const v = o.get("raw") orelse return false;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => false,
-            };
-        },
-        else => return false,
-    }
-}
 
 /// Substitute literal newlines in `w` with "<br/>" into `alloc`-owned memory.
 /// Returned slice always borrows or allocates fresh; caller owns it.
@@ -449,7 +433,7 @@ pub fn serverInfoHandler(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
         snap.directory_count = info.directory_count;
         snap.directory_names = info.directory_names;
     }
-    return buildServerInfo(&snap, getRawParam(params), alloc);
+    return buildServerInfo(&snap, (try webreq.optional(bool, params, "raw")) orelse false, alloc);
 }
 
 pub fn serverConfigHandler(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
@@ -537,23 +521,23 @@ test "buildServerInfo: raw=false substitutes newlines, raw=true preserves" {
     try std.testing.expectEqualStrings("line one\nline two", rawv.object.get("warnings").?.array.items[0].string);
 }
 
-test "getRawParam: object bool/string/missing" {
+test "server info raw parameter accepts booleans and strings" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     var o1: std.json.ObjectMap = .empty;
     try o1.put(a, "raw", .{ .bool = true });
-    try std.testing.expect(getRawParam(.{ .object = o1 }));
+    try std.testing.expect((try webreq.optional(bool, .{ .object = o1 }, "raw")) orelse false);
 
     var o2: std.json.ObjectMap = .empty;
     try o2.put(a, "raw", .{ .string = "true" });
-    try std.testing.expect(getRawParam(.{ .object = o2 }));
+    try std.testing.expect((try webreq.optional(bool, .{ .object = o2 }, "raw")) orelse false);
 
     const o3: std.json.ObjectMap = .empty;
-    try std.testing.expect(!getRawParam(.{ .object = o3 }));
+    try std.testing.expect(!((try webreq.optional(bool, .{ .object = o3 }, "raw")) orelse false));
 
-    try std.testing.expect(!getRawParam(.null));
+    try std.testing.expect(!((try webreq.optional(bool, .null, "raw")) orelse false));
 }
 
 test "buildServerConfig: shape" {
