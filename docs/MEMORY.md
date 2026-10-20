@@ -10,7 +10,8 @@ RSS on the actual printer:
 | `sqlite` (default) | **2.18 MB** | 2.28 MB | 21.8 MB | Moonraker `moonraker-sql.db`-compatible (~2.2 MB RSS) |
 | `file` (atomic-rename) | **1.20 MB** | 1.33 MB | 21.6 MB | pure-Zig, no C dep; **~1 MB lighter** |
 
-Binary is **~2.15 MB** either way (SQLite is always linked so it stays runtime-
+Binary is **2.18 MB** (2,184,772 bytes, ReleaseSmall `cortex_a7`, measured
+2026-10-20) either way (SQLite is always linked so it stays runtime-
 selectable; a build option could drop it for a ~1.2 MB binary with the file
 backend only).
 

@@ -51,26 +51,25 @@ pub fn build(b: *std.Build) void {
     if (release) exe.lto = .full;
     b.installArtifact(exe);
 
+    // `zig build test --fuzz` runs the std.testing.fuzz harnesses in this
+    // artifact with coverage-guided input.
     const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, build_opts, false) });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit).step);
     b.step("test-artifact", "Build test binary (no run)").dependOn(&unit.step);
-
-    const fuzz = b.addTest(.{ .root_module = mkmod(b, target, optimize, build_opts, false) });
-    const fuzz_run = b.addRunArtifact(fuzz);
-    b.step("fuzz", "Run fuzz harnesses").dependOn(&fuzz_run.step);
 }
 
 /// Compile the vendored SQLite amalgamation into `module`. Built with
 /// size/feature-reducing defines (no extension loading, no deprecated APIs, no
 /// shared cache) to keep the static binary small — SQLite is the heaviest part
-/// of the binary, so trim what phobos doesn't use.
+/// of the binary, so trim what phobos doesn't use. No -O flag: the module's
+/// optimize mode applies, so ReleaseSmall builds SQLite for size (an -O2
+/// override made the ReleaseSmall cortex_a7 binary 284,112 bytes larger).
 fn addVendoredSqlite(b: *std.Build, module: *std.Build.Module) void {
     module.addIncludePath(b.path("vendor/sqlite"));
     module.addCSourceFiles(.{
         .root = b.path("vendor/sqlite"),
         .files = &.{"sqlite3.c"},
         .flags = &.{
-            "-O2",
             "-DSQLITE_THREADSAFE=1",
             "-DSQLITE_DEFAULT_MEMSTATUS=0",
             "-DSQLITE_DQS=0",

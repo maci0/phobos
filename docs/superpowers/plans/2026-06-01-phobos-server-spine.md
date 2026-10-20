@@ -44,7 +44,7 @@
 - TDD: write the failing test first, watch it fail, minimal impl, watch it pass, commit.
 - **Project rule (non-negotiable):** every function gets a **unit test AND a fuzz test** alongside it. Where several functions form one parser/codec over the same untrusted input (e.g. `acceptKey` + frame codec in `net/ws.zig`), a single module fuzz harness that drives **each public function** satisfies the rule — but it must call each function, not just one. Parsers/dispatchers are the priority fuzz targets.
 - Run unit tests: `zig build test`. Run a single module's tests: `zig test src/<mod>.zig`.
-- Run fuzz (smoke, bounded): `zig build fuzz` (wires `std.testing.fuzz` harnesses; in CI run with an iteration cap).
+- Run fuzz: `zig build test --fuzz` (coverage-guided `std.testing.fuzz` harnesses in the test artifact; runs until stopped). `zig build test` runs each harness once.
 - Commit messages: Conventional Commits, **no AI attribution**, human-authored voice.
 - Commit after every green step group.
 
@@ -189,7 +189,7 @@ pub fn main() !void {
 test { std.testing.refAllDecls(@This()); }
 ```
 
-- [ ] **Step 5: Run** `zig build test` → arena tests PASS. `zig build fuzz -- --fuzz` runs the fuzz smoke. Verify native build: `zig build`.
+- [ ] **Step 5: Run** `zig build test` → arena tests PASS. `zig build test --fuzz` runs the fuzz harnesses. Verify native build: `zig build`.
 - [ ] **Step 6: Verify cross-compile** `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall` produces a static ARM binary (`file zig-out/bin/phobos` → "ARM, EABI5 ... statically linked"). *Note:* requires a `SQLite` for the cross target; if unavailable, gate `vendored SQLite` behind a `-Ddb-backend` option (default true) and disable for the cross smoke until Task 9.
 - [ ] **Step 7: Commit** — `git commit -m "build: scaffold phobos zig project with arena, test and fuzz steps"`
 
