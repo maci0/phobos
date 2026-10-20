@@ -82,8 +82,9 @@ fn scan(reader: *Io.Reader, alloc: std.mem.Allocator, query: ?Ids) !Scan {
         var description = std.mem.trim(u8, tokens.rest(), " \t");
         if (indent == 0) {
             sub = null;
-            if (token.len == 4 and std.ascii.isHex(token[0])) {
-                group = .{ .vendor = try hex(u16, token) };
+            const vendor: ?u16 = hex(u16, token) catch null;
+            if (vendor) |id| {
+                group = .{ .vendor = id };
                 result.records += 1;
                 if (description.len == 0) return error.InvalidUsbIds;
                 if (query) |ids| if (group.vendor == ids.vendor) try replace(alloc, selected.getPtr(.manufacturer), description);
@@ -425,6 +426,22 @@ test "usb ids parser converts Latin-1 and handles duplicates and unrelated secti
     try std.testing.expectEqualStrings("Mouse", parsed.names.protocol.?);
 }
 
+test "usb ids lookup accepts physical descriptor bias records in the printer cache" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "usb.ids", .data = "# Version: 2026.06.10\n1d6b Linux Foundation\n\t0002 2.0 root hub\nC 09 Hub\n\t00 Unused\n\t\t00 Full speed hub\nBIAS 0 Not Applicable\nBIAS 1 Right Hand\n" });
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, "usb.ids", alloc);
+    defer alloc.free(path);
+    var names = try lookup(std.testing.io, alloc, path, .{ .vendor = 0x1d6b, .product = 2, .class = 9, .subclass = 0, .protocol = 0 });
+    defer names.deinit(alloc);
+    try std.testing.expectEqualStrings("Linux Foundation 2.0 root hub", names.description.?);
+    try std.testing.expectEqualStrings("Hub", names.class_name.?);
+    try std.testing.expect(names.subclass == null);
+    try std.testing.expectEqualStrings("Full speed hub", names.protocol.?);
+    try std.testing.expectEqualStrings("2026.06.10", names.version.?);
+}
+
 test "usb ids malformed entries fail without leaking partial names" {
     const alloc = std.testing.allocator;
     for ([_][]const u8{
@@ -754,7 +771,7 @@ test "fuzz usb ids selected records preserve Latin-1 names and identifier hierar
                 byte.* = 'a';
             };
             const product = smith.valueWithHash(u16, 1);
-            const body = try std.fmt.allocPrint(alloc, "1234  {s}\n\t{x:0>4}  Device\nC 03 HID\n\t01 Boot\n\t\t02 Mouse\n", .{ &input_name, product });
+            const body = try std.fmt.allocPrint(alloc, "1234  {s}\n\t{x:0>4}  Device\nC 03 HID\n\t01 Boot\n\t\t02 Mouse\nBIAS 1 Right Hand\n", .{ &input_name, product });
             defer alloc.free(body);
             var reader: Io.Reader = .fixed(body);
             var parsed = try scan(&reader, alloc, .{ .vendor = 0x1234, .product = product, .class = 3, .subclass = 1, .protocol = 2 });

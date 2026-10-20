@@ -551,3 +551,47 @@ cached dependencies. No physical printer was contacted, restarted or deployed
 to; no real update, live database, golden image, QEMU, push or tag was used.
 Hardware timing, ARM runtime and performance measurements remain unverified
 for these changes. The earlier host GPIO input exception is recorded above.
+
+## 2026-10-21: real printer USB cache compatibility
+
+Requested by the user: check the completed work on the printer. Production
+phobos v0.1.2 remained on 7125, PID 6532. Its last print was complete, Klippy
+ready and both heater targets zero. The new static ARM binary ran separately
+inside the Forge-X 1.4.2 chroot, bound only to `127.0.0.1:7126`. Writable data,
+database/WAL copies, metadata fixtures and archives stayed under the owned
+`/data/.phobos-check-b7ab325-20261021` directory. The database/WAL source
+hashes were stable across copying. The live database was not opened through
+SQLite. Announcement feeds used local development mode, update refresh was
+disabled and the existing USB cache was copied, avoiding external downloads.
+The board's `/tmp` had only 3.3 MiB free, so probe files used the data partition.
+
+The first hardware pass found `/machine/peripherals/usb` returning 500 with
+the printer's 730590-byte `usb.ids` cache, version 2026.06.10. The parser
+mistook `BIAS` for a vendor because it checked only the first character of a
+four-character token. Classification now reuses the complete four-digit hex
+validator. A minimal file-backed lookup regression failed with `InvalidUsbIds`
+before the fix and passed afterward; the selected-record fuzz case now includes
+the auxiliary section too. All 19 USB-focused tests passed, including two
+bounded fuzz harnesses. The full host suite passed: 1715 passed, 1 skipped,
+0 failed; 324 bounded fuzz harnesses. Static ARM ReleaseSmall and restored
+native Debug builds passed. Corrected ARM SHA-256:
+`644a1d5cd6a0922730cfd6479ce8546e8a65f4124f61e300cce0ebf78f0e8b6f`.
+
+The corrected binary passed the steady-state hardware checks: matching
+26-component sets, real ARM/Forge-X identity, canonical roots, config/gcodes
+directory capacity, seven USB devices, camera formats/resolutions, three UARTs,
+100 HTTP reads at concurrency two, status subscription pushes, a fragmented
+64 KiB WebSocket request, raw Klippy object listing, extension-agent RPC/events
+and disconnect cleanup, owned thumbnail/ZIP operations and expected error codes.
+All four temperature stores gained four samples over 4.2 seconds. A 3376096-byte
+G-code download matched production's length and SHA-256. This compared the new
+binary with deployed phobos, not a running vendor Moonraker.
+
+An isolated observer fixture exited with `ObserverUnavailable`. The real kernel
+reports `# CONFIG_INOTIFY_USER is not set`; the actual Forge-X configuration
+already selects `none`. This is an environment limitation, now documented in
+`docs/FILE_MANAGEMENT.md`, rather than a code parsing or ABI failure. A separate
+startup readiness race was observed and is verified in the next entry. No
+motion, heating, print start, printer restart, firmware restart, power/service
+action, real update or production replacement was performed. Probe stops so
+far preserved boot ID `6213a6c1-a3b6-4b38-b637-5aa9a116a117`.

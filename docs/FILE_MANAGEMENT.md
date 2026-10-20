@@ -46,3 +46,6 @@ metadata. Writes and atomic replacements coalesce before notification; `.thumbs`
 capacity or an externally replaced root stops observation with a warning until
 restart; API mutation notifications then resume. Shutdown cancels and joins
 the observer before freeing roots or connection state.
+
+Inotify requires a kernel built with `CONFIG_INOTIFY_USER`. On kernels without
+it, select `none`; selecting `inotify` fails startup with `ObserverUnavailable`.
