@@ -1880,6 +1880,46 @@ test "printer: with Klippy sim, server.info reports klippy_connected" {
     try std.testing.expect(result.get("klippy_connected").?.bool == true);
 }
 
+test "octoprint: with Klippy sim, /api/printer/command runs gcode through Klippy" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    try ts.startKlippyBridge();
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    var rec = RecordWriter{};
+    defer rec.deinit();
+    const cid = try ts.conns.add(ts.io);
+    ts.conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
+    defer ts.conns.remove(ts.io, cid);
+    defer ts.conns.detachWriter(ts.io, cid);
+
+    const body = try ts.postJson(alloc, "/api/printer/command",
+        \\{"commands":["G28",5,"M114"]}
+    );
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{}", body);
+    // The sim answers each gcode/script with a `process_gcode_response`,
+    // fanned out as notify_gcode_response; without forwarding none arrives.
+    // Count under Core, which serializes notification fan-out.
+    const count = struct {
+        fn f(r: *const RecordWriter) usize {
+            var n: usize = 0;
+            for (r.frames.items) |frame| {
+                if (std.mem.indexOf(u8, frame, "notify_gcode_response") != null) n += 1;
+            }
+            return n;
+        }
+    }.f;
+    var responses: usize = 0;
+    var attempts: u16 = 0;
+    while (attempts < 200 and responses < 2) : (attempts += 1) {
+        responses = ts.app.core.run(ts.io, count, .{&rec});
+        if (responses < 2) std.Io.sleep(ts.io, .{ .nanoseconds = 10_000_000 }, .real) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, 2), responses);
+}
+
 test "printer: with Klippy sim, print.start returns success" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

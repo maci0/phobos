@@ -586,6 +586,7 @@ pub const App = struct {
         octoprint_ctx.* = .{};
         octoprint_ctx.server_info = info;
         octoprint_ctx.temp_store = data_store_ctx;
+        octoprint_ctx.klippy = klippy_ctx;
         klippy_ctx.octoprint = octoprint_ctx;
         klippy_ctx.temp_store = data_store_ctx;
         db_ctx.registered_namespaces = &.{ "moonraker", "announcements", "update_manager" };

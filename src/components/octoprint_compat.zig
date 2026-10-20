@@ -38,6 +38,8 @@ const software_version = "1.5.0";
 pub const OctoPrintCtx = struct {
     server_info: ?*@import("../core/methods.zig").ServerInfo = null,
     temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
+    /// Runs `/api/printer/command` gcode. Borrowed; set by the App.
+    klippy: ?*@import("klippy_connection.zig").KlippyCtx = null,
     /// Latest print_stats state from Klippy. Updated by statusUpdate()
     /// called from klippy_connection's status processing.
     print_state: PrintState = .standby,
@@ -249,9 +251,25 @@ pub fn handlePrinter(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
     return .{ .object = o };
 }
 
-/// POST /api/printer/command → run gcode. Without Klippy the commands cannot be
-/// executed; Moonraker swallows the per-command error and still returns {}.
-pub fn handleCommand(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+/// POST /api/printer/command → run each string in `commands` through Klippy's
+/// gcode/script, in order. Like `_post_command`, a failing or unsendable
+/// command does not stop the rest and the result is always {}.
+pub fn handleCommand(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
+    const commands = if (params == .object) params.object.get("commands") orelse return .{ .object = .empty } else return .{ .object = .empty };
+    if (commands != .array) return .{ .object = .empty };
+    for (commands.array.items) |command| {
+        if (command != .string) continue;
+        const k = ctx.klippy orelse continue;
+        if (!k.isConnected()) continue;
+        var script: std.json.ObjectMap = .empty;
+        try script.put(alloc, "script", .{ .string = command.string });
+        // octoprint_compat.py logs the per-command ServerError and continues.
+        _ = k.request("gcode/script", .{ .object = script }, alloc) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => std.debug.print("phobos: warning: octoprint gcode '{s}' failed: {}\n", .{ command.string, err }),
+        };
+    }
     return .{ .object = .empty };
 }
 
@@ -292,11 +310,10 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
     return .{ .object = o };
 }
 
-/// POST /api/files/moonraker/(relative_path) → select/print a file.
-/// Without Klippy a print cannot be started; selecting without printing is a
-/// no-op returning null, and any command we cannot satisfy surfaces the
-/// disconnected error (matching the start_print path failing). We return an
-/// empty object (null body) for the common no-op select case.
+/// POST /api/files/moonraker/(relative_path) → `_select_file`. Registered for
+/// API coverage only: the HTTP router matches the pattern literally, so a
+/// request for a real path never reaches this handler, and `print=true` does
+/// not start or queue a print (TODO.md). Returns {} like a plain select.
 pub fn handleSelectFile(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     return .{ .object = .empty };
 }
