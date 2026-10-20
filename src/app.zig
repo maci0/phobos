@@ -606,7 +606,7 @@ pub const App = struct {
         // The server URL is set later in setConfig when the config file is parsed.
         const spoolman_ctx = try alloc.create(SpoolmanCtx);
         errdefer alloc.destroy(spoolman_ctx);
-        spoolman_ctx.* = SpoolmanCtx.init(alloc, db_ctx.store, bus);
+        spoolman_ctx.* = try SpoolmanCtx.init(alloc, db_ctx.store, bus);
 
         // --- MQTT context (no broker; faithful endpoint shapes) ---
         const mqtt_ctx = try alloc.create(MqttCtx);
@@ -1801,7 +1801,8 @@ fn mqttApiDispatch(ctx: *anyopaque, request: std.json.Value, alloc: std.mem.Allo
 fn spoolmanSpoolDeleted(ctx: *anyopaque, spool_id: i64) void {
     const app: *App = @ptrCast(@alignCast(ctx));
     const io = app.spoolman_ctx.io orelse return;
-    app.core.run(io, SpoolmanCtx.handleSpoolDeletedLocked, .{ app.spoolman_ctx, spool_id });
+    app.core.run(io, SpoolmanCtx.handleSpoolDeletedLocked, .{ app.spoolman_ctx, spool_id }) catch |err|
+        std.debug.print("phobos: failed to clear deleted spool {d}: {}\n", .{ spool_id, err });
 }
 
 /// Glue between the MQTT reader thread and the sensor component. Inbound

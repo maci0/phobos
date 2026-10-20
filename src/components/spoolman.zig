@@ -25,9 +25,10 @@
 //! the v2 "not available" shape (use_v2_response=true) or a 503, as Moonraker
 //! does.
 //!
-//! Not implemented (TODO.md "Known Moonraker gaps"): filament-use reporting
-//! (`sync_rate`, `pending_reports` is always empty) and the active-spool check
-//! on connect.
+//! Toolhead E positions accumulate pending filament use, excluding retractions
+//! already recovered by the previous high-water mark. At most 128 spool IDs
+//! retain accounting; a full queue rejects a new selection before mutation.
+//! Filament-use delivery and active-spool validation are not implemented yet.
 
 const std = @import("std");
 const webreq = @import("../json/params.zig");
@@ -57,6 +58,15 @@ const max_proxy_response_len = 4 * 1024 * 1024;
 const proxy_timeout: std.Io.Duration = .fromSeconds(10);
 /// Moonraker's WebSocket keepalive interval; allow one interval for a pong.
 const ws_ping_interval: std.Io.Duration = .fromSeconds(20);
+/// Bounds retained accounting while Spoolman is unavailable.
+pub const max_pending_spools = 128;
+const max_extruder_name_len = 128;
+pub const default_sync_rate_seconds: u32 = 5;
+
+const PendingReport = struct {
+    used: f64 = 0,
+    in_flight: ?u64 = null,
+};
 
 /// Methods the proxy forwards (spoolman.py `_proxy_spoolman_request`).
 const proxy_methods = std.StaticStringMap(std.http.Method).initComptime(.{
@@ -99,14 +109,27 @@ pub const SpoolmanCtx = struct {
     /// to clear the active spool under the Core lock.
     on_spool_deleted: ?*const fn (ctx: *anyopaque, spool_id: i64) void = null,
     on_spool_deleted_ctx: ?*anyopaque = null,
+    /// Accounting and active selection are guarded by Core.
+    pending_reports: std.AutoArrayHashMapUnmanaged(i64, PendingReport) = .empty,
+    active_spool: ?i64 = null,
+    klippy_ready: bool = false,
+    extrusion_initialized: bool = false,
+    highest_epos: f64 = 0,
+    last_epos: f64 = 0,
+    extruder_name: [max_extruder_name_len]u8 = undefined,
+    extruder_name_len: usize = 0,
+    sync_rate_seconds: u32 = default_sync_rate_seconds,
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) SpoolmanCtx {
-        return .{ .store = store, .bus = bus, .io = null, .gpa = alloc };
+    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !SpoolmanCtx {
+        var self: SpoolmanCtx = .{ .store = store, .bus = bus, .io = null, .gpa = alloc };
+        self.active_spool = try self.loadSpoolId();
+        return self;
     }
 
     /// Stop the WebSocket supervisor and free the server target.
     pub fn deinit(self: *SpoolmanCtx) void {
         self.stopWs();
+        self.pending_reports.deinit(self.gpa);
         if (self.api_url) |u| self.gpa.free(u);
         if (self.ws_host) |h| self.gpa.free(h);
         if (self.ws_path) |p| self.gpa.free(p);
@@ -297,39 +320,52 @@ pub const SpoolmanCtx = struct {
 
     /// Clear the active spool if it matches `deleted_id` (Moonraker behaviour).
     /// Runs under the Core lock (App wires this via core.run).
-    pub fn handleSpoolDeletedLocked(self: *SpoolmanCtx, deleted_id: i64) void {
+    pub fn handleSpoolDeletedLocked(self: *SpoolmanCtx, deleted_id: i64) !void {
         const active = self.getSpoolId() orelse return;
-        if (active == deleted_id) self.setSpoolId(null);
+        if (active == deleted_id) {
+            try self.setSpoolId(null);
+            _ = self.pending_reports.orderedRemove(deleted_id);
+        }
     }
 
-    fn loadSpoolId(self: *SpoolmanCtx) ?i64 {
+    fn loadSpoolId(self: *SpoolmanCtx) !?i64 {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const v = self.store.getItem(a, db_namespace, active_spool_key) catch return null;
+        const v = self.store.getItem(a, db_namespace, active_spool_key) catch |err| switch (err) {
+            error.NamespaceNotFound, error.KeyNotFound => return null,
+            else => return err,
+        };
         return switch (v orelse return null) {
             .integer => |i| i,
             .null => null,
-            else => null,
+            else => error.InvalidSpoolId,
         };
     }
 
-    /// Return the active spool ID stored in the DataStore (null if none).
+    /// Return the cached active spool ID (null if none).
     pub fn getSpoolId(self: *SpoolmanCtx) ?i64 {
-        return self.loadSpoolId();
+        return self.active_spool;
     }
 
     /// Set the active spool ID. Persists to DataStore and, if io is set,
     /// emits notify_active_spool_set with payload [{"spool_id": <id|null>}].
-    pub fn setSpoolId(self: *SpoolmanCtx, spool_id: ?i64) void {
+    pub fn setSpoolId(self: *SpoolmanCtx, spool_id: ?i64) !void {
         if (self.getSpoolId() == spool_id) return;
+        const previous = self.active_spool;
+        const added = if (spool_id) |id| try self.reserveReport(id) else false;
+        errdefer if (added) {
+            _ = self.pending_reports.orderedRemove(spool_id.?);
+        };
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
 
         const val: std.json.Value = if (spool_id) |id| .{ .integer = id } else .null;
-        self.store.insertItem(a, db_namespace, active_spool_key, val) catch |err|
-            std.debug.print("phobos: warning: failed to persist active spool: {}, selection lost on restart\n", .{err});
+        try self.store.insertItem(a, db_namespace, active_spool_key, val);
+        self.active_spool = spool_id;
+        self.highest_epos = self.last_epos;
+        if (previous) |id| self.removeEmptyReport(id);
 
         // Emit notification only when a live event loop is available.
         const io = self.io orelse return;
@@ -342,6 +378,65 @@ pub const SpoolmanCtx = struct {
         // would deadlock the non-reentrant mutex; use emitLocked.
         self.bus.emitLocked(io, notify.names.active_spool_set, .{ .array = arr }) catch {};
     }
+
+    fn reserveReport(self: *SpoolmanCtx, id: i64) !bool {
+        if (self.pending_reports.contains(id)) return false;
+        if (self.pending_reports.count() == max_pending_spools) return error.ServiceUnavailable;
+        try self.pending_reports.put(self.gpa, id, .{});
+        return true;
+    }
+
+    fn removeEmptyReport(self: *SpoolmanCtx, id: i64) void {
+        const report = self.pending_reports.get(id) orelse return;
+        if (report.used == 0 and report.in_flight == null and self.active_spool != id)
+            _ = self.pending_reports.orderedRemove(id);
+    }
+
+    /// Klippy lifecycle hook. Call under Core before its initial status snapshot.
+    pub fn onKlippyStateLocked(self: *SpoolmanCtx, ready: bool) void {
+        self.klippy_ready = ready;
+        if (!ready) self.extrusion_initialized = false;
+    }
+
+    /// Track toolhead E coordinates, which already include the extrusion factor.
+    /// Call under Core; this performs no network requests.
+    pub fn onKlippyStatusLocked(self: *SpoolmanCtx, status: std.json.Value, _: std.json.Value) !void {
+        if (!self.klippy_ready or status != .object) return;
+        const toolhead = status.object.get("toolhead") orelse return;
+        if (toolhead != .object) return error.InvalidParams;
+        const name = switch (toolhead.object.get("extruder") orelse .null) {
+            .string => |name| name,
+            .null => if (self.extruder_name_len == 0) "extruder" else self.extruder_name[0..self.extruder_name_len],
+            else => return error.InvalidParams,
+        };
+        if (name.len == 0 or name.len > self.extruder_name.len or !std.unicode.utf8ValidateSlice(name)) return error.InvalidParams;
+        const epos: f64 = if (toolhead.object.get("position")) |position| blk: {
+            if (position != .array or position.array.items.len != 4) return error.InvalidParams;
+            break :blk switch (position.array.items[3]) {
+                .integer => |value| @floatFromInt(value),
+                .float => |value| value,
+                else => return error.InvalidParams,
+            };
+        } else if (self.extrusion_initialized) self.highest_epos else return;
+        if (!std.math.isFinite(epos)) return error.InvalidParams;
+        const changed = !std.mem.eql(u8, name, self.extruder_name[0..self.extruder_name_len]);
+        if (self.extrusion_initialized and !changed and epos > self.highest_epos) {
+            if (self.getSpoolId()) |id| {
+                const delta = epos - self.highest_epos;
+                if (!std.math.isFinite(delta)) return error.InvalidParams;
+                _ = try self.reserveReport(id);
+                const report = self.pending_reports.getPtr(id).?;
+                const updated = report.used + delta;
+                if (!std.math.isFinite(updated)) return error.InvalidParams;
+                report.used = updated;
+            }
+        }
+        self.last_epos = epos;
+        if (!self.extrusion_initialized or changed or epos > self.highest_epos) self.highest_epos = epos;
+        if (changed) std.mem.copyForwards(u8, self.extruder_name[0..name.len], name);
+        self.extruder_name_len = name.len;
+        self.extrusion_initialized = true;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -353,13 +448,21 @@ pub const SpoolmanCtx = struct {
 // ---------------------------------------------------------------------------
 
 /// GET /server/spoolman/status → spoolman connection status
-/// Shape: {"spoolman_connected": <bool>, "pending_reports": [], "spool_id": <id|null>}.
-/// `pending_reports` is always empty: filament-use reporting is not implemented.
+/// Shape: spoolman_connected, pending_reports ({spool_id, filament_used}), spool_id.
 pub fn handleStatus(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "spoolman_connected", .{ .bool = c.connected() });
-    try obj.put(alloc, "pending_reports", .{ .array = .init(alloc) });
+    var pending: std.json.Array = .init(alloc);
+    var reports = c.pending_reports.iterator();
+    while (reports.next()) |entry| {
+        if (entry.value_ptr.used <= 0) continue;
+        var report: std.json.ObjectMap = .empty;
+        try report.put(alloc, "spool_id", .{ .integer = entry.key_ptr.* });
+        try report.put(alloc, "filament_used", .{ .float = entry.value_ptr.used });
+        try pending.append(.{ .object = report });
+    }
+    try obj.put(alloc, "pending_reports", .{ .array = pending });
     const spool_id = c.getSpoolId();
     if (spool_id) |id| {
         try obj.put(alloc, "spool_id", .{ .integer = id });
@@ -383,7 +486,7 @@ pub fn handleSpoolId(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
 
     if (is_post) {
         const new_id = (try webreq.optional(i64, params, "spool_id"));
-        c.setSpoolId(new_id);
+        try c.setSpoolId(new_id);
     }
 
     var obj: std.json.ObjectMap = .empty;
@@ -642,7 +745,7 @@ pub fn handleSetActiveSpool(ctx_ptr: *anyopaque, params: std.json.Value, alloc: 
         .null => null,
         else => return error.InvalidParams,
     };
-    c.setSpoolId(sid);
+    try c.setSpoolId(sid);
     return .null;
 }
 
@@ -680,6 +783,8 @@ const MemStore = struct {
     alloc: std.mem.Allocator,
     data: std.StringHashMap(std.json.Value),
     writes: usize = 0,
+    fail_writes: bool = false,
+    fail_reads: bool = false,
 
     fn init(alloc: std.mem.Allocator) MemStore {
         return .{ .alloc = alloc, .data = std.StringHashMap(std.json.Value).init(alloc) };
@@ -691,11 +796,13 @@ const MemStore = struct {
 
     fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds_mod.Error!?std.json.Value {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
+        if (self.fail_reads) return error.BackendError;
         return self.data.get(key);
     }
 
     fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds_mod.Error!void {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
+        if (self.fail_writes) return error.BackendError;
         self.data.put(key, value) catch return ds_mod.Error.OutOfMemory;
         self.writes += 1;
     }
@@ -731,7 +838,7 @@ const MemStore = struct {
     }
 };
 
-fn makeCtx(alloc: std.mem.Allocator, mem: *MemStore, nb: *NullBus) SpoolmanCtx {
+fn makeCtx(alloc: std.mem.Allocator, mem: *MemStore, nb: *NullBus) !SpoolmanCtx {
     return SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
 }
 
@@ -747,7 +854,7 @@ test "spoolman WS: deletion frame invokes on_spool_deleted with the spool id" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
     var dummy: u8 = 0;
     ctx.on_spool_deleted = wsCaptureDeleted;
     ctx.on_spool_deleted_ctx = &dummy;
@@ -770,12 +877,12 @@ test "spoolman WS: deletion clears the active spool only when it matches" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     _ = try handleSpoolId(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 5, \"_method\": \"POST\"}"), a);
-    ctx.handleSpoolDeletedLocked(99);
+    try ctx.handleSpoolDeletedLocked(99);
     try testing.expectEqual(@as(i64, 5), ctx.getSpoolId().?);
-    ctx.handleSpoolDeletedLocked(5);
+    try ctx.handleSpoolDeletedLocked(5);
     try testing.expect(ctx.getSpoolId() == null);
 }
 
@@ -785,7 +892,7 @@ test "setServerUrl normalizes like _get_spoolman_urls and stays disconnected" {
     var mem = MemStore.init(arena.allocator());
     defer mem.deinit();
     var nb = NullBus.init(arena.allocator());
-    var ctx = makeCtx(testing.allocator, &mem, &nb);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
     defer ctx.deinit();
     // Scheme-less values default to http; the HTTP and WS ports agree.
     try ctx.setServerUrl("192.168.1.9:7913");
@@ -850,7 +957,7 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
     var conns = connections_mod.Connections.init(alloc, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &bus);
+    var ctx = try SpoolmanCtx.init(alloc, mem.dataStore(), &bus);
     defer ctx.deinit();
     var url_buf: [64]u8 = undefined;
     try ctx.setServerUrl(try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{port}));
@@ -882,7 +989,7 @@ test "handleStatus: returns correct shape with no active spool" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const result = try handleStatus(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(false, result.object.get("spoolman_connected").?.bool);
@@ -898,7 +1005,7 @@ test "handleSpoolId GET: returns null when no spool set" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const result = try handleSpoolId(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(.null, result.object.get("spool_id").?);
@@ -912,7 +1019,7 @@ test "handleSpoolId POST: sets active spool and persists" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     // POST with spool_id = 42
     const params = try mkParams(a, "{\"spool_id\": 42, \"_method\": \"POST\"}");
@@ -954,7 +1061,7 @@ test "handleSetActiveSpool: remote method sets/clears the active spool" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     // Set via the remote method.
     _ = try handleSetActiveSpool(@ptrCast(&ctx), try mkParams(a, "{\"spool_id\": 7}"), a);
@@ -979,7 +1086,7 @@ test "fuzz handleSetActiveSpool: arbitrary params never crash" {
             var mem = MemStore.init(a);
             defer mem.deinit();
             var nb = NullBus.init(a);
-            var ctx = makeCtx(a, &mem, &nb);
+            var ctx = try makeCtx(a, &mem, &nb);
             var buf: [32]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const p = std.json.parseFromSlice(std.json.Value, a, &buf, .{}) catch return;
@@ -996,7 +1103,7 @@ test "handleSpoolId POST: invalid values preserve spool, absent field clears" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     // Set first
     const set_params = try mkParams(a, "{\"spool_id\": 5, \"_method\": \"POST\"}");
@@ -1021,7 +1128,7 @@ test "handleProxy: missing request_method → InvalidParams" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     try testing.expectError(error.InvalidParams, handleProxy(@ptrCast(&ctx), .null, a));
 }
@@ -1034,7 +1141,7 @@ test "handleProxy: invalid path → InvalidParams" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/bad\"}");
     try testing.expectError(error.InvalidParams, handleProxy(@ptrCast(&ctx), params, a));
@@ -1048,7 +1155,7 @@ test "handleProxy: not connected → ServiceUnavailable (non-v2)" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\"}");
     try testing.expectError(error.ServiceUnavailable, handleProxy(@ptrCast(&ctx), params, a));
@@ -1062,7 +1169,7 @@ test "handleProxy: not connected → v2 error shape" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"use_v2_response\": true}");
     const result = try handleProxy(@ptrCast(&ctx), params, a);
@@ -1079,14 +1186,196 @@ test "spoolman active-spool persistence round-trip: set then reload" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     // Set spool ID
-    ctx.setSpoolId(77);
+    try ctx.setSpoolId(77);
 
     // Create a new context from the same datastore (simulates restart)
-    var ctx2 = SpoolmanCtx.init(a, mem.dataStore(), &nb.bus);
+    var ctx2 = try SpoolmanCtx.init(a, mem.dataStore(), &nb.bus);
     try testing.expectEqual(@as(?i64, 77), ctx2.getSpoolId());
+}
+
+test "Spoolman accounts toolhead extrusion across retractions, flow and restarts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    try ctx.setSpoolId(7);
+    ctx.onKlippyStateLocked(true);
+    const updates = [_][]const u8{
+        "{\"toolhead\":{\"position\":[0,0,0,100],\"extruder\":\"extruder\"}}",
+        "{\"toolhead\":{\"position\":[0,0,0,105]}}",
+        "{\"toolhead\":{\"position\":[0,0,0,103]}}",
+        "{\"toolhead\":{\"position\":[0,0,0,105]}}",
+        "{\"toolhead\":{\"position\":[0,0,0,107]}}",
+        "{\"toolhead\":{\"position\":[0,0,0,108]},\"gcode_move\":{\"extrude_factor\":0.5}}",
+        "{\"toolhead\":{\"position\":[0,0,0,1000],\"extruder\":\"extruder1\"}}",
+        "{\"toolhead\":{\"position\":[0,0,0,1002]}}",
+    };
+    for (updates) |update| try ctx.onKlippyStatusLocked(try mkParams(a, update), .null);
+    try ctx.setSpoolId(8);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,1004]}}"), .null);
+    ctx.onKlippyStateLocked(false);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,50]}}"), .null);
+    ctx.onKlippyStateLocked(true);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,0]}}"), .null);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,3]}}"), .null);
+    const status = try handleStatus(&ctx, .null, a);
+    const pending = status.object.get("pending_reports").?.array.items;
+    try testing.expectEqual(@as(usize, 2), pending.len);
+    try testing.expectEqual(@as(i64, 7), pending[0].object.get("spool_id").?.integer);
+    try testing.expectEqual(@as(f64, 10), pending[0].object.get("filament_used").?.float);
+    try testing.expectEqual(@as(i64, 8), pending[1].object.get("spool_id").?.integer);
+    try testing.expectEqual(@as(f64, 5), pending[1].object.get("filament_used").?.float);
+    try testing.expectEqualStrings("extruder1", ctx.extruder_name[0..ctx.extruder_name_len]);
+    try testing.expectError(error.InvalidParams, ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[1]}}"), .null));
+    _ = try jv.successResponse(a, .{ .integer = 1 }, status);
+}
+
+test "Spoolman refuses a selection before overflowing pending accounting" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    ctx.onKlippyStateLocked(true);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,0]}}"), .null);
+    for (1..max_pending_spools + 1) |index| {
+        try ctx.setSpoolId(@intCast(index));
+        var bytes: [80]u8 = undefined;
+        const update = try std.fmt.bufPrint(&bytes, "{{\"toolhead\":{{\"position\":[0,0,0,{d}]}}}}", .{index});
+        try ctx.onKlippyStatusLocked(try mkParams(a, update), .null);
+    }
+    try testing.expectError(error.ServiceUnavailable, ctx.setSpoolId(max_pending_spools + 1));
+    try testing.expectEqual(@as(?i64, max_pending_spools), ctx.getSpoolId());
+    const status = try handleStatus(&ctx, .null, a);
+    try testing.expectEqual(max_pending_spools, status.object.get("pending_reports").?.array.items.len);
+    try ctx.handleSpoolDeletedLocked(max_pending_spools);
+    try ctx.setSpoolId(max_pending_spools + 1);
+    try testing.expectEqual(@as(?i64, max_pending_spools + 1), ctx.getSpoolId());
+}
+
+test "Spoolman selection and accounting survive persistence and allocation failures" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    try ctx.setSpoolId(1);
+    ctx.onKlippyStateLocked(true);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,0]}}"), .null);
+    try ctx.onKlippyStatusLocked(try mkParams(a, "{\"toolhead\":{\"position\":[0,0,0,5]}}"), .null);
+    mem.fail_writes = true;
+    try testing.expectError(error.BackendError, ctx.setSpoolId(2));
+    try testing.expectError(error.BackendError, ctx.handleSpoolDeletedLocked(1));
+    try testing.expectEqual(@as(?i64, 1), ctx.getSpoolId());
+    try testing.expect(ctx.pending_reports.get(2) == null);
+    try testing.expectEqual(@as(f64, 5), ctx.pending_reports.get(1).?.used);
+    const Allocation = struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var req_arena = std.heap.ArenaAllocator.init(gpa);
+            defer req_arena.deinit();
+            const alloc = req_arena.allocator();
+            var store = MemStore.init(gpa);
+            defer store.deinit();
+            var bus = NullBus.init(gpa);
+            var context = try makeCtx(gpa, &store, &bus);
+            defer context.deinit();
+            try context.setSpoolId(1);
+            context.onKlippyStateLocked(true);
+            try context.onKlippyStatusLocked(try mkParams(alloc, "{\"toolhead\":{\"position\":[0,0,0,0]}}"), .null);
+            try context.onKlippyStatusLocked(try mkParams(alloc, "{\"toolhead\":{\"position\":[0,0,0,3]}}"), .null);
+            const response = try handleStatus(&context, .null, alloc);
+            const wire = try jv.successResponse(alloc, .{ .integer = 1 }, response);
+            _ = try std.json.parseFromSliceLeaky(std.json.Value, alloc, wire, .{});
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Allocation.run, .{});
+}
+
+test "Spoolman initialization rejects unreadable or corrupt persisted selection" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var nb = NullBus.init(testing.allocator);
+    mem.fail_reads = true;
+    try testing.expectError(error.BackendError, makeCtx(testing.allocator, &mem, &nb));
+    mem.fail_reads = false;
+    try mem.data.put(active_spool_key, .{ .string = "bad" });
+    try testing.expectError(error.InvalidSpoolId, makeCtx(testing.allocator, &mem, &nb));
+    try mem.data.put(active_spool_key, .{ .integer = 17 });
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    try testing.expectEqual(@as(?i64, 17), ctx.getSpoolId());
+}
+
+test "fuzz Spoolman persisted selection accepts only integer or null" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var nb = NullBus.init(a);
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const value: std.json.Value = switch (bytes[0] % 5) {
+                0 => .null,
+                1 => .{ .integer = bytes[1] },
+                2 => .{ .string = &bytes },
+                3 => .{ .bool = true },
+                else => .{ .float = 1.0 },
+            };
+            try mem.data.put(active_spool_key, value);
+            if (value == .integer or value == .null) {
+                var ctx = try makeCtx(a, &mem, &nb);
+                defer ctx.deinit();
+                try testing.expectEqual(if (value == .integer) @as(?i64, value.integer) else null, ctx.getSpoolId());
+            } else try testing.expectError(error.InvalidSpoolId, makeCtx(a, &mem, &nb));
+        }
+    }.run, .{});
+}
+
+test "fuzz Spoolman extrusion updates keep bounded finite reports" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var nb = NullBus.init(a);
+            var ctx = try makeCtx(testing.allocator, &mem, &nb);
+            defer ctx.deinit();
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            ctx.onKlippyStateLocked(true);
+            for (bytes, 0..) |byte, index| {
+                if (byte % 13 == 0) ctx.onKlippyStateLocked(false);
+                if (byte % 7 == 0) ctx.onKlippyStateLocked(true);
+                try ctx.setSpoolId(if (byte % 3 == 0) null else byte % 5);
+                var buffer: [128]u8 = undefined;
+                const update = try std.fmt.bufPrint(&buffer, "{{\"toolhead\":{{\"position\":[0,0,0,{d}],\"extruder\":\"extruder{d}\"}}}}", .{ @as(i32, byte) - @as(i32, @intCast(index)), byte % 2 });
+                try ctx.onKlippyStatusLocked(try mkParams(a, update), .null);
+                try testing.expect(ctx.pending_reports.count() <= max_pending_spools);
+                for (ctx.pending_reports.values()) |report| try testing.expect(std.math.isFinite(report.used) and report.used >= 0);
+            }
+            const response = try handleStatus(&ctx, .null, a);
+            const wire = try jv.successResponse(a, .{ .integer = 1 }, response);
+            _ = try std.json.parseFromSliceLeaky(std.json.Value, a, wire, .{});
+        }
+    }.run, .{});
 }
 
 test "Spoolman startup notifications hold Core and unchanged spools do not notify" {
@@ -1097,7 +1386,7 @@ test "Spoolman startup notifications hold Core and unchanged spools do not notif
     var conns = connections_mod.Connections.init(testing.allocator, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = SpoolmanCtx.init(testing.allocator, mem.dataStore(), &bus);
+    var ctx = try SpoolmanCtx.init(testing.allocator, mem.dataStore(), &bus);
     defer ctx.deinit();
     const Capture = struct {
         core: *Core,
@@ -1120,7 +1409,7 @@ test "Spoolman startup notifications hold Core and unchanged spools do not notif
     const conn = try conns.add(io, false);
     conns.attachWriter(io, conn, &capture, Capture.write);
     ctx.setIo(io);
-    for ([_]?i64{ 7, 7, null, null }) |id| core.run(io, SpoolmanCtx.setSpoolId, .{ &ctx, id });
+    for ([_]?i64{ 7, 7, null, null }) |id| try core.run(io, SpoolmanCtx.setSpoolId, .{ &ctx, id });
     try testing.expectEqual(@as(usize, 1), capture.status);
     try testing.expectEqual(@as(usize, 2), capture.active);
     try testing.expectEqual(@as(usize, 2), mem.writes);
@@ -1135,7 +1424,7 @@ test "fuzz Spoolman spool selection only persists changes" {
             var mem = MemStore.init(arena.allocator());
             defer mem.deinit();
             var nb = NullBus.init(arena.allocator());
-            var ctx = makeCtx(arena.allocator(), &mem, &nb);
+            var ctx = try makeCtx(arena.allocator(), &mem, &nb);
             var buf: [16]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             var previous: ?i64 = null;
@@ -1143,7 +1432,7 @@ test "fuzz Spoolman spool selection only persists changes" {
             for (buf) |byte| {
                 const id: ?i64 = if (byte % 3 == 0) null else byte % 4;
                 if (id != previous) expected += 1;
-                ctx.setSpoolId(id);
+                try ctx.setSpoolId(id);
                 try testing.expectEqual(expected, mem.writes);
                 try testing.expectEqual(id, ctx.getSpoolId());
                 previous = id;
@@ -1163,7 +1452,7 @@ test "registerSpoolman: wires expected routes and JSON-RPC methods" {
     var mem = MemStore.init(alloc);
     defer mem.deinit();
     var nb = NullBus.init(alloc);
-    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
+    var ctx = try SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
 
     try registerSpoolman(&reg, &ctx);
 
@@ -1191,7 +1480,7 @@ test "handleProxy: query parameter is accepted (not-connected path)" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"query\": \"key=value\"}");
     // Not connected → ServiceUnavailable, but the query param is valid.
@@ -1206,7 +1495,7 @@ test "handleProxy: GET with body returns InvalidParams" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     // Parameter checks run before the connection check, as in spoolman.py.
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"body\": {\"key\": 1}}");
@@ -1227,7 +1516,7 @@ test "handleProxy: v2 error shape includes response and error keys" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"use_v2_response\": true}");
     const result = try handleProxy(@ptrCast(&ctx), params, a);
@@ -1246,7 +1535,7 @@ test "handleProxy: query with special characters is accepted" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var ctx = try makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"query\": \"a=1&b=2\"}");
     try testing.expectError(error.ServiceUnavailable, handleProxy(@ptrCast(&ctx), params, a));
@@ -1303,7 +1592,7 @@ test "handleProxy forwards to <server>/api with JSON body, headers and Spoolman 
         }
     };
 
-    var ctx = makeCtx(std.heap.smp_allocator, &mem, &nb);
+    var ctx = try makeCtx(std.heap.smp_allocator, &mem, &nb);
     defer ctx.deinit();
     var url: [64]u8 = undefined;
     try ctx.setServerUrl(try std.fmt.bufPrint(&url, "127.0.0.1:{d}/", .{server.socket.address.getPort()}));
@@ -1415,7 +1704,7 @@ test "Spoolman proxy converts excessive JSON nesting into a safe string" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(std.heap.smp_allocator, &mem, &nb);
+    var ctx = try makeCtx(std.heap.smp_allocator, &mem, &nb);
     defer ctx.deinit();
     var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
     defer server.deinit(io);
@@ -1521,7 +1810,7 @@ test "fuzz handleSpoolId: never panics on arbitrary params" {
             var mem = MemStore.init(a);
             defer mem.deinit();
             var nb = NullBus.init(a);
-            var ctx = makeCtx(a, &mem, &nb);
+            var ctx = try makeCtx(a, &mem, &nb);
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -1552,7 +1841,7 @@ test "fuzz handleProxy: never panics on arbitrary params" {
             var mem = MemStore.init(a);
             defer mem.deinit();
             var nb = NullBus.init(a);
-            var ctx = makeCtx(a, &mem, &nb);
+            var ctx = try makeCtx(a, &mem, &nb);
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -1583,7 +1872,7 @@ test "fuzz handleStatus: never panics" {
             var mem = MemStore.init(a);
             defer mem.deinit();
             var nb = NullBus.init(a);
-            var ctx = makeCtx(a, &mem, &nb);
+            var ctx = try makeCtx(a, &mem, &nb);
 
             var buf: [4]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
@@ -1615,7 +1904,7 @@ test "stopWs cancels a peer stalled before the upgrade response" {
     };
     var peer = try aio.concurrent(Peer.run, .{ &server, &accepted, aio });
     defer peer.cancel(aio);
-    var ctx = SpoolmanCtx.init(testing.allocator, mem.dataStore(), &nb.bus);
+    var ctx = try SpoolmanCtx.init(testing.allocator, mem.dataStore(), &nb.bus);
     defer ctx.deinit();
     var url: [80]u8 = undefined;
     try ctx.setServerUrl(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}", .{server.socket.address.getPort()}));
@@ -1634,7 +1923,7 @@ test "Spoolman URI parsing preserves IPv6, TLS, and reverse-proxy paths" {
     var mem = MemStore.init(arena.allocator());
     defer mem.deinit();
     var nb = NullBus.init(arena.allocator());
-    var ctx = makeCtx(testing.allocator, &mem, &nb);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
     defer ctx.deinit();
     try ctx.setServerUrl("https://[::1]:7443/spools/");
     try testing.expectEqualStrings("https://[::1]:7443/spools/api", ctx.api_url.?);
@@ -1663,7 +1952,7 @@ test "fuzz Spoolman URI parser rejects malformed bounded targets" {
             var mem = MemStore.init(arena.allocator());
             defer mem.deinit();
             var nb = NullBus.init(arena.allocator());
-            var ctx = makeCtx(testing.allocator, &mem, &nb);
+            var ctx = try makeCtx(testing.allocator, &mem, &nb);
             defer ctx.deinit();
             var raw: [96]u8 = undefined;
             smith.bytesWithHash(&raw, 0);
