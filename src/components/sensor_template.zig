@@ -21,6 +21,12 @@ const Value = std.json.Value;
 
 pub const RenderError = error{ ParseError, EvalError, OutOfMemory };
 
+/// Native calls receive render-scoped arguments and return render-scoped values.
+pub const Native = struct {
+    ctx: *anyopaque,
+    call: *const fn (*anyopaque, []const u8, []const Value, std.json.ObjectMap, std.mem.Allocator) RenderError!Value,
+};
+
 /// Temporary render storage stays on the bounded handler stack.
 const max_render_bytes = 64 * 1024;
 /// Counts executed nodes, loop iterations and expression operands per render.
@@ -45,6 +51,20 @@ pub const Template = struct {
 
     pub fn deinit(self: *Template) void {
         self.arena.deinit();
+    }
+
+    /// Caller owns the text. Variables are borrowed; evaluation and output are bounded.
+    pub fn renderText(self: *const Template, alloc: std.mem.Allocator, vars: std.json.ObjectMap, native: ?Native) RenderError![]const u8 {
+        var storage: [max_render_bytes]u8 = undefined;
+        var bounded = std.heap.FixedBufferAllocator.init(&storage);
+        const scratch = bounded.allocator();
+        var ctx = Ctx{ .arena = scratch, .out = null, .native = native };
+        var it = vars.iterator();
+        while (it.next()) |entry| try ctx.vars.put(scratch, entry.key_ptr.*, try jv.deepCopy(scratch, entry.value_ptr.*));
+        var output: [max_render_bytes]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&output);
+        try exec(&ctx, self.nodes, &writer);
+        return alloc.dupe(u8, writer.buffered());
     }
 
     /// Execute with `payload` + `set_result`, recording measurements into
@@ -156,7 +176,7 @@ fn parseNodes(arena: std.mem.Allocator, tl: *TokList, stop: []const []const u8) 
                     if (tl.depth > Ctx.max_depth) return error.ParseError;
                     try nodes.append(arena, try if (kw[0] == 'i') parseIf(arena, tl, s) else parseFor(arena, tl, s));
                 } else {
-                    try nodes.append(arena, .{ .expr_stmt = s });
+                    try nodes.append(arena, .{ .expr_stmt = if (std.mem.eql(u8, kw, "do")) std.mem.trim(u8, s[2..], " \t") else s });
                 }
             },
         }
@@ -246,6 +266,7 @@ const Ctx = struct {
     arena: std.mem.Allocator,
     vars: std.StringHashMapUnmanaged(Value) = .empty,
     out: ?*std.json.ObjectMap, // set_result target (sensor path); null otherwise
+    native: ?Native = null,
     depth: u16 = 0,
     steps_left: usize = max_render_steps,
 
@@ -519,7 +540,22 @@ const Parser = struct {
                 '.' => {
                     self.pos += 1;
                     const name = try self.parseIdent();
-                    v = if (self.skip > 0) .null else try member(v, name);
+                    if (self.peek() == '(') {
+                        const prefix = if (v == .object) v.object.get("__native") else null;
+                        const path = if (prefix) |p| if (p == .string) try std.fmt.allocPrint(self.ctx.arena, "{s}.{s}", .{ p.string, name }) else name else name;
+                        if (prefix == null and v == .object and std.mem.eql(u8, name, "get")) {
+                            self.pos += 1;
+                            const key = try self.parseExpr();
+                            var fallback: Value = .null;
+                            if (self.peek() == ',') {
+                                self.pos += 1;
+                                fallback = try self.parseExpr();
+                            }
+                            if (self.peek() != ')') return error.ParseError;
+                            self.pos += 1;
+                            v = if (self.skip > 0) .null else if (key == .string) v.object.get(key.string) orelse fallback else return error.EvalError;
+                        } else v = try self.parseCall(path);
+                    } else v = if (self.skip > 0) .null else try member(v, name);
                 },
                 '[' => {
                     self.pos += 1;
@@ -624,13 +660,23 @@ const Parser = struct {
 
     fn parseCall(self: *Parser, name: []const u8) RenderError!Value {
         self.pos += 1; // '('
-        var args: [4]Value = undefined;
+        var args: [8]Value = undefined;
+        var kwargs: std.json.ObjectMap = .empty;
         var n: usize = 0;
         if (self.peek() != ')') {
             while (true) {
-                if (n >= args.len) return error.ParseError;
-                args[n] = try self.parseExpr();
-                n += 1;
+                const start = self.pos;
+                const key = self.parseIdent() catch "";
+                const keyword = self.peek() == '=' and (self.pos + 1 >= self.src.len or self.src[self.pos + 1] != '=');
+                if (keyword) {
+                    self.pos += 1;
+                    try kwargs.put(self.ctx.arena, key, try self.parseExpr());
+                } else {
+                    self.pos = start;
+                    if (n >= args.len) return error.ParseError;
+                    args[n] = try self.parseExpr();
+                    n += 1;
+                }
                 const sep = self.peek() orelse return error.ParseError;
                 if (sep == ',') {
                     self.pos += 1;
@@ -653,6 +699,18 @@ const Parser = struct {
             return .null;
         }
         if (std.mem.eql(u8, name, "range")) return self.makeRange(args[0..n]);
+        if (self.ctx.native) |native| {
+            const result = try native.call(native.ctx, name, args[0..n], kwargs, self.ctx.arena);
+            if (std.mem.endsWith(u8, name, ".__setitem__") and n == 2 and args[0] == .string) {
+                const root = name[0 .. name.len - ".__setitem__".len];
+                if (self.ctx.vars.get(root)) |value| if (value == .object) {
+                    var object = value.object;
+                    try object.put(self.ctx.arena, args[0].string, args[1]);
+                    try self.ctx.vars.put(self.ctx.arena, root, .{ .object = object });
+                };
+            }
+            return result;
+        }
         return error.EvalError;
     }
 
@@ -1006,6 +1064,60 @@ fn joinArray(arena: std.mem.Allocator, v: Value, sep: []const u8) RenderError![]
 // ===========================================================================
 
 const testing = std.testing;
+
+test "renderText calls native methods with positional and keyword arguments" {
+    const Calls = struct {
+        count: usize = 0,
+        fn call(raw: *anyopaque, name: []const u8, args: []const Value, kwargs: std.json.ObjectMap, _: std.mem.Allocator) RenderError!Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!std.mem.eql(u8, name, "request.send") or args.len != 1 or args[0] != .string) return error.EvalError;
+            if (!std.mem.eql(u8, args[0].string, "body") or kwargs.get("method").? != .string) return error.EvalError;
+            self.count += 1;
+            return .{ .string = "off" };
+        }
+    };
+    var calls: Calls = .{};
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var request: std.json.ObjectMap = .empty;
+    try request.put(a, "__native", .{ .string = "request" });
+    var vars: std.json.ObjectMap = .empty;
+    try vars.put(a, "http_request", .{ .object = request });
+    var template = try Template.init(testing.allocator, "{ http_request.send('body', method='POST') }");
+    defer template.deinit();
+    try testing.expectEqualStrings("off", try template.renderText(a, vars, .{ .ctx = &calls, .call = Calls.call }));
+    try testing.expectEqual(@as(usize, 1), calls.count);
+}
+
+test "renderText supports do statements and object get without changing borrowed variables" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var secrets: std.json.ObjectMap = .empty;
+    try secrets.put(a, "password", .{ .string = "value" });
+    var vars: std.json.ObjectMap = .empty;
+    try vars.put(a, "secrets", .{ .object = secrets });
+    var template = try Template.init(testing.allocator, "{% do range(0) %}{ secrets.get('password') }/{ secrets.get('missing', 'fallback') }");
+    defer template.deinit();
+    try testing.expectEqualStrings("value/fallback", try template.renderText(a, vars, null));
+    try testing.expectEqual(@as(usize, 1), secrets.count());
+}
+
+test "fuzz renderText with variables and keyword calls stays bounded" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var source: [256]u8 = undefined;
+            smith.bytesWithHash(&source, 0);
+            var template = Template.init(testing.allocator, &source) catch return;
+            defer template.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const result = template.renderText(arena.allocator(), .empty, null) catch return;
+            try testing.expect(result.len <= max_render_bytes);
+        }
+    }.run, .{});
+}
 
 test "Template render bounds repeated string expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
