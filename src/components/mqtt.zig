@@ -548,6 +548,12 @@ fn requestQos(cfg: *const MqttConfig, params: std.json.Value) error{InvalidParam
     return cfg.effectiveQos(try qosValue(raw));
 }
 
+fn requestTimeout(params: std.json.Value) error{InvalidParams}!?f64 {
+    const seconds = (try webreq.optional(f64, params, "timeout")) orelse return null;
+    if (!std.math.isFinite(seconds)) return error.InvalidParams;
+    return seconds;
+}
+
 /// paho's payload encoding: JSON for objects and arrays, raw strings,
 /// `true`/`false`, numbers in decimal, nothing for null.
 fn encodePayload(w: *std.Io.Writer, payload: std.json.Value) !void {
@@ -614,6 +620,7 @@ fn publishParams(ctx: *MqttCtx, topic: []const u8, params: std.json.Value) !void
 pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
     const topic = try webreq.required([]const u8, params, "topic");
+    _ = try requestTimeout(params);
     try publishParams(ctx, topic, params);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "topic", .{ .string = topic });
@@ -629,7 +636,7 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
     try validateTopic(topic);
     const cfg = &(ctx.config orelse return error.MqttNotConfigured);
     const qos = try requestQos(cfg, params);
-    const timeout = (try webreq.optional(f64, params, "timeout"));
+    const timeout = try requestTimeout(params);
     const io = ctx.io orelse return error.ServiceUnavailable;
 
     var waiter: Waiter = .{ .topic = topic, .qos = qos };
@@ -896,6 +903,42 @@ test "handleSubscribe times out without a broker and releases its waiter" {
     ctx.io = testing.io;
     try testing.expectError(error.MqttTimeout, handleSubscribe(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"t\",\"timeout\":0.02}"), a));
     try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
+}
+
+test "MQTT handlers reject invalid timeout before network I/O" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(test_options);
+    for ([_][]const u8{ "null", "\"nan\"", "\"inf\"", "\"bad\"", "1e400", "{}", "[]" }) |value| {
+        const json = try std.fmt.allocPrint(a, "{{\"topic\":\"t\",\"timeout\":{s}}}", .{value});
+        const params = try mkParams(a, json);
+        try testing.expectError(error.InvalidParams, handlePublish(@ptrCast(&ctx), params, a));
+        try testing.expectError(error.InvalidParams, handleSubscribe(@ptrCast(&ctx), params, a));
+        try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
+    }
+    try testing.expectEqual(@as(?f64, null), try requestTimeout(.null));
+    try testing.expectEqual(@as(?f64, -0.5), try requestTimeout(try mkParams(a, "{\"timeout\":\"-0.5\"}")));
+}
+
+test "fuzz MQTT timeout accepts only finite converted values" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var params: std.json.ObjectMap = .empty;
+            const seconds = smith.value(f64);
+            try params.put(arena.allocator(), "timeout", .{ .float = seconds });
+            const result = requestTimeout(.{ .object = params });
+            if (std.math.isFinite(seconds)) {
+                try testing.expectEqual(seconds, (try result).?);
+            } else {
+                try testing.expectError(error.InvalidParams, result);
+            }
+        }
+    }.run, .{});
 }
 
 test "subscribe waiters are bounded and released by shutdown" {
