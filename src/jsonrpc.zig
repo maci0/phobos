@@ -125,6 +125,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
             try std.fmt.allocPrint(alloc, "Error Setting Device Status: {s} to {s}", .{ paramStr(params, "device"), paramStr(params, "action") }) },
         // machine.py _handle_service_request.
         error.ServiceNotAllowed => .{ .bad_request, try std.fmt.allocPrint(alloc, "Service '{s}' not allowed", .{paramStr(params, "service")}) },
+        error.ServiceNotInstalled => .{ .bad_request, try std.fmt.allocPrint(alloc, "Service '{s}' not installed", .{paramStr(params, "service")}) },
         // loghelper.py rollover.
         error.UnknownApplication => .{ .bad_request, try std.fmt.allocPrint(alloc, "Unknown application {s}", .{paramStr(params, "application")}) },
         // system_deploy.py without a package provider.
@@ -814,6 +815,7 @@ test "errorReply maps statuses to Moonraker JSON-RPC codes" {
     , .{});
     const cases = [_]struct { err: anyerror, message: []const u8 }{
         .{ .err = error.ServiceNotAllowed, .message = "Service 'sshd' not allowed" },
+        .{ .err = error.ServiceNotInstalled, .message = "Service 'sshd' not installed" },
         .{ .err = error.UnknownApplication, .message = "Unknown application x" },
         .{ .err = error.PrinterLocked, .message = "Unable to change power for psu while printing" },
         .{ .err = error.DeviceRequestFailed, .message = "Error Setting Device Status: psu to on" },

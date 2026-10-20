@@ -46,6 +46,9 @@ deadline so closing stdout and stderr cannot leave a service or Git command hung
 Service actions require a discovered unit for systemd and supervisord. Simple
 and none providers accept only fixed allowed names; requests cannot add arbitrary
 service names or script paths.
+Failed commands and expired deadlines reach the service caller before state or
+notifications change. Timeout conversion leaves timestamp headroom for large
+finite configuration values; the native duration is capped at i64 nanoseconds.
 
 Device and snapshot HTTP requests use `Client.request`, native body writers and
 response readers. `Client.fetch` assumes a failed body reader always has a

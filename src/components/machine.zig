@@ -297,7 +297,8 @@ pub const MachineCtx = struct {
         }
         if (self.io) |io| {
             const timeout: std.Io.Clock.Duration = .{
-                .raw = .fromNanoseconds(std.math.lossyCast(i96, timeout_s * std.time.ns_per_s)),
+                // Leave timestamp headroom even for enormous finite config values.
+                .raw = .fromNanoseconds(std.math.lossyCast(i64, timeout_s * std.time.ns_per_s)),
                 .clock = .awake,
             };
             const result = try process.run(alloc, io, .{
@@ -306,6 +307,15 @@ pub const MachineCtx = struct {
                 .stderr_limit = .limited(cmd_output_limit),
                 .timeout = .{ .deadline = .fromNow(io, timeout) },
             });
+            const succeeded = switch (result.term) {
+                .exited => |code| code == 0,
+                else => false,
+            };
+            if (!succeeded) {
+                alloc.free(result.stdout);
+                alloc.free(result.stderr);
+                return error.CommandFailed;
+            }
             return .{ .stdout = result.stdout, .stderr = result.stderr };
         }
         return .{ .stdout = &.{}, .stderr = &.{} };
@@ -1528,10 +1538,9 @@ fn supervisorState(out: []const u8) struct { []const u8, []const u8 } {
     return .{ "unknown", "unknown" };
 }
 
-/// Run a service command whose output is not used. A failed command leaves the
-/// state query to report the outcome.
-fn runDiscardingOutput(ctx: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8, timeout_s: f64) void {
-    const result = ctx.runCmd(alloc, argv, timeout_s) catch return;
+/// Discard successful output; preserve failures before publishing service state.
+fn runDiscardingOutput(ctx: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8, timeout_s: f64) !void {
+    const result = try ctx.runCmd(alloc, argv, timeout_s);
     alloc.free(result.stdout);
     alloc.free(result.stderr);
 }
@@ -1549,7 +1558,7 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
     const provider = providerKind(ctx.provider_name);
     if ((provider == .systemd or provider == .supervisord) and (ctx.io != null or ctx.run_cmd_fn != null)) {
         try discoverServices(ctx, alloc);
-        if (!ctx.services.contains(name)) return error.ServiceNotAllowed;
+        if (!ctx.services.contains(name)) return if (allowed_services_set.has(name)) error.ServiceNotInstalled else error.ServiceNotAllowed;
     } else if (!allowed_services_set.has(name) and !std.mem.eql(u8, name, "moonraker")) {
         return error.ServiceNotAllowed;
     }
@@ -1562,7 +1571,7 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
     if (ctx.io != null or ctx.run_cmd_fn != null) switch (provider) {
         .none => {},
         .systemd => {
-            runDiscardingOutput(ctx, alloc, &.{ "systemctl", action_str, "--no-block", name }, cmd_timeout_s);
+            try runDiscardingOutput(ctx, alloc, &.{ "systemctl", action_str, "--no-block", name }, cmd_timeout_s);
             if (ctx.runCmd(alloc, &.{ "systemctl", "show", "-p", "ActiveState,SubState", "--value", name }, cmd_timeout_s)) |show| {
                 defer alloc.free(show.stdout);
                 defer alloc.free(show.stderr);
@@ -1574,7 +1583,7 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
             } else |_| {}
         },
         .supervisord => {
-            runDiscardingOutput(ctx, alloc, &.{ "supervisorctl", action_str, name }, cmd_timeout_s);
+            try runDiscardingOutput(ctx, alloc, &.{ "supervisorctl", action_str, name }, cmd_timeout_s);
             if (ctx.runCmd(alloc, &.{ "supervisorctl", "status", name }, cmd_timeout_s)) |st| {
                 defer alloc.free(st.stdout);
                 defer alloc.free(st.stderr);
@@ -1587,7 +1596,7 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
             if (ctx.script_path.len != 0) {
                 const script = try std.fs.path.join(alloc, &.{ ctx.script_path, name });
                 defer alloc.free(script);
-                runDiscardingOutput(ctx, alloc, &.{ script, action_str }, ctx.script_timeout_s);
+                try runDiscardingOutput(ctx, alloc, &.{ script, action_str }, ctx.script_timeout_s);
             }
         },
     };
@@ -3154,6 +3163,11 @@ test "service actions accept discovered units and fixed script names only" {
     }
     try testing.expectEqual(@as(usize, 0), mock.commands);
     try testing.expectEqual(@as(usize, 1), ctx.services.count());
+    const missing = try objParams(alloc, "{\"service\":\"webcamd\"}");
+    try testing.expectError(error.ServiceNotInstalled, handleServiceStart(&ctx, missing, alloc));
+    try testing.expectError(error.ServiceNotInstalled, handleServiceStop(&ctx, missing, alloc));
+    try testing.expectError(error.ServiceNotInstalled, handleServiceRestart(&ctx, missing, alloc));
+    try testing.expectEqual(@as(usize, 0), mock.commands);
     for ([_][]const u8{ "simple", "none" }) |provider| {
         try ctx.setProvider(provider);
         try testing.expectError(error.ServiceNotAllowed, handleServiceStart(&ctx, try objParams(alloc, "{\"service\":\"klipper-extra\"}"), alloc));
@@ -3195,6 +3209,42 @@ test "runCmd: real processes are bounded by time and output size" {
     try testing.expectError(error.Timeout, c.runCmd(testing.allocator, &.{ "sleep", "5" }, 0.2));
     try testing.expect(start.untilNow(threaded.io()).raw.toMilliseconds() < 3000);
     try testing.expectError(error.StreamTooLong, c.runCmd(testing.allocator, &.{ "head", "-c", "300000", "/dev/zero" }, cmd_timeout_s));
+    try testing.expectError(error.CommandFailed, c.runCmd(testing.allocator, &.{"false"}, cmd_timeout_s));
+}
+
+test "service action failures preserve state and reach the caller" {
+    const Mock = struct {
+        fn run(_: *anyopaque, _: std.mem.Allocator, _: []const []const u8) !MachineCtx.RunCmdResult {
+            return error.CommandFailed;
+        }
+    };
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setProvider("simple");
+    try ctx.setScriptPath(".");
+    var unused: u8 = 0;
+    ctx.setRunCmdFn(Mock.run, &unused);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const params = try objParams(arena_state.allocator(), "{\"service\":\"klipper\"}");
+    inline for (.{ handleServiceStart, handleServiceStop, handleServiceRestart }) |handler| {
+        try testing.expectError(error.CommandFailed, handler(&ctx, params, arena_state.allocator()));
+        try testing.expectEqual(@as(usize, 0), ctx.services.count());
+    }
+}
+
+test "runCmd: enormous finite timeouts leave timestamp headroom" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var ctx = MachineCtx{ .gpa = testing.allocator, .clock_io = io, .io = io };
+    defer ctx.deinit();
+    for ([_]f64{ 1e20, 1e200, std.math.floatMax(f64) }) |seconds| {
+        const result = try ctx.runCmd(testing.allocator, &.{ "printf", "done" }, seconds);
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        try testing.expectEqualStrings("done", result.stdout);
+    }
 }
 
 test "simple provider: script_timeout kills a hung script" {
@@ -3213,8 +3263,7 @@ test "simple provider: script_timeout kills a hung script" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const start = std.Io.Clock.Timestamp.now(io, .awake);
-    const r = try handleServiceRestart(@ptrCast(&c), try objParams(arena.allocator(), "{\"service\":\"klipper\"}"), arena.allocator());
-    try testing.expectEqualStrings("ok", r.string);
+    try testing.expectError(error.Timeout, handleServiceRestart(@ptrCast(&c), try objParams(arena.allocator(), "{\"service\":\"klipper\"}"), arena.allocator()));
     try testing.expect(start.untilNow(io).raw.toMilliseconds() < 3000);
 }
 
