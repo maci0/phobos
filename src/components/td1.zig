@@ -14,7 +14,7 @@
 //! `parseTd1Line` like td1.py `_parse_line`: field[4]=td, field[5]=color), then
 //! under Core adds new devices, records readings and drops unplugged ones.
 //! Discovery and serial reads run outside Core; each read waits at most the
-//! serial read timeout.
+//! serial read timeout, and the whole device scan has a shared time budget.
 //!
 //! Not implemented (TODO.md): the `retrieve file` error-file handshake (so
 //! `error` stays null), the reboot handshake (reboot only forgets the device),
@@ -36,6 +36,8 @@ const scan_interval: std.Io.Duration = .fromSeconds(5);
 const max_line_bytes = 256;
 /// Bytes read from one device per scan before giving up on a parseable line.
 const max_scan_bytes = 4 * max_line_bytes;
+/// One serial timeout for a scan, plus at most its final in-flight read.
+const max_scan_time: std.Io.Duration = .fromMilliseconds(@as(i64, serial_mod.read_timeout_ds) * 100);
 
 /// Parsed TD-1 serial line. Mirrors td1.py `_parse_line`: the device emits
 /// comma-separated lines; when there are ≥6 fields, field[4] is the TD value
@@ -64,7 +66,8 @@ pub fn parseTd1Line(line: []const u8) ?ParsedTd1Line {
 /// Open the TD-1 at `path`, skip the partial line the port opened into, and
 /// return the next complete line that parses, its color copied into `alloc`.
 /// Null when the device stays silent for a serial read timeout or sends no
-/// parseable line within `max_scan_bytes`.
+/// parseable line within `max_scan_bytes` or the scan time budget. An in-flight
+/// read can exceed the budget by at most one serial read timeout.
 pub fn readTd1Line(io: std.Io, alloc: std.mem.Allocator, path: []const u8, baud: u32) !?ParsedTd1Line {
     var port = try serial_mod.Serial.open(io, path, baud);
     defer port.close();
@@ -72,7 +75,9 @@ pub fn readTd1Line(io: std.Io, alloc: std.mem.Allocator, path: []const u8, baud:
     var len: usize = 0;
     var synced = false;
     var total: usize = 0;
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
     while (total < max_scan_bytes) {
+        if (start.untilNow(io).raw.nanoseconds >= max_scan_time.nanoseconds) return null;
         const n = try port.readSome(buf[len..]);
         if (n == 0) return null;
         total += n;
@@ -354,12 +359,16 @@ pub const Td1Ctx = struct {
     /// read each device outside Core, then apply the results under `core`.
     /// A device that cannot be opened or read is retried on the next pass.
     pub fn scanOnce(self: *Td1Ctx, io: std.Io, core: *Core) void {
+        if (self.poll_stop.isSet()) return;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
         const devs = findTd1Devices(io, a, self.tty_root, self.dev_prefix);
         const readings = a.alloc(?ParsedTd1Line, devs.len) catch return;
-        for (devs, readings) |d, *reading| reading.* = readTd1Line(io, a, d.path, self.baud) catch null;
+        for (devs, readings) |d, *reading| {
+            if (self.poll_stop.isSet()) return;
+            reading.* = readTd1Line(io, a, d.path, self.baud) catch null;
+        }
         core.run(io, applyScan, .{ self, a, devs, readings });
     }
 
@@ -572,6 +581,48 @@ test "readTd1Line: skips the partial first line, drops overlong lines" {
     try testing.expectEqualStrings("Pink", reading.color);
 }
 
+test "readTd1Line bounds the whole scan when a device keeps supplying bytes" {
+    const Fake = struct {
+        elapsed: i96 = 0,
+
+        fn now(raw: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return .{ .nanoseconds = self.elapsed };
+        }
+
+        fn open(_: ?*anyopaque, dir: Dir, path: []const u8, options: Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            return dir.openFile(testing.io, path, options);
+        }
+
+        fn close(_: ?*anyopaque, files: []const std.Io.File) void {
+            for (files) |file| file.close(testing.io);
+        }
+
+        fn read(raw: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            const op = operation.file_read_streaming;
+            self.elapsed += std.time.ns_per_s / 2;
+            return testing.io.operate(.{ .file_read_streaming = .{ .file = op.file, .data = &.{op.data[0][0..1]} } });
+        }
+    };
+    var fake: Fake = .{};
+    var vtable = std.Io.failing.vtable.*;
+    vtable.now = Fake.now;
+    vtable.dirOpenFile = Fake.open;
+    vtable.fileClose = Fake.close;
+    vtable.operate = Fake.read;
+    const aio: std.Io = .{ .userdata = &fake, .vtable = &vtable };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "td1", .data = "\nts,sn,fw,batt,1.72,Green\n" });
+    const path = try tmp.dir.realPathFileAlloc(testing.io, "td1", testing.allocator);
+    defer testing.allocator.free(path);
+    const result = try readTd1Line(aio, testing.allocator, path, 115200);
+    defer if (result) |value| testing.allocator.free(value.color);
+    try testing.expect(result == null);
+    try testing.expect(fake.elapsed <= 2 * std.time.ns_per_s);
+}
+
 test "fuzz readTd1Line: arbitrary device bytes never crash" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
@@ -623,6 +674,22 @@ test "scanOnce: a device node that cannot be opened is still listed" {
     ctx.dev_prefix = ttys.dev;
     ctx.scanOnce(testing.io, &core);
     try testing.expect(!ctx.conns.get("NODEV").?.done_initializing);
+}
+
+test "scanOnce leaves tracked devices unchanged after polling stops" {
+    const aio = testing.io;
+    var ttys = try FakeTtys.init(&.{.{ "ttyACM0", "e4b2\n", "0045\n", "NEW\n" }});
+    defer ttys.deinit();
+    var core = Core.init();
+    var ctx = Td1Ctx.init(testing.allocator, aio);
+    defer ctx.deinit();
+    try ctx.addConnection(.{ .serial_number = "OLD", .scan_time = "now" });
+    ctx.tty_root = ttys.sys;
+    ctx.dev_prefix = ttys.dev;
+    ctx.poll_stop.set(aio);
+    ctx.scanOnce(aio, &core);
+    try testing.expectEqual(@as(usize, 1), ctx.conns.count());
+    try testing.expect(ctx.conns.contains("OLD"));
 }
 
 // ---- handleGetData ----

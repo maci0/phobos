@@ -112,6 +112,10 @@ partial measurements. Only successful numeric results and their copied keys
 enter the caller's arena. Power batch responses copy each device's state before
 the next device request can release Core and change that state.
 
+TD-1 scans use `std.Io.Clock` to share one serial-timeout budget across reads;
+their final in-flight read can add at most one further serial timeout. Polling
+checks its stop event before opening each device.
+
 Update tests create native temporary repositories whose `origin` points to the
 same local fixture. Refresh assertions check the resulting tracking ref; the
 test suite does not fetch the project's remote.
