@@ -238,6 +238,49 @@ pub fn connect(ts: *TestServer, alloc: std.mem.Allocator) !*WsTestConn {
 
 // --- tests ---------------------------------------------------------------
 
+test "WS: accepts native messages through the ten MiB boundary" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const client = try connect(ts, alloc);
+    defer client.close();
+    const prefix = "{\"jsonrpc\":\"2.0\",\"method\":\"server.info\",\"params\":{\"padding\":\"";
+    const suffix = "\"},\"id\":1}";
+    for ([_]usize{ 64 * 1024, @import("../util/ws_message.zig").max_message_size }) |size| {
+        const request = try alloc.alloc(u8, size);
+        defer alloc.free(request);
+        @memcpy(request[0..prefix.len], prefix);
+        @memset(request[prefix.len .. size - suffix.len], 'x');
+        @memcpy(request[size - suffix.len ..], suffix);
+        const response = try client.callRaw(alloc, request);
+        defer alloc.free(response);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.contains("result"));
+    }
+    const again = try client.call(alloc, "server.info", null);
+    defer alloc.free(again);
+    try std.testing.expect(std.mem.indexOf(u8, again, "\"result\"") != null);
+}
+
+test "WS: rejects an announced message above ten MiB without reading its payload" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const client = try connect(ts, alloc);
+    defer client.close();
+    try client.writer.interface.writeAll(&.{ 0x81, 0xff });
+    try client.writer.interface.writeInt(u64, @import("../util/ws_message.zig").max_message_size + 1, .big);
+    try client.writer.interface.flush();
+    client.read_deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(1), .clock = .awake });
+    _ = client.readFrame() catch |err| {
+        try std.testing.expect(err == error.EndOfStream or err == error.ReadFailed);
+        if (client.reader.err) |read_err| try std.testing.expect(read_err != error.ConnectionTimedOut);
+        return;
+    };
+    return error.ExpectedClosedSocket;
+}
+
 test "WS upgrade times out on silent and incomplete response headers" {
     const ts = try TestServer.init(std.testing.allocator);
     defer ts.stop();

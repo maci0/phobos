@@ -27,6 +27,7 @@ const server_core = @import("../server/core.zig");
 const clock = @import("../util/clock.zig");
 const SocketDeadline = @import("../util/socket_deadline.zig").SocketDeadline;
 const DeadlineWriter = @import("../util/deadline_writer.zig").DeadlineWriter;
+const MessageBuffer = @import("../util/ws_message.zig").MessageBuffer;
 const connections = @import("../server/connections.zig");
 
 /// One in-flight request awaiting its response. The persistent reader routes
@@ -211,10 +212,12 @@ const Bridge = struct {
     /// Client to Klippy, on the calling task. Returns when the client closes
     /// or either socket fails.
     fn relayClient(self: *Bridge) void {
+        var input = MessageBuffer.init(self.gpa, self.ws.input);
+        defer input.deinit();
         var buf: [4096]u8 = undefined;
         var writer = self.stream.writer(self.io, &buf);
         while (true) {
-            const msg = self.ws.readSmallMessage() catch return;
+            const msg = input.read(self.ws) catch return;
             switch (msg.opcode) {
                 .text, .binary => {
                     framing.write(&writer.interface, msg.data) catch return;

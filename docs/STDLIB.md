@@ -244,3 +244,9 @@ five-second write budget per complete frame. Native `net_write` consumes buffere
 headers, payload vectors and repeated slices without resetting that deadline.
 Each frame starts its budget under the session's write mutex, including the first
 frame after an idle period. A timeout shuts down both socket directions.
+
+Inbound WebSocket frames use the native server codec with a lazily grown input
+buffer capped at 10 MiB. The announced length is checked before allocation;
+consuming a large message restores the original small buffer when the remaining
+buffered input fits. Pongs are discarded before checking the following frame's
+capacity because the native reader otherwise skips them internally.

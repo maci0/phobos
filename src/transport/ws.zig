@@ -19,9 +19,8 @@
 //! and `server.websocket.id`. Those are handled here, bound to the in-scope
 //! `*Connection`, before falling back to the shared dispatcher.
 //!
-//! Framing is std.http.Server.WebSocket — we never hand-roll RFC6455. `readSmallMessage`
-//! requires each message fit the connection's input buffer (16 KiB, see
-//! http_transport); a larger message closes the connection.
+//! Native WebSocket framing uses a lazily grown input buffer capped at 10 MiB.
+//! The original small buffer is restored after a large message is consumed.
 
 const std = @import("std");
 const Io = std.Io;
@@ -32,6 +31,7 @@ const connections = @import("../server/connections.zig");
 const klippy_connection = @import("../components/klippy_connection.zig");
 const authz = @import("../components/authorization.zig");
 const DeadlineWriter = @import("../util/deadline_writer.zig").DeadlineWriter;
+const MessageBuffer = @import("../util/ws_message.zig").MessageBuffer;
 
 const Connections = connections.Connections;
 const Connection = connections.Connection;
@@ -224,8 +224,10 @@ const FrameWriter = struct {
 
 /// Read and answer messages until the client closes or a read or write fails.
 fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) void {
+    var input = MessageBuffer.init(std.heap.smp_allocator, ws.input);
+    defer input.deinit();
     while (true) {
-        const msg = ws.readSmallMessage() catch return;
+        const msg = input.read(ws) catch return;
         switch (msg.opcode) {
             .ping => {
                 // Pongs are control frames; they still go under the write
