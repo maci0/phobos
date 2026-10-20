@@ -127,6 +127,9 @@ These differ from older Zig docs:
   use 640 bytes of SHA-256 fingerprints, preserving numeric equality and object
   key-order independence without retaining request arenas.
 
+Trusted-client authentication accepts forwarded addresses only from a trusted
+socket peer, including endpoints where authentication is optional.
+
 ## 5. Adding (or completing) a component
 
 Every component has the same layout. Templates: `src/components/power.zig`

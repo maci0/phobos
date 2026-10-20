@@ -1378,12 +1378,10 @@ pub fn authenticateRequest(
     if (creds.remote_ip) |ip_s| {
         if (parseIp(ip_s)) |ip| {
             if (c.trusted.isTrusted(ip)) {
-                if (auth_required) {
-                    if (creds.proxy_ip) |pip| {
-                        if (parseIp(pip)) |proxy| {
-                            if (!c.trusted.isTrusted(proxy)) return .{ .unauthorized = {} };
-                        } else |_| return .{ .unauthorized = {} };
-                    }
+                if (creds.proxy_ip) |pip| {
+                    if (parseIp(pip)) |proxy| {
+                        if (!c.trusted.isTrusted(proxy)) return .{ .unauthorized = {} };
+                    } else |_| return .{ .unauthorized = {} };
                 }
                 return .{ .user = trusted_user };
             }
@@ -2136,20 +2134,24 @@ test "authenticateRequest: untrusted proxy is rejected, trusted proxy is accepte
     const proxy = try parseIp("10.0.0.8");
     const only_client = [_]IpAddress{client};
     ctx.trusted = .{ .ips = &only_client };
-    const blocked = authenticateRequest(&ctx, a, .HTTP, .{
-        .remote_ip = "192.168.1.9",
-        .proxy_ip = "10.0.0.8",
-    }, true);
-    try testing.expect(blocked == .unauthorized);
+    for ([_]bool{ true, false }) |required| {
+        const blocked = authenticateRequest(&ctx, a, .HTTP, .{
+            .remote_ip = "192.168.1.9",
+            .proxy_ip = "10.0.0.8",
+        }, required);
+        try testing.expect(blocked == .unauthorized);
+    }
 
     const both = [_]IpAddress{ client, proxy };
     ctx.trusted = .{ .ips = &both };
-    const allowed = authenticateRequest(&ctx, a, .HTTP, .{
-        .remote_ip = "192.168.1.9",
-        .proxy_ip = "10.0.0.8",
-    }, true);
-    try testing.expect(allowed == .user);
-    try testing.expectEqualStrings(trusted_user, allowed.user);
+    for ([_]bool{ true, false }) |required| {
+        const allowed = authenticateRequest(&ctx, a, .HTTP, .{
+            .remote_ip = "192.168.1.9",
+            .proxy_ip = "10.0.0.8",
+        }, required);
+        try testing.expect(allowed == .user);
+        try testing.expectEqualStrings(trusted_user, allowed.user);
+    }
 }
 
 test "authenticateRequest: invalid api key → unauthorized" {
