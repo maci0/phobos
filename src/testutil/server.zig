@@ -110,6 +110,9 @@ pub const TestServer = struct {
         // Disable the proc_stat timer to avoid background-thread + thread-pool
         // interactions that deadlock the test harness.
         self.app.machine_ctx.no_proc_stat_timer = true;
+        // Test clients connect from loopback without credentials. A config
+        // with `[authorization] trusted_clients` replaces this table.
+        try self.app.auth_ctx.setTrustedClients("127.0.0.1 ::1");
         if (config_path) |path| self.app.setConfig(self.io, path);
 
         self.srv = try alloc.create(http_transport.Server);
@@ -300,11 +303,6 @@ pub const TestServer = struct {
 
 // --- tests ---------------------------------------------------------------
 
-fn trustOnlyLoopback(ts: *TestServer, ips: *const [1]std.Io.net.IpAddress) void {
-    ts.app.auth_ctx.trust_unknown_ip = false;
-    ts.app.auth_ctx.trusted = .{ .ips = ips };
-}
-
 /// Connection writer that records every notification frame. Frames use
 /// smp_allocator, not the testing allocator: the write runs on a server thread
 /// while the test thread is inside std.http.Client.fetch, which holds the
@@ -338,8 +336,6 @@ test "use_xheaders false ignores X-Real-Ip and X-Forwarded-For on the live serve
     const on_path = try tmp.dir.realPathFileAlloc(io, "on.cfg", alloc);
     defer alloc.free(on_path);
 
-    const loopback = (try authz.parseTrustedEntry("127.0.0.1")).ip;
-    const ips = [_]std.Io.net.IpAddress{loopback};
     const hdrs = [_]std.http.Header{
         .{ .name = "X-Forwarded-For", .value = "8.8.8.8" },
         .{ .name = "X-Real-Ip", .value = "8.8.8.8" },
@@ -347,7 +343,6 @@ test "use_xheaders false ignores X-Real-Ip and X-Forwarded-For on the live serve
 
     const off = try TestServer.initWithConfig(alloc, off_path);
     defer off.stop();
-    trustOnlyLoopback(off, &ips);
     const off_body = try off.getWithHeaders(alloc, "/access/user", &hdrs);
     defer alloc.free(off_body);
     // Socket peer is 127.0.0.1. Headers must not rewrite it to 8.8.8.8.
@@ -355,11 +350,32 @@ test "use_xheaders false ignores X-Real-Ip and X-Forwarded-For on the live serve
 
     const on = try TestServer.initWithConfig(alloc, on_path);
     defer on.stop();
-    trustOnlyLoopback(on, &ips);
     const on_body = try on.getWithHeaders(alloc, "/access/user", &hdrs);
     defer alloc.free(on_body);
     // Same headers rewrite the client to 8.8.8.8, which is not trusted.
     try std.testing.expect(std.mem.indexOf(u8, on_body, "\"code\":401") != null);
+}
+
+test "a peer outside trusted_clients gets 401 on the live server" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "m.cfg", .data = "[authorization]\ntrusted_clients:\n 10.0.0.0/8\n" });
+    const cfg_path = try tmp.dir.realPathFileAlloc(io, "m.cfg", alloc);
+    defer alloc.free(cfg_path);
+
+    const ts = try TestServer.initWithConfig(alloc, cfg_path);
+    defer ts.stop();
+    const body = try ts.get(alloc, "/server/config");
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"code\":401") != null);
+    // auth_required=false routes stay reachable.
+    const info = try ts.get(alloc, "/access/info");
+    defer alloc.free(info);
+    try std.testing.expect(std.mem.indexOf(u8, info, "\"trusted\":false") != null);
 }
 
 test "GET /server/info returns result with disconnected klippy state" {

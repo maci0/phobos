@@ -448,10 +448,6 @@ pub const App = struct {
         // host/port keep tokens self-consistent within this instance.
         auth_ctx.* = try AuthCtx.init(alloc, aio, db_ctx.store, "http://localhost:7125");
         errdefer auth_ctx.deinit();
-        // The spine transport does not yet surface the socket peer address;
-        // trust requests whose IP is unknown (local deployment default). Valid
-        // JWT / API-key credentials still take precedence.
-        auth_ctx.trust_unknown_ip = true;
 
         // --- Spoolman context (spool_id persistence + proxy stubs) ---
         // io is not stored here; setIo() is called after the event loop starts

@@ -86,31 +86,18 @@ pub fn isReservedUser(name: []const u8) bool {
 // Crypto helpers
 // ---------------------------------------------------------------------------
 
-/// Hex-encode `bytes` into `out` (must be 2*bytes.len). Returns the slice.
-pub fn toHex(out: []u8, bytes: []const u8) []const u8 {
-    return std.fmt.bufPrint(out, "{x}", .{bytes}) catch unreachable;
-}
-
 /// PBKDF2-HMAC-SHA256 hex digest of `password` with `salt` (raw bytes) over
-/// `hash_iter` rounds. Writes a 64-char lowercase hex string into `out`
-/// (must be >= 64 bytes). Matches authorization.py exactly.
-pub fn hashPassword(out: []u8, password: []const u8, salt: []const u8) []const u8 {
+/// `hash_iter` rounds, as 64 lowercase hex chars. Matches authorization.py.
+pub fn hashPassword(password: []const u8, salt: []const u8) [64]u8 {
     var dk: [32]u8 = undefined;
     std.crypto.pwhash.pbkdf2(&dk, password, salt, hash_iter, HmacSha256) catch unreachable;
-    return toHex(out, &dk);
+    return std.fmt.bytesToHex(dk, .lower);
 }
 
 /// Constant-time comparison of two equal-or-different-length byte slices.
 pub fn constEql(comptime len: usize, a: []const u8, b: []const u8) bool {
     if (a.len != len or b.len != len) return false;
     return std.crypto.timing_safe.eql([len]u8, a[0..len].*, b[0..len].*);
-}
-
-/// Decode a hex string into `out`. Returns the decoded slice or error.
-fn fromHex(out: []u8, hex: []const u8) ![]u8 {
-    if (hex.len % 2 != 0) return error.InvalidHex;
-    if (out.len < hex.len / 2) return error.InvalidHex;
-    return std.fmt.hexToBytes(out, hex);
 }
 
 /// RFC4648 base32 (upper-case, no padding for 20-byte inputs that align to a
@@ -542,11 +529,20 @@ pub const TrustedEntry = union(enum) {
     domain: void,
 };
 
+/// A CIDR with a prefix longer than the address or with host bits set
+/// (`192.168.1.5/24`) is `error.InvalidEntry`, as Python `ip_network` rejects it.
 pub fn parseTrustedEntry(val: []const u8) !TrustedEntry {
     if (std.mem.indexOfScalar(u8, val, '/')) |slash| {
         const addr_s = val[0..slash];
         const prefix = std.fmt.parseInt(u8, val[slash + 1 ..], 10) catch return error.InvalidEntry;
         const addr = parseIp(addr_s) catch return error.InvalidEntry;
+        const ab = addrBytes(addr);
+        if (prefix > @as(u16, ab.len) * 8) return error.InvalidEntry;
+        for (ab.bytes(), 0..) |b, i| {
+            const kept = @min(8, prefix -| i * 8);
+            const host_mask: u8 = if (kept == 8) 0 else @as(u8, 0xff) >> @intCast(kept);
+            if (b & host_mask != 0) return error.InvalidEntry;
+        }
         return .{ .cidr = .{ .addr = addr, .prefix = prefix } };
     }
     if (parseIp(val)) |addr| {
@@ -588,13 +584,11 @@ pub const AuthCtx = struct {
     /// True when `trusted.ips` / `trusted.ranges` were allocated by
     /// `setTrustedClients` and must be freed in `deinit`.
     trusted_owned: bool = false,
-    /// When true, a request whose remote IP could not be determined by the
-    /// transport (the spine does not yet surface the socket peer address) is
-    /// treated as a trusted local connection. This mirrors Moonraker's common
-    /// "trust localhost" default and is set by the App. Explicit JWT / API-key
-    /// credentials still take precedence and an invalid JWT still fails closed.
-    trust_unknown_ip: bool = false,
     oneshot: std.ArrayList(OneshotToken) = .empty,
+    /// Guards `users`, `api_key` and `oneshot` after startup: connection tasks
+    /// authenticate outside Core while access.* handlers mutate under Core.
+    /// Leaf lock: never acquire Core or another lock while holding it.
+    mutex: std.Io.Mutex = .init,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, store: DataStore, issuer: []const u8) !AuthCtx {
         var ctx = AuthCtx{
@@ -606,7 +600,7 @@ pub const AuthCtx = struct {
         // Generate a fresh api key by default (uuid4().hex equivalent: 32 hex).
         var raw: [16]u8 = undefined;
         try io.randomSecure(&raw);
-        _ = toHex(&ctx.api_key, &raw);
+        ctx.api_key = std.fmt.bytesToHex(raw, .lower);
         ctx.loadFromStore() catch {};
         ctx.ensureApiUser() catch {};
         return ctx;
@@ -641,7 +635,11 @@ pub const AuthCtx = struct {
         errdefer ranges.deinit(self.gpa);
         var it = std.mem.tokenizeAny(u8, raw, " \t\r\n,");
         while (it.next()) |entry| {
-            switch (parseTrustedEntry(entry) catch continue) {
+            const parsed = parseTrustedEntry(entry) catch {
+                std.debug.print("phobos: warning: [authorization]: invalid trusted_clients entry '{s}' skipped\n", .{entry});
+                continue;
+            };
+            switch (parsed) {
                 .ip => |ip| try ips.append(self.gpa, ip),
                 .cidr => |cidr| try ranges.append(self.gpa, cidr),
                 .domain => {},
@@ -750,7 +748,7 @@ pub const AuthCtx = struct {
             if (u.jwk_id.len == 0 or u.jwt_secret.len != 64) continue;
             if (!std.mem.eql(u8, u.jwk_id, kid)) continue;
             var seed: [32]u8 = undefined;
-            _ = fromHex(&seed, u.jwt_secret) catch continue;
+            _ = std.fmt.hexToBytes(&seed, u.jwt_secret) catch continue;
             const kp = Ed25519.KeyPair.generateDeterministic(seed) catch continue;
             return kp.public_key;
         }
@@ -770,31 +768,28 @@ pub const AuthCtx = struct {
         }
     }
 
-    /// Create and store a oneshot token bound to `ip` and `username`.
-    pub fn createOneshot(self: *AuthCtx, ip: IpAddress, username: []const u8, now: i64) ![]const u8 {
+    /// Create and store a oneshot token bound to `ip` and `username`. Caller
+    /// holds `mutex`.
+    fn createOneshot(self: *AuthCtx, ip: IpAddress, username: []const u8, now: i64) ![32]u8 {
         self.pruneOneshot(now);
         var raw: [20]u8 = undefined;
         try self.io.randomSecure(&raw);
-        var tok_buf: [32]u8 = undefined;
-        const tok = base32Encode(&tok_buf, &raw);
         var entry = OneshotToken{
             .token = undefined,
             .ip = ip,
             .username = try self.gpa.dupe(u8, username),
             .expires_at = now + oneshot_timeout_s,
         };
-        @memcpy(&entry.token, tok);
+        errdefer self.gpa.free(entry.username);
+        _ = base32Encode(&entry.token, &raw);
         try self.oneshot.append(self.gpa, entry);
-        return self.gpa.dupe(u8, tok);
+        return entry.token;
     }
 
-    /// Consume a oneshot token (single-use), returning the bound username if the
-    /// token exists, is unexpired, and the IP matches.
-    /// Consume a oneshot token. On success returns the username duped into
-    /// `alloc` (the caller's per-request arena) so it shares the request
-    /// lifetime — duping into `self.gpa` previously leaked, since the resulting
-    /// `AuthOutcome.user` is treated as a borrow and never freed.
-    pub fn consumeOneshot(self: *AuthCtx, alloc: std.mem.Allocator, token: []const u8, ip: IpAddress, now: i64) ?[]const u8 {
+    /// Consume a oneshot token (single-use). Returns the bound username duped
+    /// into `alloc` when the token exists, is unexpired and the IP matches.
+    /// Caller holds `mutex`.
+    fn consumeOneshot(self: *AuthCtx, alloc: std.mem.Allocator, token: []const u8, ip: IpAddress, now: i64) ?[]const u8 {
         self.pruneOneshot(now);
         var i: usize = 0;
         while (i < self.oneshot.items.len) : (i += 1) {
@@ -887,13 +882,11 @@ fn loginOrCreate(
         if (c.users.getPtr(username) != null) return error.UserExists;
         var salt: [32]u8 = undefined;
         try c.io.randomSecure(&salt);
-        var salt_hex: [64]u8 = undefined;
-        _ = toHex(&salt_hex, &salt);
-        var hash_buf: [64]u8 = undefined;
-        const hashed = hashPassword(&hash_buf, password, &salt);
+        const salt_hex = std.fmt.bytesToHex(salt, .lower);
+        const hashed = hashPassword(password, &salt);
         const u = User{
             .username = username,
-            .password = hashed,
+            .password = &hashed,
             .salt = &salt_hex,
             .source = "moonraker",
             .created_on = nowSeconds(c.io),
@@ -905,10 +898,9 @@ fn loginOrCreate(
         if (!std.mem.eql(u8, u.source, source)) return error.Unauthorized;
         // Verify password.
         var salt: [32]u8 = undefined;
-        const salt_bytes = fromHex(&salt, u.salt) catch return error.InvalidPassword;
-        var hash_buf: [64]u8 = undefined;
-        const hashed = hashPassword(&hash_buf, password, salt_bytes);
-        if (!constEql(64, hashed, u.password)) return error.InvalidPassword;
+        const salt_bytes = std.fmt.hexToBytes(&salt, u.salt) catch return error.InvalidPassword;
+        const hashed = hashPassword(password, salt_bytes);
+        if (!constEql(64, &hashed, u.password)) return error.InvalidPassword;
     }
 
     return issueTokens(c, alloc, username, new_user);
@@ -933,7 +925,7 @@ fn issueTokens(
     var jwk_owned: ?[]const u8 = null;
 
     if (u.jwt_secret.len == 64) {
-        _ = fromHex(&seed, u.jwt_secret) catch return error.Unauthorized;
+        _ = std.fmt.hexToBytes(&seed, u.jwt_secret) catch return error.Unauthorized;
         if (u.jwk_id.len == 0) {
             var rnd: [32]u8 = undefined;
             try c.io.randomSecure(&rnd);
@@ -949,8 +941,7 @@ fn issueTokens(
         }
     } else {
         try c.io.randomSecure(&seed);
-        var secret_hex: [64]u8 = undefined;
-        _ = toHex(&secret_hex, &seed);
+        const secret_hex = std.fmt.bytesToHex(seed, .lower);
         var rnd: [32]u8 = undefined;
         try c.io.randomSecure(&rnd);
         const new_kid = b64url.Encoder.encode(&jwk_id_buf, &rnd);
@@ -987,16 +978,18 @@ fn ctxOf(ptr: *anyopaque) *AuthCtx {
 /// POST /access/login
 pub fn handleLogin(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     return loginOrCreate(c, params, alloc, false);
 }
 
 /// POST /access/logout
 pub fn handleLogout(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
-    // The current user is conveyed via the "_user" injected param when present
-    // (the auth hook resolves the user). Fall back to an explicit "username".
-    const username = currentUser(params) orelse getOptStr(params, "username") orelse
-        return error.NotFound;
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
+    // Only the authenticated user can log out (Moonraker has no username param).
+    const username = currentUser(params) orelse return error.NotFound;
     if (isReservedUser(username)) return error.Forbidden;
     const u = c.users.getPtr(username) orelse return error.NotFound;
     // Clear the keypair → invalidates outstanding JWTs.
@@ -1015,6 +1008,8 @@ pub fn handleLogout(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
 /// POST /access/refresh_jwt
 pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     const refresh_token = getStr(params, "refresh_token") catch return error.InvalidParams;
 
     // Resolve kid → public key, verify the refresh token.
@@ -1027,7 +1022,7 @@ pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     if (u.jwt_secret.len != 64 or u.jwk_id.len == 0) return error.Unauthorized;
 
     var seed: [32]u8 = undefined;
-    _ = fromHex(&seed, u.jwt_secret) catch return error.Unauthorized;
+    _ = std.fmt.hexToBytes(&seed, u.jwt_secret) catch return error.Unauthorized;
     const now = nowSecondsInt(c.io);
     const token = try generateJwt(alloc, c.issuer, claims.username, u.jwk_id, seed, .access, now, jwt_exp_seconds);
 
@@ -1042,6 +1037,8 @@ pub fn handleRefreshJwt(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// GET /access/info
 pub fn handleInfo(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "default_source", .{ .string = try alloc.dupe(u8, c.default_source) });
     var sources: std.json.Array = .init(alloc);
@@ -1069,6 +1066,8 @@ pub fn handleInfo(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
 /// GET/POST/DELETE /access/user
 pub fn handleUserGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     const username = currentUser(params);
     var obj: std.json.ObjectMap = .empty;
     if (username) |name| {
@@ -1097,11 +1096,15 @@ pub fn handleUserGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
 
 pub fn handleUserPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     return loginOrCreate(c, params, alloc, true);
 }
 
 pub fn handleUserDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     const username = getStr(params, "username") catch return error.InvalidParams;
     if (currentUser(params)) |cur| {
         if (std.mem.eql(u8, cur, username)) return error.Forbidden;
@@ -1123,6 +1126,8 @@ pub fn handleUserDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// GET /access/users/list
 pub fn handleUsersList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     _ = params;
     var arr: std.json.Array = .init(alloc);
     var it = c.users.iterator();
@@ -1143,6 +1148,8 @@ pub fn handleUsersList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
 /// POST /access/user/password
 pub fn handlePasswordReset(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     const password = getStr(params, "password") catch return error.InvalidParams;
     const new_password = getStr(params, "new_password") catch return error.InvalidParams;
     const username = currentUser(params) orelse return error.NotFound;
@@ -1150,15 +1157,13 @@ pub fn handlePasswordReset(ctx: *anyopaque, params: std.json.Value, alloc: std.m
     const u = c.users.getPtr(username) orelse return error.NotFound;
 
     var salt: [32]u8 = undefined;
-    const salt_bytes = fromHex(&salt, u.salt) catch return error.InvalidParams;
-    var hash_buf: [64]u8 = undefined;
-    const cur_hash = hashPassword(&hash_buf, password, salt_bytes);
-    if (!constEql(64, cur_hash, u.password)) return error.Forbidden;
+    const salt_bytes = std.fmt.hexToBytes(&salt, u.salt) catch return error.InvalidParams;
+    const cur_hash = hashPassword(password, salt_bytes);
+    if (!constEql(64, &cur_hash, u.password)) return error.Forbidden;
 
-    var new_hash_buf: [64]u8 = undefined;
-    const new_hash = hashPassword(&new_hash_buf, new_password, salt_bytes);
+    const new_hash = hashPassword(new_password, salt_bytes);
     var tmpl = u.*;
-    tmpl.password = new_hash;
+    tmpl.password = &new_hash;
     try c.putUser(tmpl);
     c.syncUser(username);
 
@@ -1171,6 +1176,8 @@ pub fn handlePasswordReset(ctx: *anyopaque, params: std.json.Value, alloc: std.m
 /// GET /access/api_key  → returns the current api key string.
 pub fn handleGetApiKey(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     _ = params;
     return .{ .string = try alloc.dupe(u8, &c.api_key) };
 }
@@ -1178,10 +1185,12 @@ pub fn handleGetApiKey(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
 /// POST /access/api_key → regenerate and return the new api key.
 pub fn handlePostApiKey(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     _ = params;
     var raw: [16]u8 = undefined;
     try c.io.randomSecure(&raw);
-    _ = toHex(&c.api_key, &raw);
+    c.api_key = std.fmt.bytesToHex(raw, .lower);
     // Update the API user's password.
     if (c.users.getPtr(api_user)) |u| {
         var tmpl = u.*;
@@ -1195,11 +1204,12 @@ pub fn handlePostApiKey(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// GET /access/oneshot_token → mint a single-use token bound to the caller IP.
 pub fn handleOneshot(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
     const ip = currentIp(params) orelse parseIp("127.0.0.1") catch unreachable;
     const username = currentUser(params) orelse api_user;
     const tok = try c.createOneshot(ip, username, nowSecondsInt(c.io));
-    defer c.gpa.free(tok);
-    return .{ .string = try alloc.dupe(u8, tok) };
+    return .{ .string = try alloc.dupe(u8, &tok) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,7 +1258,7 @@ fn jwtKid(alloc: std.mem.Allocator, token: []const u8) ?[]const u8 {
 // ---------------------------------------------------------------------------
 
 pub const AuthOutcome = union(enum) {
-    /// Authenticated as this username (borrowed; valid until next user mutation).
+    /// Authenticated as this username (static, or in the request allocator).
     user: []const u8,
     /// No credentials but the endpoint does not require auth.
     anonymous: void,
@@ -1306,9 +1316,36 @@ pub fn resolveClientAddr(socket_peer: []const u8, x_real_ip: ?[]const u8, x_forw
     return .{ .client = client, .proxy = socket_peer };
 }
 
+/// User named by a valid access JWT, or null. The name lives in `alloc`.
+/// Caller holds `c.mutex`.
+fn jwtUser(c: *AuthCtx, alloc: std.mem.Allocator, token: []const u8, now: i64, check_exp: bool) ?[]const u8 {
+    const kid = jwtKid(alloc, token) orelse return null;
+    const pk = c.publicKeyForKid(kid) orelse return null;
+    const claims = decodeJwt(alloc, token, pk, .access, c.issuer, now, check_exp) catch return null;
+    if (c.users.getPtr(claims.username) == null) return null;
+    return claims.username;
+}
+
+/// Moonraker `validate_jwt`: the user named by a valid access JWT, duped into
+/// `alloc`, or null.
+pub fn validateJwt(c: *AuthCtx, alloc: std.mem.Allocator, token: []const u8) ?[]const u8 {
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
+    return jwtUser(c, alloc, token, nowSecondsInt(c.io), true);
+}
+
+/// Moonraker `validate_api_key`: true when API keys are enabled and `key`
+/// matches.
+pub fn validateApiKey(c: *AuthCtx, key: []const u8) bool {
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
+    return c.enable_api_key and constEql(32, key, &c.api_key);
+}
+
 /// Authentication chain, mirroring authorization.py `authenticate_request`:
 /// JWT → oneshot → API key → trusted IP → fail. `transport == INTERNAL`
-/// bypasses. `auth_required` gates the final fall-through.
+/// bypasses. `auth_required` gates the final fall-through. A returned user
+/// name is static or lives in `alloc`.
 pub fn authenticateRequest(
     c: *AuthCtx,
     alloc: std.mem.Allocator,
@@ -1317,24 +1354,17 @@ pub fn authenticateRequest(
     auth_required: bool,
 ) AuthOutcome {
     if (transport == .INTERNAL) return .{ .anonymous = {} };
+    c.mutex.lockUncancelable(c.io);
+    defer c.mutex.unlock(c.io);
 
     const now = nowSecondsInt(c.io);
 
-    // 1) JWT
+    // 1) JWT. A malformed or invalid JWT is an explicit failure in Moonraker.
     if (creds.jwt) |raw| {
         const token = stripBearer(raw);
         if (token.len > 0) {
-            if (jwtKid(alloc, token)) |kid| {
-                if (c.publicKeyForKid(kid)) |pk| {
-                    if (decodeJwt(alloc, token, pk, .access, c.issuer, now, auth_required)) |claims| {
-                        if (c.users.getPtr(claims.username) != null) {
-                            return .{ .user = claims.username };
-                        }
-                    } else |_| {}
-                }
-            }
-            // A malformed/invalid JWT is an explicit failure in Moonraker.
-            return .{ .unauthorized = {} };
+            const user = jwtUser(c, alloc, token, now, auth_required) orelse return .{ .unauthorized = {} };
+            return .{ .user = user };
         }
     }
 
@@ -1368,10 +1398,10 @@ pub fn authenticateRequest(
 
     // 4) Trusted IP. A rewritten client is accepted only when the socket peer
     // (the proxy) is itself a trusted client. Moonraker: `_check_trusted_proxy`.
+    // A request without a client address is never trusted.
     if (creds.remote_ip) |ip_s| {
         if (parseIp(ip_s)) |ip| {
-            const client_ok = c.trusted.isTrusted(ip) or c.trust_unknown_ip;
-            if (client_ok) {
+            if (c.trusted.isTrusted(ip)) {
                 if (auth_required) {
                     if (creds.proxy_ip) |pip| {
                         if (parseIp(pip)) |proxy| {
@@ -1382,10 +1412,6 @@ pub fn authenticateRequest(
                 return .{ .user = trusted_user };
             }
         } else |_| {}
-    } else if (c.trust_unknown_ip) {
-        // Peer IP unavailable from the transport → treat as a trusted local
-        // connection (see field docs).
-        return .{ .user = trusted_user };
     }
 
     if (!auth_required) return .{ .anonymous = {} };
@@ -1556,21 +1582,19 @@ fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 // --- Crypto unit tests ---
 
 test "hashPassword: matches Python hashlib pbkdf2_hmac vector" {
-    var out: [64]u8 = undefined;
     const salt: [32]u8 = @splat(0);
-    const h = hashPassword(&out, "secret", &salt);
+    const h = hashPassword("secret", &salt);
     try testing.expectEqualStrings(
         "f424449b70198c6d5478fff835b93ee602323ffd7a2d225b51e2b4ba08c0602c",
-        h,
+        &h,
     );
 }
 
 test "hashPassword: string-salt vector parity" {
-    var out: [64]u8 = undefined;
-    const h = hashPassword(&out, "password", "salt");
+    const h = hashPassword("password", "salt");
     try testing.expectEqualStrings(
         "0394a2ede332c9a13eb82e9b24631604c31df978b4e2f0fbd2c549944f9d79a5",
-        h,
+        &h,
     );
 }
 
@@ -1912,23 +1936,21 @@ test "oneshot token: single-use, IP-bound" {
 
     const ip = try parseIp("10.0.0.5");
     const tok = try ctx.createOneshot(ip, "_API_KEY_USER_", 1000);
-    defer a.free(tok);
 
     // Wrong IP → null.
     const wrong_ip = try parseIp("10.0.0.6");
-    try testing.expect(ctx.consumeOneshot(a, tok, wrong_ip, 1001) == null);
+    try testing.expect(ctx.consumeOneshot(a, &tok, wrong_ip, 1001) == null);
 
     // Re-mint (the wrong-IP attempt consumed the token in Moonraker semantics).
     const tok2 = try ctx.createOneshot(ip, "_API_KEY_USER_", 1000);
-    defer a.free(tok2);
-    const u = ctx.consumeOneshot(a, tok2, ip, 1001);
+    const u = ctx.consumeOneshot(a, &tok2, ip, 1001);
     try testing.expect(u != null);
     if (u) |un| {
         defer a.free(un);
         try testing.expectEqualStrings("_API_KEY_USER_", un);
     }
     // Second use → null (single-use).
-    try testing.expect(ctx.consumeOneshot(a, tok2, ip, 1001) == null);
+    try testing.expect(ctx.consumeOneshot(a, &tok2, ip, 1001) == null);
 }
 
 test "oneshot token: expires after TTL" {
@@ -1941,9 +1963,8 @@ test "oneshot token: expires after TTL" {
     defer ctx.deinit();
     const ip = try parseIp("127.0.0.1");
     const tok = try ctx.createOneshot(ip, api_user, 1000);
-    defer a.free(tok);
     // now = 1000 + 6 > 1000 + ONESHOT_TIMEOUT(5) → expired.
-    try testing.expect(ctx.consumeOneshot(a, tok, ip, 1006) == null);
+    try testing.expect(ctx.consumeOneshot(a, &tok, ip, 1006) == null);
 }
 
 test "trusted client: exact IP and CIDR match" {
@@ -1980,6 +2001,92 @@ test "parseTrustedEntry: ip, cidr, domain" {
     try testing.expectEqual(@as(u8, 8), e2.cidr.prefix);
     const e3 = try parseTrustedEntry("example.com");
     try testing.expect(e3 == .domain);
+}
+
+test "parseTrustedEntry: CIDR with host bits or an oversized prefix is rejected" {
+    try testing.expectError(error.InvalidEntry, parseTrustedEntry("192.168.1.5/24"));
+    try testing.expectError(error.InvalidEntry, parseTrustedEntry("10.0.0.0/33"));
+    try testing.expectError(error.InvalidEntry, parseTrustedEntry("fd00::1/64"));
+    try testing.expectError(error.InvalidEntry, parseTrustedEntry("10.128.0.0/8"));
+    _ = try parseTrustedEntry("192.168.1.0/24");
+    _ = try parseTrustedEntry("192.168.1.5/32");
+    _ = try parseTrustedEntry("0.0.0.0/0");
+    _ = try parseTrustedEntry("10.0.0.0/9");
+    _ = try parseTrustedEntry("fd00::/64");
+    _ = try parseTrustedEntry("::1/128");
+}
+
+test "fuzz parseTrustedEntry: an accepted CIDR contains its own network address" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var bytes: [4]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const prefix = smith.valueRangeAtMostWithHash(u8, 0, 40, 1);
+            var buf: [32]u8 = undefined;
+            const text = try std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}/{d}", .{ bytes[0], bytes[1], bytes[2], bytes[3], prefix });
+            const entry = parseTrustedEntry(text) catch return;
+            try testing.expect(prefix <= 32);
+            try testing.expect(cidrContains(entry.cidr, entry.cidr.addr));
+            const host_bits: u32 = if (prefix == 32) 0 else @as(u32, 0xffff_ffff) >> @intCast(prefix);
+            try testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, &bytes, .big) & host_bits);
+        }
+    }.run, .{});
+}
+
+test "setTrustedClients skips a CIDR with host bits set" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var ctx = try mkCtx(testing.allocator, &mem);
+    defer ctx.deinit();
+    try ctx.setTrustedClients("192.168.1.5/24 10.0.0.0/8");
+    try testing.expect(!ctx.trusted.isTrusted(try parseIp("192.168.1.9")));
+    try testing.expect(ctx.trusted.isTrusted(try parseIp("10.2.3.4")));
+}
+
+test "createOneshot frees the username when storing the token fails" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    var ctx = try mkCtx(failing.allocator(), &mem);
+    defer ctx.deinit();
+    failing.fail_index = failing.alloc_index + 1;
+    try testing.expectError(error.OutOfMemory, ctx.createOneshot(try parseIp("127.0.0.1"), "alice", 1000));
+    try testing.expectEqual(@as(usize, 0), ctx.oneshot.items.len);
+}
+
+test "authenticateRequest waits for a handler holding the auth lock" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var ctx = try mkCtx(testing.allocator, &mem);
+    defer ctx.deinit();
+    const Probe = struct {
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(p: *@This(), c: *AuthCtx) void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            _ = authenticateRequest(c, arena.allocator(), .HTTP, .{ .remote_ip = "127.0.0.1" }, true);
+            p.done.store(true, .release);
+        }
+    };
+    var probe: Probe = .{};
+    ctx.mutex.lockUncancelable(testing.io);
+    var future = try testing.io.concurrent(Probe.run, .{ &probe, &ctx });
+    try std.Io.sleep(testing.io, .fromMilliseconds(50), .awake);
+    const finished_while_locked = probe.done.load(.acquire);
+    ctx.mutex.unlock(testing.io);
+    future.await(testing.io);
+    try testing.expect(!finished_while_locked);
+    try testing.expect(probe.done.load(.acquire));
+}
+
+test "authenticateRequest: a request without a client address is not trusted" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var ctx = try mkCtx(testing.allocator, &mem);
+    defer ctx.deinit();
+    try ctx.setTrustedClients("0.0.0.0/0");
+    try testing.expect(authenticateRequest(&ctx, testing.allocator, .HTTP, .{}, true) == .unauthorized);
+    try testing.expect(authenticateRequest(&ctx, testing.allocator, .HTTP, .{}, false) == .anonymous);
 }
 
 test "authenticateRequest: chain order and INTERNAL bypass" {
@@ -2201,11 +2308,9 @@ test "fuzz hashPassword: never crashes; deterministic" {
             var buf: [64]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const n = @as(usize, buf[0]) % buf.len;
-            var out1: [64]u8 = undefined;
-            var out2: [64]u8 = undefined;
-            const h1 = hashPassword(&out1, buf[0..n], "saltsalt");
-            const h2 = hashPassword(&out2, buf[0..n], "saltsalt");
-            try testing.expectEqualStrings(h1, h2);
+            const h1 = hashPassword(buf[0..n], "saltsalt");
+            const h2 = hashPassword(buf[0..n], "saltsalt");
+            try testing.expectEqualStrings(&h1, &h2);
         }
     }.run, .{});
 }
