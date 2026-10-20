@@ -346,11 +346,10 @@ _norm_structure_compare array item masking (Python).
   validated). 15 unit + 4 fuzz tests.
 - **button** — ~~notification-only, GPIO stubbed.~~ DONE: full ButtonCtx with
   addButton/sendEvent/emitButtonEvent/notification_sent guard, 10 unit + 3 fuzz tests.
-- **job_queue** — ~~transition_gcode/delay, remote methods~~ DONE: transition_gcode
-  injection via dispatchNextJob, transition_delay storage, "loading" queue state,
-  pause_job_queue/start_job_queue JSON-RPC remote methods registered, [job_queue]
-  config parsing wired in app.zig, transition_delay timer thread with atomic
-  cancel flag and thread join (1-second polling, 32 unit + 8 fuzz tests).
+- **job_queue** — DONE: the job_queue.py state machine (loading → starting →
+  job_loaded), transition gcode and delay before automatically loaded jobs on a
+  cancellable dispatch worker, pause_job_queue/start_job_queue remote methods,
+  [job_queue] config. Remaining gaps are listed under Known Moonraker gaps.
 
 ### P2 — misc
 - ~~Read host/port from config in `main()`.~~ Done: `-c`/`--config`, `extractBindAddr`, 5 tests.
@@ -445,3 +444,4 @@ Keep the coverage gate at 100% and the full suite green after every step.
 - `machine.update.full` runs only package steps and no git; no update restarts the updated service (`src/components/update_manager.zig` `runFullUpdate`).
 - `usb.ids` is neither downloaded nor parsed, so USB class fields are null and names cover only Moonraker's built-in 1d50 entries; V4L2 `modes` are not enumerated (VIDIOC_ENUM_FMT); `machine.peripherals.canbus` returns no UUIDs (`src/components/machine.zig` `buildUsbDevice`, `enumVideo`, `handleCanbus`).
 - `server.gcode_store` stays empty in production: `klippy_connection.zig` `emitGcodeResponse` and the `printer.gcode.script` proxy do not call `DataStoreCtx.pushGcodeResponse`/`pushGcodeCommand` (`src/components/data_store.zig`); Moonraker records both (`data_store.py` `_handle_gcode_response`, `_store_gcode_command`).
+- `[job_queue] load_on_startup` is not supported (phobos warns at config load) and the queue does not pause on Klippy shutdown: both need a Klippy ready/shutdown hook from `klippy_connection.zig` into `JobQueueCtx` (`src/components/job_queue.zig`; Moonraker `job_queue.py` `_handle_ready`, `_handle_shutdown`).

@@ -898,8 +898,9 @@ pub const App = struct {
             self.job_queue_ctx.setTransitionConfig(tg, td);
             // Moonraker defaults: both false.
             const automatic = cfg.getBoolean("job_queue", "automatic_transition") catch false;
-            const load_on_start = cfg.getBoolean("job_queue", "load_on_startup") catch false;
-            self.job_queue_ctx.setQueueOptions(automatic, load_on_start);
+            self.job_queue_ctx.setAutomaticTransition(automatic);
+            if (cfg.getBoolean("job_queue", "load_on_startup") catch false)
+                std.debug.print("phobos: warning: [job_queue] load_on_startup is not supported; start the queue manually\n", .{});
         }
 
         // [mqtt] (mqtt.py MQTTClient). Moonraker fails the component on a bad

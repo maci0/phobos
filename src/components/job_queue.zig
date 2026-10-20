@@ -10,13 +10,17 @@
 //!   GET    /server/job_queue/status  → server.job_queue.status
 //!   POST   /server/job_queue/jump    → server.job_queue.jump
 //!
-//! Queue state is persisted in the DataStore under namespace "job_queue" with
-//! key "queue". Queue items are serialized as a JSON array of job objects.
+//! Queued jobs are persisted in the DataStore under namespace "job_queue" with
+//! key "queue" (Moonraker keeps them in memory only). The queue always starts
+//! "paused", like Moonraker.
 //!
-//! NOTE: Without Klippy there is no print dispatch. The queue state machine
-//! is implemented faithfully (paused/ready/loading/starting) but job_loaded
-//! transitions (starting a print via Klippy) are never triggered. The queue
-//! starts in "paused" state.
+//! States follow job_queue.py: start or an automatic transition after a
+//! completed print moves "ready"/"paused" to "loading"; the dispatch worker
+//! runs the transition gcode, enters "starting", sends SDCARD_PRINT_FILE,
+//! removes the loaded job, emits "job_loaded" and settles on "ready"
+//! (more jobs, automatic transition) or "paused". Any failure pauses the
+//! queue. `load_on_startup` and pausing on Klippy shutdown need Klippy event
+//! hooks phobos lacks (TODO.md, Known Moonraker gaps).
 //!
 //! Queued job shape (matches job_queue.py QueuedJob.as_dict):
 //!   filename, job_id, time_added, time_in_queue
@@ -61,13 +65,11 @@ pub const JobQueueCtx = struct {
     jobs: std.ArrayList(QueuedJob),
     /// Current queue state string.
     queue_state: []const u8,
-    /// Guards `jobs` and `queue_state`. They are mutated both by the Core-locked
-    /// HTTP/JSON-RPC handlers AND, off-Core, by the Klippy reader thread
-    /// (onJobStateChanged) and the dispatch worker thread — the Core lock does not
-    /// serialise those, so a status update arriving mid-handler could tear the
-    /// ArrayList. Held only around the structural ops; NEVER across a blocking
-    /// dispatchFn/scheduleNextJobDispatch/cancelDelayTimer call (the worker the
-    /// reader must service would otherwise be unreachable → deadlock).
+    /// Guards `jobs`, `queue_state` and `pause_requested`. They are mutated by
+    /// Core-locked handlers and job-state events AND, off-Core, by the dispatch
+    /// worker thread. Held only around the structural ops; NEVER across a
+    /// blocking dispatchFn/scheduleNextJobDispatch/cancelDelayTimer call (the
+    /// joined worker would otherwise wait on this lock → deadlock).
     /// Locked via lockJobs/unlockJobs, which no-op when `io` is unset (single-
     /// threaded init / unit tests have no concurrent mutator).
     mutex: std.Io.Mutex = .init,
@@ -81,12 +83,11 @@ pub const JobQueueCtx = struct {
     /// Delay in seconds between queued jobs (config: job_transition_delay).
     transition_delay: f64 = 0.0,
     /// When false (Moonraker default), the queue does NOT auto-advance to the
-    /// next job after one completes — it pauses and waits for an explicit start
-    /// (config: automatic_transition). phobos previously always auto-advanced.
+    /// next job after one completes (config: automatic_transition).
     automatic: bool = false,
-    /// Start queued jobs once Klippy becomes ready (config: load_on_startup).
-    /// Default false; stored for parity (false matches current behavior).
-    load_on_start: bool = false,
+    /// Set by pause, cleared by start: jobs queued during a print do not make
+    /// a paused queue "ready" (job_queue.py `pause_requested`).
+    pause_requested: bool = false,
     /// Background thread for transition_delay timer (nil when delay is zero or
     /// no timer is active). Pattern follows proc_stat in machine.zig.
     delay_thread: ?std.Io.Future(void) = null,
@@ -132,8 +133,8 @@ pub const JobQueueCtx = struct {
             .delay_thread = null,
             .delay_cancel = .unset,
         };
-        // Load persisted queue on init
-        ctx.loadFromStore() catch {};
+        ctx.loadFromStore() catch |err|
+            std.debug.print("phobos: warning: persisted job queue not loaded: {}\n", .{err});
         return ctx;
     }
 
@@ -157,11 +158,10 @@ pub const JobQueueCtx = struct {
         self.transition_delay = delay;
     }
 
-    /// Set the [job_queue] behaviour flags: `automatic_transition` (auto-advance
-    /// to the next job on completion) and `load_on_startup`.
-    pub fn setQueueOptions(self: *JobQueueCtx, automatic: bool, load_on_start: bool) void {
+    /// Set `[job_queue] automatic_transition` (auto-advance to the next job on
+    /// completion).
+    pub fn setAutomaticTransition(self: *JobQueueCtx, automatic: bool) void {
         self.automatic = automatic;
-        self.load_on_start = load_on_start;
     }
 
     /// Returns true when Klippy is wired and connected.
@@ -196,165 +196,120 @@ pub const JobQueueCtx = struct {
         }
     }
 
-    /// Called by JobStateCtx when a job state transition is detected.
-    /// On complete: if automatic, pop the completed job and advance to next.
-    /// On abort (error/cancelled): set state to paused.
+    /// Called by JobStateCtx (under Core) when a job state transition is
+    /// detected (job_queue.py `_on_job_state_changed`). A completed print loads
+    /// the next job only with automatic transition and a "ready" queue; an
+    /// aborted print pauses a non-empty queue.
     pub fn onJobStateChanged(self: *JobQueueCtx, event: anytype, _: std.json.ObjectMap, _: std.json.ObjectMap) void {
         switch (event) {
             .complete => {
-                // Mutate jobs/queue_state under the lock; release it before the
-                // (blocking) scheduleNextJobDispatch and the internally-locking
-                // save/emit helpers.
-                var do_dispatch = false;
+                if (!self.automatic) return;
                 {
                     self.lockJobs();
                     defer self.unlockJobs();
-                    // Remove the completed job from the front of the queue.
-                    if (self.jobs.items.len > 0) {
-                        self.jobs.items[0].deinit(self.gpa);
-                        _ = self.jobs.orderedRemove(0);
-                    }
-                    if (self.jobs.items.len > 0) {
-                        self.queue_state = "ready";
-                        // Auto-advance to the next job ONLY when automatic
-                        // transition is enabled (Moonraker default is off: the
-                        // queue stays "ready" until the user starts it again).
-                        do_dispatch = self.automatic and self.canDispatch();
-                    } else {
-                        self.queue_state = "paused";
-                    }
+                    if (!std.mem.eql(u8, self.queue_state, "ready") or self.jobs.items.len == 0) return;
                 }
-                // Auto-advance: dispatch next job after transition_delay (or now).
-                // MUST be outside the lock — it joins the prior worker thread.
-                if (do_dispatch) self.scheduleNextJobDispatch() catch {};
-                var arena = std.heap.ArenaAllocator.init(self.gpa);
-                defer arena.deinit();
-                self.saveToStore(arena.allocator());
-                emitQueueChanged(self, arena.allocator(), "state_changed", true);
+                self.setQueueState("loading");
+                // Outside the lock: scheduling joins the prior worker thread.
+                self.scheduleNextJobDispatch(true);
             },
             .@"error", .cancelled => {
-                var changed = false;
-                {
+                const has_jobs = blk: {
                     self.lockJobs();
                     defer self.unlockJobs();
-                    if (self.jobs.items.len > 0) {
-                        self.queue_state = "paused";
-                        changed = true;
-                    }
-                }
-                if (changed) {
+                    break :blk self.jobs.items.len > 0;
+                };
+                if (has_jobs) {
+                    self.setQueueState("paused");
                     self.cancelDelayTimer(); // joins worker — never under the lock
-                    var arena = std.heap.ArenaAllocator.init(self.gpa);
-                    defer arena.deinit();
-                    self.saveToStore(arena.allocator());
-                    emitQueueChanged(self, arena.allocator(), "state_changed", false);
                 }
             },
             else => {},
         }
     }
 
-    /// Schedule the next job dispatch on a dedicated worker thread. The worker
-    /// sleeps out `transition_delay` (0 = dispatch immediately), then calls
-    /// dispatchNextJob and emits a queue_changed notification once complete.
-    /// Dispatch is ALWAYS async — it makes a blocking Klippy request that none of
-    /// the callers (on-Core `handleStart`, the Klippy reader thread, the timer)
-    /// may block on. Cancelled by cancelDelayTimer (pause/abort/error/deinit).
-    fn scheduleNextJobDispatch(self: *JobQueueCtx) !void {
-        // Always dispatch on a dedicated worker thread (even at delay 0). The
-        // dispatch makes a BLOCKING Klippy request, and the callers
-        // (handleStart under Core, onJobStateChanged on the Klippy reader thread,
-        // the timer) can none of them safely block here: the reader would block
-        // on its own response, and an on-Core caller would unbalance the Core
-        // lock. The worker holds no Core and is not the reader, so requestOffCore
-        // is safe. Tests using a non-Klippy capture dispatch can join the thread.
+    /// Load the front job on a dedicated worker thread. After a completed
+    /// print (`after_job`) the worker first waits `transition_delay` and runs
+    /// the transition gcode; a queue start loads at once. Dispatch is ALWAYS
+    /// async: it makes a blocking Klippy request, and the callers (handlers and
+    /// job-state events under Core) may not block on it. Cancelled by
+    /// cancelDelayTimer (pause/abort/deinit). The caller sets "loading" first;
+    /// a failure to start the worker pauses the queue.
+    fn scheduleNextJobDispatch(self: *JobQueueCtx, after_job: bool) void {
         self.cancelDelayTimer(); // join + clear any previous timer
         self.delay_cancel.reset();
-        // "loading" only means "waiting out the transition delay"; for an
-        // immediate (delay-0) dispatch leave the state as the caller set it.
-        if (self.transition_delay > 0) self.setQueueState("loading");
-        self.delay_thread = self.clock_io.concurrent(transitionDelayCallback, .{self}) catch |e| {
+        self.delay_thread = self.clock_io.concurrent(transitionDelayCallback, .{ self, after_job }) catch |err| {
             self.delay_thread = null;
-            return e;
-        };
-    }
-
-    /// Dispatch start-gcode for the front job to Klippy.
-    /// When transition_gcode is configured, it is sent first (between-job gcode
-    /// injection, matching Moonraker's _start_next_job → _load_next_job flow).
-    fn dispatchNextJob(self: *JobQueueCtx) !void {
-        // Defensive: the worker thread dereferences dispatchFn/klippy; if a
-        // concurrent teardown nulled them, bail rather than unwrap null.
-        if (self.dispatchFn == null or self.klippy == null) return;
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-
-        // Snapshot the front job's filename into the arena under the lock — the
-        // reader thread may orderedRemove(0) during the blocking dispatch below,
-        // which would dangle a `&jobs.items[0]` pointer. The lock is released
-        // before dispatchFn (a blocking Klippy request the reader must service).
-        const filename: []const u8 = blk: {
-            self.lockJobs();
-            defer self.unlockJobs();
-            if (self.jobs.items.len == 0) return;
-            break :blk try a.dupe(u8, self.jobs.items[0].filename);
-        };
-
-        // Inject transition gcode if configured. On failure, pause the queue
-        // rather than proceeding to start the print (Moonraker _pop_job).
-        if (self.transition_gcode) |tg| {
-            if (tg.len > 0) {
-                self.setQueueState("loading");
-                var tparams = try std.json.ObjectMap.init(a, &.{}, &.{});
-                try tparams.put(a, "script", .{ .string = tg });
-                _ = self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = tparams }, a) catch {
-                    self.setQueueState("paused");
-                    return;
-                };
-                // The transition gcode may have paused the queue (e.g. an M-code
-                // that triggered a pause) — don't start the print if so.
-                if (!self.queueStateEql("loading")) return;
-            }
-        }
-
-        // Build on the arena (no fixed 512B cap → no truncation, no extra dupe).
-        const script = try std.fmt.allocPrint(a, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{filename});
-
-        var params_obj = try std.json.ObjectMap.init(a, &.{}, &.{});
-        try params_obj.put(a, "script", .{ .string = script });
-        // On start-gcode failure, pause the queue (don't silently drop the job).
-        _ = self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = params_obj }, a) catch {
+            std.debug.print("phobos: warning: job queue paused, dispatch worker not started: {}\n", .{err});
             self.setQueueState("paused");
             return;
         };
     }
 
-    /// Dispatch pause command to Klippy.
-    fn dispatchPause(self: *JobQueueCtx) !void {
+    /// Load the front job (job_queue.py `_pop_job`). A failure pauses the queue.
+    fn dispatchNextJob(self: *JobQueueCtx, need_transition: bool) void {
+        // The worker dereferences dispatchFn/klippy; if a concurrent teardown
+        // nulled them, bail rather than unwrap null.
+        if (self.dispatchFn == null or self.klippy == null) return;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const empty = try std.json.ObjectMap.init(a, &.{}, &.{});
-        _ = try self.dispatchFn.?(self.klippy.?, "pause_resume/pause", .{ .object = empty }, a);
+        self.loadNextJob(a, need_transition) catch |err| {
+            std.debug.print("phobos: warning: job queue paused, next job not loaded: {}\n", .{err});
+            self.setQueueState("paused");
+        };
     }
 
-    /// Dispatch resume command to Klippy.
-    fn dispatchResume(self: *JobQueueCtx) !void {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const empty = try std.json.ObjectMap.init(a, &.{}, &.{});
-        _ = try self.dispatchFn.?(self.klippy.?, "pause_resume/resume", .{ .object = empty }, a);
+    fn loadNextJob(self: *JobQueueCtx, a: std.mem.Allocator, need_transition: bool) !void {
+        // Snapshot the front job under the lock; the lock is released before
+        // the blocking Klippy requests below.
+        const front: QueuedJob = blk: {
+            self.lockJobs();
+            defer self.unlockJobs();
+            if (std.mem.eql(u8, self.queue_state, "paused")) return;
+            if (self.jobs.items.len == 0) return error.QueueEmpty;
+            if (!std.mem.eql(u8, self.queue_state, "loading")) return error.QueueStateChanged;
+            if (self.isPrinting()) return error.PrinterBusy;
+            const j = self.jobs.items[0];
+            break :blk .{ .filename = try a.dupe(u8, j.filename), .job_id = try a.dupe(u8, j.job_id), .time_added = j.time_added };
+        };
+
+        const transition = self.transition_gcode orelse "";
+        if (need_transition and transition.len > 0) {
+            try self.runScript(a, transition);
+            // The transition gcode may have paused the queue.
+            if (!self.queueStateEql("loading")) return error.QueueStateChanged;
+        }
+
+        self.setQueueState("starting");
+        // klippy_apis.py start_print: drop a leading '/', escape double quotes.
+        const name = if (std.mem.startsWith(u8, front.filename, "/")) front.filename[1..] else front.filename;
+        const escaped = try std.mem.replaceOwned(u8, a, name, "\"", "\\\"");
+        try self.runScript(a, try std.fmt.allocPrint(a, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped}));
+
+        {
+            self.lockJobs();
+            defer self.unlockJobs();
+            // Remove the loaded job by id: handlers may have reordered or
+            // deleted entries during the request.
+            for (self.jobs.items, 0..) |*j, i| {
+                if (!std.mem.eql(u8, j.job_id, front.job_id)) continue;
+                j.deinit(self.gpa);
+                _ = self.jobs.orderedRemove(i);
+                break;
+            }
+            if (std.mem.eql(u8, self.queue_state, "starting")) {
+                self.queue_state = if (self.jobs.items.len > 0 and self.automatic) "ready" else "paused";
+            }
+        }
+        self.saveToStore(a);
+        emitQueueChanged(self, a, "job_loaded", true);
     }
 
-    /// Dispatch cancel command to Klippy.
-    fn dispatchCancel(self: *JobQueueCtx) !void {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        const empty = try std.json.ObjectMap.init(a, &.{}, &.{});
-        _ = try self.dispatchFn.?(self.klippy.?, "pause_resume/cancel", .{ .object = empty }, a);
+    fn runScript(self: *JobQueueCtx, a: std.mem.Allocator, script: []const u8) !void {
+        var params: std.json.ObjectMap = .empty;
+        try params.put(a, "script", .{ .string = script });
+        _ = try self.dispatchFn.?(self.klippy.?, "gcode/script", .{ .object = params }, a);
     }
 
     /// Acquire `mutex` guarding jobs/queue_state. No-op when `io` is unset (no
@@ -368,12 +323,18 @@ pub const JobQueueCtx = struct {
         if (self.io) |io| self.mutex.unlock(io);
     }
 
-    /// Thread-safe setter for `queue_state` (the worker thread updates it off the
-    /// Core lock while handlers read/write it under Core).
+    /// Set `queue_state` and announce a change (job_queue.py
+    /// `_set_queue_state`). Callers must NOT hold `mutex`.
     fn setQueueState(self: *JobQueueCtx, s: []const u8) void {
-        self.lockJobs();
-        defer self.unlockJobs();
-        self.queue_state = s;
+        {
+            self.lockJobs();
+            defer self.unlockJobs();
+            if (std.mem.eql(u8, self.queue_state, s)) return;
+            self.queue_state = s;
+        }
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        emitQueueChanged(self, arena.allocator(), "state_changed", false);
     }
 
     /// Thread-safe compare of `queue_state`.
@@ -383,96 +344,69 @@ pub const JobQueueCtx = struct {
         return std.mem.eql(u8, self.queue_state, s);
     }
 
-    /// Persist current queue to store. Locks `mutex` around the jobs/state read
-    /// (callers must NOT already hold it).
+    /// Persist the queued jobs. A failure is logged: the in-memory queue stays
+    /// authoritative. Callers must NOT hold `mutex`.
     fn saveToStore(self: *JobQueueCtx, arena: std.mem.Allocator) void {
-        var arr: std.json.Array = .init(arena);
-        const cur_time = nowSecs(self.clock_io);
-        self.lockJobs();
-        for (self.jobs.items) |*j| {
-            const v = j.asJson(arena, cur_time) catch continue;
-            arr.append(v) catch {};
-        }
-        const state = self.queue_state;
-        self.unlockJobs();
-        const state_obj = buildQueueObj(arena, .{ .array = arr }, state) catch return;
-        self.store.insertItem(arena, ns_queue, queue_key, state_obj) catch |err|
+        const queue = buildResponse(self, arena) catch |err| {
+            std.debug.print("phobos: warning: failed to persist job queue: {} — queued jobs may be lost on restart\n", .{err});
+            return;
+        };
+        self.store.insertItem(arena, ns_queue, queue_key, queue) catch |err|
             std.debug.print("phobos: warning: failed to persist job queue: {} — queued jobs may be lost on restart\n", .{err});
     }
 
-    /// Load persisted queue from store.
+    /// Load persisted jobs from store. The persisted `queue_state` is ignored:
+    /// the queue starts "paused" and no load is in flight after a restart.
     fn loadFromStore(self: *JobQueueCtx) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
 
         const val = (try self.store.getItem(a, ns_queue, queue_key)) orelse return;
-        switch (val) {
-            .object => |obj| {
-                if (obj.get("queue_state")) |qs| {
-                    if (qs == .string) {
-                        // Map the persisted value to a static literal (no dupe →
-                        // queue_state stays a non-owned literal everywhere, so
-                        // the later literal assignments never leak a duped string).
-                        for ([_][]const u8{ "ready", "paused", "loading", "standby" }) |k| {
-                            if (std.mem.eql(u8, qs.string, k)) {
-                                self.queue_state = k;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (obj.get("queued_jobs")) |qj| {
-                    if (qj == .array) {
-                        for (qj.array.items) |item| {
-                            if (item != .object) continue;
-                            const obj2 = item.object;
-                            const filename = obj2.get("filename") orelse continue;
-                            const job_id = obj2.get("job_id") orelse continue;
-                            if (filename != .string or job_id != .string) continue;
-                            const time_added = switch (obj2.get("time_added") orelse .null) {
-                                .float => |f| f,
-                                .integer => |i| @as(f64, @floatFromInt(i)),
-                                else => 0.0,
-                            };
-                            const owned_filename = try self.gpa.dupe(u8, filename.string);
-                            errdefer self.gpa.free(owned_filename);
-                            const owned_id = try self.gpa.dupe(u8, job_id.string);
-                            errdefer self.gpa.free(owned_id);
-                            try self.jobs.append(self.gpa, .{
-                                .filename = owned_filename,
-                                .job_id = owned_id,
-                                .time_added = time_added,
-                            });
-                        }
-                    }
-                }
-            },
-            else => {},
+        if (val != .object) return;
+        const qj = val.object.get("queued_jobs") orelse return;
+        if (qj != .array) return;
+        for (qj.array.items) |item| {
+            if (item != .object) continue;
+            const obj2 = item.object;
+            const filename = obj2.get("filename") orelse continue;
+            const job_id = obj2.get("job_id") orelse continue;
+            if (filename != .string or job_id != .string) continue;
+            const time_added = switch (obj2.get("time_added") orelse .null) {
+                .float => |f| f,
+                .integer => |i| @as(f64, @floatFromInt(i)),
+                else => 0.0,
+            };
+            const owned_filename = try self.gpa.dupe(u8, filename.string);
+            errdefer self.gpa.free(owned_filename);
+            const owned_id = try self.gpa.dupe(u8, job_id.string);
+            errdefer self.gpa.free(owned_id);
+            try self.jobs.append(self.gpa, .{
+                .filename = owned_filename,
+                .job_id = owned_id,
+                .time_added = time_added,
+            });
         }
     }
 };
 
-/// Background thread callback for transition_delay timer.  Sleeps in
-/// 1-second intervals (or the remaining delay, whichever is shorter),
-/// checking the cancel flag between each.  This ensures cancelDelayTimer
-/// / deinit can join promptly (matching the proc_stat timer pattern).
-/// Exits early when the cancel flag is set (pause/abort/deinit).
-fn transitionDelayCallback(self: *JobQueueCtx) void {
-    // Sleep out the transition delay (0 = dispatch immediately), checking the
-    // cancel flag between 1s chunks so cancelDelayTimer/deinit can join promptly.
-    // NOTE: never null `delay_thread` from here — only the joiner
-    // (cancelDelayTimer/deinit) clears it after join(), else a concurrent joiner
-    // could read null, skip the join, and leak/UAF the still-running thread.
-    if (self.io) |io| {
-        const ns = std.math.lossyCast(i96, self.transition_delay * std.time.ns_per_s);
-        if (sleep.untilStopped(io, .fromNanoseconds(ns), &self.delay_cancel)) return;
+/// Dispatch worker body. After a completed print it sleeps out the transition
+/// delay, waking early when the cancel event is set (pause/abort/deinit).
+/// NOTE: never null `delay_thread` from here — only the joiner
+/// (cancelDelayTimer/deinit) clears it after the join, else a concurrent
+/// joiner could read null, skip the join, and leak/UAF the running thread.
+fn transitionDelayCallback(self: *JobQueueCtx, after_job: bool) void {
+    if (after_job) {
+        if (self.io) |io| {
+            const ns = std.math.lossyCast(i96, self.transition_delay * std.time.ns_per_s);
+            if (sleep.untilStopped(io, .fromNanoseconds(ns), &self.delay_cancel)) return;
+        }
     }
     // Bail if cancelled or torn down. deinit nulls dispatchFn, so that check
     // alone detects teardown; io may be null in tests with a non-Klippy capture
-    // dispatch (delay-0 dispatch itself needs no io — only the sleep does).
+    // dispatch (only the sleep needs io).
     if (self.delay_cancel.isSet() or self.dispatchFn == null) return;
-    _ = self.dispatchNextJob() catch {};
+    self.dispatchNextJob(after_job);
 }
 
 // ---------------------------------------------------------------------------
@@ -596,18 +530,16 @@ fn emitQueueChanged(c: *JobQueueCtx, alloc: std.mem.Allocator, action: []const u
     var inner: std.json.ObjectMap = .empty;
     inner.put(alloc, "action", .{ .string = action }) catch return;
 
-    // Snapshot jobs + state under the lock (the reader/worker threads mutate them
+    // Snapshot jobs + state under the lock (the dispatch worker mutates them
     // concurrently). emitLocked below uses conns, not the mutex, so it's fine to
-    // hold the lock across it.
+    // hold the lock across it. An allocation failure drops the event rather
+    // than announcing a truncated queue.
     c.lockJobs();
     defer c.unlockJobs();
     if (include_queue) {
         const cur_time = nowSecs(c.clock_io);
         var arr: std.json.Array = .init(alloc);
-        for (c.jobs.items) |*j| {
-            const v = j.asJson(alloc, cur_time) catch continue;
-            arr.append(v) catch {};
-        }
+        for (c.jobs.items) |*j| arr.append(j.asJson(alloc, cur_time) catch return) catch return;
         inner.put(alloc, "updated_queue", .{ .array = arr }) catch return;
     } else {
         inner.put(alloc, "updated_queue", .null) catch return;
@@ -618,12 +550,11 @@ fn emitQueueChanged(c: *JobQueueCtx, alloc: std.mem.Allocator, action: []const u
     var params: std.json.Array = .init(alloc);
     params.append(.{ .object = inner }) catch return;
 
-    // Emit via emitLocked (which does NOT acquire Core): handler callers already
-    // hold Core (Core.run) so plain emit would deadlock; the off-Core Klippy
-    // reader caller (onJobStateChanged) must NOT acquire Core either, or it could
-    // deadlock against a handler that holds Core while blocked on the reader.
-    // emitLocked broadcasts under per-connection write locks, so it's safe from
-    // both. No-op without io.
+    // Emit via emitLocked (which does NOT acquire Core): handlers and job-state
+    // events already hold Core, so plain emit would deadlock; the dispatch
+    // worker must NOT acquire Core either, because a Core holder may be joining
+    // it (cancelDelayTimer). emitLocked broadcasts under per-connection write
+    // locks, so it's safe from both. No-op without io.
     const io = c.io orelse return;
     c.bus.emitLocked(io, notify.names.job_queue_changed, .{ .array = params }) catch {};
 }
@@ -647,6 +578,14 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     const files = try getStrList(params, "filenames");
     const reset = getOptBool(params, "reset", false);
 
+    // Validate every file before touching the queue (job_queue.py queue_job):
+    // a rejected request leaves the queue unchanged. Reject files that don't
+    // exist under the gcodes root; no checker wired → accept.
+    for (files) |fv| {
+        if (fv != .string or !c.fileExists(fv.string)) return error.InvalidParams;
+    }
+
+    var set_ready = false;
     {
         c.lockJobs();
         defer c.unlockJobs();
@@ -656,16 +595,9 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
         }
 
         for (files) |fv| {
-            const filename = switch (fv) {
-                .string => |s| s,
-                else => return error.InvalidParams,
-            };
-            // Reject files that don't exist under the gcodes root (Moonraker
-            // queue_job → check_file_exists). No checker wired → accept.
-            if (!c.fileExists(filename)) return error.InvalidParams;
             const job_id = try genJobId(c.clock_io, c.gpa, c.job_seq.fetchAdd(1, .monotonic));
             errdefer c.gpa.free(job_id);
-            const fname_owned = try c.gpa.dupe(u8, filename);
+            const fname_owned = try c.gpa.dupe(u8, fv.string);
             errdefer c.gpa.free(fname_owned);
             const time_added = nowSecs(c.clock_io);
             try c.jobs.append(c.gpa, .{
@@ -674,11 +606,14 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
                 .time_added = time_added,
             });
         }
+        // Jobs queued during a print continue automatically after it.
+        set_ready = c.automatic and !c.pause_requested and c.isPrinting();
     }
 
     // Persist
     c.saveToStore(alloc);
     emitQueueChanged(c, alloc, "jobs_added", true);
+    if (set_ready) c.setQueueState("ready");
     return buildResponse(c, alloc);
 }
 
@@ -749,42 +684,39 @@ pub fn handleJobDispatch(ctx: *anyopaque, params: std.json.Value, alloc: std.mem
     return handleDeleteJob(ctx, params, alloc);
 }
 
-/// POST /server/job_queue/pause
+/// POST /server/job_queue/pause — pauses the queue only; a running print
+/// continues (job_queue.py pause_queue).
 pub fn handlePause(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
     c.setQueueState("paused");
     c.cancelDelayTimer(); // joins worker — never under the lock
-    // Dispatch pause gcode to Klippy when connected.
-    if (c.canDispatch()) {
-        c.dispatchPause() catch {};
-    }
-    c.saveToStore(alloc);
-    emitQueueChanged(c, alloc, "state_changed", false);
-    return buildResponse(c, alloc);
-}
-
-/// POST /server/job_queue/start
-pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
-    var do_dispatch = false;
     {
         c.lockJobs();
         defer c.unlockJobs();
-        if (c.jobs.items.len > 0) {
-            c.queue_state = "ready";
-            // Dispatch start gcode for the front job to Klippy (respects
-            // transition_delay when configured). Skip while a print is active —
-            // Moonraker defers loading until the current job finishes
-            // (_check_can_print); the queue stays "ready" and loads later.
-            do_dispatch = c.canDispatch() and !c.isPrinting();
-        } else {
-            c.queue_state = "paused";
-        }
+        c.pause_requested = true;
     }
-    // Outside the lock: scheduleNextJobDispatch joins the prior worker thread.
-    if (do_dispatch) c.scheduleNextJobDispatch() catch {};
-    c.saveToStore(alloc);
-    emitQueueChanged(c, alloc, "state_changed", false);
+    return buildResponse(c, alloc);
+}
+
+/// POST /server/job_queue/start (job_queue.py start_queue). Loads the front
+/// job at once when Klippy is connected and idle; otherwise the queue waits
+/// "ready" with automatic transition, else stays "paused".
+pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const c: *JobQueueCtx = @ptrCast(@alignCast(ctx));
+    const next_state: ?[]const u8 = blk: {
+        c.lockJobs();
+        defer c.unlockJobs();
+        c.pause_requested = false;
+        if (!std.mem.eql(u8, c.queue_state, "ready") and !std.mem.eql(u8, c.queue_state, "paused")) break :blk null;
+        if (c.jobs.items.len == 0) break :blk "paused";
+        if (c.canDispatch() and !c.isPrinting()) break :blk "loading";
+        break :blk if (c.automatic) "ready" else "paused";
+    };
+    if (next_state) |s| {
+        c.setQueueState(s);
+        // Outside the lock: scheduling joins the prior worker thread.
+        if (std.mem.eql(u8, s, "loading")) c.scheduleNextJobDispatch(false);
+    }
     return buildResponse(c, alloc);
 }
 
@@ -1146,7 +1078,7 @@ test "handlePause: sets queue_state to paused" {
     try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
 }
 
-test "handleStart: transitions to ready when jobs queued" {
+test "handleStart: without Klippy a queued job waits paused, or ready with automatic transition" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1167,8 +1099,52 @@ test "handleStart: transitions to ready when jobs queued" {
     const p1 = try mkParams(a, "{\"filenames\":[\"a.gcode\"]}");
     _ = try handlePostJob(@ptrCast(&ctx), p1, a);
 
+    // job_queue.py start_queue: the printer cannot print, so the queue only
+    // waits "ready" when it may advance on its own.
     const result = try handleStart(@ptrCast(&ctx), .null, a);
-    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
+    ctx.setAutomaticTransition(true);
+    const ready = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("ready", ready.object.get("queue_state").?.string);
+}
+
+test "handlePostJob: a rejected file leaves the queue unchanged" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
+    defer ctx.deinit();
+
+    _ = try handlePostJob(@ptrCast(&ctx), try mkParams(a, "{\"filenames\":[\"a.gcode\"]}"), a);
+    try testing.expectError(error.InvalidParams, handlePostJob(@ptrCast(&ctx), try mkParams(a, "{\"filenames\":[\"b.gcode\",7],\"reset\":true}"), a));
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
+    try testing.expectEqualStrings("a.gcode", ctx.jobs.items[0].filename);
+}
+
+test "handlePostJob: jobs queued during a print make the automatic queue ready" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    var dummy: u8 = 0;
+    ctx.printing_check = jqPrintingStub;
+    ctx.printing_ctx = &dummy;
+    jq_printing_flag = true;
+    defer jq_printing_flag = false;
+    ctx.setAutomaticTransition(true);
+
+    const params = try mkParams(a, "{\"filenames\":[\"a.gcode\"]}");
+    try testing.expectEqualStrings("ready", (try handlePostJob(@ptrCast(&ctx), params, a)).object.get("queue_state").?.string);
+    // An explicit pause sticks until the next start.
+    _ = try handlePause(@ptrCast(&ctx), .null, a);
+    try testing.expectEqualStrings("paused", (try handlePostJob(@ptrCast(&ctx), params, a)).object.get("queue_state").?.string);
 }
 
 test "handleStart: empty queue stays paused" {
@@ -1329,32 +1305,50 @@ test "stress: concurrent handlers + reader callback don't corrupt the queue" {
     ctx.setIo(io); // enable locking (io non-null)
     defer ctx.deinit();
 
-    // Worker thread plays the off-Core Klippy reader: complete pops the front
-    // job, error pauses — both mutate jobs/queue_state. canDispatch is false
-    // (no Klippy wired) so no dispatch worker is spawned.
+    // A second thread reorders the queue and changes its state while the main
+    // thread appends. canDispatch is false (no Klippy wired), so no dispatch
+    // worker is spawned.
+    const rounds = 3000;
     const Worker = struct {
         fn run(c: *JobQueueCtx) void {
             var n: usize = 0;
-            while (n < 3000) : (n += 1) {
+            while (n < rounds) : (n += 1) {
+                var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+                defer arena.deinit();
                 c.onJobStateChanged(JE.complete, .empty, .empty);
                 c.onJobStateChanged(JE.@"error", .empty, .empty);
+                var last: []const u8 = "";
+                {
+                    c.lockJobs();
+                    defer c.unlockJobs();
+                    if (c.jobs.items.len > 0) last = arena.allocator().dupe(u8, c.jobs.items[c.jobs.items.len - 1].job_id) catch return;
+                }
+                if (last.len == 0) continue;
+                var params: std.json.ObjectMap = .empty;
+                params.put(arena.allocator(), "job_id", .{ .string = last }) catch return;
+                _ = handleJump(@ptrCast(c), .{ .object = params }, arena.allocator()) catch return;
             }
         }
     };
     const th = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, Worker.run, .{&ctx});
 
     var n: usize = 0;
-    while (n < 3000) : (n += 1) {
+    while (n < rounds) : (n += 1) {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         const a = arena.allocator();
         const params = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"filenames\":[\"x.gcode\"]}", .{});
-        _ = handlePostJob(@ptrCast(&ctx), params, a) catch {};
-        _ = handleStatus(@ptrCast(&ctx), .null, a) catch {};
-        _ = handleDeleteJob(@ptrCast(&ctx), .{ .object = .empty }, a) catch {};
+        _ = try handlePostJob(@ptrCast(&ctx), params, a);
+        _ = try handleStatus(@ptrCast(&ctx), .null, a);
+        _ = try handleDeleteJob(@ptrCast(&ctx), .{ .object = .empty }, a);
     }
     th.join();
-    // Pass = completed without a data race or crash.
+    // No append or reorder was lost: every queued job is present exactly once.
+    try testing.expectEqual(@as(usize, rounds), ctx.jobs.items.len);
+    var seen = std.StringHashMap(void).init(testing.allocator);
+    defer seen.deinit();
+    for (ctx.jobs.items) |j| try testing.expect(!(try seen.getOrPut(j.job_id)).found_existing);
+    try testing.expectEqualStrings("paused", ctx.queue_state);
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,7 +1408,8 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
     }) catch unreachable;
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
-    try ctx.scheduleNextJobDispatch();
+    ctx.queue_state = "loading";
+    ctx.scheduleNextJobDispatch(false);
     // Dispatch now runs on a worker thread (always-async); join it before asserting.
     if (ctx.delay_thread) |*th| {
         th.await(ctx.clock_io);
@@ -1422,6 +1417,8 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
     }
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);
+    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
+    try testing.expectEqualStrings("paused", ctx.queue_state);
 }
 
 var jq_file_exists_flag: bool = true;
@@ -1492,8 +1489,10 @@ test "dispatchNextJob: pauses the queue when start-gcode dispatch fails (G6)" {
     });
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
-    try ctx.dispatchNextJob(); // start gcode fails → must pause, not error out
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(false); // start gcode fails → must pause and keep the job
     try testing.expectEqualStrings("paused", ctx.queue_state);
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
 }
 
 test "handleStart: does not dispatch while a print is active (G5 can-print)" {
@@ -1525,11 +1524,15 @@ test "handleStart: does not dispatch while a print is active (G5 can-print)" {
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
     jq_printing_flag = true;
+    defer jq_printing_flag = false; // reset for other tests
     _ = try handleStart(@ptrCast(&ctx), .null, a);
     try testing.expect(!cap.called); // deferred while printing
+    try testing.expectEqualStrings("paused", ctx.queue_state);
+    // With automatic transition the queue waits "ready" for the print to end.
+    ctx.setAutomaticTransition(true);
+    _ = try handleStart(@ptrCast(&ctx), .null, a);
+    try testing.expect(!cap.called);
     try testing.expectEqualStrings("ready", ctx.queue_state);
-
-    jq_printing_flag = false; // reset for other tests
 }
 
 test "fuzz handlePostJob with file_check: never crashes" {
@@ -1591,7 +1594,7 @@ test "cancelDelayTimer: safe no-op when no timer active" {
     try testing.expectEqual(null, ctx.delay_thread);
 }
 
-test "transition_delay: handleStart respects delay config" {
+test "handleStart: loads the front job without waiting for the transition delay" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1608,9 +1611,10 @@ test "transition_delay: handleStart respects delay config" {
     var bus = NotifyBus.init(&core, &conns);
     var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
+    ctx.setIo(io);
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-    // delay=0 → immediate dispatch
-    ctx.setTransitionConfig(null, 0.0);
+    // job_queue.py start_queue pops without the job transition delay or gcode.
+    ctx.setTransitionConfig("G28", 60.0);
 
     _ = ctx.jobs.append(ctx.gpa, .{
         .filename = try a.dupe(u8, "print.gcode"),
@@ -1620,13 +1624,14 @@ test "transition_delay: handleStart respects delay config" {
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
     const result = try handleStart(@ptrCast(&ctx), .null, a);
-    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    try testing.expectEqualStrings("loading", result.object.get("queue_state").?.string);
     // Dispatch runs on a worker thread now (always-async); join before asserting.
     if (ctx.delay_thread) |*th| {
         th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
-    try testing.expect(cap.called);
+    try testing.expectEqual(@as(usize, 1), cap.call_count); // print only, no transition gcode
+    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
 }
 
 test "transition_delay: handlePause cancels running delay timer" {
@@ -1646,9 +1651,11 @@ test "transition_delay: handlePause cancels running delay timer" {
     var bus = NotifyBus.init(&core, &conns);
     var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
+    ctx.setIo(io);
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-    // Small delay so we can cancel mid-flight.
-    ctx.setTransitionConfig(null, 0.05);
+    // Long delay so the pause lands mid-wait.
+    ctx.setTransitionConfig(null, 60.0);
+    ctx.setAutomaticTransition(true);
 
     _ = ctx.jobs.append(ctx.gpa, .{
         .filename = try a.dupe(u8, "print.gcode"),
@@ -1657,13 +1664,16 @@ test "transition_delay: handlePause cancels running delay timer" {
     }) catch unreachable;
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
-    // Start with delay → spawns timer thread.
-    _ = try handleStart(@ptrCast(&ctx), .null, a);
+    // A completed print on a ready automatic queue starts the delay timer.
+    ctx.queue_state = "ready";
+    ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
     try testing.expectEqualStrings("loading", ctx.queue_state);
 
     // Pause immediately — cancel the timer.
     const result = try handlePause(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
+    try testing.expect(!cap.called);
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
 }
 
 test "transition_delay: timer completes and dispatches" {
@@ -1695,7 +1705,8 @@ test "transition_delay: timer completes and dispatches" {
     defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
     // Spawn the delay timer thread.
-    try ctx.scheduleNextJobDispatch();
+    ctx.queue_state = "loading";
+    ctx.scheduleNextJobDispatch(true);
 
     // Wait for the timer thread to complete.
     if (ctx.delay_thread) |*th| {
@@ -1725,19 +1736,22 @@ test "deinit: cancels delay timer gracefully" {
     var bus = NotifyBus.init(&core, &conns);
     var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
 
+    ctx.setIo(io);
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-    ctx.setTransitionConfig(null, 0.2);
+    ctx.setTransitionConfig(null, 60.0);
 
     _ = ctx.jobs.append(ctx.gpa, .{
         .filename = try a.dupe(u8, "print.gcode"),
         .job_id = try a.dupe(u8, "JOB001"),
         .time_added = 100.0,
     }) catch unreachable;
-    defer for (ctx.jobs.items) |*j| j.deinit(ctx.gpa);
 
-    // Start timer then immediately deinit — must not hang or crash.
-    ctx.scheduleNextJobDispatch() catch {};
+    // Start the timer then deinit at once: the wait is cut short and the job
+    // is never loaded.
+    ctx.queue_state = "loading";
+    ctx.scheduleNextJobDispatch(true);
     ctx.deinit();
+    try testing.expect(!cap.called);
 }
 
 // ---------------------------------------------------------------------------
@@ -1790,55 +1804,40 @@ test "dispatchNextJob: builds correct gcode and calls dispatcher" {
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
-    try ctx.dispatchNextJob();
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(false);
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);
     try testing.expect(cap.has_params);
+    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
 }
 
-test "dispatchPause: calls pause_resume/pause" {
-    var mem = MemStore.init(testing.allocator);
+test "dispatchNextJob: start_print strips a leading slash and escapes quotes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
+    var ctx = try JobQueueCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
+    const Script = struct {
+        var buf: [128]u8 = undefined;
+        var len: usize = 0;
+        fn handler(_: *anyopaque, _: []const u8, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+            const s = params.object.get("script").?.string;
+            @memcpy(buf[0..s.len], s);
+            len = s.len;
+            return .null;
+        }
+    };
+    var dummy: u8 = 0;
+    ctx.setKlippyDispatch(&dummy, &Script.handler);
+    try ctx.jobs.append(ctx.gpa, .{ .filename = try a.dupe(u8, "/a \"b\".gcode"), .job_id = try a.dupe(u8, "J1"), .time_added = 1.0 });
 
-    var cap = TestDispatchCapture{};
-    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-
-    try ctx.dispatchPause();
-    try testing.expect(cap.called);
-    try testing.expectEqualStrings("pause_resume/pause", cap.method);
-}
-
-test "dispatchResume: calls pause_resume/resume" {
-    var mem = MemStore.init(testing.allocator);
-    defer mem.deinit();
-    var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
-    defer ctx.deinit();
-
-    var cap = TestDispatchCapture{};
-    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-
-    try ctx.dispatchResume();
-    try testing.expect(cap.called);
-    try testing.expectEqualStrings("pause_resume/resume", cap.method);
-}
-
-test "dispatchCancel: calls pause_resume/cancel" {
-    var mem = MemStore.init(testing.allocator);
-    defer mem.deinit();
-    var bus: NotifyBus = undefined;
-    var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
-    defer ctx.deinit();
-
-    var cap = TestDispatchCapture{};
-    ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-
-    try ctx.dispatchCancel();
-    try testing.expect(cap.called);
-    try testing.expectEqualStrings("pause_resume/cancel", cap.method);
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(false);
+    try testing.expectEqualStrings("SDCARD_PRINT_FILE FILENAME=\"a \\\"b\\\".gcode\"", Script.buf[0..Script.len]);
 }
 
 test "handleStart: dispatches next job when wired and queued" {
@@ -1863,7 +1862,7 @@ test "handleStart: dispatches next job when wired and queued" {
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
     const result = try handleStart(@ptrCast(&ctx), .null, a);
-    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    try testing.expectEqualStrings("loading", result.object.get("queue_state").?.string);
     // Dispatch runs on a worker thread now (always-async); join before asserting.
     if (ctx.delay_thread) |*th| {
         th.await(ctx.clock_io);
@@ -1873,7 +1872,7 @@ test "handleStart: dispatches next job when wired and queued" {
     try testing.expectEqualStrings("gcode/script", cap.method);
 }
 
-test "handlePause: dispatches pause when wired" {
+test "handlePause: pauses the queue without pausing the print" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1888,10 +1887,10 @@ test "handlePause: dispatches pause when wired" {
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
+    // job_queue.py pause_queue sends nothing to Klippy.
     const result = try handlePause(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
-    try testing.expect(cap.called);
-    try testing.expectEqualStrings("pause_resume/pause", cap.method);
+    try testing.expect(!cap.called);
 }
 
 test "handleStart: does not dispatch when not wired" {
@@ -1914,7 +1913,8 @@ test "handleStart: does not dispatch when not wired" {
 
     // No dispatch wired — handleStart should still work, just not dispatch.
     const result = try handleStart(@ptrCast(&ctx), .null, a);
-    try testing.expectEqualStrings("ready", result.object.get("queue_state").?.string);
+    try testing.expectEqualStrings("paused", result.object.get("queue_state").?.string);
+    try testing.expect(ctx.delay_thread == null);
 }
 
 test "setTransitionConfig: stores gcode and delay" {
@@ -1952,13 +1952,14 @@ test "dispatchNextJob: injects transition gcode when configured" {
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
-    try ctx.dispatchNextJob();
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(true);
 
     try testing.expect(cap.called);
     // Two dispatches: transition gcode, then print file.
     try testing.expectEqual(@as(usize, 2), cap.call_count);
     try testing.expectEqualStrings("gcode/script", cap.method); // last call = print file
-    try testing.expectEqualStrings("loading", ctx.queue_state);
+    try testing.expectEqualStrings("paused", ctx.queue_state); // queue now empty
 }
 
 test "dispatchNextJob: no transition gcode when not configured" {
@@ -1975,7 +1976,8 @@ test "dispatchNextJob: no transition gcode when not configured" {
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
-    try ctx.dispatchNextJob();
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(true);
 
     try testing.expect(cap.called);
     try testing.expectEqual(@as(usize, 1), cap.call_count);
@@ -1998,7 +2000,8 @@ test "dispatchNextJob: transition with empty gcode string is no-op" {
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
 
-    try ctx.dispatchNextJob();
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(true);
 
     try testing.expect(cap.called);
     try testing.expectEqual(@as(usize, 1), cap.call_count); // empty gcode skipped
@@ -2022,17 +2025,19 @@ test "onJobStateChanged complete: auto-advances and dispatches next" {
 
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
-    ctx.setQueueOptions(true, false); // automatic_transition on
+    ctx.setAutomaticTransition(true);
+    ctx.queue_state = "ready";
 
     // Simulate the current job completing.
     ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
-
-    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len); // front job removed
     // Auto-advance dispatch runs on a worker thread now; join before asserting.
     if (ctx.delay_thread) |*th| {
         th.await(ctx.clock_io);
         ctx.delay_thread = null;
     }
+    // The front job was loaded and removed; one remains, so the queue waits ready.
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
+    try testing.expectEqualStrings("job2.gcode", ctx.jobs.items[0].filename);
     try testing.expectEqualStrings("ready", ctx.queue_state);
     try testing.expect(cap.called);
     try testing.expectEqualStrings("gcode/script", cap.method);
@@ -2056,35 +2061,36 @@ test "onJobStateChanged complete: default (automatic off) does NOT auto-advance"
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
     // automatic_transition defaults to false → no dispatch on completion.
 
+    ctx.queue_state = "ready";
     ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
-    if (ctx.delay_thread) |*th| {
-        th.await(ctx.clock_io);
-        ctx.delay_thread = null;
-    }
-    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len); // front removed
-    try testing.expectEqualStrings("ready", ctx.queue_state); // ready, but...
-    try testing.expect(!cap.called); // ...no auto-advance dispatch
+    try testing.expect(ctx.delay_thread == null);
+    try testing.expectEqual(@as(usize, 2), ctx.jobs.items.len); // nothing removed
+    try testing.expectEqualStrings("ready", ctx.queue_state);
+    try testing.expect(!cap.called); // no auto-advance dispatch
 }
 
-test "onJobStateChanged complete: last job sets paused, no dispatch" {
+test "onJobStateChanged complete: a paused queue keeps its jobs after a manual print" {
     var mem = MemStore.init(testing.allocator);
     defer mem.deinit();
     var bus: NotifyBus = undefined;
     var ctx = try JobQueueCtx.init(testing.allocator, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
 
-    const fname = try testing.allocator.dupe(u8, "onlyjob.gcode");
+    const fname = try testing.allocator.dupe(u8, "queued.gcode");
     const jid = try testing.allocator.dupe(u8, "JOB020");
     try ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 30.0 });
 
     var cap = TestDispatchCapture{};
     ctx.setKlippyDispatch(@ptrCast(&cap), &TestDispatchCapture.handler);
+    ctx.setAutomaticTransition(true);
 
+    // The user paused the queue and printed another file by hand.
     ctx.onJobStateChanged(JobEvent.complete, .empty, .empty);
 
-    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
+    try testing.expect(ctx.delay_thread == null);
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
     try testing.expectEqualStrings("paused", ctx.queue_state);
-    try testing.expect(!cap.called); // No dispatch, queue is empty.
+    try testing.expect(!cap.called);
 }
 
 /// Enum mirroring JobEvent for test dispatch testing (avoid cross-component import).
@@ -2134,8 +2140,11 @@ test "fuzz dispatchNextJob/setKlippyDispatch/onJobStateChanged: never panics" {
                 ctx.jobs.append(ctx.gpa, .{ .filename = fname, .job_id = jid, .time_added = 100.0 }) catch return;
             }
 
-            // Exercise dispatch.
-            _ = ctx.dispatchNextJob() catch {};
+            // Exercise dispatch from every state.
+            const states = [_][]const u8{ "paused", "ready", "loading", "starting" };
+            ctx.queue_state = states[buf[2] % states.len];
+            ctx.setAutomaticTransition(buf[3] & 1 == 0);
+            ctx.dispatchNextJob(buf[4] & 1 == 0);
 
             // Exercise state transitions.
             const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
@@ -2396,7 +2405,10 @@ test "persisted queue loading cleans up partial jobs and rejects non-string fiel
     try db.insertItem(alloc, ns_queue, queue_key, value);
     var bus: NotifyBus = undefined;
     var baseline = testing.FailingAllocator.init(testing.allocator, .{});
+    // A queue persisted mid-load restarts paused (job_queue.py starts paused).
+    try db.insertItem(alloc, ns_queue, queue_key ++ ".queue_state", .{ .string = "loading" });
     var complete = try JobQueueCtx.init(baseline.allocator(), testing.io, db.dataStore(), &bus);
+    try testing.expectEqualStrings("paused", complete.queue_state);
     const count = baseline.alloc_index;
     try testing.expectEqual(@as(usize, 1), complete.jobs.items.len);
     complete.deinit();
