@@ -316,6 +316,7 @@ pub const MqttCtx = struct {
             self.setClient(io, null);
             return err;
         };
+        if (self.on_connection) |cb| cb(self.on_connection_ctx.?, true);
         if (self.on_connected) |cb| cb(self.on_connected_ctx.?);
         // A stop that ran before the client was published missed it.
         if (self.reader_stop.isSet()) client.shutdownRecv();
@@ -352,6 +353,7 @@ pub const MqttCtx = struct {
             self.reader_thread = null;
         }
         self.setClient(io, null);
+        if (self.on_connection) |cb| cb(self.on_connection_ctx.?, false);
         client.deinit();
         self.gpa.destroy(client);
     }
