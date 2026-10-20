@@ -117,3 +117,10 @@ Owned JSON snapshots still require a recursive copy and matching cleanup.
 `std.json.Value.jsonParseFromValue` returns its source unchanged, so it cannot
 detach a snapshot from a request arena. Inputs must pass the existing depth
 guard before copying or serialization.
+
+HTTP and JSON-RPC serialize handler results before releasing Core, because
+results can borrow mutable component strings. Transport screening runs after
+method, transport, argument and authentication checks for each request, including
+batch items. A failed upstream request can replace the reserved `_method` value
+with an owned status/message object immediately before returning
+`UpstreamRequestFailed`; client-supplied reserved values are always replaced.

@@ -318,10 +318,9 @@ pub fn handleParsed(
     // comptime-known function, so dispatch the runtime handler pointer through a
     // fixed trampoline. `off_core` read routes skip the lock and run in parallel
     // (same decision the JSON-RPC dispatcher makes, so both transports agree).
-    const result = (if (route.off_core)
-        callHandler(route.handler, route.ctx, params, alloc)
-    else
-        srv.core.run(srv.io, callHandler, .{ route.handler, route.ctx, params, alloc })) catch |err| {
+    if (!route.off_core) srv.core.lock(srv.io);
+    defer if (!route.off_core) srv.core.unlock(srv.io);
+    const result = callHandler(route.handler, route.ctx, params, alloc) catch |err| {
         const reply = try jsonrpc.errorReply(err, params, alloc);
         return errorResponse(alloc, reply.status, reply.message);
     };

@@ -51,6 +51,13 @@ pub const Caller = struct {
     remote_ip: ?[]const u8 = null,
     /// No authenticated user: `auth_required` methods answer "Unauthorized".
     need_auth: bool = false,
+    screen: ?Screen = null,
+};
+
+/// Transport-specific screening after method, params and authentication checks.
+pub const Screen = struct {
+    ctx: *anyopaque,
+    run: *const fn (*anyopaque, *std.json.Value, std.mem.Allocator) anyerror!void,
 };
 
 /// Comptime-known trampoline so a runtime handler pointer can run inside
@@ -73,6 +80,20 @@ pub const ErrorReply = struct {
 /// Map a handler error to its HTTP status, JSON-RPC code and message. The
 /// message may be allocated in `alloc`.
 pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}!ErrorReply {
+    if (err == error.UpstreamRequestFailed and params == .object) {
+        const slot = params.object.get(method_key) orelse .null;
+        if (slot == .object) {
+            const code = slot.object.get("status") orelse .null;
+            const message = slot.object.get("message") orelse .null;
+            if (code == .integer and code.integer >= 400 and code.integer <= 599 and message == .string) {
+                return .{ .status = @fromBackingInt(@intCast(code.integer)), .message = message.string, .rpc_code = switch (code.integer) {
+                    404 => -32601,
+                    401 => -32602,
+                    else => code.integer,
+                } };
+            }
+        }
+    }
     const status: std.http.Status, const message: []const u8 = switch (err) {
         error.InvalidParams => .{ .bad_request, "Invalid params" },
         error.MissingFilename => .{ .bad_request, "No data for argument: filename" },
@@ -91,6 +112,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.KlippyDisconnected => .{ .service_unavailable, "Klippy Host not connected" },
         error.MqttNotConfigured => .{ .service_unavailable, "MQTT not configured" },
         error.MqttTimeout => .{ .gateway_timeout, "MQTT Subscribe Timed Out" },
+        error.DuplicateMqttRequest => .{ .bad_request, "Duplicate MQTT Request" },
         error.ServiceUnavailable, error.NotReady => .{ .service_unavailable, "Service Unavailable" },
         error.UpdateRefusedPrinting => .{ .service_unavailable, "Update Refused: Klippy is printing" },
         // power.py process_request with locked_while_printing.
@@ -122,12 +144,23 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.NoSubscriptionConnection => .{ .bad_request, "No connection associated with subscription request" },
         else => .{ .internal_server_error, "Internal Server Error" },
     };
-    const rpc_code: i64 = switch (status) {
+    const rpc_code: i64 = if (err == error.DuplicateMqttRequest) -10000 else switch (status) {
         .not_found => -32601,
         .unauthorized => -32602,
         else => @backingInt(status),
     };
     return .{ .status = status, .message = message, .rpc_code = rpc_code };
+}
+
+/// Replace the reserved verb slot after an upstream failure. The caller must
+/// immediately return UpstreamRequestFailed. Storage belongs to alloc.
+pub fn setErrorReply(alloc: std.mem.Allocator, params: std.json.Value, status: std.http.Status, message: []const u8) error{OutOfMemory}!void {
+    std.debug.assert(params == .object);
+    const slot = params.object.getPtr(method_key).?;
+    var fields: std.json.ObjectMap = .empty;
+    try fields.put(alloc, "status", .{ .integer = @backingInt(status) });
+    try fields.put(alloc, "message", .{ .string = try alloc.dupe(u8, message) });
+    slot.* = .{ .object = fields };
 }
 
 /// The string at `key` in `params`, or "" when absent or not a string.
@@ -278,14 +311,17 @@ pub const Dispatcher = struct {
         };
         if (caller.need_auth and entry.auth_required) return try jv.errorResponse(alloc, id, -32602, "Unauthorized");
 
-        const params = try requestParams(handler_alloc, src, entry.verb, caller, std.mem.startsWith(u8, method, "access."));
+        var params = try requestParams(handler_alloc, src, entry.verb, caller, std.mem.startsWith(u8, method, "access."));
+        if (caller.screen) |screen| screen.run(screen.ctx, &params, handler_alloc) catch |err| {
+            const reply = try errorReply(err, params, handler_alloc);
+            return try jv.errorResponse(alloc, id, reply.rpc_code, reply.message);
+        };
 
         // REST and JSON-RPC agree: off_core methods skip the Core lock, the
         // rest hold it. Bare tests wire no Core.
-        const result = (if (entry.off_core or self.core == null)
-            entry.handler(entry.ctx, params, handler_alloc)
-        else
-            self.core.?.run(self.io.?, callHandlerTramp, .{ entry.handler, entry.ctx, params, handler_alloc })) catch |err| {
+        if (!entry.off_core) if (self.core) |core| core.lock(self.io.?);
+        defer if (!entry.off_core) if (self.core) |core| core.unlock(self.io.?);
+        const result = entry.handler(entry.ctx, params, handler_alloc) catch |err| {
             const reply = try errorReply(err, params, handler_alloc);
             return try jv.errorResponse(alloc, id, reply.rpc_code, reply.message);
         };
@@ -344,6 +380,96 @@ test "unknown method returns -32601 and echoes id" {
     const err_obj = obj.get("error").?.object;
     try std.testing.expectEqual(@as(i64, -32601), err_obj.get("code").?.integer);
     try std.testing.expectEqual(@as(i64, 1), obj.get("id").?.integer);
+}
+
+test "screening follows validation and applies to each batch request" {
+    const ScreenCtx = struct {
+        calls: usize = 0,
+        fn screen(ctx: *anyopaque, params: *std.json.Value, _: std.mem.Allocator) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            _ = params.object.swapRemove("mqtt_timestamp");
+            if (self.calls == 2) return error.DuplicateMqttRequest;
+        }
+    };
+    const a = std.testing.allocator;
+    var d = try makeDispatcher(a);
+    defer d.deinit();
+    var screen: ScreenCtx = .{};
+    const root = try std.json.parseFromSlice(std.json.Value, a,
+        \\[{"jsonrpc":"2.0","method":"missing","id":0},{"jsonrpc":"2.0","method":"echo","params":[],"id":1},{"jsonrpc":"2.0","method":"echo","params":{"mqtt_timestamp":1},"id":2},{"jsonrpc":"2.0","method":"echo","params":{"mqtt_timestamp":1},"id":3}]
+    , .{});
+    defer root.deinit();
+    const bytes = try d.handleParsedRoot(.{ .screen = .{ .ctx = &screen, .run = ScreenCtx.screen } }, root.value, a);
+    defer a.free(bytes);
+    const result = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), screen.calls);
+    try std.testing.expect(result.value.array.items[2].object.get("result").?.object.get("mqtt_timestamp") == null);
+    try std.testing.expectEqual(@as(i64, -10000), result.value.array.items[3].object.get("error").?.object.get("code").?.integer);
+}
+
+test "upstream error uses only the server-owned request slot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const forged = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"_method":{"status":418,"message":"forged"}}
+    , .{});
+    const params = try requestParams(a, forged.object, .GET, .{}, false);
+    try std.testing.expectEqual(@as(i64, 500), (try errorReply(error.UpstreamRequestFailed, params, a)).rpc_code);
+    try setErrorReply(a, params, .conflict, "upstream conflict");
+    const reply = try errorReply(error.UpstreamRequestFailed, params, a);
+    try std.testing.expectEqual(std.http.Status.conflict, reply.status);
+    try std.testing.expectEqualStrings("upstream conflict", reply.message);
+    try std.testing.expectEqual(@as(i64, 409), reply.rpc_code);
+    try setErrorReply(a, params, .ok, "invalid success");
+    try std.testing.expectEqual(@as(i64, 500), (try errorReply(error.UpstreamRequestFailed, params, a)).rpc_code);
+}
+
+test "every transport replaces a forged upstream error with its verb" {
+    const a = std.testing.allocator;
+    var d = Dispatcher.init(a);
+    defer d.deinit();
+    const Handler = struct {
+        fn fail(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+            return error.UpstreamRequestFailed;
+        }
+    };
+    try d.register("fail", &_dummy_ctx, Handler.fail);
+    try d.register("echo", &_dummy_ctx, echoHandler);
+    const root = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"jsonrpc":"2.0","method":"fail","params":{"_method":{"status":418,"message":"forged"}},"id":1}
+    , .{});
+    defer root.deinit();
+    for (std.enums.values(TransportType)) |transport| {
+        const bytes = try d.handleParsedRoot(.{ .transport = transport }, root.value, a);
+        defer a.free(bytes);
+        const result = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+        defer result.deinit();
+        try std.testing.expectEqual(@as(i64, 500), result.value.object.get("error").?.object.get("code").?.integer);
+    }
+}
+
+test "fuzz upstream error carrier validates status and retains owned text" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var message: [32]u8 = undefined;
+            smith.bytesWithHash(&message, 0);
+            const params = try requestParams(a, null, .POST, .{}, false);
+            const status = smith.valueRangeAtMostWithHash(u16, 100, 999, 1);
+            try setErrorReply(a, params, @fromBackingInt(@intCast(status)), &message);
+            const reply = try errorReply(error.UpstreamRequestFailed, params, a);
+            if (status >= 400 and status <= 599) {
+                try std.testing.expectEqual(status, @backingInt(reply.status));
+                try std.testing.expectEqualSlices(u8, &message, reply.message);
+                try std.testing.expect(reply.message.ptr != &message);
+            } else try std.testing.expectEqual(std.http.Status.internal_server_error, reply.status);
+        }
+    }.run, .{});
 }
 
 test "invalid JSON returns -32700" {
