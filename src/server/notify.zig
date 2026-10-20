@@ -99,12 +99,6 @@ pub const all_names = [_][]const u8{
     names.webcams_changed,
 };
 
-/// True if `name` is one of the known notification method names.
-pub fn isKnown(name: []const u8) bool {
-    for (all_names) |n| if (std.mem.eql(u8, n, name)) return true;
-    return false;
-}
-
 /// Build the JSON-RPC notification wire bytes for `method` + `params`.
 ///
 /// `params` must be a JSON array value (Moonraker's `data` tuple); when it is
@@ -115,20 +109,9 @@ pub fn buildFrame(
     method: []const u8,
     params: std.json.Value,
 ) error{OutOfMemory}![]u8 {
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    defer aw.deinit();
-    var jw: std.json.Stringify = .{ .writer = &aw.writer };
-    jw.beginObject() catch return error.OutOfMemory;
-    jw.objectField("jsonrpc") catch return error.OutOfMemory;
-    jw.write("2.0") catch return error.OutOfMemory;
-    jw.objectField("method") catch return error.OutOfMemory;
-    jw.write(method) catch return error.OutOfMemory;
-    if (hasPayload(params)) {
-        jw.objectField("params") catch return error.OutOfMemory;
-        jw.write(params) catch return error.OutOfMemory;
-    }
-    jw.endObject() catch return error.OutOfMemory;
-    return aw.toOwnedSlice();
+    const Frame = struct { jsonrpc: []const u8 = "2.0", method: []const u8, params: ?std.json.Value };
+    const frame: Frame = .{ .method = method, .params = if (hasPayload(params)) params else null };
+    return std.json.Stringify.valueAlloc(alloc, frame, .{ .emit_null_optional_fields = false });
 }
 
 /// Mirror Moonraker's `if data:` truthiness: omit `params` for null / empty
@@ -291,12 +274,8 @@ test "buildFrame: empty array params omits the params key (falsy data)" {
     , out);
 }
 
-test "all_names has 27 entries and isKnown agrees" {
+test "all_names has 27 entries" {
     try std.testing.expectEqual(@as(usize, 27), all_names.len);
-    try std.testing.expect(isKnown(names.status_update));
-    try std.testing.expect(isKnown("notify_gcode_response"));
-    try std.testing.expect(!isKnown("notify_bogus"));
-    try std.testing.expect(!isKnown(""));
     // Every symbol begins with the notify_ prefix.
     for (all_names) |n| try std.testing.expect(std.mem.startsWith(u8, n, "notify_"));
 }
@@ -417,7 +396,7 @@ test "emit skips a dead connection without stalling others" {
     defer arena.deinit();
     try bus.emit(io, names.klippy_ready, try paramsArray(arena.allocator(), "x"));
 
-    try std.testing.expect(conns.isDead(io, dead));
+    try std.testing.expect(dead.dead);
     try std.testing.expectEqual(@as(usize, 1), rl.frames.items.len);
 }
 

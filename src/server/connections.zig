@@ -194,24 +194,6 @@ pub const Connections = struct {
         }
     }
 
-    /// True if the connection has been flagged dead by a failed write.
-    pub fn isDead(self: *Connections, io: Io, conn: *Connection) bool {
-        _ = self;
-        conn.write_mutex.lockUncancelable(io);
-        defer conn.write_mutex.unlock(io);
-        return conn.dead;
-    }
-
-    /// Snapshot the current set of connection pointers into `out_alloc` so the
-    /// notification bus can fan out without holding the registry mutex while it
-    /// writes (writes take per-connection mutexes, which must not nest under the
-    /// registry lock). Caller frees the returned slice. Thread-safe.
-    pub fn snapshot(self: *Connections, io: Io, out_alloc: std.mem.Allocator) ![]*Connection {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        return out_alloc.dupe(*Connection, self.list.items);
-    }
-
     /// Add status-update topics to a connection's subscription set. Duplicate
     /// topics are ignored. Strings are copied into the registry allocator.
     /// Thread-safe.
@@ -234,13 +216,6 @@ pub const Connections = struct {
         for (topics) |t| {
             if (conn.subs.fetchRemove(t)) |kv| self.alloc.free(kv.key);
         }
-    }
-
-    /// True if `conn` is subscribed to `topic`. Thread-safe.
-    pub fn isSubscribed(self: *Connections, io: Io, conn: *Connection, topic: []const u8) bool {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-        return conn.subs.contains(topic);
     }
 
     /// Allocate the next monotonic connection id under the Core lock so it
@@ -583,7 +558,7 @@ test "writeFrame is a no-op with no writer attached" {
     const c = try conns.add(io);
     // No attachWriter: must not error, must not crash.
     try conns.writeFrame(io, c, "ignored");
-    try std.testing.expect(!conns.isDead(io, c));
+    try std.testing.expect(!c.dead);
 }
 
 test "writeFrame flags the connection dead on write failure" {
@@ -601,7 +576,7 @@ test "writeFrame flags the connection dead on write failure" {
     conns.attachWriter(io, c, &rec, RecordWriter.write);
 
     try std.testing.expectError(error.WriteFailed, conns.writeFrame(io, c, "x"));
-    try std.testing.expect(conns.isDead(io, c));
+    try std.testing.expect(c.dead);
     // Once dead, further writes short-circuit with ConnectionDead.
     try std.testing.expectError(error.ConnectionDead, conns.writeFrame(io, c, "y"));
 }
@@ -661,7 +636,7 @@ test "detachWriter stops further delivery" {
     try std.testing.expectEqual(@as(usize, 1), rec.frames.items.len);
 }
 
-test "subscribe/unsubscribe/isSubscribed track topics" {
+test "subscribe and unsubscribe track topics" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -671,46 +646,23 @@ test "subscribe/unsubscribe/isSubscribed track topics" {
     defer conns.deinit(io);
 
     const c = try conns.add(io);
-    try std.testing.expect(!conns.isSubscribed(io, c, "toolhead"));
+    try std.testing.expect(!c.subs.contains("toolhead"));
 
     try conns.subscribe(io, c, &.{ "toolhead", "extruder" });
-    try std.testing.expect(conns.isSubscribed(io, c, "toolhead"));
-    try std.testing.expect(conns.isSubscribed(io, c, "extruder"));
+    try std.testing.expect(c.subs.contains("toolhead"));
+    try std.testing.expect(c.subs.contains("extruder"));
 
     // Duplicate subscribe is idempotent.
     try conns.subscribe(io, c, &.{"toolhead"});
-    try std.testing.expect(conns.isSubscribed(io, c, "toolhead"));
+    try std.testing.expect(c.subs.contains("toolhead"));
 
     conns.unsubscribe(io, c, &.{"toolhead"});
-    try std.testing.expect(!conns.isSubscribed(io, c, "toolhead"));
-    try std.testing.expect(conns.isSubscribed(io, c, "extruder"));
+    try std.testing.expect(!c.subs.contains("toolhead"));
+    try std.testing.expect(c.subs.contains("extruder"));
 
     // Unsubscribe of an absent topic is a no-op.
     conns.unsubscribe(io, c, &.{"missing"});
-    try std.testing.expect(conns.isSubscribed(io, c, "extruder"));
-}
-
-test "snapshot returns the live connection set" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var core = Core.init();
-    var conns = Connections.init(std.testing.allocator, &core);
-    defer conns.deinit(io);
-
-    const a = try conns.add(io);
-    const b = try conns.add(io);
-    const snap = try conns.snapshot(io, std.testing.allocator);
-    defer std.testing.allocator.free(snap);
-    try std.testing.expectEqual(@as(usize, 2), snap.len);
-    var seen_a = false;
-    var seen_b = false;
-    for (snap) |c| {
-        if (c == a) seen_a = true;
-        if (c == b) seen_b = true;
-    }
-    try std.testing.expect(seen_a and seen_b);
+    try std.testing.expect(c.subs.contains("extruder"));
 }
 
 test "fuzz_subscribe: random subscribe/unsubscribe never crashes or leaks" {
@@ -733,10 +685,10 @@ test "fuzz_subscribe: random subscribe/unsubscribe never crashes or leaks" {
                 const t = topics[(b >> 1) % topics.len];
                 if (b & 1 == 0) {
                     try conns.subscribe(io, c, &.{t});
-                    try std.testing.expect(conns.isSubscribed(io, c, t));
+                    try std.testing.expect(c.subs.contains(t));
                 } else {
                     conns.unsubscribe(io, c, &.{t});
-                    try std.testing.expect(!conns.isSubscribed(io, c, t));
+                    try std.testing.expect(!c.subs.contains(t));
                 }
             }
         }

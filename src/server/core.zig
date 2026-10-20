@@ -45,45 +45,6 @@ pub const Core = struct {
     }
 };
 
-/// A minimal FIFO notification queue, serialized through a `Core`: enqueue under
-/// the lock, drain in FIFO order. The production fan-out lives in `NotifyBus`
-/// (`notify.zig`); this is the precursor primitive the serialized-drain tests use.
-pub fn Fifo(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        core: *Core,
-        items: std.ArrayList(T) = .empty,
-        alloc: std.mem.Allocator,
-
-        pub fn init(core: *Core, alloc: std.mem.Allocator) Self {
-            return .{ .core = core, .alloc = alloc };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.items.deinit(self.alloc);
-        }
-
-        /// Append one item under the core lock.
-        pub fn enqueue(self: *Self, io: Io, item: T) !void {
-            self.core.lock(io);
-            defer self.core.unlock(io);
-            try self.items.append(self.alloc, item);
-        }
-
-        /// Drain all items in FIFO order into `out`, clearing the queue.
-        /// Caller owns the returned slice (allocated with `out_alloc`).
-        pub fn drain(self: *Self, io: Io, out_alloc: std.mem.Allocator) ![]T {
-            self.core.lock(io);
-            defer self.core.unlock(io);
-            const out = try out_alloc.alloc(T, self.items.items.len);
-            @memcpy(out, self.items.items);
-            self.items.clearRetainingCapacity();
-            return out;
-        }
-    };
-}
-
 // --- tests ---------------------------------------------------------------
 
 const SeqCtx = struct {
@@ -137,88 +98,22 @@ test "core serializes and seq is monotonic" {
     }
 }
 
-test "notifications drain in FIFO order" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var core = Core.init();
-    var q = Fifo([]const u8).init(&core, std.testing.allocator);
-    defer q.deinit();
-
-    try q.enqueue(io, "notify_a");
-    try q.enqueue(io, "notify_b");
-
-    const drained = try q.drain(io, std.testing.allocator);
-    defer std.testing.allocator.free(drained);
-
-    try std.testing.expectEqual(@as(usize, 2), drained.len);
-    try std.testing.expectEqualStrings("notify_a", drained[0]);
-    try std.testing.expectEqualStrings("notify_b", drained[1]);
-}
-
-const ProdCtx = struct {
-    io: Io,
-    q: *Fifo(u32),
-    producer: u32,
-    count: u32,
-};
-
-fn producerWorker(ctx: *ProdCtx) void {
-    var i: u32 = 0;
-    while (i < ctx.count) : (i += 1) {
-        // Encode producer in high bits, sequence in low bits so we can verify
-        // per-producer relative ordering after draining.
-        const item: u32 = (ctx.producer << 24) | i;
-        ctx.q.enqueue(ctx.io, item) catch {};
-    }
-}
-
-test "fuzz_core: concurrent producers keep relative order with no loss" {
+test "fuzz_core: run returns the result of each call and seq counts them" {
     try std.testing.fuzz({}, struct {
+        fn bump(c: *Core, by: u8) u64 {
+            var last: u64 = 0;
+            for (0..by) |_| last = c.nextSeq();
+            return last;
+        }
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var seed: [2]u8 = undefined;
-            smith.bytesWithHash(&seed, 0);
-
-            const producers: u32 = 2 + (@as(u32, seed[0]) % 5); // 2..6
-            const per: u32 = 1 + (@as(u32, seed[1]) % 64); // 1..64
-
             var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
             defer threaded.deinit();
-            const io = threaded.io();
-
             var core = Core.init();
-            var q = Fifo(u32).init(&core, std.heap.smp_allocator);
-            defer q.deinit();
-
-            const ctxs = try std.heap.smp_allocator.alloc(ProdCtx, producers);
-            defer std.heap.smp_allocator.free(ctxs);
-            for (ctxs, 0..) |*c, p| c.* = .{ .io = io, .q = &q, .producer = @intCast(p), .count = per };
-
-            const FutT = @TypeOf(io.async(producerWorker, .{&ctxs[0]}));
-            const futs = try std.heap.smp_allocator.alloc(FutT, producers);
-            defer std.heap.smp_allocator.free(futs);
-            for (futs, 0..) |*f, p| f.* = io.async(producerWorker, .{&ctxs[p]});
-            for (futs) |*f| f.await(io);
-
-            const drained = try q.drain(io, std.heap.smp_allocator);
-            defer std.heap.smp_allocator.free(drained);
-
-            // No loss: total count matches.
-            try std.testing.expectEqual(@as(usize, producers * per), drained.len);
-
-            // Per-producer relative order preserved: each producer's items must
-            // appear in increasing sequence in the drained output.
-            const last = try std.heap.smp_allocator.alloc(?u32, producers);
-            defer std.heap.smp_allocator.free(last);
-            @memset(last, null);
-            for (drained) |item| {
-                const p = item >> 24;
-                const seq = item & 0x00FF_FFFF;
-                if (last[p]) |prev| {
-                    try std.testing.expect(seq > prev);
-                }
-                last[p] = seq;
+            var total: u64 = 0;
+            for (0..smith.valueRangeAtMostWithHash(u8, 0, 16, 0)) |i| {
+                const by = smith.valueRangeAtMostWithHash(u8, 1, 32, @intCast(i + 1));
+                total += by;
+                try std.testing.expectEqual(total, core.run(threaded.io(), bump, .{ &core, by }));
             }
         }
     }.run, .{});

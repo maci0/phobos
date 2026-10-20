@@ -4,7 +4,6 @@
 //! below; `src/app.zig` is the runtime assembly point those modules wire into.
 const std = @import("std");
 const build_options = @import("build_options");
-pub const arena = @import("util/arena.zig");
 pub const clock = @import("util/clock.zig");
 
 pub const datastore = @import("store/datastore.zig");
@@ -274,7 +273,7 @@ fn run(init: std.process.Init) !void {
     // Moonraker's `-d` with no `-c` loads <data>/config/moonraker.conf.
     // S65moonraker passes only `-d /root/printer_data`.
     const implied_config = if (config_path == null and data_path != null)
-        std.fs.path.join(alloc, &.{ data_path.?, "config", "moonraker.conf" }) catch null
+        try std.fs.path.join(alloc, &.{ data_path.?, "config", "moonraker.conf" })
     else
         null;
     defer if (implied_config) |p| alloc.free(p);
@@ -286,7 +285,7 @@ fn run(init: std.process.Init) !void {
 
     // Select the DataStore backend from `[database] backend` (sqlite | file).
     const db_backend = resolveDbBackend(alloc, aio, config_path);
-    const db_path = resolveDbPath(alloc, init.arena.allocator(), aio, config_path, data_path);
+    const db_path = try resolveDbPath(alloc, init.arena.allocator(), aio, config_path, data_path);
     std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(db_backend), if (db_path) |p| p else "" });
 
     if (data_path) |dp| std.debug.print("phobos: data path = {s}\n", .{dp});
@@ -334,18 +333,18 @@ pub fn resolveDbPath(
     aio: std.Io,
     config_path: ?[]const u8,
     data_path: ?[]const u8,
-) ?[]const u8 {
+) !?[]const u8 {
     if (config_path) |path| {
         var cfg = config.ConfigParser.init(gpa);
         defer cfg.deinit();
         if (cfg.parseFile(aio, path)) {
             if (cfg.get("database", "path")) |v| {
-                if (v.len > 0) return arena_alloc.dupe(u8, v) catch null;
+                if (v.len > 0) return try arena_alloc.dupe(u8, v);
             }
         } else |_| {}
     }
     const dp = data_path orelse return null;
-    return std.fs.path.join(arena_alloc, &.{ dp, "database", "moonraker-sql.db" }) catch null;
+    return try std.fs.path.join(arena_alloc, &.{ dp, "database", "moonraker-sql.db" });
 }
 
 /// Resolve the bind address from a config file (or defaults).
@@ -803,15 +802,15 @@ test "resolveDbPath: -d uses moonraker-sql.db unless the config sets a path" {
     const base = try std.fmt.allocPrint(a, "{s}/{s}", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     try tmp.dir.createDirPath(aio, "config");
     try tmp.dir.writeFile(aio, .{ .sub_path = "config/moonraker.conf", .data = "[server]\nport: 7125\n" });
-    const implied = resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/moonraker.conf" }), base).?;
+    const implied = (try resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/moonraker.conf" }), base)).?;
     try std.testing.expect(std.mem.endsWith(u8, implied, "/database/moonraker-sql.db"));
     try std.testing.expect(std.mem.indexOf(u8, implied, base) != null);
 
     try tmp.dir.writeFile(aio, .{ .sub_path = "config/override.conf", .data = "[database]\npath: /var/lib/moonraker-sql.db\n" });
-    const over = resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/override.conf" }), base).?;
+    const over = (try resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/override.conf" }), base)).?;
     try std.testing.expectEqualStrings("/var/lib/moonraker-sql.db", over);
 
-    try std.testing.expect(resolveDbPath(alloc, a, aio, null, null) == null);
+    try std.testing.expect((try resolveDbPath(alloc, a, aio, null, null)) == null);
 }
 
 test {
