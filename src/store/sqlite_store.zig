@@ -187,6 +187,18 @@ pub const SqliteStore = struct {
         return try arena.dupe(u8, src);
     }
 
+    /// Load the same logical record for reads and mutations. A KV record
+    /// shadows its migrated table row.
+    fn getRecord(self: *SqliteStore, arena: std.mem.Allocator, namespace: []const u8, record_key: []const u8) Error!?json.Value {
+        if (try self.getRecordRaw(arena, namespace, record_key)) |raw| return try decodeRecord(arena, raw);
+        if (std.mem.eql(u8, namespace, "history")) return self.historyJobFromTable(arena, record_key);
+        if (std.mem.eql(u8, namespace, "history_totals")) {
+            const totals = try self.totalsFromTable(arena);
+            return totals.object.get(record_key);
+        }
+        return null;
+    }
+
     fn putRecordRaw(self: *SqliteStore, namespace: []const u8, record_key: []const u8, value: ?[]const u8) Error!void {
         if (value) |v| {
             const stmt = try self.prepare("INSERT OR REPLACE INTO namespace_store (namespace,key,value) VALUES (?1,?2,?3)");
@@ -212,36 +224,7 @@ pub const SqliteStore = struct {
         defer self.unlockRmw();
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
-        const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse {
-            // Drop-in fallback: history lives in the dedicated tables, not KV.
-            // For a single job lookup, query that one row by its PRIMARY KEY
-            // (job_id) instead of scanning the whole job_history table and
-            // materialising every job just to pick one — the latter is O(rows)
-            // per get and degrades linearly as print history grows.
-            if (std.mem.eql(u8, namespace, "history")) {
-                const job = (try self.historyJobFromTable(arena, segs[0])) orelse return null;
-                return ds.getPath(job, segs[1..]) catch |e| switch (e) {
-                    ds.Error.KeyNotFound => null,
-                    else => |o| o,
-                };
-            }
-            const ns_val: ?json.Value = if (std.mem.eql(u8, namespace, "history_totals"))
-                try self.totalsFromTable(arena)
-            else
-                null;
-            if (ns_val) |nv| {
-                if (nv == .object) {
-                    if (nv.object.get(segs[0])) |top| {
-                        return ds.getPath(top, segs[1..]) catch |e| switch (e) {
-                            ds.Error.KeyNotFound => null,
-                            else => |o| o,
-                        };
-                    }
-                }
-            }
-            return null;
-        };
-        const record = try decodeRecord(arena, raw);
+        const record = (try self.getRecord(arena, namespace, segs[0])) orelse return null;
         return ds.getPath(record, segs[1..]) catch |e| switch (e) {
             ds.Error.KeyNotFound => null,
             else => |o| o,
@@ -254,11 +237,7 @@ pub const SqliteStore = struct {
         self.lockRmw();
         defer self.unlockRmw();
         var record: json.Value = .null;
-        if (segs.len > 1) {
-            if (try self.getRecordRaw(arena, namespace, segs[0])) |raw| {
-                record = try decodeRecord(arena, raw);
-            } else record = .{ .object = .empty };
-        }
+        if (segs.len > 1) record = (try self.getRecord(arena, namespace, segs[0])) orelse .{ .object = .empty };
         const new_record = try ds.insertPath(arena, record, segs[1..], value);
         try self.putRecordRaw(namespace, segs[0], try encodeRecord(arena, new_record));
     }
@@ -268,8 +247,7 @@ pub const SqliteStore = struct {
         const segs = pk.slice();
         self.lockRmw();
         defer self.unlockRmw();
-        const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse return Error.KeyNotFound;
-        const record = try decodeRecord(arena, raw);
+        const record = (try self.getRecord(arena, namespace, segs[0])) orelse return Error.KeyNotFound;
         const new_record = try ds.updatePath(arena, record, segs[1..], value);
         try self.putRecordRaw(namespace, segs[0], try encodeRecord(arena, new_record));
     }
@@ -279,7 +257,7 @@ pub const SqliteStore = struct {
         const segs = pk.slice();
         self.lockRmw();
         defer self.unlockRmw();
-        const migrated_history = segs.len == 1 and std.mem.eql(u8, namespace, "history");
+        const migrated_history = std.mem.eql(u8, namespace, "history") or std.mem.eql(u8, namespace, "history_totals");
         if (migrated_history) try self.execSql("BEGIN IMMEDIATE");
         errdefer if (migrated_history) self.execSql("ROLLBACK") catch |err|
             std.debug.print("phobos: warning: history deletion rollback failed: {}\n", .{err});
@@ -289,19 +267,15 @@ pub const SqliteStore = struct {
     }
 
     fn deleteRecord(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, segs: []const []const u8) Error!json.Value {
-        // A migrated `job_history` row is a whole history record; delete it
-        // with its key so it cannot reappear behind the removed KV record.
-        const table_job: ?json.Value = if (segs.len == 1 and std.mem.eql(u8, namespace, "history"))
-            try self.deleteHistoryRow(arena, segs[0])
-        else
-            null;
-        const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse
-            return table_job orelse Error.KeyNotFound;
-        const record = try decodeRecord(arena, raw);
+        const record = (try self.getRecord(arena, namespace, segs[0])) orelse return Error.KeyNotFound;
         const res = try ds.deletePath(record, segs[1..]);
         if (res.record) |new_record| {
             try self.putRecordRaw(namespace, segs[0], try encodeRecord(arena, new_record));
         } else {
+            // Removing the last shadow field must not resurrect its table row.
+            if (std.mem.eql(u8, namespace, "history")) try self.deleteHistoryRow(segs[0]);
+            if (std.mem.eql(u8, namespace, "history_totals") and std.mem.eql(u8, segs[0], "totals") and try self.hasTable("job_totals"))
+                try self.execSql("DELETE FROM job_totals WHERE provider='history'");
             try self.putRecordRaw(namespace, segs[0], null);
         }
         return res.removed;
@@ -346,7 +320,14 @@ pub const SqliteStore = struct {
         // table job whose id has no KV record (KV wins); totals come from the
         // table until phobos saves its own.
         if (std.mem.eql(u8, namespace, "history")) try self.mergeHistoryTable(arena, &obj);
-        if (obj.count() == 0 and std.mem.eql(u8, namespace, "history_totals")) return self.totalsFromTable(arena);
+        if (std.mem.eql(u8, namespace, "history_totals")) {
+            const totals = try self.totalsFromTable(arena);
+            var it = totals.object.iterator();
+            while (it.next()) |entry| {
+                const gop = try obj.getOrPut(arena, entry.key_ptr.*);
+                if (!gop.found_existing) gop.value_ptr.* = entry.value_ptr.*;
+            }
+        }
         return .{ .object = obj };
     }
 
@@ -396,15 +377,14 @@ pub const SqliteStore = struct {
         };
     }
 
-    /// Delete one `job_history` row, returning the job it held; null when the
-    /// table or row is absent.
-    fn deleteHistoryRow(self: *SqliteStore, arena: std.mem.Allocator, job_key: []const u8) Error!?json.Value {
-        const job = (try self.historyJobFromTable(arena, job_key)) orelse return null;
+    /// Delete a backing history row, if one exists.
+    fn deleteHistoryRow(self: *SqliteStore, job_key: []const u8) Error!void {
+        const id = jobRowId(job_key) orelse return;
+        if (!try self.hasTable("job_history")) return;
         const stmt = try self.prepare("DELETE FROM job_history WHERE job_id=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        if (c.sqlite3_bind_int64(stmt, 1, jobRowId(job_key).?) != c.SQLITE_OK) return Error.BackendError;
+        if (c.sqlite3_bind_int64(stmt, 1, id) != c.SQLITE_OK) return Error.BackendError;
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return Error.BackendError;
-        return job;
     }
 
     /// Read Moonraker's `job_totals` table (provider `history`) into the
@@ -725,6 +705,107 @@ test "SqliteStore: migrated job_history stays visible beside new KV jobs" {
     try testing.expect((try s.getItem(a, "history", "000001")) == null);
     try testing.expectError(Error.KeyNotFound, s.deleteItem(a, "history", "000002"));
     try testing.expectEqual(@as(usize, 1), (try s.getNamespace(a, "history")).object.count());
+}
+
+test "SqliteStore: dotted mutations preserve migrated job records" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (0..3) |operation| {
+        var s = try SqliteStore.open(testing.io, ":memory:");
+        defer s.deinit();
+        try createJobHistory(&s);
+        switch (operation) {
+            0 => try s.insertItem(a, "history", "000001.metadata.layers", .{ .integer = 8 }),
+            1 => try s.updateItem(a, "history", "000001.metadata.layers", .{ .integer = 8 }),
+            2 => try testing.expectEqual(@as(i64, 3), (try s.deleteItem(a, "history", "000001.metadata.layers")).integer),
+            else => unreachable,
+        }
+        try testing.expectEqualStrings("a.gcode", (try s.getItem(a, "history", "000001.filename")).?.string);
+        const layers = try s.getItem(a, "history", "000001.metadata.layers");
+        if (operation == 2) try testing.expect(layers == null) else try testing.expectEqual(@as(i64, 8), layers.?.integer);
+        try testing.expectEqual(@as(usize, 2), (try s.getNamespace(a, "history")).object.count());
+    }
+}
+
+test "SqliteStore: deleting the last shadow field cannot restore its migrated row" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    var shadow: json.ObjectMap = .empty;
+    try shadow.put(a, "only", .{ .integer = 7 });
+    try s.insertItem(a, "history", "000001", .{ .object = shadow });
+    try s.execSql("CREATE TRIGGER prevent_delete BEFORE DELETE ON namespace_store BEGIN SELECT RAISE(ABORT,'record unavailable'); END;");
+    try testing.expectError(Error.BackendError, s.deleteItem(a, "history", "000001.only"));
+    try testing.expectEqual(@as(i64, 7), (try s.getItem(a, "history", "000001.only")).?.integer);
+    try testing.expect((try s.historyJobFromTable(a, "000001")) != null);
+    try s.execSql("DROP TRIGGER prevent_delete");
+    _ = try s.deleteItem(a, "history", "000001.only");
+    try testing.expect((try s.getItem(a, "history", "000001")) == null);
+    try testing.expect((try s.historyJobFromTable(a, "000001")) == null);
+}
+
+test "SqliteStore: migrated totals stay visible and mutations preserve other fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try s.execSql(
+        \\CREATE TABLE job_totals (provider TEXT, field TEXT, maximum REAL, total REAL);
+        \\INSERT INTO job_totals VALUES ('history','total_jobs',NULL,9), ('history','total_time',NULL,10), ('other','reading',NULL,99);
+    );
+    try s.insertItem(a, "history_totals", "note", .{ .string = "keep" });
+    const all = (try s.getNamespace(a, "history_totals")).object;
+    try testing.expectEqual(@as(usize, 2), all.count());
+    try testing.expectEqual(@as(f64, 10), all.get("totals").?.object.get("total_time").?.float);
+    try s.insertItem(a, "history_totals", "totals.total_jobs", .{ .integer = 11 });
+    try s.updateItem(a, "history_totals", "totals.total_time", .{ .integer = 20 });
+    _ = try s.deleteItem(a, "history_totals", "totals.total_jobs");
+    try testing.expect((try s.getItem(a, "history_totals", "totals.total_jobs")) == null);
+    try testing.expectEqual(@as(i64, 20), (try s.getItem(a, "history_totals", "totals.total_time")).?.integer);
+    try s.execSql("CREATE TRIGGER prevent_delete BEFORE DELETE ON namespace_store BEGIN SELECT RAISE(ABORT,'record unavailable'); END;");
+    try testing.expectError(Error.BackendError, s.deleteItem(a, "history_totals", "totals.total_time"));
+    try testing.expectEqual(@as(f64, 10), (try s.totalsFromTable(a)).object.get("totals").?.object.get("total_time").?.float);
+    try s.execSql("DROP TRIGGER prevent_delete");
+    _ = try s.deleteItem(a, "history_totals", "totals.total_time");
+    try testing.expect((try s.getItem(a, "history_totals", "totals")) == null);
+    const remaining = (try s.getNamespace(a, "history_totals")).object;
+    try testing.expectEqual(@as(usize, 1), remaining.count());
+    try testing.expectEqualStrings("keep", remaining.get("note").?.string);
+    const stmt = try s.prepare("SELECT total FROM job_totals WHERE provider='other'");
+    defer _ = c.sqlite3_finalize(stmt);
+    try testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stmt));
+    try testing.expectEqual(@as(f64, 99), c.sqlite3_column_double(stmt, 0));
+}
+
+test "fuzz SqliteStore: migrated dotted mutations retain unrelated job fields" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var s = try SqliteStore.open(testing.io, ":memory:");
+            defer s.deinit();
+            try createJobHistory(&s);
+            var bytes: [8]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const number = std.mem.readInt(i64, &bytes, .little);
+            const operation = bytes[0] % 3;
+            switch (operation) {
+                0 => try s.insertItem(a, "history", "000001.metadata.layers", .{ .integer = number }),
+                1 => try s.updateItem(a, "history", "000001.metadata.layers", .{ .integer = number }),
+                2 => _ = try s.deleteItem(a, "history", "000001.metadata.layers"),
+                else => unreachable,
+            }
+            try testing.expectEqualStrings("a.gcode", (try s.getItem(a, "history", "000001.filename")).?.string);
+            const layers = try s.getItem(a, "history", "000001.metadata.layers");
+            if (operation == 2) try testing.expect(layers == null) else try testing.expectEqual(number, layers.?.integer);
+        }
+    }.run, .{});
 }
 
 test "SqliteStore: an unreadable job_history table is an error, not an empty history" {

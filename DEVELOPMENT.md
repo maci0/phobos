@@ -239,3 +239,6 @@ datadir: `database/moonraker-sql.db` for SQLite, `database` for the file backend
 SQLite scalar records require their exact encoded length and UTF-8 strings;
 corrupt values produce a backend error instead of a substituted value.
 SQLite paths reject embedded NUL before creating parents or entering the C API.
+Reads and dotted mutations share the migrated history/totals record loader.
+KV records shadow complete table records; deleting the final shadow field clears
+the backing row in the same transaction so it cannot reappear.
