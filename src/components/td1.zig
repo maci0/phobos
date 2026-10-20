@@ -7,14 +7,18 @@
 //!   POST /machine/td1/reboot → machine.td1.reboot
 //!
 //! The TD-1 is a USB serial device (VID=0xE4B2, PID=0x0045) that reports
-//! filament TD (transparency/diameter) and color data. Serial-port comms are
-//! implemented: `pollSerialOnce` opens the device via `serial.zig` and parses a
-//! TD-1 CSV line (`parseTd1Line`, matching td1.py `_parse_line`: field[4]=td,
-//! field[5]=color). USB discovery (`findTd1Devices`, matching `_find_td1_devices`:
-//! vid/pid 0xE4B2/0x0045) and the reboot handshake (`rebootSerial`/
-//! `nextRebootCommand`) are implemented; `scanOnce` ties discovery → connect →
-//! poll. The parser, discovery (sysfs scan), and reboot protocol are unit-tested;
-//! on-hardware serial timing is exercised only against a real device.
+//! filament TD (transparency/diameter) and color data. A background thread
+//! scans every `scan_interval` (td1.py `_watch_for_new_devices`): it finds TD-1
+//! ttys in sysfs (`findTd1Devices`, matching `_find_td1_devices`), reads one
+//! complete CSV line per device through `serial.zig` (`readTd1Line`, parsed by
+//! `parseTd1Line` like td1.py `_parse_line`: field[4]=td, field[5]=color), then
+//! under Core adds new devices, records readings and drops unplugged ones.
+//! Discovery and serial reads run outside Core; each read waits at most the
+//! serial read timeout.
+//!
+//! Not implemented (TODO.md): the `retrieve file` error-file handshake (so
+//! `error` stays null), the reboot handshake (reboot only forgets the device),
+//! and a persistent per-device connection. On-hardware timing is unverified.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
@@ -24,6 +28,13 @@ const Registry = registry.Registry;
 const Core = @import("../server/core.zig").Core;
 const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
+
+/// Discovery interval (td1.py `_watch_for_new_devices` sleeps 5 s).
+const scan_interval: std.Io.Duration = .fromSeconds(5);
+/// Longest TD-1 line kept; a longer line is discarded.
+const max_line_bytes = 256;
+/// Bytes read from one device per scan before giving up on a parseable line.
+const max_scan_bytes = 4 * max_line_bytes;
 
 /// Parsed TD-1 serial line. Mirrors td1.py `_parse_line`: the device emits
 /// comma-separated lines; when there are ≥6 fields, field[4] is the TD value
@@ -47,6 +58,38 @@ pub fn parseTd1Line(line: []const u8) ?ParsedTd1Line {
     if (n < 6) return null;
     const td = std.fmt.parseFloat(f64, std.mem.trim(u8, fields[4], " \t\r\n")) catch return null;
     return .{ .td = td, .color = std.mem.trim(u8, fields[5], " \t\r\n") };
+}
+
+/// Open the TD-1 at `path`, skip the partial line the port opened into, and
+/// return the next complete line that parses, its color copied into `alloc`.
+/// Null when the device stays silent for a serial read timeout or sends no
+/// parseable line within `max_scan_bytes`.
+pub fn readTd1Line(io: std.Io, alloc: std.mem.Allocator, path: []const u8, baud: u32) !?ParsedTd1Line {
+    var port = try serial_mod.Serial.open(io, path, baud);
+    defer port.close();
+    var buf: [max_line_bytes]u8 = undefined;
+    var len: usize = 0;
+    var synced = false;
+    var total: usize = 0;
+    while (total < max_scan_bytes) {
+        const n = try port.readSome(buf[len..]);
+        if (n == 0) return null;
+        total += n;
+        len += n;
+        while (std.mem.indexOfScalar(u8, buf[0..len], '\n')) |end| {
+            if (synced) if (parseTd1Line(buf[0..end])) |parsed|
+                return .{ .td = parsed.td, .color = try alloc.dupe(u8, parsed.color) };
+            synced = true;
+            std.mem.copyForwards(u8, &buf, buf[end + 1 .. len]);
+            len -= end + 1;
+        }
+        if (len == buf.len) {
+            // Overlong line: drop it and resynchronise on the next newline.
+            len = 0;
+            synced = false;
+        }
+    }
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,29 +206,6 @@ pub fn findTd1Devices(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8
     };
 }
 
-/// TD-1 reboot handshake step (td1.py reboot): after sending "change settings\n"
-/// the device replies; on "ready" the next command is "RGB_Enabled = True\ndone\n",
-/// otherwise no further command is sent. Pure so the protocol is unit-tested.
-pub fn nextRebootCommand(ack: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, std.mem.trim(u8, ack, " \t\r\n"), "ready"))
-        return "RGB_Enabled = True\ndone\n";
-    return null;
-}
-
-/// Perform the TD-1 reboot serial exchange (best-effort; needs the device).
-pub fn rebootSerial(io: std.Io, path: []const u8, baud: u32) !void {
-    var ser = try serial_mod.Serial.open(io, path, baud);
-    defer ser.close();
-    try ser.write("change settings\n");
-    var buf: [128]u8 = undefined;
-    const n = ser.readSome(&buf) catch 0;
-    const ack = if (std.mem.indexOfScalar(u8, buf[0..n], '\n')) |i| buf[0..i] else buf[0..n];
-    if (nextRebootCommand(ack)) |cmd| {
-        try ser.write(cmd);
-        _ = ser.readSome(&buf) catch 0; // drain final ack (ignored, like td1.py)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------------------
@@ -209,12 +229,6 @@ pub const Td1Connection = struct {
     }
 };
 
-/// Current UTC time as an ISO-8601 string ("YYYY-MM-DDTHH:MM:SSZ"), written into
-/// `buf` (needs >= 20 bytes). Used for TD-1 scan timestamps.
-pub fn nowIso8601(io: std.Io, buf: []u8) []const u8 {
-    return clock.iso8601(io, buf);
-}
-
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -222,10 +236,9 @@ pub fn nowIso8601(io: std.Io, buf: []u8) []const u8 {
 pub const Td1Ctx = struct {
     clock_io: std.Io,
     gpa: std.mem.Allocator,
+    /// Read and written only under Core.
     conns: std.StringHashMap(Td1Connection),
     /// Background discovery/poll plumbing (set via setIo/setCore + startPolling).
-    /// scanOnce mutates `conns`, which handleGetData reads under the Core lock, so
-    /// the poll thread runs scanOnce through core.run to serialize the two.
     io: ?std.Io = null,
     core: ?*Core = null,
     poll_thread: ?std.Thread = null,
@@ -233,7 +246,6 @@ pub const Td1Ctx = struct {
     tty_root: []const u8 = "/sys/class/tty",
     dev_prefix: []const u8 = "/dev",
     baud: u32 = 115200,
-    poll_interval_ns: u64 = 1_000_000_000, // 1 s
 
     pub fn init(alloc: std.mem.Allocator, clock_io: std.Io) Td1Ctx {
         return .{ .clock_io = clock_io, .gpa = alloc, .conns = std.StringHashMap(Td1Connection).init(alloc) };
@@ -266,54 +278,47 @@ pub const Td1Ctx = struct {
     fn pollLoop(self: *Td1Ctx) void {
         const io = self.io orelse return;
         const core = self.core orelse return;
-        while (!self.poll_stop.isSet()) {
-            // Chunked so stopPolling's join returns promptly instead of blocking
-            // a full interval.
-            if (sleep.untilStopped(io, .fromNanoseconds(self.poll_interval_ns), &self.poll_stop)) break;
-            // Run the scan under the Core lock so conns mutations are serialized
-            // with handleGetData.
-            core.run(io, Td1Ctx.scanOnce, .{ self, io, self.tty_root, self.dev_prefix, self.baud });
-        }
+        while (!sleep.untilStopped(io, scan_interval, &self.poll_stop)) self.scanOnce(io, core);
     }
 
     pub fn deinit(self: *Td1Ctx) void {
         self.stopPolling();
         var it = self.conns.iterator();
         while (it.next()) |entry| {
-            const conn = entry.value_ptr;
-            self.gpa.free(conn.serial_number);
-            self.gpa.free(conn.scan_time);
-            if (conn.color) |c| self.gpa.free(c);
-            if (conn.error_msg) |e| self.gpa.free(e);
+            freeConnection(self.gpa, entry.value_ptr.*);
             self.gpa.free(entry.key_ptr.*);
         }
         self.conns.deinit();
     }
 
-    /// Read one line from the TD-1 serial device and update the named
-    /// connection's td/color (matching td1.py run_serial → _parse_line). A line
-    /// that fails to parse is ignored. Best-effort: opening/reading errors
-    /// propagate; a malformed line is a no-op.
-    pub fn pollSerialOnce(self: *Td1Ctx, io: std.Io, serial_number: []const u8, path: []const u8, baud: u32) !void {
-        var ser = try serial_mod.Serial.open(io, path, baud);
-        defer ser.close();
-        var buf: [256]u8 = undefined;
-        const n = try ser.readSome(&buf);
-        const data = buf[0..n];
-        const line = if (std.mem.indexOfScalar(u8, data, '\n')) |i| data[0..i] else data;
-        const parsed = parseTd1Line(line) orelse return;
+    fn freeConnection(gpa: std.mem.Allocator, conn: Td1Connection) void {
+        gpa.free(conn.serial_number);
+        gpa.free(conn.scan_time);
+        if (conn.color) |c| gpa.free(c);
+        if (conn.error_msg) |e| gpa.free(e);
+    }
+
+    /// Forget a device. Returns false when it is not tracked.
+    fn removeConnection(self: *Td1Ctx, serial_number: []const u8) bool {
+        // The key is a separate allocation from serial_number (see addConnection).
+        const removed = self.conns.fetchRemove(serial_number) orelse return false;
+        freeConnection(self.gpa, removed.value);
+        self.gpa.free(removed.key);
+        return true;
+    }
+
+    /// Store a parsed reading on a tracked device (td1.py `_parse_line`).
+    fn recordReading(self: *Td1Ctx, serial_number: []const u8, reading: ParsedTd1Line) !void {
         const conn = self.conns.getPtr(serial_number) orelse return error.NotFound;
-        const new_color = try self.gpa.dupe(u8, parsed.color);
+        const new_color = try self.gpa.dupe(u8, reading.color);
         errdefer self.gpa.free(new_color);
-        // Refresh scan_time on each successful reading (td1.py _parse_line sets
-        // `_scan_time = datetime.utcnow().isoformat()+"Z"`).
         var ts_buf: [32]u8 = undefined;
-        const new_scan = try self.gpa.dupe(u8, nowIso8601(self.clock_io, &ts_buf));
+        const new_scan = try self.gpa.dupe(u8, clock.iso8601(self.clock_io, &ts_buf));
         if (conn.color) |c| self.gpa.free(c);
         conn.color = new_color;
         self.gpa.free(conn.scan_time);
         conn.scan_time = new_scan;
-        conn.td = parsed.td;
+        conn.td = reading.td;
         conn.done_initializing = true;
     }
 
@@ -340,31 +345,40 @@ pub const Td1Ctx = struct {
         };
         if (try self.conns.fetchPut(k, v)) |prior| {
             self.gpa.free(k); // Replacements retain the map's existing key.
-            self.gpa.free(prior.value.serial_number);
-            self.gpa.free(prior.value.scan_time);
-            if (prior.value.color) |c| self.gpa.free(c);
-            if (prior.value.error_msg) |e| self.gpa.free(e);
+            freeConnection(self.gpa, prior.value);
         }
     }
 
-    /// One discovery + poll pass (matches td1.py's enumerate→connect loop):
-    /// scan `tty_root` for TD-1 devices, register any new ones, and refresh each
-    /// from its serial port. Best-effort — a device that won't open is skipped.
-    pub fn scanOnce(self: *Td1Ctx, io: std.Io, tty_root: []const u8, dev_prefix: []const u8, baud: u32) void {
+    /// One discovery pass (td1.py `_watch_for_new_devices`): scan sysfs and
+    /// read each device outside Core, then apply the results under `core`.
+    /// A device that cannot be opened or read is retried on the next pass.
+    pub fn scanOnce(self: *Td1Ctx, io: std.Io, core: *Core) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const devs = findTd1Devices(io, a, tty_root, dev_prefix);
-        for (devs) |d| {
+        const devs = findTd1Devices(io, a, self.tty_root, self.dev_prefix);
+        const readings = a.alloc(?ParsedTd1Line, devs.len) catch return;
+        for (devs, readings) |d, *reading| reading.* = readTd1Line(io, a, d.path, self.baud) catch null;
+        core.run(io, applyScan, .{ self, a, devs, readings });
+    }
+
+    /// Add new devices, record readings and drop devices that are no longer
+    /// present (td1.py prunes `disconnected_serials`). Runs under Core.
+    fn applyScan(self: *Td1Ctx, a: std.mem.Allocator, devs: []const Td1Device, readings: []const ?ParsedTd1Line) void {
+        for (devs, readings) |d, reading| {
             if (!self.conns.contains(d.serial)) {
                 var ts_buf: [32]u8 = undefined;
-                self.addConnection(.{
-                    .serial_number = d.serial,
-                    .scan_time = nowIso8601(self.clock_io, &ts_buf),
-                }) catch continue;
+                self.addConnection(.{ .serial_number = d.serial, .scan_time = clock.iso8601(self.clock_io, &ts_buf) }) catch continue;
             }
-            self.pollSerialOnce(io, d.serial, d.path, baud) catch {};
+            if (reading) |r| self.recordReading(d.serial, r) catch {};
         }
+        var gone: std.ArrayList([]const u8) = .empty;
+        var it = self.conns.keyIterator();
+        outer: while (it.next()) |key| {
+            for (devs) |d| if (std.mem.eql(u8, d.serial, key.*)) continue :outer;
+            gone.append(a, key.*) catch return;
+        }
+        for (gone.items) |serial_number| _ = self.removeConnection(serial_number);
     }
 };
 
@@ -405,12 +419,8 @@ pub fn handleGetData(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
     var it = ctx.conns.iterator();
     while (it.next()) |entry| {
         const conn = entry.value_ptr;
-        if (conn.getData(alloc)) |dev_data| {
-            if (dev_data) |dd| {
-                try devices.put(alloc, conn.serial_number, .{ .object = dd });
-            }
-        } else |_| {
-            // Allocation failed; skip this device to avoid partial responses.
+        if (try conn.getData(alloc)) |dd| {
+            try devices.put(alloc, conn.serial_number, .{ .object = dd });
         }
     }
     try out.put(alloc, "devices", .{ .object = devices });
@@ -421,34 +431,18 @@ pub fn handleGetData(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 // POST /machine/td1/reboot → machine.td1.reboot
 // ---------------------------------------------------------------------------
 
-/// Reboot a TD-1 device by serial number.
+/// Reboot a TD-1 device by serial number: a known serial is forgotten
+/// (`status: ok`) and rediscovered by the next scan while still plugged in;
+/// an unknown one returns `serial_error`. The serial reboot handshake is not
+/// sent (TODO.md).
 ///
-/// AGENT: this is an in-memory device map, not a host reboot and not a
-/// serial-port reboot. Unknown serial → `serial_error`. Known serial →
-/// remove the map entry and return `status: ok`. NEVER open a USB/serial
-/// device here, and NEVER call systemctl, reboot, shutdown, or poweroff.
-/// Doing so halts the machine that runs the tests.
+/// AGENT: NEVER open a USB/serial device here, and NEVER call systemctl,
+/// reboot, shutdown, or poweroff. Doing so halts the machine that runs the tests.
 pub fn handleReboot(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *Td1Ctx = @ptrCast(@alignCast(ctx_ptr));
     const serial = try getStr(params, "serial");
-
     var out: std.json.ObjectMap = .empty;
-    if (ctx.conns.getEntry(serial)) |entry| {
-        // Free the entry's value fields AND the map key (a separate allocation
-        // from serial_number — see addConnection). remove() only unlinks; the
-        // key would otherwise leak on every reboot of a known device.
-        const key = entry.key_ptr.*;
-        const conn = entry.value_ptr.*;
-        ctx.gpa.free(conn.serial_number);
-        ctx.gpa.free(conn.scan_time);
-        if (conn.color) |c| ctx.gpa.free(c);
-        if (conn.error_msg) |e| ctx.gpa.free(e);
-        _ = ctx.conns.remove(serial);
-        ctx.gpa.free(key);
-        try out.put(alloc, "status", .{ .string = "ok" });
-    } else {
-        try out.put(alloc, "status", .{ .string = "serial_error" });
-    }
+    try out.put(alloc, "status", .{ .string = if (ctx.removeConnection(serial)) "ok" else "serial_error" });
     return .{ .object = out };
 }
 
@@ -474,6 +468,42 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     return p.value;
 }
 
+/// sysfs tty tree with one tty per entry (name, vid, pid, serial) under
+/// `sys`, and a `dev` directory for device nodes, in a temp dir.
+const FakeTtys = struct {
+    tmp: testing.TmpDir,
+    sys: [:0]u8,
+    dev: [:0]u8,
+
+    fn init(ttys: []const [4][]const u8) !FakeTtys {
+        const io = testing.io;
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.createDirPath(io, "sys");
+        try tmp.dir.createDirPath(io, "dev");
+        for (ttys) |t| try addTty(tmp.dir, t);
+        const sys = try tmp.dir.realPathFileAlloc(io, "sys", testing.allocator);
+        errdefer testing.allocator.free(sys);
+        return .{ .tmp = tmp, .sys = sys, .dev = try tmp.dir.realPathFileAlloc(io, "dev", testing.allocator) };
+    }
+
+    fn addTty(dir: Dir, t: [4][]const u8) !void {
+        const io = testing.io;
+        var buf: [96]u8 = undefined;
+        try dir.createDirPath(io, try std.fmt.bufPrint(&buf, "sys/{s}/device", .{t[0]}));
+        const attrs = [_][2][]const u8{ .{ "idVendor", t[1] }, .{ "idProduct", t[2] }, .{ "serial", t[3] } };
+        for (attrs) |attr| {
+            try dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&buf, "sys/{s}/device/{s}", .{ t[0], attr[0] }), .data = attr[1] });
+        }
+    }
+
+    fn deinit(self: *FakeTtys) void {
+        testing.allocator.free(self.sys);
+        testing.allocator.free(self.dev);
+        self.tmp.cleanup();
+    }
+};
+
 // ---- USB discovery ----
 
 test "isTd1VidPid / parseUsbHex" {
@@ -485,36 +515,16 @@ test "isTd1VidPid / parseUsbHex" {
     try testing.expectEqual(@as(?u16, null), parseUsbHex("zzzz"));
 }
 
-test "nextRebootCommand: 'ready' → enable cmd, else none" {
-    try testing.expectEqualStrings("RGB_Enabled = True\ndone\n", nextRebootCommand("ready\n").?);
-    try testing.expectEqualStrings("RGB_Enabled = True\ndone\n", nextRebootCommand("  ready ").?);
-    try testing.expect(nextRebootCommand("busy") == null);
-    try testing.expect(nextRebootCommand("") == null);
-}
-
 test "findTd1Devices: matches TD-1 vid/pid in a temp sysfs tree, skips others" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const root = ".testtmp-td1-sys";
-    Dir.cwd().deleteTree(io, root) catch {};
-    defer Dir.cwd().deleteTree(io, root) catch {};
-
     // ttyACM0 → TD-1 (match); ttyACM1 → other vendor; ttyS0 → no device dir.
-    inline for (.{
-        .{ "ttyACM0", "e4b2", "0045", "TD1ABC" },
-        .{ "ttyACM1", "1234", "5678", "OTHER" },
-    }) |d| {
-        const dev = root ++ "/" ++ d[0] ++ "/device";
-        try Dir.cwd().createDirPath(io, dev);
-        try writeFileStr(io, dev ++ "/idVendor", d[1] ++ "\n");
-        try writeFileStr(io, dev ++ "/idProduct", d[2] ++ "\n");
-        try writeFileStr(io, dev ++ "/serial", d[3] ++ "\n");
-    }
-    try Dir.cwd().createDirPath(io, root ++ "/ttyS0");
+    var ttys = try FakeTtys.init(&.{
+        .{ "ttyACM0", "e4b2\n", "0045\n", "TD1ABC\n" },
+        .{ "ttyACM1", "1234\n", "5678\n", "OTHER\n" },
+    });
+    defer ttys.deinit();
+    try ttys.tmp.dir.createDirPath(testing.io, "sys/ttyS0");
 
-    const devs = findTd1Devices(io, testing.allocator, root, "/dev");
+    const devs = findTd1Devices(testing.io, testing.allocator, ttys.sys, "/dev");
     defer {
         for (devs) |device| {
             testing.allocator.free(device.path);
@@ -528,7 +538,7 @@ test "findTd1Devices: matches TD-1 vid/pid in a temp sysfs tree, skips others" {
     for (0..8) |index| {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
         const alloc = failing.allocator();
-        const devices = findTd1Devices(io, alloc, root, "/dev");
+        const devices = findTd1Devices(testing.io, alloc, ttys.sys, "/dev");
         for (devices) |device| {
             alloc.free(device.path);
             alloc.free(device.serial);
@@ -538,71 +548,97 @@ test "findTd1Devices: matches TD-1 vid/pid in a temp sysfs tree, skips others" {
     }
 }
 
-test "scanOnce: registers a discovered TD-1 connection" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const root = ".testtmp-td1-scan";
-    Dir.cwd().deleteTree(io, root) catch {};
-    defer Dir.cwd().deleteTree(io, root) catch {};
-    const dev = root ++ "/ttyACM0/device";
-    try Dir.cwd().createDirPath(io, dev);
-    try writeFileStr(io, dev ++ "/idVendor", "e4b2\n");
-    try writeFileStr(io, dev ++ "/idProduct", "0045\n");
-    try writeFileStr(io, dev ++ "/serial", "SCANME\n");
-
-    var ctx = Td1Ctx.init(testing.allocator, std.testing.io);
-    defer ctx.deinit();
-    // Device node won't open (no real serial) → poll fails, but the connection
-    // is registered from discovery.
-    ctx.scanOnce(io, root, "/dev", 115200);
-    try testing.expect(ctx.conns.contains("SCANME"));
-}
-
-fn writeFileStr(io: std.Io, path: []const u8, contents: []const u8) !void {
-    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = contents });
-}
-
-test "fuzz findTd1Devices/parseUsbHex: arbitrary inputs never crash" {
+test "fuzz parseUsbHex: arbitrary inputs never crash" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [16]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             _ = parseUsbHex(&buf);
-            _ = nextRebootCommand(&buf);
         }
     }.run, .{});
 }
 
-// ---- nowIso8601 ----
-
-test "nowIso8601: ISO-8601 UTC shape (YYYY-MM-DDTHH:MM:SSZ)" {
-    var buf: [32]u8 = undefined;
-    const s = nowIso8601(std.testing.io, &buf);
-    try testing.expectEqual(@as(usize, 20), s.len);
-    try testing.expectEqual(@as(u8, '-'), s[4]);
-    try testing.expectEqual(@as(u8, '-'), s[7]);
-    try testing.expectEqual(@as(u8, 'T'), s[10]);
-    try testing.expectEqual(@as(u8, ':'), s[13]);
-    try testing.expectEqual(@as(u8, ':'), s[16]);
-    try testing.expectEqual(@as(u8, 'Z'), s[19]);
-    // Year is past the epoch and plausibly current-era.
-    const year = try std.fmt.parseInt(u16, s[0..4], 10);
-    try testing.expect(year >= 2020 and year < 3000);
+test "readTd1Line: skips the partial first line, drops overlong lines" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { data: []const u8, td: ?f64 }{
+        .{ .data = "1.5,Red\nts,sn,fw,batt,1.72,Green\n", .td = 1.72 },
+        // A line at open may be the tail of a longer one: never trusted.
+        .{ .data = "ts,sn,fw,batt,1.72,Green\n", .td = null },
+        .{ .data = "\nbad\nts,sn,fw,batt,2.5, Blue \r\n", .td = 2.5 },
+        .{ .data = "\nts,sn,fw,batt,1.0,Cyan", .td = null }, // no newline yet
+    };
+    for (cases) |case| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = case.data });
+        const path = try tmp.dir.realPathFileAlloc(io, "td1", a);
+        const reading = try readTd1Line(io, a, path, 115200);
+        try testing.expectEqual(case.td, if (reading) |r| r.td else null);
+    }
+    var long: [max_line_bytes + 40]u8 = @splat('x');
+    const tail = "\nts,sn,fw,batt,3.0,Pink\n";
+    var data: [long.len + tail.len]u8 = undefined;
+    @memcpy(data[0..long.len], &long);
+    @memcpy(data[long.len..], tail);
+    try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = &data });
+    const reading = (try readTd1Line(io, a, try tmp.dir.realPathFileAlloc(io, "td1", a), 115200)).?;
+    try testing.expectEqualStrings("Pink", reading.color);
 }
 
-test "fuzz nowIso8601: any buffer size never crashes" {
+test "fuzz readTd1Line: arbitrary device bytes never crash" {
     try testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            // Buffer may be too small (then bufPrint fails → fallback literal);
-            // either way it must not crash and must return a non-empty string.
-            const n: usize = smith.valueRangeAtMostWithHash(u32, 0, 40, 0);
-            var buf: [40]u8 = undefined;
-            const s = nowIso8601(std.testing.io, buf[0..n]);
-            try testing.expect(s.len > 0);
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            const io = testing.io;
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var data: [600]u8 = undefined;
+            smith.bytesWithHash(&data, 0);
+            try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = &data });
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            if (try readTd1Line(io, a, try tmp.dir.realPathFileAlloc(io, "td1", a), 115200)) |r| {
+                try testing.expect(r.color.len < max_line_bytes);
+            }
         }
     }.run, .{});
+}
+
+test "scanOnce: adds a device with its reading, then drops it when unplugged" {
+    const io = testing.io;
+    var ttys = try FakeTtys.init(&.{.{ "ttyACM0", "e4b2\n", "0045\n", "SCANME\n" }});
+    defer ttys.deinit();
+    try ttys.tmp.dir.writeFile(io, .{ .sub_path = "dev/ttyACM0", .data = "1.0,Old\nts,sn,fw,batt,1.72,Green\n" });
+    var core = Core.init();
+    var ctx = Td1Ctx.init(testing.allocator, io);
+    defer ctx.deinit();
+    ctx.tty_root = ttys.sys;
+    ctx.dev_prefix = ttys.dev;
+
+    ctx.scanOnce(io, &core);
+    const conn = ctx.conns.get("SCANME").?;
+    try testing.expect(conn.done_initializing);
+    try testing.expectEqual(@as(?f64, 1.72), conn.td);
+    try testing.expectEqualStrings("Green", conn.color.?);
+
+    try ttys.tmp.dir.deleteTree(io, "sys/ttyACM0");
+    ctx.scanOnce(io, &core);
+    try testing.expectEqual(@as(usize, 0), ctx.conns.count());
+}
+
+test "scanOnce: a device node that cannot be opened is still listed" {
+    var ttys = try FakeTtys.init(&.{.{ "ttyACM0", "e4b2\n", "0045\n", "NODEV\n" }});
+    defer ttys.deinit();
+    var core = Core.init();
+    var ctx = Td1Ctx.init(testing.allocator, testing.io);
+    defer ctx.deinit();
+    ctx.tty_root = ttys.sys;
+    ctx.dev_prefix = ttys.dev;
+    ctx.scanOnce(testing.io, &core);
+    try testing.expect(!ctx.conns.get("NODEV").?.done_initializing);
 }
 
 // ---- handleGetData ----
@@ -895,29 +931,6 @@ test "fuzz parseTd1Line: arbitrary input never crashes" {
             _ = parseTd1Line(&buf);
         }
     }.run, .{});
-}
-
-test "pollSerialOnce: reads a line from the device and updates the connection" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = "ts,sn,fw,batt,1.72,Green\n" });
-    const path = try tmp.dir.realPathFileAlloc(io, "td1", std.testing.allocator);
-    defer std.testing.allocator.free(path);
-
-    var ctx = Td1Ctx.init(std.testing.allocator, std.testing.io);
-    defer ctx.deinit();
-    try ctx.addConnection(.{ .serial_number = "TD1A", .scan_time = "init", .done_initializing = false });
-
-    try ctx.pollSerialOnce(io, "TD1A", path, 115200);
-
-    const conn = ctx.conns.getPtr("TD1A").?;
-    try std.testing.expect(conn.done_initializing);
-    try std.testing.expectEqual(@as(f64, 1.72), conn.td.?);
-    try std.testing.expectEqualStrings("Green", conn.color.?);
 }
 
 test "handleReboot: removing a known device frees the map key (no leak)" {
