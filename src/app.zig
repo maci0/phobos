@@ -655,7 +655,14 @@ pub const App = struct {
         // io is wired later via httpServer/setIo so /proc & /sys reads work.
         const machine_ctx = try alloc.create(MachineCtx);
         errdefer alloc.destroy(machine_ctx);
-        machine_ctx.* = .{ .clock_io = aio, .gpa = alloc, .bus = bus, .conns = conns };
+        machine_ctx.* = .{
+            .clock_io = aio,
+            .gpa = alloc,
+            .bus = bus,
+            .conns = conns,
+            .usb_ids = try @import("components/usb_ids.zig").Ctx.init(alloc, aio, datadir, db_ctx.store),
+        };
+        errdefer machine_ctx.usb_ids.?.deinit();
         webcam_ctx.machine_ctx = machine_ctx;
 
         // --- Update manager context (machine.update.*) ---
@@ -3665,4 +3672,19 @@ test "setConfig loads Spoolman sync rate and rejects missing or invalid options"
         try std.testing.expectEqual(case[2], instance.spoolman_ctx.sync_rate_seconds);
         try std.testing.expect(instance.spoolman_ctx.report_thread == null);
     }
+}
+
+test "USB ID cache setup never starts a network worker in HTTP test servers" {
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(aio, ".", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var instance = try App.init(std.testing.allocator, aio, path);
+    defer instance.deinit(aio);
+    instance.machine_ctx.no_proc_stat_timer = true;
+    _ = instance.httpServer(aio);
+    try std.testing.expect(instance.machine_ctx.usb_ids != null);
+    try std.testing.expect(instance.machine_ctx.usb_ids.?.worker == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(aio, "misc/usb.ids", .{}));
 }

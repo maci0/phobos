@@ -43,6 +43,7 @@ const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
+const usb_ids = @import("usb_ids.zig");
 const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
 const process = @import("../util/process.zig");
@@ -151,6 +152,7 @@ pub const MachineCtx = struct {
 
     gpa: std.mem.Allocator,
     clock_io: std.Io,
+    usb_ids: ?usb_ids.Ctx = null,
     proc_cpu_wall: f64 = 0,
     proc_cpu_time: f64 = 0,
     io: ?std.Io = null,
@@ -385,7 +387,14 @@ pub const MachineCtx = struct {
         return .{ .stdout = &.{}, .stderr = &.{} };
     }
 
+    /// Only the daemon calls this; App.httpServer never starts network downloads.
+    pub fn startUsbIdsUpdate(self: *MachineCtx, force: bool) !void {
+        if (self.usb_ids) |*ids| try ids.start(force);
+    }
+
     pub fn deinit(self: *MachineCtx) void {
+        if (self.usb_ids) |*ids| ids.deinit();
+        self.usb_ids = null;
         self.proc_stat_stop.set(self.clock_io);
         if (self.proc_stat_thread) |th| {
             th.join();
@@ -1903,31 +1912,21 @@ pub fn handleUsb(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
     const ctx: *MachineCtx = @ptrCast(@alignCast(ctx_ptr));
     var arr: std.json.Array = .init(alloc);
     if (ctx.io) |io| {
-        enumUsb(io, alloc, &arr) catch {};
+        try enumUsb(io, alloc, &arr, if (ctx.usb_ids) |*ids| ids.path else null);
     }
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "usb_devices", .{ .array = arr });
     return .{ .object = obj };
 }
 
-/// Moonraker's built-in usb.ids entries (`UsbIdData._usb_info_cache`). phobos
-/// has no usb.ids database, so these are the only names it resolves.
-const usb_vendor_names = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "1d50", "OpenMoko, Inc" },
-});
-const usb_product_names = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "1d50:614e", "Klipper 3d-Printer Firmware" },
-    .{ "1d50:6177", "Katapult Bootloader (CDC_ACM)" },
-});
-
 /// Build the JSON object for one USB device folder `base` (e.g.
 /// /sys/bus/usb/devices/1-1), as `sysfs_devs.find_usb_devices` plus machine.py
 /// `_do_usb_detect`. Returns null when `base` is not a device folder or a
-/// required attribute is missing or malformed. Without usb.ids, class,
-/// subclass and protocol are null, and manufacturer, product and description
-/// fall back to the built-in vendor entries.
-fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8) !?std.json.Value {
-    _ = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceClass" })) orelse return null;
+/// required attribute is missing or malformed. The caller supplies a request arena.
+fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8, ids_path: ?[]const u8) !?std.json.Value {
+    const class_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceClass" })) orelse return null;
+    const subclass_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceSubClass" })) orelse return null;
+    const protocol_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceProtocol" })) orelse return null;
     const devnum_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "devnum" })) orelse return null;
     const busnum_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "busnum" })) orelse return null;
     const devnum = std.fmt.parseInt(i64, devnum_text, 10) catch return null;
@@ -1935,8 +1934,17 @@ fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8) !?std.
     const vid = try std.ascii.allocLowerString(alloc, sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idVendor" })) orelse return null);
     const pid = try std.ascii.allocLowerString(alloc, sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idProduct" })) orelse return null);
 
-    const vendor_name = usb_vendor_names.get(vid);
-    const product_name = if (vendor_name != null) usb_product_names.get(try std.fmt.allocPrint(alloc, "{s}:{s}", .{ vid, pid })) else null;
+    const ids: usb_ids.Ids = .{
+        .vendor = std.fmt.parseInt(u16, vid, 16) catch return null,
+        .product = std.fmt.parseInt(u16, pid, 16) catch return null,
+        .class = std.fmt.parseInt(u8, class_text, 16) catch return null,
+        .subclass = std.fmt.parseInt(u8, subclass_text, 16) catch return null,
+        .protocol = std.fmt.parseInt(u8, protocol_text, 16) catch return null,
+    };
+    const names = try usb_ids.lookup(io, alloc, ids_path, ids);
+    if (names.version) |version| alloc.free(version);
+    const vendor_name = names.manufacturer;
+    const product_name = names.product;
     var dev: std.json.ObjectMap = .empty;
     try dev.put(alloc, "device_num", .{ .integer = devnum });
     try dev.put(alloc, "bus_num", .{ .integer = busnum });
@@ -1946,23 +1954,26 @@ fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8) !?std.
     try dev.put(alloc, "manufacturer", attrOrDefault(io, alloc, base, "manufacturer", vendor_name));
     try dev.put(alloc, "product", attrOrDefault(io, alloc, base, "product", product_name));
     try dev.put(alloc, "serial", attrOrDefault(io, alloc, base, "serial", null));
-    try dev.put(alloc, "class", .null);
-    try dev.put(alloc, "subclass", .null);
-    try dev.put(alloc, "protocol", .null);
-    try dev.put(alloc, "description", if (vendor_name) |v|
-        .{ .string = if (product_name) |p| try std.fmt.allocPrint(alloc, "{s} {s}", .{ v, p }) else v }
-    else
-        .null);
+    inline for (.{ "manufacturer", "product", "serial" }) |field| {
+        const value = dev.get(field).?;
+        if (value == .string and !std.unicode.utf8ValidateSlice(value.string)) return null;
+    }
+    inline for (.{ .{ "class", "class_name" }, .{ "subclass", "subclass" }, .{ "protocol", "protocol" }, .{ "description", "description" } }) |field| {
+        try dev.put(alloc, field[0], if (@field(names, field[1])) |value| .{ .string = value } else .null);
+    }
     return .{ .object = dev };
 }
 
-fn enumUsb(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
-    var dir = Dir.cwd().openDir(io, "/sys/bus/usb/devices", .{ .iterate = true }) catch return;
+fn enumUsb(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array, ids_path: ?[]const u8) !void {
+    var dir = Dir.cwd().openDir(io, "/sys/bus/usb/devices", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         const base = try std.fs.path.join(alloc, &.{ "/sys/bus/usb/devices", entry.name });
-        if (try buildUsbDevice(io, alloc, base)) |dev| try arr.append(dev);
+        if (try buildUsbDevice(io, alloc, base, ids_path)) |dev| try arr.append(dev);
     }
 }
 
@@ -2598,7 +2609,7 @@ test "buildUsbDevice: ids, null class fields and built-in vendor names" {
     try tmp.dir.writeFile(io, .{ .sub_path = "1-1/manufacturer", .data = "Klipper\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "1-1/product", .data = "stm32f446xx\n" });
 
-    const o = (try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-1" }))).?.object;
+    const o = (try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-1" }), null)).?.object;
     try testing.expectEqual(@as(i64, 4), o.get("device_num").?.integer);
     try testing.expectEqual(@as(i64, 1), o.get("bus_num").?.integer);
     try testing.expectEqualStrings("1d50", o.get("vendor_id").?.string); // lower-cased
@@ -2610,15 +2621,15 @@ test "buildUsbDevice: ids, null class fields and built-in vendor names" {
     for ([_][]const u8{ "class", "subclass", "protocol" }) |k| try testing.expectEqual(std.json.Value.null, o.get(k).?);
     try testing.expectEqualStrings("OpenMoko, Inc Klipper 3d-Printer Firmware", o.get("description").?.string);
 
-    const k = (try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-2" }))).?.object;
+    const k = (try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-2" }), null)).?.object;
     try testing.expectEqualStrings("OpenMoko, Inc", k.get("manufacturer").?.string);
     try testing.expectEqualStrings("Katapult Bootloader (CDC_ACM)", k.get("product").?.string);
 
     // A non-device folder (no bDeviceClass) and a malformed devnum → null.
     try tmp.dir.createDirPath(io, "usb1");
-    try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "usb1" }))) == null);
+    try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "usb1" }), null)) == null);
     try tmp.dir.writeFile(io, .{ .sub_path = "1-2/devnum", .data = "x\n" });
-    try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-2" }))) == null);
+    try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-2" }), null)) == null);
 }
 
 test "video entries sort by device index, then name" {
@@ -4090,4 +4101,33 @@ test "fuzz machine file reads preserve bytes with exact owned storage" {
             try std.testing.expectEqualSlices(u8, bytes[0..len], contents);
         }
     }.run, .{});
+}
+
+test "buildUsbDevice: cached class names and malformed required or optional attributes" {
+    const aio = std.testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.createDirPath(aio, "device");
+    inline for (.{
+        .{ "bDeviceClass", "03" }, .{ "bDeviceSubClass", "01" }, .{ "bDeviceProtocol", "02" },
+        .{ "devnum", "4" },        .{ "busnum", "1" },           .{ "idVendor", "1234" },
+        .{ "idProduct", "5678" },
+    }) |attribute| try tmp.dir.writeFile(aio, .{ .sub_path = "device/" ++ attribute[0], .data = attribute[1] });
+    try tmp.dir.writeFile(aio, .{ .sub_path = "usb.ids", .data = "1234 Vendor\n\t5678 Device\nC 03 HID\n\t01 Boot\n\t\t02 Mouse\n" });
+    const path = try tmp.dir.realPathFileAlloc(aio, "usb.ids", a);
+    const device = try tmp.dir.realPathFileAlloc(aio, "device", a);
+    const value = (try buildUsbDevice(aio, a, device, path)).?.object;
+    try testing.expectEqualStrings("Vendor", value.get("manufacturer").?.string);
+    try testing.expectEqualStrings("Vendor Device", value.get("description").?.string);
+    try testing.expectEqualStrings("HID", value.get("class").?.string);
+    try testing.expectEqualStrings("Boot", value.get("subclass").?.string);
+    try testing.expectEqualStrings("Mouse", value.get("protocol").?.string);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "device/serial", .data = "\xff" });
+    try testing.expect((try buildUsbDevice(aio, a, device, path)) == null);
+    try tmp.dir.deleteFile(aio, "device/serial");
+    try tmp.dir.deleteFile(aio, "device/bDeviceProtocol");
+    try testing.expect((try buildUsbDevice(aio, a, device, path)) == null);
 }
