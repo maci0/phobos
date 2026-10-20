@@ -1255,7 +1255,7 @@ test "registerAnnouncements: wires expected routes and JSON-RPC methods" {
 // Background refresh timer tests
 // ---------------------------------------------------------------------------
 
-test "deinit: handles null refresh_thread gracefully" {
+test "deinit: without a refresh worker it still marks the context stopped" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1263,15 +1263,13 @@ test "deinit: handles null refresh_thread gracefully" {
     var mem = MemStore.init(a);
     defer mem.deinit();
     var core = NullCore.init();
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
     var conns = NullConns.init(a, &core);
-    defer conns.deinit(io);
+    defer conns.deinit(std.testing.io);
     var bus = NotifyBus.init(&core, &conns);
     var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
-    // No setIo → refresh_thread is null. deinit must not crash.
     ctx.deinit();
+    try testing.expect(ctx.refresh_thread == null);
+    try testing.expect(ctx.refresh_stop.isSet());
 }
 
 test "deinit: sets refresh_stop and nulls io" {
@@ -1301,51 +1299,39 @@ test "deinit: sets refresh_stop and nulls io" {
     try testing.expect(ctx.refresh_stop.isSet());
 }
 
-test "announcementsRefreshTimerThread: exits when pre-stopped" {
+test "announcementsRefreshTimerThread: returns at once when stopped or without io, doing no work" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-
-    var mem = MemStore.init(a);
-    defer mem.deinit();
-    var core = NullCore.init();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    // A dismissed entry that is already due: a worker iteration would wake it.
+    try insertEntry(&mem, a, "000001",
+        \\{"entry_id":"due","dismissed":true,"date":1.0,"dismiss_wake":1.0}
+    );
+    var core = NullCore.init();
     var conns = NullConns.init(a, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
     var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
+    try testing.expectEqual(@as(i64, 1), ctx.wake_at.load(.monotonic));
 
-    // Pre-set stop flag; the thread should exit the while loop without sleeping.
-    ctx.refresh_stop.set(ctx.clock_io);
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    // No io: returns before the first wait.
     announcementsRefreshTimerThread(&ctx);
-    // If we reach here, the thread exited cleanly.
-}
-
-test "announcementsRefreshTimerThread: exits when io is null" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var mem = MemStore.init(a);
-    defer mem.deinit();
-    var core = NullCore.init();
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var conns = NullConns.init(a, &core);
-    defer conns.deinit(io);
-    var bus = NotifyBus.init(&core, &conns);
-    var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
-    defer ctx.deinit();
-
-    // io is null (setIo never called). Thread should break on null io check
-    // after the first 1-second sleep.
-    ctx.refresh_stop.reset();
+    // Stopped: returns before the first iteration.
+    ctx.io = io;
+    ctx.refresh_stop.set(io);
     announcementsRefreshTimerThread(&ctx);
-    // If we reach here, the thread exited cleanly after the null io check.
+    ctx.io = null;
+    try testing.expect(start.untilNow(io).raw.toMilliseconds() < 900);
+    const entry = (try mem.dataStore().getItem(a, ns_entries, "000001")).?;
+    try testing.expect(entry.object.get("dismissed").?.bool);
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,7 +1458,8 @@ test "fuzz handleListFeeds: never panics" {
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            _ = handleListFeeds(@ptrCast(&ctx), .null, a) catch {};
+            const result = try handleListFeeds(@ptrCast(&ctx), .null, a);
+            try testing.expectEqual(@as(usize, 2), result.object.get("feeds").?.array.items.len);
         }
     }.run, .{});
 }
