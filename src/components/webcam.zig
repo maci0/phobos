@@ -29,7 +29,13 @@
 //! DELETE /server/webcams/item params: name or uid (webcam source must be "database")
 //! GET /server/webcams/item params: name or uid
 //! POST /server/webcams/test params: name or uid
-//!   Response: {"name": ..., "snapshot_reachable": false, "snapshot_url": ..., "stream_url": ...}
+//!   Response: {"name": ..., "snapshot_reachable": bool, "snapshot_url": ..., "stream_url": ...}
+//!   URLs without `scheme://host` resolve against http://127.0.0.1. The
+//!   snapshot GET runs with the Core lock released and is cancelled after 2 s.
+//!
+//! A `uid` param naming no webcam is a 404 for every verb. New webcams get a
+//! random UUID4. Config webcams list first; a database webcam with a config
+//! webcam's name is hidden, and its row is kept.
 //!
 //! NOTE: webcam.py stores cams using camelCase field names in the DB (CAM_FIELDS
 //! mapping). We replicate that mapping faithfully.
@@ -37,7 +43,8 @@
 const std = @import("std");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
-const clock = @import("../util/clock.zig");
+const sleep = @import("../util/sleep.zig");
+const database = @import("database.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 
@@ -215,8 +222,11 @@ pub const WebcamCtx = struct {
     gpa: std.mem.Allocator,
     /// In-memory map: uid → Webcam (persisted to DataStore on writes)
     cams: std.StringHashMapUnmanaged(Webcam),
-    /// Insertion order of uids. Moonraker's webcam dict keeps config order.
+    /// Insertion order of uids (borrowing the map keys): config webcams in
+    /// config order, then database webcams, as Moonraker's webcam dict.
     order: std.ArrayList([]const u8) = .empty,
+    /// Number of config webcams at the front of `order`.
+    config_count: usize = 0,
     /// Datadir `.moonraker.uuid`. Empty uses the nil UUID.
     instance_uuid: []const u8 = "",
 
@@ -264,30 +274,27 @@ pub const WebcamCtx = struct {
         self.order.deinit(self.gpa);
     }
 
+    /// Remove `uid` from `order`, keeping `config_count` in step.
     fn untrack(self: *WebcamCtx, uid: []const u8) void {
-        var i: usize = 0;
-        while (i < self.order.items.len) {
-            if (std.mem.eql(u8, self.order.items[i], uid)) {
-                _ = self.order.orderedRemove(i);
-                return;
-            }
-            i += 1;
+        for (self.order.items, 0..) |item, i| {
+            if (!std.mem.eql(u8, item, uid)) continue;
+            _ = self.order.orderedRemove(i);
+            if (i < self.config_count) self.config_count -= 1;
+            return;
         }
     }
 
+    /// Forget the webcam named `name` in memory. Its database row stays:
+    /// Moonraker ignores a database webcam whose name a config webcam uses.
     fn dropByName(self: *WebcamCtx, name: []const u8) void {
         const existing = self.findByName(name) orelse return;
-        var uid_buf: [80]u8 = undefined;
-        if (existing.uid.len > uid_buf.len) return;
-        @memcpy(uid_buf[0..existing.uid.len], existing.uid);
-        const uid_tmp = uid_buf[0..existing.uid.len];
-        self.untrack(uid_tmp);
-        if (self.cams.fetchRemove(uid_tmp)) |kv| {
-            var val = kv.value;
-            freeWebcam(self.gpa, &val);
-            self.gpa.free(kv.key);
-        }
-        self.deleteFromStore(uid_tmp);
+        // `existing.uid` is a separate allocation from the map key and stays
+        // valid until `freeWebcam` below.
+        self.untrack(existing.uid);
+        const kv = self.cams.fetchRemove(existing.uid).?;
+        var val = kv.value;
+        freeWebcam(self.gpa, &val);
+        self.gpa.free(kv.key);
     }
 
     /// Load persisted webcams from the DataStore on startup.
@@ -322,8 +329,7 @@ pub const WebcamCtx = struct {
         const a = arena.allocator();
 
         const db_val = toDbValue(a, cam) catch return;
-        const uid_z = a.dupeSentinel(u8, cam.uid, 0) catch return;
-        self.store.insertItem(a, ns, uid_z, db_val) catch |err| {
+        self.store.insertItem(a, ns, cam.uid, db_val) catch |err| {
             std.debug.print("phobos: warning: failed to persist webcam '{s}': {} — change will be lost on restart\n", .{ cam.uid, err });
         };
     }
@@ -333,8 +339,7 @@ pub const WebcamCtx = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const uid_z = a.dupeSentinel(u8, uid, 0) catch return;
-        _ = self.store.deleteItem(a, ns, uid_z) catch |err| switch (err) {
+        _ = self.store.deleteItem(a, ns, uid) catch |err| switch (err) {
             error.KeyNotFound => {}, // idempotent delete — nothing persisted
             else => std.debug.print("phobos: warning: failed to delete webcam '{s}' from store: {} — may reappear on restart\n", .{ uid, err }),
         };
@@ -397,8 +402,11 @@ pub const WebcamCtx = struct {
         try self.order.ensureUnusedCapacity(gpa, 1);
         try self.cams.ensureUnusedCapacity(gpa, 1);
         self.dropByName(spec.name);
+        // A database webcam whose random uid equals this uid5 is hidden too.
+        if (self.findByUid(cam.uid)) |other| self.dropByName(other.name);
         self.cams.putAssumeCapacity(key, cam);
-        self.order.appendAssumeCapacity(key);
+        self.order.insertAssumeCapacity(self.config_count, key);
+        self.config_count += 1;
     }
 
     /// Find cam by name (caller must hold mutex).
@@ -415,23 +423,17 @@ pub const WebcamCtx = struct {
         return self.cams.getPtr(uid);
     }
 
-    /// Generate a unique UID not already in use.
-    fn newUid(self: *WebcamCtx, alloc: std.mem.Allocator) ![]const u8 {
-        // Use a simple counter-based approach since we can't call UUID4 easily.
-        // In production Moonraker uses uuid.uuid4(). We use a timestamp + count.
-        const now_ns = clock.wallNanos(self.clock_io);
-        var attempt: u64 = 0;
-        while (attempt < 1000) : (attempt += 1) {
-            var buf: [40]u8 = undefined;
-            const uid_str = try std.fmt.bufPrint(&buf, "{x:0>16}{x:0>8}", .{
-                now_ns,
-                attempt,
-            });
-            if (!self.cams.contains(uid_str)) {
-                return alloc.dupe(u8, uid_str);
-            }
+    /// A random UUID4 not already in use (Moonraker `_get_guaranteed_uuid`).
+    fn newUid(self: *WebcamCtx, buf: *[36]u8) []const u8 {
+        const io = self.io orelse self.clock_io;
+        while (true) {
+            var bytes: [16]u8 = undefined;
+            io.random(&bytes);
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            const uid = formatUuid(&bytes, buf);
+            if (!self.cams.contains(uid)) return uid;
         }
-        return error.OutOfMemory;
     }
 
     /// Return a JSON array of all webcam dicts (for notifications and list).
@@ -545,65 +547,32 @@ fn freeWebcam(alloc: std.mem.Allocator, cam: *Webcam) void {
 // Parameter helpers
 // ---------------------------------------------------------------------------
 
-fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .bool => |b| b,
-                .string => |s| std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1"),
-                .integer => |i| i != 0,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
+/// Moonraker `get_boolean`: a bool, or "true"/"false" in any case. Absent → default.
+fn getOptBool(params: std.json.Value, field: []const u8, default_val: bool) error{InvalidParams}!bool {
+    const v = (if (params == .object) params.object.get(field) else null) orelse return default_val;
+    return switch (v) {
+        .bool => |b| b,
+        .string => |s| if (std.ascii.eqlIgnoreCase(s, "true")) true else if (std.ascii.eqlIgnoreCase(s, "false")) false else error.InvalidParams,
+        else => error.InvalidParams,
+    };
 }
 
-fn getOptStr(params: std.json.Value, field: []const u8) ?[]const u8 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return null;
-            return switch (v) {
-                .string => |s| s,
-                .null => null,
-                else => null,
-            };
-        },
-        else => return null,
-    }
+/// Moonraker `get_int`: an integer, an integral float or a decimal string.
+/// Absent → default.
+fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) error{InvalidParams}!i64 {
+    const v = (if (params == .object) params.object.get(field) else null) orelse return default_val;
+    return switch (v) {
+        .integer => |i| i,
+        .float => |f| jv.floatToInt(f) orelse error.InvalidParams,
+        .string => |s| std.fmt.parseInt(i64, s, 10) catch error.InvalidParams,
+        else => error.InvalidParams,
+    };
 }
 
-fn getStr(params: std.json.Value, field: []const u8) error{InvalidParams}![]const u8 {
-    return getOptStr(params, field) orelse error.InvalidParams;
-}
-
-fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return default_val;
-            return switch (v) {
-                .integer => |i| i,
-                .float => |f| jv.floatToInt(f) orelse default_val,
-                .string => |s| std.fmt.parseInt(i64, s, 10) catch default_val,
-                else => default_val,
-            };
-        },
-        else => return default_val,
-    }
-}
-
-fn getOptObj(params: std.json.Value, field: []const u8) std.json.ObjectMap {
-    switch (params) {
-        .object => |obj| {
-            const v = obj.get(field) orelse return .empty;
-            return switch (v) {
-                .object => |o| o,
-                else => .empty,
-            };
-        },
-        else => return .empty,
-    }
+/// `extra_data`: an object, absent → empty.
+fn getOptObj(params: std.json.Value, field: []const u8) error{InvalidParams}!std.json.ObjectMap {
+    const v = (if (params == .object) params.object.get(field) else null) orelse return .empty;
+    return if (v == .object) v.object else error.InvalidParams;
 }
 
 // ---------------------------------------------------------------------------
@@ -624,8 +593,7 @@ pub fn handleWebcamGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
     // Moonraker get_str("name") when neither uid nor name was sent:
     // 400 "No data for argument: name". An unknown name stays 404.
-    if (getOptStr(params, "uid") == null and getOptStr(params, "name") == null) return error.MissingWebcamName;
-    const cam = lookupCamera(c, params, true) orelse return error.NotFound;
+    const cam = try lookupCamera(c, params) orelse return error.NotFound;
     const cam_json = try cam.asJson(alloc);
     var result: std.json.ObjectMap = .empty;
     try result.put(alloc, "webcam", cam_json);
@@ -637,47 +605,37 @@ pub fn handleWebcamGet(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
 pub fn handleWebcamPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
 
-    // Look up existing cam (optional for POST — creates if absent)
-    const existing = lookupCamera(c, params, false);
-
-    if (existing) |cam| {
-        // Update path: check source
-        if (std.mem.eql(u8, cam.source, "config")) {
-            return error.Forbidden;
-        }
-        // Apply updates from params
-        var updated = try cam.dupe(c.gpa);
+    // An unknown uid is a 404; an unknown name creates a webcam.
+    const cam: *Webcam = if (lookupCamera(c, params) catch |err| switch (err) {
+        error.MissingWebcamName => null,
+        else => |e| return e,
+    }) |existing| blk: {
+        if (std.mem.eql(u8, existing.source, "config")) return error.Forbidden;
+        var updated = try existing.dupe(c.gpa);
         errdefer freeWebcam(c.gpa, &updated);
-        try updateCamFromParams(c.gpa, &updated, params, c);
+        try updateCamFromParams(c, &updated, params);
         try updated.validate();
-        freeWebcam(c.gpa, cam);
-        cam.* = updated;
-        c.saveToStore(cam);
-    } else {
-        // Create new webcam
-        const name = try getStr(params, "name");
-        const uid = try c.newUid(alloc);
-        defer alloc.free(uid);
-
-        // Check for name collision
+        freeWebcam(c.gpa, existing);
+        existing.* = updated;
+        break :blk existing;
+    } else blk: {
+        const name = try database.getStr(params, "name");
         if (c.findByName(name) != null) return error.InvalidParams;
-
-        var new_cam = try camFromWebRequest(c.gpa, params, uid);
+        var uid_buf: [36]u8 = undefined;
+        var new_cam = try camFromWebRequest(c.gpa, params, c.newUid(&uid_buf));
         errdefer freeWebcam(c.gpa, &new_cam);
         try new_cam.validate();
 
-        const uid_owned = try c.gpa.dupe(u8, uid);
+        const uid_owned = try c.gpa.dupe(u8, new_cam.uid);
         errdefer c.gpa.free(uid_owned);
-
         try c.order.ensureUnusedCapacity(c.gpa, 1);
         try c.cams.put(c.gpa, uid_owned, new_cam);
         c.order.appendAssumeCapacity(uid_owned);
-        const stored_cam = c.cams.getPtr(uid_owned).?;
-        c.saveToStore(stored_cam);
-    }
+        break :blk c.cams.getPtr(uid_owned).?;
+    };
+    c.saveToStore(cam);
 
-    const cam_ptr = lookupCamera(c, params, true).?;
-    const cam_json = try cam_ptr.asJson(alloc);
+    const cam_json = try cam.asJson(alloc);
     c.emitWebcamsChanged(alloc);
     var result: std.json.ObjectMap = .empty;
     try result.put(alloc, "webcam", cam_json);
@@ -689,7 +647,7 @@ pub fn handleWebcamPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 pub fn handleWebcamDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
 
-    const cam = lookupCamera(c, params, true) orelse return error.NotFound;
+    const cam = try lookupCamera(c, params) orelse return error.NotFound;
 
     if (std.mem.eql(u8, cam.source, "config")) {
         return error.Forbidden;
@@ -716,42 +674,74 @@ pub fn handleWebcamDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.me
     return .{ .object = result };
 }
 
+/// Moonraker probes snapshots with connect_timeout=1 s and request_timeout=1 s.
+const SNAPSHOT_TIMEOUT: std.Io.Duration = .fromSeconds(2);
+/// Host for URLs without a scheme (Moonraker `WebCam._default_host` before
+/// the machine's public address is known).
+const default_host = "http://127.0.0.1";
+
+/// Moonraker `_get_url`: a URL without `scheme://host` is a path on the
+/// default host. Empty stays empty (Moonraker reports "").
+fn resolveUrl(alloc: std.mem.Allocator, url: []const u8) ![]const u8 {
+    if (url.len == 0) return "";
+    if (std.mem.indexOf(u8, url, "://")) |sep| {
+        const scheme_ok = sep > 0 and for (url[0..sep]) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') break false;
+        } else true;
+        if (scheme_ok and sep + 3 < url.len and url[sep + 3] != '/') return alloc.dupe(u8, url);
+    }
+    return std.fmt.allocPrint(alloc, default_host ++ "/{s}", .{std.mem.trimStart(u8, url, "/")});
+}
+
 /// GET an `http(s)://` snapshot URL and report whether it responded with a
 /// success status (Moonraker `_handle_webcam_test`: `snapshot_reachable = not
-/// ret.has_error()`). Returns false for non-http URLs or when no io is wired
-/// (tests). Note: std.http.Client.fetch has no per-request timeout here, mirroring
-/// spoolman's proxy — an unroutable host can block until the OS TCP timeout.
-fn probeSnapshot(io: std.Io, gpa: std.mem.Allocator, url: []const u8) bool {
+/// ret.has_error()`). The request is cancelled after `timeout`.
+fn probeSnapshot(io: std.Io, gpa: std.mem.Allocator, url: []const u8, timeout: std.Io.Duration) bool {
     if (!std.mem.startsWith(u8, url, "http")) return false;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const aa = arena.allocator();
-    var client: std.http.Client = .{ .allocator = aa, .io = io };
-    defer client.deinit();
-    var sink: [4096]u8 = undefined;
-    var disc: std.Io.Writer.Discarding = .init(&sink);
-    const result = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .response_writer = &disc.writer,
-    }) catch return false;
-    return result.status.class() == .success;
+    const Task = struct {
+        fn run(tio: std.Io, a: std.mem.Allocator, u: []const u8, done: *std.Io.Event) bool {
+            defer done.set(tio);
+            var arena = std.heap.ArenaAllocator.init(a);
+            defer arena.deinit();
+            var client: std.http.Client = .{ .allocator = arena.allocator(), .io = tio };
+            defer client.deinit();
+            var sink: [4096]u8 = undefined;
+            var disc: std.Io.Writer.Discarding = .init(&sink);
+            const result = client.fetch(.{
+                .location = .{ .url = u },
+                .method = .GET,
+                .response_writer = &disc.writer,
+            }) catch return false;
+            return result.status.class() == .success;
+        }
+    };
+    var done: std.Io.Event = .unset;
+    var task = io.concurrent(Task.run, .{ io, gpa, url, &done }) catch return false;
+    _ = sleep.untilStopped(io, timeout, &done);
+    return task.cancel(io);
 }
 
 /// POST /server/webcams/test → {"name", "snapshot_reachable", "snapshot_url", "stream_url"}.
-/// Probes the snapshot URL when io is wired and the URL is http(s).
+/// Probes the snapshot URL when io is wired and the URL is http(s), with the
+/// Core lock released for the request.
 pub fn handleWebcamTest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *WebcamCtx = @ptrCast(@alignCast(ctx));
 
-    const cam = lookupCamera(c, params, true) orelse return error.NotFound;
-
-    const reachable = if (c.io) |io| probeSnapshot(io, c.gpa, cam.snapshot_url) else false;
-
+    const cam = try lookupCamera(c, params) orelse return error.NotFound;
+    // Copies: the webcam may change while Core is released.
+    const snapshot_url = try resolveUrl(alloc, cam.snapshot_url);
     var result: std.json.ObjectMap = .empty;
-    try result.put(alloc, "name", .{ .string = cam.name });
+    try result.put(alloc, "name", .{ .string = try alloc.dupe(u8, cam.name) });
+    try result.put(alloc, "snapshot_url", .{ .string = snapshot_url });
+    try result.put(alloc, "stream_url", .{ .string = try resolveUrl(alloc, cam.stream_url) });
+
+    var reachable = false;
+    if (c.io) |io| if (std.mem.startsWith(u8, snapshot_url, "http")) {
+        c.bus.core.unlock(io);
+        defer c.bus.core.lock(io);
+        reachable = probeSnapshot(io, c.gpa, snapshot_url, SNAPSHOT_TIMEOUT);
+    };
     try result.put(alloc, "snapshot_reachable", .{ .bool = reachable });
-    try result.put(alloc, "snapshot_url", .{ .string = cam.snapshot_url });
-    try result.put(alloc, "stream_url", .{ .string = cam.stream_url });
     return .{ .object = result };
 }
 
@@ -759,86 +749,63 @@ pub fn handleWebcamTest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Look up a webcam by uid (preferred) or name. Returns null if not found.
-/// When `required` is true and not found, caller should return error.NotFound.
-fn lookupCamera(c: *WebcamCtx, params: std.json.Value, _: bool) ?*Webcam {
-    if (getOptStr(params, "uid")) |uid| {
-        return c.findByUid(uid);
-    }
-    if (getOptStr(params, "name")) |name| {
-        return c.findByName(name);
-    }
-    return null;
+/// Moonraker `_lookup_camera`: a `uid` param must name an existing webcam
+/// (else 404); otherwise `name` selects one (null when absent from the table).
+/// Neither param: `error.MissingWebcamName`.
+fn lookupCamera(c: *WebcamCtx, params: std.json.Value) !?*Webcam {
+    if (try database.getOptStr(params, "uid")) |uid| return c.findByUid(uid) orelse error.NotFound;
+    const name = (try database.getOptStr(params, "name")) orelse return error.MissingWebcamName;
+    return c.findByName(name);
 }
 
 /// Create a new Webcam from web request params (from_web_request equivalent).
 fn camFromWebRequest(alloc: std.mem.Allocator, params: std.json.Value, uid: []const u8) !Webcam {
-    const name = try getStr(params, "name");
-    const stream_url = try getStr(params, "stream_url");
     return (Webcam{
-        .name = name,
-        .enabled = getOptBool(params, "enabled", true),
-        .icon = getOptStr(params, "icon") orelse "mdiWebcam",
-        .aspect_ratio = getOptStr(params, "aspect_ratio") orelse "4:3",
-        .target_fps = getOptInt(params, "target_fps", 15),
-        .target_fps_idle = getOptInt(params, "target_fps_idle", 5),
-        .location = getOptStr(params, "location") orelse "printer",
-        .service = getOptStr(params, "service") orelse "mjpegstreamer",
-        .stream_url = stream_url,
-        .snapshot_url = getOptStr(params, "snapshot_url") orelse "",
-        .flip_horizontal = getOptBool(params, "flip_horizontal", false),
-        .flip_vertical = getOptBool(params, "flip_vertical", false),
-        .rotation = getOptInt(params, "rotation", 0),
+        .name = try database.getStr(params, "name"),
+        .enabled = try getOptBool(params, "enabled", true),
+        .icon = try database.getOptStr(params, "icon") orelse "mdiWebcam",
+        .aspect_ratio = try database.getOptStr(params, "aspect_ratio") orelse "4:3",
+        .target_fps = try getOptInt(params, "target_fps", 15),
+        .target_fps_idle = try getOptInt(params, "target_fps_idle", 5),
+        .location = try database.getOptStr(params, "location") orelse "printer",
+        .service = try database.getOptStr(params, "service") orelse "mjpegstreamer",
+        .stream_url = try database.getStr(params, "stream_url"),
+        .snapshot_url = try database.getOptStr(params, "snapshot_url") orelse "",
+        .flip_horizontal = try getOptBool(params, "flip_horizontal", false),
+        .flip_vertical = try getOptBool(params, "flip_vertical", false),
+        .rotation = try getOptInt(params, "rotation", 0),
         .source = "database",
-        .extra_data = getOptObj(params, "extra_data"),
+        .extra_data = try getOptObj(params, "extra_data"),
         .uid = uid,
     }).dupe(alloc);
 }
 
-/// Apply updates from POST params to an existing webcam (update equivalent).
-fn updateCamFromParams(alloc: std.mem.Allocator, cam: *Webcam, params: std.json.Value, c: *WebcamCtx) !void {
+/// Apply every non-protected field present in `params` (Moonraker
+/// `WebCam.update`; `source` and `uid` are protected). `cam` is a private
+/// copy; the caller frees it on error.
+fn updateCamFromParams(c: *WebcamCtx, cam: *Webcam, params: std.json.Value) !void {
     inline for (.{ "name", "icon", "aspect_ratio", "location", "service", "stream_url", "snapshot_url" }) |field| {
-        if (getOptStr(params, field)) |value| {
+        if (try database.getOptStr(params, field)) |value| {
             if (!std.mem.eql(u8, @field(cam, field), value)) {
                 if (comptime std.mem.eql(u8, field, "name")) {
                     if (c.findByName(value) != null) return error.InvalidParams;
                 }
-                const owned = try alloc.dupe(u8, value);
-                alloc.free(@field(cam, field));
+                const owned = try c.gpa.dupe(u8, value);
+                c.gpa.free(@field(cam, field));
                 @field(cam, field) = owned;
             }
         }
     }
-
-    // Numeric/bool fields
-    switch (params) {
-        .object => |obj| {
-            if (obj.get("enabled")) |v| cam.enabled = switch (v) {
-                .bool => |b| b,
-                else => cam.enabled,
-            };
-            if (obj.get("flip_horizontal")) |v| cam.flip_horizontal = switch (v) {
-                .bool => |b| b,
-                else => cam.flip_horizontal,
-            };
-            if (obj.get("flip_vertical")) |v| cam.flip_vertical = switch (v) {
-                .bool => |b| b,
-                else => cam.flip_vertical,
-            };
-            if (obj.get("target_fps")) |v| cam.target_fps = switch (v) {
-                .integer => |i| i,
-                else => cam.target_fps,
-            };
-            if (obj.get("target_fps_idle")) |v| cam.target_fps_idle = switch (v) {
-                .integer => |i| i,
-                else => cam.target_fps_idle,
-            };
-            if (obj.get("rotation")) |v| cam.rotation = switch (v) {
-                .integer => |i| i,
-                else => cam.rotation,
-            };
-        },
-        else => {},
+    inline for (.{ "enabled", "flip_horizontal", "flip_vertical" }) |field| {
+        @field(cam, field) = try getOptBool(params, field, @field(cam, field));
+    }
+    inline for (.{ "target_fps", "target_fps_idle", "rotation" }) |field| {
+        @field(cam, field) = try getOptInt(params, field, @field(cam, field));
+    }
+    if (params == .object and params.object.contains("extra_data")) {
+        const extra = (try jv.deepCopy(c.gpa, .{ .object = try getOptObj(params, "extra_data") })).object;
+        jv.free(c.gpa, .{ .object = cam.extra_data });
+        cam.extra_data = extra;
     }
 }
 
@@ -895,20 +862,17 @@ fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     return p.value;
 }
 
-// Minimal null bus for tests that don't need notifications.
-// IMPORTANT: NullBus must not be moved after init (contains self-referential pointers).
-// Always store in a variable and pass a pointer to it.
+// Minimal bus for tests that don't need notifications. Initialise in place:
+// the bus points at the core and connection list beside it.
 const NullBus = struct {
     core: @import("../server/core.zig").Core,
     conns_obj: @import("../server/connections.zig").Connections,
     bus: NotifyBus,
 
-    fn init(alloc: std.mem.Allocator) NullBus {
-        var nb: NullBus = undefined;
-        nb.core = @import("../server/core.zig").Core.init();
-        nb.conns_obj = @import("../server/connections.zig").Connections.init(alloc, &nb.core);
-        nb.bus = NotifyBus.init(&nb.core, &nb.conns_obj);
-        return nb;
+    fn init(nb: *NullBus, alloc: std.mem.Allocator) void {
+        nb.core = .init();
+        nb.conns_obj = .init(alloc, &nb.core);
+        nb.bus = .init(&nb.core, &nb.conns_obj);
     }
 };
 
@@ -959,7 +923,8 @@ test "webcam copies free partial fields and nested extra data" {
 }
 
 test "webcam extra data survives its request and invalid updates preserve the record" {
-    var nb = NullBus.init(testing.allocator);
+    var nb: NullBus = undefined;
+    nb.init(testing.allocator);
     var ctx = try makeCtx(testing.allocator, &nb);
     defer ctx.deinit();
     {
@@ -995,7 +960,8 @@ test "addFromConfig: config webcam is listed and cannot be overwritten" {
     const a = arena.allocator();
     var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
     defer db.deinit();
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try WebcamCtx.init(a, std.testing.io, db.dataStore(), &nb.bus);
     defer ctx.deinit();
 
@@ -1031,7 +997,8 @@ test "handleWebcamList: empty store returns empty array" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1047,7 +1014,8 @@ test "webcam CRUD: create, get, update, delete round-trip" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(ctx_alloc);
+    var nb: NullBus = undefined;
+    nb.init(ctx_alloc);
     var ctx = try WebcamCtx.init(ctx_alloc, std.testing.io, NullDS.dataStore(), &nb.bus);
     defer ctx.deinit();
 
@@ -1084,7 +1052,8 @@ test "webcam: get non-existent cam → NotFound" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1099,7 +1068,8 @@ test "webcam: invalid rotation → InvalidParams on create" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1112,7 +1082,8 @@ test "webcam: invalid aspect_ratio → InvalidParams on create" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1125,7 +1096,8 @@ test "webcam: test endpoint returns snapshot_reachable=false" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1142,10 +1114,10 @@ test "probeSnapshot: non-http URLs are unreachable (no network attempt)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expect(!probeSnapshot(io, testing.allocator, "rtsp://example/stream"));
-    try testing.expect(!probeSnapshot(io, testing.allocator, "ftp://host/x"));
-    try testing.expect(!probeSnapshot(io, testing.allocator, ""));
-    try testing.expect(!probeSnapshot(io, testing.allocator, "webcam/?action=snapshot"));
+    try testing.expect(!probeSnapshot(io, testing.allocator, "rtsp://example/stream", .fromMilliseconds(100)));
+    try testing.expect(!probeSnapshot(io, testing.allocator, "ftp://host/x", .fromMilliseconds(100)));
+    try testing.expect(!probeSnapshot(io, testing.allocator, "", .fromMilliseconds(100)));
+    try testing.expect(!probeSnapshot(io, testing.allocator, "webcam/?action=snapshot", .fromMilliseconds(100)));
 }
 
 test "fuzz probeSnapshot: non-http schemes never crash and never reach the network" {
@@ -1159,7 +1131,7 @@ test "fuzz probeSnapshot: non-http schemes never crash and never reach the netwo
             // Force a non-http scheme so the guard returns before any fetch.
             var url: [40]u8 = undefined;
             const wrote = std.fmt.bufPrint(&url, "zz://{s}", .{tail[0..@min(tail.len, 30)]}) catch return;
-            try testing.expect(!probeSnapshot(io, testing.allocator, wrote));
+            try testing.expect(!probeSnapshot(io, testing.allocator, wrote, .fromMilliseconds(100)));
         }
     }.run, .{});
 }
@@ -1169,7 +1141,8 @@ test "webcam: POST missing name → InvalidParams" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1182,7 +1155,8 @@ test "webcam: POST missing stream_url → InvalidParams" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var nb = NullBus.init(a);
+    var nb: NullBus = undefined;
+    nb.init(a);
     var ctx = try makeCtx(a, &nb);
     defer ctx.deinit();
 
@@ -1199,7 +1173,8 @@ test "registerWebcam: wires routes and JSON-RPC methods" {
     var reg = Registry.init(alloc, &d);
     defer reg.deinit();
 
-    var nb = NullBus.init(alloc);
+    var nb: NullBus = undefined;
+    nb.init(alloc);
     var ctx = try makeCtx(alloc, &nb);
     defer ctx.deinit();
 
@@ -1230,7 +1205,8 @@ test "fuzz handleWebcamList: never crashes" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var nb = NullBus.init(a);
+            var nb: NullBus = undefined;
+            nb.init(a);
             var ctx = makeCtx(a, &nb) catch return;
             defer ctx.deinit();
             var buf: [4]u8 = undefined;
@@ -1246,7 +1222,8 @@ test "fuzz handleWebcamPost: arbitrary params never crash" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var nb = NullBus.init(a);
+            var nb: NullBus = undefined;
+            nb.init(a);
             var ctx = makeCtx(a, &nb) catch return;
             defer ctx.deinit();
 
@@ -1278,7 +1255,8 @@ test "fuzz handleWebcamGet: arbitrary params never crash" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var nb = NullBus.init(a);
+            var nb: NullBus = undefined;
+            nb.init(a);
             var ctx = makeCtx(a, &nb) catch return;
             defer ctx.deinit();
 
@@ -1308,7 +1286,8 @@ test "fuzz handleWebcamDelete: arbitrary params never crash" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var nb = NullBus.init(a);
+            var nb: NullBus = undefined;
+            nb.init(a);
             var ctx = makeCtx(a, &nb) catch return;
             defer ctx.deinit();
 
@@ -1339,7 +1318,8 @@ test "fuzz handleWebcamTest: arbitrary params never crash" {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            var nb = NullBus.init(a);
+            var nb: NullBus = undefined;
+            nb.init(a);
             var ctx = makeCtx(a, &nb) catch return;
             defer ctx.deinit();
 
@@ -1411,4 +1391,130 @@ test "fuzz Webcam.validate: never panics on arbitrary field values" {
             _ = cam.validate() catch {};
         }
     }.run, .{});
+}
+
+test "webcam POST: an unknown uid is NotFound and creates nothing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nb: NullBus = undefined;
+    nb.init(a);
+    var ctx = try makeCtx(testing.allocator, &nb);
+    defer ctx.deinit();
+
+    const params = try mkParams(a, "{\"uid\":\"00000000-0000-4000-8000-000000000000\",\"name\":\"cam\",\"stream_url\":\"x\"}");
+    try testing.expectError(error.NotFound, handleWebcamPost(@ptrCast(&ctx), params, a));
+    try testing.expectError(error.NotFound, handleWebcamGet(@ptrCast(&ctx), params, a));
+    try testing.expectEqual(@as(u32, 0), ctx.cams.count());
+    try testing.expectEqual(@as(usize, 0), ctx.order.items.len);
+}
+
+test "webcam POST: new uids are UUID4 and updates apply every field" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nb: NullBus = undefined;
+    nb.init(a);
+    var ctx = try makeCtx(testing.allocator, &nb);
+    defer ctx.deinit();
+
+    const created = try handleWebcamPost(@ptrCast(&ctx), try mkParams(a, "{\"name\":\"cam\",\"stream_url\":\"/s\",\"enabled\":\"false\",\"target_fps\":\"20\"}"), a);
+    const uid = created.object.get("webcam").?.object.get("uid").?.string;
+    var bytes: [16]u8 = undefined;
+    try parseUuid(uid, &bytes);
+    try testing.expectEqual(@as(usize, 36), uid.len);
+    try testing.expectEqual(@as(u8, 0x40), bytes[6] & 0xf0);
+    try testing.expectEqual(@as(u8, 0x80), bytes[8] & 0xc0);
+    const cam = ctx.findByUid(uid).?;
+    try testing.expect(!cam.enabled);
+    try testing.expectEqual(@as(i64, 20), cam.target_fps);
+
+    const update = try std.fmt.allocPrint(a, "{{\"uid\":\"{s}\",\"enabled\":\"TRUE\",\"rotation\":\"90\",\"extra_data\":{{\"k\":[1]}}}}", .{uid});
+    _ = try handleWebcamPost(@ptrCast(&ctx), try mkParams(a, update), a);
+    try testing.expect(cam.enabled);
+    try testing.expectEqual(@as(i64, 90), cam.rotation);
+    try testing.expectEqual(@as(i64, 1), cam.extra_data.get("k").?.array.items[0].integer);
+
+    // Wrong types are a 400 and leave the record unchanged.
+    for ([_][]const u8{ "\"enabled\":\"maybe\"", "\"target_fps\":\"fast\"", "\"extra_data\":5", "\"icon\":7" }) |field| {
+        const body = try std.fmt.allocPrint(a, "{{\"uid\":\"{s}\",{s}}}", .{ uid, field });
+        try testing.expectError(error.InvalidParams, handleWebcamPost(@ptrCast(&ctx), try mkParams(a, body), a));
+    }
+    try testing.expect(cam.enabled);
+    try testing.expectEqualStrings("mdiWebcam", cam.icon);
+    try testing.expectEqual(@as(i64, 1), cam.extra_data.get("k").?.array.items[0].integer);
+}
+
+test "addFromConfig: hides a same-name database webcam without deleting it and lists config first" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    defer db.deinit();
+    var nb: NullBus = undefined;
+    nb.init(a);
+    {
+        var ctx = try WebcamCtx.init(testing.allocator, std.testing.io, db.dataStore(), &nb.bus);
+        defer ctx.deinit();
+        _ = try handleWebcamPost(@ptrCast(&ctx), try mkParams(a, "{\"name\":\"db_cam\",\"stream_url\":\"/a\"}"), a);
+        _ = try handleWebcamPost(@ptrCast(&ctx), try mkParams(a, "{\"name\":\"shared\",\"stream_url\":\"/b\"}"), a);
+    }
+    var ctx = try WebcamCtx.init(testing.allocator, std.testing.io, db.dataStore(), &nb.bus);
+    defer ctx.deinit();
+    try ctx.addFromConfig(.{ .name = "shared", .stream_url = "/config" });
+    try ctx.addFromConfig(.{ .name = "second", .stream_url = "/config2" });
+
+    const list = (try handleWebcamList(@ptrCast(&ctx), .null, a)).object.get("webcams").?.array.items;
+    try testing.expectEqual(@as(usize, 3), list.len);
+    try testing.expectEqualStrings("shared", list[0].object.get("name").?.string);
+    try testing.expectEqualStrings("config", list[0].object.get("source").?.string);
+    try testing.expectEqualStrings("second", list[1].object.get("name").?.string);
+    try testing.expectEqualStrings("db_cam", list[2].object.get("name").?.string);
+    // The hidden row is still in the database.
+    try testing.expectEqual(@as(usize, 2), (try db.dataStore().getNamespace(a, "webcams")).object.count());
+    // Deleting a database webcam keeps the config webcams at the front.
+    _ = try handleWebcamDelete(@ptrCast(&ctx), try mkParams(a, "{\"name\":\"db_cam\"}"), a);
+    try testing.expectEqual(@as(usize, 2), ctx.config_count);
+    try testing.expectEqual(@as(usize, 2), ctx.order.items.len);
+}
+
+test "resolveUrl: paths use the default host like Moonraker _get_url" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("http://127.0.0.1/webcam/?action=snapshot", try resolveUrl(a, "/webcam/?action=snapshot"));
+    try testing.expectEqualStrings("http://127.0.0.1/webcam", try resolveUrl(a, "webcam"));
+    try testing.expectEqualStrings("http://cam:8080/x", try resolveUrl(a, "http://cam:8080/x"));
+    try testing.expectEqualStrings("rtsp://cam/stream", try resolveUrl(a, "rtsp://cam/stream"));
+    try testing.expectEqualStrings("http://127.0.0.1/a://b", try resolveUrl(a, "/a://b"));
+    try testing.expectEqualStrings("", try resolveUrl(a, ""));
+}
+
+test "fuzz resolveUrl: output is empty or carries a scheme and host" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [48]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const len = smith.valueRangeAtMostWithHash(u8, 0, buf.len, 1);
+            const out = try resolveUrl(testing.allocator, buf[0..len]);
+            defer if (out.len > 0) testing.allocator.free(out);
+            if (len == 0) return testing.expectEqual(@as(usize, 0), out.len);
+            try testing.expect(std.mem.indexOf(u8, out, "://") != null);
+        }
+    }.run, .{});
+}
+
+test "probeSnapshot: a stalled server is cancelled after the timeout" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    // Listening but never accepting: connect succeeds, no response arrives.
+    var ip = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try ip.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/snap", .{server.socket.address.getPort()});
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    try testing.expect(!probeSnapshot(io, testing.allocator, url, .fromMilliseconds(200)));
+    try testing.expect(start.untilNow(io).raw.toMilliseconds() < 5000);
 }
