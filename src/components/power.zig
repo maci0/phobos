@@ -606,7 +606,7 @@ fn alwaysPrinting(_: *anyopaque) bool {
 /// Loopback HTTP device double: accepts one connection, reads the request
 /// head, optionally takes `core` (blocks while a handler holds it), then
 /// writes `reply` (or nothing when null) and closes.
-const DeviceDouble = struct {
+pub const DeviceDouble = struct {
     io: std.Io,
     server: std.Io.net.Server,
     reply: ?[]const u8,
@@ -614,16 +614,16 @@ const DeviceDouble = struct {
     request_line: [128]u8 = undefined,
     request_len: usize = 0,
 
-    fn bind(io: std.Io, reply: ?[]const u8) !DeviceDouble {
+    pub fn bind(io: std.Io, reply: ?[]const u8) !DeviceDouble {
         var ip = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
         return .{ .io = io, .server = try ip.listen(io, .{ .reuse_address = true }), .reply = reply };
     }
 
-    fn url(self: *const DeviceDouble, buf: []u8, path: []const u8) ![]const u8 {
+    pub fn url(self: *const DeviceDouble, buf: []u8, path: []const u8) ![]const u8 {
         return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ self.server.socket.address.getPort(), path });
     }
 
-    fn serveOne(self: *DeviceDouble) void {
+    pub fn serveOne(self: *DeviceDouble) void {
         const stream = self.server.accept(self.io) catch return;
         defer stream.close(self.io);
         var rbuf: [1024]u8 = undefined;
@@ -1393,12 +1393,21 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
     }
 }
 
-test "driveGpio: no-op without pin or io (no crash)" {
+test "driveGpio: writes nothing without io or without a pin" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
     var ctx = PowerCtx.init(testing.allocator, null);
     defer ctx.deinit();
-    // No io, no pin → must not crash.
-    try ctx.addDevice(.{ .name = "d", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false });
-    try ctx.driveGpio(ctx.findDevice("d").?, true);
+    ctx.gpio_root = root;
+    try ctx.addDevice(.{ .name = "pinned", .type_str = "gpio", .state = "off", .gpio_pin = 5 });
+    try ctx.addDevice(.{ .name = "bare", .type_str = "gpio", .state = "off" });
+    try ctx.driveGpio(ctx.findDevice("pinned").?, true); // io not wired
+    ctx.setIo(io);
+    try ctx.driveGpio(ctx.findDevice("bare").?, true); // no pin
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "export", .{}));
 }
 
 test "power devices preserve ownership on replacement and allocation failure" {

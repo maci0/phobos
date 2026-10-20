@@ -1004,26 +1004,54 @@ pub const App = struct {
                 if (!std.mem.startsWith(u8, sect, "wled ")) continue;
                 const strip_name = sect["wled ".len..];
                 if (strip_name.len == 0) continue;
-                const chain_count: i64 = cfg.getInt(sect, "chain_count") catch @as(i64, 1);
-                const count = std.math.cast(usize, chain_count) orelse continue;
-                const initial_preset: i64 = cfg.getInt(sect, "initial_preset") catch @as(i64, -1);
-                const initial_red: f64 = cfg.getFloat(sect, "initial_red") catch 0.5;
-                const initial_green: f64 = cfg.getFloat(sect, "initial_green") catch 0.5;
-                const initial_blue: f64 = cfg.getFloat(sect, "initial_blue") catch 0.5;
-                const initial_white: f64 = cfg.getFloat(sect, "initial_white") catch 0.5;
-                const address: ?[]const u8 = cfg.get(sect, "address");
-                const port: u16 = clampInt(u16, cfg.getInt(sect, "port") catch 80, 80);
-                const protocol: ?[]const u8 = cfg.get(sect, "protocol");
-                // Build initial_colors as JSON array [R,G,B,W].
-                const initial_colors = std.fmt.allocPrint(self.alloc, "[{d},{d},{d},{d}]", .{ initial_red, initial_green, initial_blue, initial_white }) catch continue;
-                defer self.alloc.free(initial_colors);
-                // Build chain_data with color_size=4 per node.
-                const color_size: usize = 4;
-                const chain_data_len = std.math.mul(usize, count, color_size) catch continue;
-                const chain_data = self.alloc.alloc(u8, chain_data_len) catch continue;
-                defer self.alloc.free(chain_data);
-                @memset(chain_data, 0);
-                self.wled_ctx.addStrip(strip_name, chain_count, chain_data, initial_preset, initial_preset, initial_colors, false, address, port, protocol) catch |err| {
+                // Moonraker wled.py: `type` http (address/port/protocol) or
+                // serial (serial/baud); other types fail the strip.
+                const strip_type = cfg.get(sect, "type") orelse "http";
+                var url_buf: [512]u8 = undefined;
+                const transport: wled_component.Transport = if (std.ascii.eqlIgnoreCase(strip_type, "http")) http: {
+                    const address = cfg.get(sect, "address") orelse {
+                        std.debug.print("phobos: warning: wled strip '{s}': address required, strip not added\n", .{strip_name});
+                        continue;
+                    };
+                    const port: u16 = clampInt(u16, cfg.getInt(sect, "port") catch 80, 80);
+                    const protocol = cfg.get(sect, "protocol") orelse "http";
+                    break :http .{ .http = std.fmt.bufPrint(&url_buf, "{s}://{s}:{d}/json", .{ protocol, address, port }) catch {
+                        std.debug.print("phobos: warning: wled strip '{s}': address too long, strip not added\n", .{strip_name});
+                        continue;
+                    } };
+                } else if (std.ascii.eqlIgnoreCase(strip_type, "serial")) serial: {
+                    const path = cfg.get(sect, "serial") orelse {
+                        std.debug.print("phobos: warning: wled strip '{s}': serial required, strip not added\n", .{strip_name});
+                        continue;
+                    };
+                    const baud = std.math.cast(u32, cfg.getInt(sect, "baud") catch wled_component.default_baud) orelse {
+                        std.debug.print("phobos: warning: wled strip '{s}': invalid baud, strip not added\n", .{strip_name});
+                        continue;
+                    };
+                    break :serial .{ .serial = .{ .path = path, .baud = baud } };
+                } else {
+                    std.debug.print("phobos: warning: wled strip '{s}': unsupported type '{s}', strip not added\n", .{ strip_name, strip_type });
+                    continue;
+                };
+                const timeout_ms = std.math.lossyCast(i64, (cfg.getFloat(sect, "timeout") catch 2.0) * std.time.ms_per_s);
+                const chain_count = std.math.cast(usize, cfg.getInt(sect, "chain_count") catch 1) orelse 0;
+                if (timeout_ms <= 0 or chain_count == 0) {
+                    std.debug.print("phobos: warning: wled strip '{s}': chain_count and timeout must be positive, strip not added\n", .{strip_name});
+                    continue;
+                }
+                self.wled_ctx.addStrip(.{
+                    .name = strip_name,
+                    .chain_count = chain_count,
+                    .initial_preset = cfg.getInt(sect, "initial_preset") catch -1,
+                    .initial_color = .{
+                        cfg.getFloat(sect, "initial_red") catch 0.5,
+                        cfg.getFloat(sect, "initial_green") catch 0.5,
+                        cfg.getFloat(sect, "initial_blue") catch 0.5,
+                        cfg.getFloat(sect, "initial_white") catch 0.5,
+                    },
+                    .transport = transport,
+                    .timeout = .fromMilliseconds(timeout_ms),
+                }) catch |err| {
                     std.debug.print("phobos: warning: failed to add wled strip '{s}': {}\n", .{ strip_name, err });
                 };
             }
@@ -1499,6 +1527,9 @@ pub const App = struct {
         self.power_ctx.applyInitialStates();
         // Handlers hold Core from here on; device HTTP releases it.
         self.power_ctx.core = self.core;
+        self.wled_ctx.setIo(io);
+        self.wled_ctx.applyInitialStates();
+        self.wled_ctx.core = self.core;
         self.sensor_ctx.setIo(io);
         // Wire io into the job queue so it can emit notify_job_queue_changed.
         self.job_queue_ctx.setIo(io);
@@ -2139,6 +2170,46 @@ test "setConfig [power] reads pin and protocol URLs without leaking" {
     try std.testing.expectEqualStrings("http://10.0.0.9/relay/2?turn=on", plug.on_url.?);
     try std.testing.expectEqualStrings("http://10.0.0.9/relay/2", plug.status_url.?);
     try std.testing.expect(app.power_ctx.findDevice("bad") == null);
+}
+
+test "setConfig [wled] builds http and serial transports and rejects bad strips" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    const body =
+        \\[wled desk]
+        \\address: 10.0.0.5
+        \\chain_count: 3
+        \\timeout: 0.5
+        \\
+        \\[wled shelf]
+        \\type: serial
+        \\serial: /dev/ttyWLED
+        \\
+        \\[wled nowhere]
+        \\type: serial
+        \\
+        \\[wled odd]
+        \\type: dmx
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+
+    var app = try testApp(alloc, io, &tmp);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    const desk = app.wled_ctx.findStrip("desk").?;
+    try std.testing.expectEqualStrings("http://10.0.0.5:80/json", desk.transport.http);
+    try std.testing.expectEqual(@as(usize, 3), desk.chain_count);
+    try std.testing.expectEqual(@as(i64, 500), desk.timeout.toMilliseconds());
+    const shelf = app.wled_ctx.findStrip("shelf").?;
+    try std.testing.expectEqualStrings("/dev/ttyWLED", shelf.transport.serial.path);
+    try std.testing.expectEqual(wled_component.default_baud, shelf.transport.serial.baud);
+    try std.testing.expect(app.wled_ctx.findStrip("nowhere") == null);
+    try std.testing.expect(app.wled_ctx.findStrip("odd") == null);
 }
 
 test "setConfig [paneldue] processPanelDueLine strips checksummed file commands" {

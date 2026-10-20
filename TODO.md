@@ -366,10 +366,11 @@ _norm_structure_compare array item masking (Python).
   `server.mqtt.publish` sends to the broker; `server.mqtt.subscribe` waits for
   the first broker message; QoS 1 and 2 handshakes; JSON-RPC over the API
   topics with `mqtt_timestamp` duplicate screening. Gaps are listed below.
-- **power/wled/td1** — DONE: power HTTP-URL devices send real GET, `type: gpio`
-  drives the sysfs line (gpio_sysfs.zig); td1 reads CSV over UART (serial.zig);
-  wled drives serial strips and HTTP strips via `std.http.Client`. Remaining:
-  other vendor power backends + on-hardware verification.
+- **power/wled/td1** — power HTTP-URL devices send real GET, `type: gpio`
+  drives the sysfs `pin` (gpio_sysfs.zig); td1 reads CSV over UART (serial.zig);
+  wled `type: http` and `type: serial` strips send WLED JSON state. Device I/O
+  runs with Core released. Remaining: other vendor power backends, the gaps
+  listed under Known Moonraker gaps, and on-hardware verification.
 - **spoolman/announcements** — ETag/If-Modified-Since conditional GET is DONE
   (http_get.zig). Real RSS fetch + background periodic refresh timer (30 min,
   atomically stoppable); notify_announcement_update + notify_spoolman_status_changed
@@ -446,4 +447,6 @@ Keep the coverage gate at 100% and the full suite green after every step.
 - power: `off_when_shutdown`, `on_when_job_queued`, `bound_services`, `restart_klipper_when_powered`, `restrict_action_processing` and `timer` are not parsed or acted on (`src/components/power.zig`).
 - power: the Klippy remote method `set_device_power` is not registered (`src/components/power.zig`); see the remote-method entry under wled.
 - power: generic `http` devices have no `request_template`/`response_template`; status replies use a fixed on/off heuristic (`power.parseStatus`).
+- wled, power: `set_wled_state`, `set_wled` and `set_device_power` are not registered as Klippy remote methods. `KlippyCtx` has one `remote_handler` that Feather owns and calls it on the reader thread, so device I/O there would stall the status drain; it needs per-component routing and dispatch off the reader (`src/components/klippy_connection.zig`). `set_wled_state`/`set_wled` stay client JSON-RPC methods (`src/components/wled.zig`).
+- wled: startup sends the initial state once; Moonraker first queries `{"v":true}` and retries failed strips for 120 s. HTTP sends make one attempt (Moonraker 3), and serial strips open the port per command without reading replies (`src/components/wled.zig`).
 - power: device and printing-lock failures map to `Internal Server Error`/`Printer is busy`, not Moonraker's 400 messages (`src/jsonrpc.zig`, `src/http_transport.zig`).

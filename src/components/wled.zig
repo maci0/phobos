@@ -11,10 +11,18 @@
 //!   GET  /machine/wled/strip   → machine.wled.get_strip (single)
 //!   POST /machine/wled/strip   → machine.wled.post_strip (single)
 //!
-//! HTTP WLED strips (with an `address` config) send real HTTP POST requests to
-//! the WLED JSON API (`/json`). Serial strips (with a `serial_path`, set via
-//! setStripSerial) write the newline-terminated JSON command to the character
-//! device through `serial.zig`. Strips with neither remain in-memory only.
+//! plus `set_wled_state` and `set_wled` as client JSON-RPC methods. Moonraker
+//! registers those two as Klippy remote methods; phobos does not (TODO.md).
+//!
+//! `type: http` strips POST WLED JSON state to `{protocol}://{address}:{port}/json`
+//! within the strip `timeout`; `type: serial` strips write the same JSON to the
+//! `serial` device at `baud`. A strip added without a transport keeps its state
+//! in memory only. The state rules (wled_on, wled_off, wled_control, set_wled,
+//! _set_initial_state) follow wled.py. A failed send sets `error` and fails the
+//! request.
+//!
+//! CORE LOCK. Handlers run under Core; a send releases it for the device I/O and
+//! re-resolves the strip by name afterwards.
 //!
 //! STRIPS FROM CONFIG. Without `[wled <name>]` config sections (the spine
 //! carries none), the strips map is empty and the list endpoint returns {}.
@@ -23,9 +31,40 @@
 const std = @import("std");
 const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
+const Core = @import("../server/core.zig").Core;
+const power = @import("power.zig");
 const serial_mod = @import("serial.zig");
 
 const Registry = registry.Registry;
+
+/// Moonraker StripHttp `timeout` default (wled.py).
+pub const default_timeout: std.Io.Duration = .fromSeconds(2);
+/// Moonraker StripSerial default `baud` (wled.py `from_config(config, 115200)`).
+pub const default_baud: u32 = 115200;
+/// WLED answers a state POST with `{"success":true}`; a longer reply is an error.
+const max_reply_bytes = 256;
+
+pub const Error = error{ NotFound, OutOfMemory, DeviceRequestFailed };
+
+/// How a strip's JSON state reaches the device.
+pub const Transport = union(enum) {
+    /// No device: state is kept in memory only.
+    none,
+    /// WLED JSON API URL, `{protocol}://{address}:{port}/json`.
+    http: []const u8,
+    serial: struct { path: []const u8, baud: u32 },
+};
+
+/// Strip configuration; `addStrip` copies every string.
+pub const Config = struct {
+    name: []const u8,
+    chain_count: usize = 1,
+    initial_preset: i64 = -1,
+    /// initial_red, initial_green, initial_blue, initial_white.
+    initial_color: [4]f64 = @splat(0.5),
+    transport: Transport = .none,
+    timeout: std.Io.Duration = default_timeout,
+};
 
 // ---------------------------------------------------------------------------
 // Strip state
@@ -36,139 +75,107 @@ pub const Strip = struct {
     pub const color_size: usize = 4;
 
     name: []const u8,
-    status: []const u8, // "on" | "off"
-    chain_count: i64,
+    on: bool = false,
+    chain_count: usize,
     chain_data: []u8,
     preset: i64,
     initial_preset: i64,
-    initial_colors: ?[]const u8,
-    brightness: i64,
-    intensity: i64,
-    speed: i64,
-    error_state: ?[]const u8,
-    send_full_chain_data: bool,
-    /// HTTP WLED device address (hostname or IP). When non-null, on/off/control
-    /// send real HTTP commands to the WLED JSON API; when null, the strip is
-    /// serial-driven (sendWledBody writes the JSON line over serial.zig).
-    address: ?[]const u8 = null,
-    port: u16 = 80,
-    protocol: []const u8 = "http",
-    /// Serial-strip device path (Moonraker `serial:`). When non-null, WLED JSON
-    /// commands are written to this character device instead of HTTP.
-    serial_path: ?[]const u8 = null,
-    /// Serial baud rate (Moonraker default 115200).
-    serial_baud: u32 = 115200,
+    initial_color: [4]f64,
+    brightness: i64 = 255,
+    intensity: i64 = -1,
+    speed: i64 = -1,
+    error_state: ?[]const u8 = null,
+    send_full_chain_data: bool = true,
+    transport: Transport,
+    timeout: std.Io.Duration,
 
     fn deinit(self: *Strip, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
-        alloc.free(self.status);
         alloc.free(self.chain_data);
-        if (self.initial_colors) |value| alloc.free(value);
         if (self.error_state) |value| alloc.free(value);
-        if (self.address) |value| alloc.free(value);
-        if (!std.mem.eql(u8, self.protocol, "http")) alloc.free(self.protocol);
-        if (self.serial_path) |value| alloc.free(value);
-    }
-
-    /// Moonraker: wled_on(preset). Sets send_full_chain_data=true and
-    /// resets brightness/intensity/speed to -1 (unknown until read back).
-    /// Does NOT set self.status — the caller (processRequest or set_wled_state)
-    /// is responsible for updating the status via WledCtx.setStatus.
-    /// Real HTTP POST handled by WledCtx.
-    pub fn wledOn(self: *Strip, preset: i64) void {
-        self.preset = preset;
-        self.send_full_chain_data = true;
-        self.brightness = -1;
-        self.intensity = -1;
-        self.speed = -1;
-    }
-
-    /// Moonraker: wled_off(). Sets onoff=OnOff.off and
-    /// send_full_chain_data=true so the next set_wled sends full chain.
-    pub fn wledOff(self: *Strip) void {
-        self.send_full_chain_data = true;
-    }
-
-    /// Moonraker: wled_control(brightness, intensity, speed).
-    /// Applies the requested controls regardless of on/off state (the caller
-    /// at a higher level – setStripControl or handleSingleStrip – manages the
-    /// status transition to "on").
-    /// Range-checks: brightness 1-255, intensity 0-255, speed 0-255.
-    /// Returns true if any control was applied.
-    pub fn wledControl(self: *Strip, brightness: i64, intensity: i64, speed: i64) bool {
-        var applied = false;
-        if (brightness >= 1) {
-            if (brightness <= 255) {
-                self.brightness = brightness;
-                applied = true;
-            }
+        switch (self.transport) {
+            .none => {},
+            .http => |url| alloc.free(url),
+            .serial => |s| alloc.free(s.path),
         }
-        if (intensity >= 0) {
-            if (intensity <= 255) {
-                self.intensity = intensity;
-                applied = true;
-            }
-        }
-        if (speed >= 0) {
-            if (speed <= 255) {
-                self.speed = speed;
-                applied = true;
-            }
-        }
-        return applied;
     }
 
     /// Moonraker: _update_color_data(red, green, blue, white, index).
-    /// Scales float 0.0-1.0 to 0-255 and writes into chain_data.
-    /// If index is null, fills the entire chain with the same color.
-    /// Otherwise writes led_data at the given 1-based pixel index.
-    pub fn updateColorData(
-        self: *Strip,
-        red: f64,
-        green: f64,
-        blue: f64,
-        white: f64,
-        index: ?usize,
-    ) void {
-        const r: u8 = @intFromFloat(@min(@max(red * 255.0 + 0.5, 0), 255));
-        const g: u8 = @intFromFloat(@min(@max(green * 255.0 + 0.5, 0), 255));
-        const b: u8 = @intFromFloat(@min(@max(blue * 255.0 + 0.5, 0), 255));
-        const w: u8 = @intFromFloat(@min(@max(white * 255.0 + 0.5, 0), 255));
-        const led_data = [_]u8{ r, g, b, w };
-        const count = @min(std.math.cast(usize, self.chain_count) orelse return, self.chain_data.len / color_size);
-
+    /// Scales 0.0-1.0 to 0-255 into chain_data: the whole chain when `index`
+    /// is null, else the 1-based pixel `index` (ignored when out of range).
+    pub fn updateColorData(self: *Strip, color: [4]f64, index: ?usize) void {
+        var led_data: [color_size]u8 = undefined;
+        for (color, &led_data) |c, *byte| byte.* = @intFromFloat(@min(@max(c * 255.0 + 0.5, 0), 255));
         if (index) |idx| {
-            if (idx >= 1 and idx <= count) {
-                const start = (idx - 1) * color_size;
-                const end = idx * color_size;
-                @memcpy(self.chain_data[start..end], &led_data);
-            }
+            if (idx >= 1 and idx <= self.chain_count) @memcpy(self.chain_data[(idx - 1) * color_size ..][0..color_size], &led_data);
         } else {
-            for (0..count) |i| {
-                const start = i * color_size;
-                @memcpy(self.chain_data[start..][0..color_size], &led_data);
-            }
+            for (0..self.chain_count) |i| @memcpy(self.chain_data[i * color_size ..][0..color_size], &led_data);
         }
     }
 
-    /// Moonraker: set_wled(red, green, blue, white, index, transmit).
-    /// Updates color data and conditionally builds the WLED JSON state
-    /// (stub: in-memory only; real transmission is deferred to caller).
-    pub fn setWled(
-        self: *Strip,
-        red: f64,
-        green: f64,
-        blue: f64,
-        white: f64,
-        index: ?usize,
-    ) void {
-        self.updateColorData(red, green, blue, white, index);
-        // Clear preset — sending seg{} reverts to preset otherwise.
-        self.preset = -1;
-        // If coming from a preset without wled_control, default brightness.
-        if (self.brightness == -1) self.brightness = 255;
+    /// Write 1-based pixel `index` as a JSON number array (wled.py `_wled_pixel`).
+    fn writePixel(self: *const Strip, s: *std.json.Stringify, index: usize) std.Io.Writer.Error!void {
+        try s.beginArray();
+        for (self.chain_data[(index - 1) * color_size ..][0..color_size]) |byte| try s.write(byte);
+        try s.endArray();
     }
 };
+
+/// Moonraker set_wled state body: `{"on":true,"tt":0,"bri":B,"seg":{"bri":B,"i":[...]}}`.
+/// `i` is a range command for the whole chain when `index` is null, every
+/// pixel when a full send is pending, else the single changed pixel.
+/// Clears `send_full_chain_data` when it sends the whole chain.
+fn setWledBody(alloc: std.mem.Allocator, strip: *Strip, index: ?usize) std.Io.Writer.Error![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("on");
+    try s.write(true);
+    try s.objectField("tt");
+    try s.write(0);
+    try s.objectField("bri");
+    try s.write(strip.brightness);
+    try s.objectField("seg");
+    try s.beginObject();
+    try s.objectField("bri");
+    try s.write(strip.brightness);
+    try s.objectField("i");
+    try s.beginArray();
+    if (index) |idx| {
+        if (strip.send_full_chain_data) {
+            strip.send_full_chain_data = false;
+            for (1..strip.chain_count + 1) |i| try strip.writePixel(&s, i);
+        } else {
+            try s.write(idx - 1);
+            try strip.writePixel(&s, idx);
+        }
+    } else {
+        strip.send_full_chain_data = false;
+        try s.write(0);
+        try s.write(strip.chain_count);
+        try strip.writePixel(&s, 1);
+    }
+    try s.endArray();
+    try s.endObject();
+    try s.endObject();
+    return out.written();
+}
+
+/// Send `body` over `transport`.
+fn transmit(gpa: std.mem.Allocator, io: std.Io, transport: Transport, timeout: std.Io.Duration, body: []const u8) !void {
+    switch (transport) {
+        .none => {},
+        .http => |url| {
+            var reply: [max_reply_bytes]u8 = undefined;
+            _ = try power.deviceRequest(gpa, io, .POST, url, body, timeout, &reply);
+        },
+        .serial => |s| {
+            var port = try serial_mod.Serial.open(io, s.path, s.baud);
+            defer port.close();
+            try port.write(body);
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Context
@@ -178,6 +185,8 @@ pub const WledCtx = struct {
     gpa: std.mem.Allocator,
     strips: std.StringHashMap(Strip),
     io: ?std.Io = null,
+    /// Held by the caller of every handler once wired; released for device I/O.
+    core: ?*Core = null,
 
     pub fn init(alloc: std.mem.Allocator) WledCtx {
         return .{
@@ -195,135 +204,41 @@ pub const WledCtx = struct {
         self.strips.deinit();
     }
 
-    /// Configure a strip as a serial device: subsequent commands are written to
-    /// `path` (gpa-owned, replacing any previous value) at `baud`.
-    pub fn setStripSerial(self: *WledCtx, name: []const u8, path: []const u8, baud: u32) !void {
-        const s = self.strips.getPtr(name) orelse return error.NotFound;
-        const dup = try self.gpa.dupe(u8, path);
-        if (s.serial_path) |old| self.gpa.free(old);
-        s.serial_path = dup;
-        s.serial_baud = baud;
-    }
-
-    /// Set the Io handle for making real HTTP requests to WLED devices.
+    /// Set the Io handle used for device I/O.
     pub fn setIo(self: *WledCtx, io: std.Io) void {
         self.io = io;
-    }
-
-    /// Send a JSON body string to a WLED device via HTTP POST.
-    /// Sets strip.error_state on failure.
-    pub fn sendWledBody(self: *WledCtx, strip: *Strip, body: []const u8) void {
-        const io = self.io orelse return;
-
-        // Serial strip: write the newline-terminated JSON command to the device.
-        if (strip.serial_path) |path| {
-            var ser = serial_mod.Serial.open(io, path, strip.serial_baud) catch {
-                if (strip.error_state) |e| self.gpa.free(e);
-                strip.error_state = self.gpa.dupe(u8, "WLED: serial open failed") catch null;
-                return;
-            };
-            defer ser.close();
-            // Single newline-terminated write (one serial transaction).
-            const line = std.fmt.allocPrint(self.gpa, "{s}\n", .{body}) catch return;
-            defer self.gpa.free(line);
-            ser.write(line) catch {
-                if (strip.error_state) |e| self.gpa.free(e);
-                strip.error_state = self.gpa.dupe(u8, "WLED: serial write failed") catch null;
-                return;
-            };
-            if (strip.error_state) |e| {
-                self.gpa.free(e);
-                strip.error_state = null;
-            }
-            return;
-        }
-
-        const addr = strip.address orelse return;
-
-        // Build URL: {protocol}://{address}:{port}/json
-        var url_buf: [256]u8 = undefined;
-        const url = std.fmt.bufPrint(&url_buf, "{s}://{s}:{d}/json", .{ strip.protocol, addr, strip.port }) catch return;
-
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const aa = arena.allocator();
-
-        var client: std.http.Client = .{ .allocator = aa, .io = io };
-        defer client.deinit();
-
-        var aw: std.Io.Writer.Allocating = .init(aa);
-        defer aw.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = body,
-            .response_writer = &aw.writer,
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "application/json" },
-            },
-        }) catch {
-            if (strip.error_state) |e| self.gpa.free(e);
-            strip.error_state = self.gpa.dupe(u8, "WLED: HTTP request failed") catch null;
-            return;
-        };
-
-        if (result.status != .ok) {
-            if (strip.error_state) |e| self.gpa.free(e);
-            strip.error_state = self.gpa.dupe(u8, "WLED: non-200 response") catch null;
-        } else {
-            // Clear error state on success.
-            if (strip.error_state) |e| {
-                self.gpa.free(e);
-                strip.error_state = null;
-            }
-        }
     }
 
     pub fn findStrip(self: *WledCtx, name: []const u8) ?*Strip {
         return self.strips.getPtr(name);
     }
 
-    /// Add a strip (takes ownership of all slices passed by copy).
-    pub fn addStrip(
-        self: *WledCtx,
-        name: []const u8,
-        chain_count: i64,
-        chain_data: []const u8,
-        preset: i64,
-        initial_preset: i64,
-        initial_colors: ?[]const u8,
-        send_full_chain_data: bool,
-        address: ?[]const u8,
-        port: u16,
-        protocol: ?[]const u8,
-    ) !void {
-        const k = try self.gpa.dupe(u8, name);
+    /// Add or replace a strip, copying all configuration strings.
+    pub fn addStrip(self: *WledCtx, config: Config) !void {
+        const k = try self.gpa.dupe(u8, config.name);
         errdefer self.gpa.free(k);
         var strip: Strip = .{
             .name = "",
-            .status = "",
+            .chain_count = config.chain_count,
             .chain_data = &.{},
-            .chain_count = chain_count,
-            .preset = preset,
-            .initial_preset = initial_preset,
-            .initial_colors = null,
-            .brightness = 255,
-            .intensity = -1,
-            .speed = -1,
-            .error_state = null,
-            .send_full_chain_data = send_full_chain_data,
-            .port = port,
+            .preset = config.initial_preset,
+            .initial_preset = config.initial_preset,
+            .initial_color = config.initial_color,
+            .transport = .none,
+            .timeout = config.timeout,
         };
         errdefer strip.deinit(self.gpa);
-        strip.name = try self.gpa.dupe(u8, name);
-        strip.status = try self.gpa.dupe(u8, "off");
-        strip.chain_data = try self.gpa.dupe(u8, chain_data);
-        if (initial_colors) |value| strip.initial_colors = try self.gpa.dupe(u8, value);
-        if (address) |value| strip.address = try self.gpa.dupe(u8, value);
-        if (protocol) |value| {
-            if (!std.mem.eql(u8, value, "http")) strip.protocol = try self.gpa.dupe(u8, value);
-        }
+        strip.name = try self.gpa.dupe(u8, config.name);
+        strip.chain_data = try self.gpa.alloc(u8, try std.math.mul(usize, config.chain_count, Strip.color_size));
+        @memset(strip.chain_data, 0);
+        // Copy into a local first: assigning the union directly would set the
+        // tag before a failed dupe, and the errdefer would free garbage.
+        const transport: Transport = switch (config.transport) {
+            .none => .none,
+            .http => |url| .{ .http = try self.gpa.dupe(u8, url) },
+            .serial => |s| .{ .serial = .{ .path = try self.gpa.dupe(u8, s.path), .baud = s.baud } },
+        };
+        strip.transport = transport;
         if (try self.strips.fetchPut(k, strip)) |prior| {
             self.gpa.free(k); // Replacements retain the map's existing key.
             var old = prior.value;
@@ -331,46 +246,152 @@ pub const WledCtx = struct {
         }
     }
 
-    pub fn setStatus(self: *WledCtx, name: []const u8, new_status: []const u8) !void {
-        const s = self.strips.getPtr(name) orelse return error.NotFound;
-        const owned = try self.gpa.dupe(u8, new_status);
-        self.gpa.free(s.status);
-        s.status = owned;
+    /// Bring every strip to its configured initial state (Moonraker
+    /// `component_init` → `_set_initial_state`). Runs before `core` is wired.
+    /// A failed strip keeps its `error`.
+    pub fn applyInitialStates(self: *WledCtx) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = self.strips.keyIterator();
+        while (it.next()) |k| names.append(a, k.*) catch return;
+        for (names.items) |name| self.setInitialState(a, name) catch |err|
+            std.debug.print("phobos: warning: wled strip '{s}' failed init: {}\n", .{ name, err });
     }
 
-    /// Apply control parameters to a strip (brightness, preset, intensity,
-    /// speed). Any param set to a non-negative value is applied; -1 means
-    /// "keep current". Turns the strip on.
-    pub fn setStripControl(
-        self: *WledCtx,
-        name: []const u8,
-        brightness: i64,
-        preset: i64,
-        intensity: i64,
-        speed: i64,
-    ) !void {
-        const s = self.strips.getPtr(name) orelse return error.NotFound;
-        // Set status to "on" before wledControl so the off-guard passes.
-        try self.setStatus(name, "on");
-        _ = s.wledControl(brightness, intensity, speed);
-        if (preset >= 0) s.preset = preset;
-        // Send real HTTP POST to WLED device if address is configured.
-        if (s.address != null) {
-            // Build a WLED control JSON body mirroring Moonraker's wled_control.
-            var body_buf: [256]u8 = undefined;
-            var body: []const u8 = "{}";
-            var has_control = false;
-            if (brightness > 0 or intensity >= 0 or speed >= 0) has_control = true;
-            if (has_control) {
-                const tt: i64 = 0; // transition time: instant (matches Moonraker default)
-                // Simple: just send brightness/seg if preset is active.
-                if (s.preset != -1) {
-                    body = std.fmt.bufPrint(&body_buf, "{{\"tt\":{d},\"bri\":{d},\"seg\":{{\"bri\":{d}}}}}", .{ tt, @max(0, brightness), @max(0, brightness) }) catch "{}";
-                } else {
-                    body = std.fmt.bufPrint(&body_buf, "{{\"tt\":{d},\"bri\":{d}}}", .{ tt, @max(0, brightness) }) catch "{}";
-                }
+    /// Send `body` to strip `name` with Core released, record the outcome in
+    /// `error` (Moonraker `_send_wled_command`) and return the re-resolved
+    /// strip. `name` must not borrow from a strip. Without io nothing is sent.
+    fn command(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8, body: []const u8) Error!*Strip {
+        const strip = self.findStrip(name) orelse return error.NotFound;
+        const io = self.io orelse return strip;
+        const transport: Transport = switch (strip.transport) {
+            .none => return strip,
+            .http => |url| .{ .http = try alloc.dupe(u8, url) },
+            .serial => |s| .{ .serial = .{ .path = try alloc.dupe(u8, s.path), .baud = s.baud } },
+        };
+        const timeout = strip.timeout;
+        const result = blk: {
+            if (self.core) |core| core.unlock(io);
+            defer if (self.core) |core| core.lock(io);
+            break :blk transmit(self.gpa, io, transport, timeout, body);
+        };
+        const fresh = self.findStrip(name) orelse return error.NotFound;
+        if (fresh.error_state) |e| self.gpa.free(e);
+        fresh.error_state = null;
+        result catch |err| {
+            fresh.error_state = try std.fmt.allocPrint(self.gpa, "WLED: Error {s}", .{@errorName(err)});
+            return error.DeviceRequestFailed;
+        };
+        return fresh;
+    }
+
+    /// Moonraker wled_on(preset): a negative preset restores the initial state.
+    fn wledOn(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8, preset: i64) Error!void {
+        const strip = self.findStrip(name) orelse return error.NotFound;
+        strip.on = true;
+        if (preset < 0) return self.setInitialState(alloc, name);
+        strip.send_full_chain_data = true;
+        strip.preset = preset;
+        // Without reading the data back from wled the values are unknown.
+        strip.brightness = -1;
+        strip.intensity = -1;
+        strip.speed = -1;
+        _ = try self.command(alloc, name, try std.fmt.allocPrint(alloc, "{{\"on\":true,\"ps\":{d}}}", .{preset}));
+    }
+
+    /// Moonraker wled_off().
+    fn wledOff(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8) Error!void {
+        const strip = self.findStrip(name) orelse return error.NotFound;
+        strip.on = false;
+        // Without this a SET_WLED for one pixel after WLED_OFF sends only that pixel.
+        strip.send_full_chain_data = true;
+        _ = try self.command(alloc, name, "{\"on\":false}");
+    }
+
+    /// Moonraker _set_initial_state().
+    fn setInitialState(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8) Error!void {
+        const strip = self.findStrip(name) orelse return error.NotFound;
+        strip.send_full_chain_data = true;
+        strip.on = true;
+        strip.preset = strip.initial_preset;
+        strip.brightness = 255;
+        strip.intensity = -1;
+        strip.speed = -1;
+        if (strip.initial_preset >= 0) {
+            strip.updateColorData(strip.initial_color, null);
+            return self.wledOn(alloc, name, strip.initial_preset);
+        }
+        return self.setWled(alloc, name, strip.initial_color, null, true);
+    }
+
+    /// Moonraker wled_control(brightness, intensity, speed): only on a lit
+    /// strip; `bri` for 1..255, segment `ix`/`sx` for 0..255 with a preset.
+    fn wledControl(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8, brightness: i64, intensity: i64, speed: i64) Error!void {
+        const strip = self.findStrip(name) orelse return error.NotFound;
+        if (!strip.on) return;
+        const with_preset = strip.preset != -1;
+        const set_bri = brightness > 0 and brightness <= 255;
+        const set_ix = with_preset and intensity > -1 and intensity <= 255;
+        const set_sx = with_preset and speed > -1 and speed <= 255;
+        if (!set_bri and !set_ix and !set_sx) return;
+        if (set_bri) strip.brightness = brightness;
+        if (set_ix) strip.intensity = intensity;
+        if (set_sx) strip.speed = speed;
+        var out: std.Io.Writer.Allocating = .init(alloc);
+        var s: std.json.Stringify = .{ .writer = &out.writer };
+        controlBody(&s, strip, set_bri, set_ix, set_sx) catch return error.OutOfMemory;
+        _ = try self.command(alloc, name, out.written());
+    }
+
+    fn controlBody(s: *std.json.Stringify, strip: *const Strip, set_bri: bool, set_ix: bool, set_sx: bool) std.Io.Writer.Error!void {
+        try s.beginObject();
+        try s.objectField("tt");
+        try s.write(0);
+        // Even without an active preset, sending seg {} turns it back on.
+        if (strip.preset != -1) {
+            try s.objectField("seg");
+            try s.beginObject();
+            if (set_bri) {
+                try s.objectField("bri");
+                try s.write(strip.brightness);
             }
-            self.sendWledBody(s, body);
+            if (set_ix) {
+                try s.objectField("ix");
+                try s.write(strip.intensity);
+            }
+            if (set_sx) {
+                try s.objectField("sx");
+                try s.write(strip.speed);
+            }
+            try s.endObject();
+        }
+        if (set_bri) {
+            try s.objectField("bri");
+            try s.write(strip.brightness);
+        }
+        try s.endObject();
+    }
+
+    /// Moonraker set_wled(red, green, blue, white, index, transmit).
+    fn setWled(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8, color: [4]f64, index: ?usize, transmit_now: bool) Error!void {
+        const strip = self.findStrip(name) orelse return error.NotFound;
+        strip.updateColorData(color, index);
+        if (!transmit_now) {
+            // Send all data on the next transmit.
+            strip.send_full_chain_data = true;
+            return;
+        }
+        // Clear the preset: sending seg {} would revert to it.
+        strip.preset = -1;
+        if (strip.brightness == -1) strip.brightness = 255;
+        const body = setWledBody(alloc, strip, index) catch return error.OutOfMemory;
+        const fresh = try self.command(alloc, name, body);
+        if (!fresh.on) {
+            // WLED needs a repeated command to light an off strip.
+            fresh.on = true;
+            _ = try self.command(alloc, name, body);
         }
     }
 };
@@ -411,34 +432,39 @@ fn getOptInt(params: std.json.Value, field: []const u8, default_val: i64) i64 {
     }
 }
 
+/// A numeric param as f64; 0 when absent or not a number (Moonraker defaults).
+fn getOptFloat(params: std.json.Value, field: []const u8) f64 {
+    switch (params) {
+        .object => |obj| {
+            const v = obj.get(field) orelse return 0;
+            return switch (v) {
+                .float => |f| f,
+                .integer => |i| @floatFromInt(i),
+                .string => |s| std.fmt.parseFloat(f64, s) catch 0,
+                else => 0,
+            };
+        },
+        else => return 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Strip info shape
 // ---------------------------------------------------------------------------
 
 /// Build the per-strip info object matching Strip.get_strip_info():
-///   { strip, status, chain_count, chain_data, preset, brightness, intensity, speed, error, send_full_chain_data }
-/// chain_data is encoded as a base-16 hex string ("" when empty or send_full_chain_data is false).
+///   { strip, status, chain_count, preset, brightness, intensity, speed, error }
 pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "strip", .{ .string = s.name });
-    try obj.put(alloc, "status", .{ .string = s.status });
-    try obj.put(alloc, "chain_count", .{ .integer = s.chain_count });
-    // Match Moonraker: only include chain_data in strip info when
-    // send_full_chain_data is true; otherwise emit an empty string.
-    const cd: []const u8 = if (s.send_full_chain_data and s.chain_data.len > 0)
-        try std.fmt.allocPrint(alloc, "{x}", .{s.chain_data})
-    else
-        "";
-    try obj.put(alloc, "chain_data", .{ .string = cd });
+    try obj.put(alloc, "status", .{ .string = if (s.on) "on" else "off" });
+    // chain_data holds chain_count * 4 bytes, so the count fits in i64.
+    try obj.put(alloc, "chain_count", .{ .integer = @intCast(s.chain_count) });
     try obj.put(alloc, "preset", .{ .integer = s.preset });
     try obj.put(alloc, "brightness", .{ .integer = s.brightness });
     try obj.put(alloc, "intensity", .{ .integer = s.intensity });
     try obj.put(alloc, "speed", .{ .integer = s.speed });
-    if (s.error_state) |e| {
-        try obj.put(alloc, "error", .{ .string = e });
-    } else {
-        try obj.put(alloc, "error", .null);
-    }
+    try obj.put(alloc, "error", if (s.error_state) |e| .{ .string = e } else .null);
     return .{ .object = obj };
 }
 
@@ -446,38 +472,26 @@ pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value
 // Action helpers
 // ---------------------------------------------------------------------------
 
-/// Apply an action ("on" | "off" | "toggle" | "status") to a strip.
-fn processRequest(ctx: *WledCtx, strip: *Strip, req: []const u8) ![]const u8 {
-    if (std.mem.eql(u8, req, "status")) {
-        return strip.status;
-    }
-    const action: []const u8 = blk: {
-        if (!std.mem.eql(u8, req, "toggle")) break :blk req;
-        break :blk if (std.mem.eql(u8, strip.status, "off")) "on" else "off";
-    };
-    if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
-        return error.InvalidParams;
-    }
-    // Update in-memory state.
-    if (std.mem.eql(u8, action, "on")) {
-        strip.wledOn(strip.preset);
-        // Send real HTTP POST to WLED device if address is configured.
-        if (strip.address != null) {
-            var body_buf: [128]u8 = undefined;
-            const body = if (strip.preset >= 0)
-                std.fmt.bufPrint(&body_buf, "{{\"on\":true,\"ps\":{d}}}", .{strip.preset}) catch ""
-            else
-                "{\"on\":true}";
-            ctx.sendWledBody(strip, body);
-        }
-    } else {
-        strip.wledOff();
-        if (strip.address != null) {
-            ctx.sendWledBody(strip, "{\"on\":false}");
-        }
-    }
-    ctx.setStatus(strip.name, action) catch {};
-    return ctx.findStrip(strip.name).?.status;
+/// Moonraker _process_request: apply "status" | "on" | "off" | "toggle" |
+/// "control" to strip `name` (not borrowed from a strip).
+fn processRequest(
+    ctx: *WledCtx,
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    req: []const u8,
+    preset: i64,
+    brightness: i64,
+    intensity: i64,
+    speed: i64,
+) (Error || error{InvalidParams})!void {
+    const strip = ctx.findStrip(name) orelse return error.NotFound;
+    if (std.mem.eql(u8, req, "status")) return;
+    const action: []const u8 = if (std.mem.eql(u8, req, "toggle")) (if (strip.on) "off" else "on") else req;
+    if (std.mem.eql(u8, action, "off")) return ctx.wledOff(alloc, name);
+    const is_on = std.mem.eql(u8, action, "on");
+    if (!is_on and !std.mem.eql(u8, action, "control")) return error.InvalidParams;
+    if (is_on) try ctx.wledOn(alloc, name, preset);
+    if (brightness != -1 or intensity != -1 or speed != -1) try ctx.wledControl(alloc, name, brightness, intensity, speed);
 }
 
 // ---------------------------------------------------------------------------
@@ -505,44 +519,40 @@ pub fn handleStrips(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
 
 /// Shared single-strip handler.
 /// GET → returns { "<strip>": strip_info }.
-/// POST → requires `action` in [on|off|toggle|control]; returns { "<strip>": strip_info }.
+/// POST → requires `action` in [on|off|toggle|control] and applies the
+/// request's preset/brightness/intensity/speed; returns { "<strip>": strip_info }.
 pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
     const strip_name = try getStr(params, "strip");
-    const strip = ctx.findStrip(strip_name) orelse {
-        // Matches Moonraker: "No valid strip named <x>"
-        return error.NotFound;
-    };
-    // GET is read-only: ignore any `action` and report status. Only POST may
-    // mutate the strip (matches Moonraker _handle_single_wled_request, which
-    // reads `action` only on POST). Without this guard a GET with ?action=on
-    // would drive the hardware — an unsafe side-effecting GET.
+    // Matches Moonraker: "No valid strip named <x>"
+    if (ctx.findStrip(strip_name) == null) return error.NotFound;
+    // GET is read-only: only POST reads `action` (Moonraker
+    // _handle_single_wled_request), so GET ?action=on cannot drive hardware.
     const is_post = if (getOptStr(params, "_method")) |m| std.mem.eql(u8, m, "POST") else false;
-    const action: []const u8 = if (is_post) (if (getOptStr(params, "action")) |a| blk: {
-        const al = std.ascii.allocLowerString(alloc, a) catch a;
-        if (!std.mem.eql(u8, al, "on") and
-            !std.mem.eql(u8, al, "off") and
-            !std.mem.eql(u8, al, "toggle") and
-            !std.mem.eql(u8, al, "control"))
+    if (is_post) {
+        const a = getOptStr(params, "action") orelse return error.InvalidParams;
+        const action = try std.ascii.allocLowerString(alloc, a);
+        if (!std.mem.eql(u8, action, "on") and
+            !std.mem.eql(u8, action, "off") and
+            !std.mem.eql(u8, action, "toggle") and
+            !std.mem.eql(u8, action, "control"))
         {
             return error.InvalidParams;
         }
-        break :blk al;
-    } else "status") else "status";
-
-    if (std.mem.eql(u8, action, "control")) {
-        const brightness = getOptInt(params, "brightness", -1);
-        const preset = getOptInt(params, "preset", -1);
-        const intensity = getOptInt(params, "intensity", -1);
-        const speed = getOptInt(params, "speed", -1);
-        try ctx.setStripControl(strip_name, brightness, preset, intensity, speed);
-    } else {
-        _ = try processRequest(ctx, strip, action);
+        try processRequest(
+            ctx,
+            alloc,
+            strip_name,
+            action,
+            getOptInt(params, "preset", -1),
+            getOptInt(params, "brightness", -1),
+            getOptInt(params, "intensity", -1),
+            getOptInt(params, "speed", -1),
+        );
     }
-    // Re-fetch after potential state change.
-    const updated = ctx.findStrip(strip_name) orelse strip;
+    const strip = ctx.findStrip(strip_name) orelse return error.NotFound;
     var out: std.json.ObjectMap = .empty;
-    try out.put(alloc, strip_name, try buildStripInfo(alloc, updated));
+    try out.put(alloc, strip_name, try buildStripInfo(alloc, strip));
     return .{ .object = out };
 }
 
@@ -555,17 +565,15 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
     var out: std.json.ObjectMap = .empty;
     switch (params) {
         .object => |obj| {
-            if (obj.count() == 0) return error.InvalidParams;
             var it = obj.iterator();
             while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
                 // HTTP injects `_method` into every route. It is not a strip.
-                if (name.len == 0 or name[0] == '_') continue;
-                if (ctx.findStrip(name)) |strip| {
-                    _ = processRequest(ctx, strip, action) catch {};
-                    const updated = ctx.findStrip(name) orelse strip;
-                    const info = buildStripInfo(alloc, updated) catch continue;
-                    try out.put(alloc, name, info);
+                if (std.mem.startsWith(u8, name, "_")) continue;
+                if (ctx.findStrip(name) != null) {
+                    try processRequest(ctx, alloc, name, action, -1, -1, -1, -1);
+                    const strip = ctx.findStrip(name) orelse return error.NotFound;
+                    try out.put(alloc, name, try buildStripInfo(alloc, strip));
                 } else {
                     // Matches Moonraker's result[name] = {"error": "strip_not_found"}
                     var err_obj: std.json.ObjectMap = .empty;
@@ -605,165 +613,58 @@ pub fn handleBatchToggle(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
 pub fn handleSetWledState(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
     const strip_name = try getStr(params, "strip");
+    if (ctx.findStrip(strip_name) == null) return error.NotFound;
 
-    const strip = ctx.findStrip(strip_name) orelse {
-        return error.NotFound;
-    };
-
-    // Resolve the `state` param: can be a bool or a string.
+    // `state` may be a bool or a string; "true"/"false" map to on/off.
     var status: ?[]const u8 = null;
-    switch (params) {
-        .object => |obj| {
-            if (obj.get("state")) |sv| {
-                switch (sv) {
-                    .bool => |b| status = if (b) "on" else "off",
-                    .string => |s| {
-                        const sl = std.ascii.allocLowerString(alloc, s) catch s;
-                        if (std.mem.eql(u8, sl, "true")) {
-                            status = "on";
-                        } else if (std.mem.eql(u8, sl, "false")) {
-                            status = "off";
-                        } else if (std.mem.eql(u8, sl, "on")) {
-                            status = "on";
-                        } else if (std.mem.eql(u8, sl, "off")) {
-                            status = "off";
-                        } else {
-                            status = sl;
-                        }
-                    },
-                    else => {},
-                }
-            }
+    if (params == .object) if (params.object.get("state")) |sv| switch (sv) {
+        .bool => |b| status = if (b) "on" else "off",
+        .string => |s| {
+            const sl = try std.ascii.allocLowerString(alloc, s);
+            status = if (std.mem.eql(u8, sl, "true")) "on" else if (std.mem.eql(u8, sl, "false")) "off" else sl;
         },
         else => {},
-    }
+    };
 
     const preset = getOptInt(params, "preset", -1);
     const brightness = getOptInt(params, "brightness", -1);
     const intensity = getOptInt(params, "intensity", -1);
     const speed = getOptInt(params, "speed", -1);
 
-    // Moonraker: if no state, preset, or control data, log and return.
-    if (status == null and preset == -1 and brightness == -1 and intensity == -1 and speed == -1) {
-        var out: std.json.ObjectMap = .empty;
-        try out.put(alloc, "status", .{ .string = "ok" });
-        return .{ .object = out };
-    }
-
-    // All other arguments are ignored when turning off.
-    if (status != null and std.mem.eql(u8, status.?, "off")) {
-        strip.wledOff();
-        try ctx.setStatus(strip_name, "off");
-        if (strip.address != null) {
-            ctx.sendWledBody(strip, "{\"on\":false}");
-        }
-    }
-
-    // Turn on if status is "on" or a preset is specified.
-    if ((status != null and std.mem.eql(u8, status.?, "on")) or preset != -1) {
-        strip.wledOn(preset);
-        try ctx.setStatus(strip_name, "on");
-        if (strip.address != null) {
-            var body_buf: [128]u8 = undefined;
-            const body = if (preset >= 0)
-                std.fmt.bufPrint(&body_buf, "{{\"on\":true,\"ps\":{d}}}", .{preset}) catch "{\"on\":true}"
-            else
-                "{\"on\":true}";
-            ctx.sendWledBody(strip, body);
-        }
-    }
-
-    // Control: apply brightness/intensity/speed.
-    if (brightness != -1 or intensity != -1 or speed != -1) {
-        _ = strip.wledControl(brightness, intensity, speed);
-    }
-
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "status", .{ .string = "ok" });
+    // Moonraker: nothing to do without a state, preset or control data.
+    if (status == null and preset == -1 and brightness == -1 and intensity == -1 and speed == -1) {
+        return .{ .object = out };
+    }
+    const s = status orelse "";
+    // All other arguments are ignored when turning off.
+    if (std.mem.eql(u8, s, "off")) try ctx.wledOff(alloc, strip_name);
+    // Turn on if status is "on" or a preset is specified.
+    if (std.mem.eql(u8, s, "on") or preset != -1) try ctx.wledOn(alloc, strip_name, preset);
+    if (brightness != -1 or intensity != -1 or speed != -1) try ctx.wledControl(alloc, strip_name, brightness, intensity, speed);
     return .{ .object = out };
 }
 
 /// Moonraker: set_wled(strip, red, green, blue, white, index, transmit).
-/// Individual pixel control for compatibility with SET_LED.
+/// Individual pixel control for compatibility with SET_LED. `index` is
+/// 1-based; a negative index means the whole chain, any other index outside
+/// the chain is rejected.
 pub fn handleSetWled(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *WledCtx = @ptrCast(@alignCast(ctx_ptr));
     const strip_name = try getStr(params, "strip");
-
-    const strip = ctx.findStrip(strip_name) orelse {
-        return error.NotFound;
-    };
-
-    const red = switch (params) {
-        .object => |obj| blk: {
-            if (obj.get("red")) |v| {
-                break :blk switch (v) {
-                    .float => |f| f,
-                    .integer => |i| @as(f64, @floatFromInt(i)),
-                    else => @as(f64, 0.0),
-                };
-            }
-            break :blk @as(f64, 0.0);
-        },
-        else => @as(f64, 0.0),
-    };
-    const green = switch (params) {
-        .object => |obj| blk: {
-            if (obj.get("green")) |v| {
-                break :blk switch (v) {
-                    .float => |f| f,
-                    .integer => |i| @as(f64, @floatFromInt(i)),
-                    else => @as(f64, 0.0),
-                };
-            }
-            break :blk @as(f64, 0.0);
-        },
-        else => @as(f64, 0.0),
-    };
-    const blue = switch (params) {
-        .object => |obj| blk: {
-            if (obj.get("blue")) |v| {
-                break :blk switch (v) {
-                    .float => |f| f,
-                    .integer => |i| @as(f64, @floatFromInt(i)),
-                    else => @as(f64, 0.0),
-                };
-            }
-            break :blk @as(f64, 0.0);
-        },
-        else => @as(f64, 0.0),
-    };
-    const white = switch (params) {
-        .object => |obj| blk: {
-            if (obj.get("white")) |v| {
-                break :blk switch (v) {
-                    .float => |f| f,
-                    .integer => |i| @as(f64, @floatFromInt(i)),
-                    else => @as(f64, 0.0),
-                };
-            }
-            break :blk @as(f64, 0.0);
-        },
-        else => @as(f64, 0.0),
-    };
+    const strip = ctx.findStrip(strip_name) orelse return error.NotFound;
 
     const index_raw = getOptInt(params, "index", -1);
-    const index: ?usize = if (index_raw < 0) null else @intCast(index_raw);
-    const transmit = getOptInt(params, "transmit", 1);
-
-    strip.setWled(red, green, blue, white, index);
-
-    // If transmitting, we'd send the WLED command. Stub: mark in-memory only.
-    if (transmit == 1) {
-        strip.send_full_chain_data = false;
-        // If strip is off, setWled doesn't normally turn it on, but the
-        // Moonraker bug workaround in wled.py lines 284-289 requires a
-        // second send. We just mark it on here (stub).
-        if (std.mem.eql(u8, strip.status, "off")) {
-            try ctx.setStatus(strip_name, "on");
-        }
-    } else {
-        strip.send_full_chain_data = true;
-    }
+    const index: ?usize = if (index_raw < 0) null else std.math.cast(usize, index_raw) orelse return error.InvalidParams;
+    if (index) |i| if (i == 0 or i > strip.chain_count) return error.InvalidParams;
+    const color = [4]f64{
+        getOptFloat(params, "red"),
+        getOptFloat(params, "green"),
+        getOptFloat(params, "blue"),
+        getOptFloat(params, "white"),
+    };
+    try ctx.setWled(alloc, strip_name, color, index, getOptInt(params, "transmit", 1) == 1);
 
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "status", .{ .string = "ok" });
@@ -784,10 +685,8 @@ pub fn registerWled(reg: *Registry, ctx: *WledCtx) !void {
     try reg.registerEndpoint(.{ .path = "/machine/wled/toggle", .methods = &.{.POST} }, c, handleBatchToggle);
     try reg.registerEndpoint(.{ .path = "/machine/wled/strip", .methods = &.{ .GET, .POST } }, c, handleSingleStrip);
 
-    // Remote-only methods (no HTTP route, JSON-RPC only).
-    // Moonraker: self.server.register_remote_method("set_wled_state", ...)
-    //           self.server.register_remote_method("set_wled", ...)
-    // Static literals → register directly (stable .rodata keys, no name_pool).
+    // Moonraker registers these as Klippy remote methods; phobos exposes them as
+    // client JSON-RPC methods. Static literals → stable .rodata keys.
     try reg.dispatcher.register("set_wled_state", c, handleSetWledState);
     try reg.dispatcher.register("set_wled", c, handleSetWled);
 }
@@ -803,427 +702,259 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     return p.value;
 }
 
-fn testCtx(alloc: std.mem.Allocator) WledCtx {
-    return WledCtx.init(alloc);
-}
+/// A serial strip backed by a regular file in a temp dir. Each send reopens the
+/// file and writes from offset 0, so `take` returns the latest send (over any
+/// longer earlier one) and clears the file.
+const Capture = struct {
+    tmp: testing.TmpDir,
+    path: [:0]u8,
 
-// ---- handleStrips ----
+    fn init() !Capture {
+        var tmp = testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "wled", .data = "" });
+        return .{ .tmp = tmp, .path = try tmp.dir.realPathFileAlloc(testing.io, "wled", testing.allocator) };
+    }
 
-test "handleStrips: empty map when no strips configured" {
+    fn deinit(self: *Capture) void {
+        testing.allocator.free(self.path);
+        self.tmp.cleanup();
+    }
+
+    fn take(self: *Capture, buf: []u8) ![]const u8 {
+        const data = try self.tmp.dir.readFile(testing.io, "wled", buf);
+        try self.tmp.dir.writeFile(testing.io, .{ .sub_path = "wled", .data = "" });
+        return data;
+    }
+
+    fn strip(self: *const Capture, name: []const u8, chain_count: usize, initial_preset: i64) Config {
+        return .{ .name = name, .chain_count = chain_count, .initial_preset = initial_preset, .transport = .{ .serial = .{ .path = self.path, .baud = default_baud } } };
+    }
+};
+
+test "handleStrips: empty map, then the Moonraker strip info keys" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
+    const empty = try handleStrips(@ptrCast(&ctx), .null, a);
+    try testing.expectEqual(@as(usize, 0), empty.object.get("strips").?.object.count());
+
+    try ctx.addStrip(.{ .name = "desk", .chain_count = 3, .initial_preset = 2 });
     const v = try handleStrips(@ptrCast(&ctx), .null, a);
-    const strips = v.object.get("strips").?.object;
-    try testing.expectEqual(@as(usize, 0), strips.count());
+    const info = v.object.get("strips").?.object.get("desk").?.object;
+    const keys = [_][]const u8{ "strip", "status", "chain_count", "preset", "brightness", "intensity", "speed", "error" };
+    try testing.expectEqual(keys.len, info.count());
+    for (keys) |k| try testing.expect(info.get(k) != null);
+    try testing.expectEqualStrings("off", info.get("status").?.string);
+    try testing.expectEqual(@as(i64, 3), info.get("chain_count").?.integer);
+    try testing.expectEqual(@as(i64, 2), info.get("preset").?.integer);
 }
 
-test "handleStrips: returns strip info when strip configured" {
+test "handleSingleStrip: unknown strip, GET is read-only, invalid action" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("printer_leds", 30, "", -1, -1, null, false, null, 80, null);
-    const v = try handleStrips(@ptrCast(&ctx), .null, a);
-    const strips = v.object.get("strips").?.object;
-    try testing.expectEqual(@as(usize, 1), strips.count());
-    const s = strips.get("printer_leds").?.object;
-    try testing.expectEqualStrings("printer_leds", s.get("strip").?.string);
-    try testing.expectEqualStrings("off", s.get("status").?.string);
-    try testing.expectEqual(@as(i64, 30), s.get("chain_count").?.integer);
-    try testing.expectEqual(@as(i64, -1), s.get("preset").?.integer);
-}
-
-// ---- handleSingleStrip GET ----
-
-test "handleSingleStrip: GET unknown strip returns NotFound" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
+    try ctx.addStrip(.{ .name = "s" });
     try testing.expectError(error.NotFound, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"ghost\"}"), a));
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"on\",\"_method\":\"GET\"}"), a);
+    try testing.expectEqualStrings("off", v.object.get("s").?.object.get("status").?.string);
+    try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"dance\",\"_method\":\"POST\"}"), a));
 }
 
-test "handleSingleStrip: GET returns strip info" {
+test "POST on with a preset sends ps; on without one restores the initial colours" {
+    var cap = try Capture.init();
+    defer cap.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\"}"), a);
-    const s = v.object.get("leds").?.object;
-    try testing.expectEqualStrings("leds", s.get("strip").?.string);
-    try testing.expectEqualStrings("off", s.get("status").?.string);
+    ctx.setIo(testing.io);
+    try ctx.addStrip(cap.strip("s", 2, -1));
+    var buf: [256]u8 = undefined;
+
+    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"on\",\"preset\":3,\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("{\"on\":true,\"ps\":3}", try cap.take(&buf));
+    const info = v.object.get("s").?.object;
+    try testing.expectEqualStrings("on", info.get("status").?.string);
+    try testing.expectEqual(@as(i64, 3), info.get("preset").?.integer);
+    try testing.expectEqual(@as(i64, -1), info.get("brightness").?.integer);
+
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("{\"on\":true,\"tt\":0,\"bri\":255,\"seg\":{\"bri\":255,\"i\":[0,2,[128,128,128,128]]}}", try cap.take(&buf));
+    try testing.expectEqual(@as(i64, -1), ctx.findStrip("s").?.preset);
 }
 
-test "handleSingleStrip: GET ignores action (no side effect)" {
+test "control: skipped when off, bri only without a preset, seg ix/sx with one" {
+    var cap = try Capture.init();
+    defer cap.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    // No _method → treated as GET; the `action=on` must be ignored.
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"leds\",\"action\":\"on\"}"), a);
-    try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
-    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
+    ctx.setIo(testing.io);
+    try ctx.addStrip(cap.strip("s", 1, -1));
+    var buf: [256]u8 = undefined;
+
+    // Off strip: control does nothing and the strip stays off.
+    const off = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"control\",\"intensity\":40,\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("off", off.object.get("s").?.object.get("status").?.string);
+    try testing.expectEqualStrings("", try cap.take(&buf));
+
+    try ctx.setInitialState(a, "s");
+    _ = try cap.take(&buf);
+    // No preset: intensity/speed are not sent, brightness is.
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"control\",\"intensity\":40,\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("", try cap.take(&buf));
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"control\",\"brightness\":90,\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("{\"tt\":0,\"bri\":90}", try cap.take(&buf));
+
+    try ctx.wledOn(a, "s", 4);
+    _ = try cap.take(&buf);
+    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"control\",\"intensity\":40,\"speed\":300,\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("{\"tt\":0,\"seg\":{\"ix\":40}}", try cap.take(&buf));
+    try testing.expectEqual(@as(i64, 40), ctx.findStrip("s").?.intensity);
+    try testing.expectEqual(@as(i64, -1), ctx.findStrip("s").?.speed);
 }
 
-// ---- handleSingleStrip POST ----
-
-test "handleSingleStrip: POST action=on turns strip on" {
+test "set_wled: pixel then full chain after off, and a second send from off" {
+    var cap = try Capture.init();
+    defer cap.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"on\"}"), a);
-    try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
+    ctx.setIo(testing.io);
+    try ctx.addStrip(cap.strip("s", 2, -1));
+    var buf: [512]u8 = undefined;
+
+    // From off with a pending full send: the whole chain, and the strip is lit.
+    _ = try handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"red\":1,\"index\":2}"), a);
+    const full = "{\"on\":true,\"tt\":0,\"bri\":255,\"seg\":{\"bri\":255,\"i\":[[0,0,0,0],[255,0,0,0]]}}";
+    try testing.expectEqualStrings(full, try cap.take(&buf));
+    try testing.expect(ctx.findStrip("s").?.on);
+    // Lit strip: only the changed pixel.
+    _ = try handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"blue\":1.0,\"index\":1}"), a);
+    try testing.expectEqualStrings("{\"on\":true,\"tt\":0,\"bri\":255,\"seg\":{\"bri\":255,\"i\":[0,[0,0,255,0]]}}", try cap.take(&buf));
+    // transmit=0 stores colours only and forces a full send next time.
+    _ = try handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"green\":1,\"index\":1,\"transmit\":0}"), a);
+    try testing.expectEqualStrings("", try cap.take(&buf));
+    try testing.expect(ctx.findStrip("s").?.send_full_chain_data);
 }
 
-test "handleSingleStrip: POST action=toggle flips status" {
+test "set_wled: index outside the chain is rejected, including 2^32" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    // off → on
-    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
-    try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
-    // on → off
-    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"toggle\"}"), a);
-    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
+    try ctx.addStrip(.{ .name = "s", .chain_count = 2 });
+    try testing.expectError(error.InvalidParams, handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"index\":0}"), a));
+    try testing.expectError(error.InvalidParams, handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"index\":3}"), a));
+    try testing.expectError(error.InvalidParams, handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"index\":4294967297}"), a));
+    _ = try handleSetWled(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"index\":-5}"), a);
 }
 
-test "handleSingleStrip: POST action=off turns strip off" {
+test "set_wled_state: off, preset on and control in Moonraker order" {
+    var cap = try Capture.init();
+    defer cap.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    // Turn on first, then off.
-    _ = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"on\"}"), a);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"off\"}"), a);
-    try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
+    ctx.setIo(testing.io);
+    try ctx.addStrip(cap.strip("s", 1, -1));
+    var buf: [256]u8 = undefined;
+
+    _ = try handleSetWledState(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"preset\":5,\"brightness\":20}"), a);
+    try testing.expectEqualStrings("{\"tt\":0,\"seg\":{\"bri\":20},\"bri\":20}", try cap.take(&buf));
+    try testing.expectEqual(@as(i64, 5), ctx.findStrip("s").?.preset);
+    _ = try handleSetWledState(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"state\":false,\"preset\":7}"), a);
+    try testing.expectEqualStrings("{\"on\":true,\"ps\":7}", try cap.take(&buf));
+    try testing.expect(ctx.findStrip("s").?.on);
+    // Nothing requested: no send.
+    _ = try handleSetWledState(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\"}"), a);
+    try testing.expectEqualStrings("", try cap.take(&buf));
 }
 
-test "handleSingleStrip: POST invalid action returns InvalidParams" {
+test "batch: toggle, injected keys, strip_not_found and empty params" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    try testing.expectError(error.InvalidParams, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"dance\"}"), a));
-}
-
-test "handleSingleStrip: POST action=control applies brightness and turns on" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\",\"brightness\":128}"), a);
-    const s = v.object.get("leds").?.object;
-    try testing.expectEqualStrings("on", s.get("status").?.string);
-    try testing.expectEqual(@as(i64, 128), s.get("brightness").?.integer);
-    // Other params unchanged.
-    try testing.expectEqual(@as(i64, -1), s.get("preset").?.integer);
-    try testing.expectEqual(@as(i64, -1), s.get("intensity").?.integer);
-    try testing.expectEqual(@as(i64, -1), s.get("speed").?.integer);
-}
-
-test "handleSingleStrip: POST action=control with preset and intensity" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\",\"preset\":3,\"intensity\":200}"), a);
-    const s = v.object.get("leds").?.object;
-    try testing.expectEqualStrings("on", s.get("status").?.string);
-    try testing.expectEqual(@as(i64, 3), s.get("preset").?.integer);
-    try testing.expectEqual(@as(i64, 200), s.get("intensity").?.integer);
-}
-
-test "handleSingleStrip: POST action=control with all params" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\",\"brightness\":200,\"preset\":5,\"intensity\":180,\"speed\":50}"), a);
-    const s = v.object.get("leds").?.object;
-    try testing.expectEqualStrings("on", s.get("status").?.string);
-    try testing.expectEqual(@as(i64, 200), s.get("brightness").?.integer);
-    try testing.expectEqual(@as(i64, 5), s.get("preset").?.integer);
-    try testing.expectEqual(@as(i64, 180), s.get("intensity").?.integer);
-    try testing.expectEqual(@as(i64, 50), s.get("speed").?.integer);
-}
-
-test "handleSingleStrip: POST action=control with no params still turns on" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"POST\",\"strip\":\"leds\",\"action\":\"control\"}"), a);
-    const s = v.object.get("leds").?.object;
-    try testing.expectEqualStrings("on", s.get("status").?.string);
-    // Default values preserved (no params applied).
-    try testing.expectEqual(@as(i64, 255), s.get("brightness").?.integer);
-    try testing.expectEqual(@as(i64, -1), s.get("preset").?.integer);
-}
-
-// ---- batch handlers ----
-
-test "handleBatchOn: turns on known strip" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const v = try handleBatchOn(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
-    try testing.expectEqualStrings("on", v.object.get("leds").?.object.get("status").?.string);
-}
-
-test "handleBatchOff: turns off known strip" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    try ctx.setStatus("leds", "on");
-    const v = try handleBatchOff(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
-    try testing.expectEqualStrings("off", v.object.get("leds").?.object.get("status").?.string);
-}
-
-test "handleBatchToggle: toggles strip status" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
-    try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
-    _ = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"leds\":null}"), a);
-    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
-}
-
-test "handleBatchStatus: injected _method is not a strip" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
+    try ctx.addStrip(.{ .name = "s" });
+    const v = try handleBatchToggle(@ptrCast(&ctx), try objParams(a, "{\"s\":null,\"_method\":\"POST\",\"\":null}"), a);
+    try testing.expectEqualStrings("on", v.object.get("s").?.object.get("status").?.string);
+    try testing.expectEqualStrings("strip_not_found", v.object.get("").?.object.get("error").?.string);
+    try testing.expect(v.object.get("_method") == null);
+    const off = try handleBatchOff(@ptrCast(&ctx), try objParams(a, "{\"s\":null}"), a);
+    try testing.expectEqualStrings("off", off.object.get("s").?.object.get("status").?.string);
     try testing.expectError(error.InvalidParams, handleBatchStatus(@ptrCast(&ctx), try objParams(a, "{\"_method\":\"GET\"}"), a));
+    try testing.expectError(error.InvalidParams, handleBatchOn(@ptrCast(&ctx), .null, a));
 }
 
-test "handleBatchStatus: unknown strip returns strip_not_found shape" {
+test "a failed send sets error and fails the request" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = testCtx(a);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [96]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&path_buf, "{s}/{s}/missing", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    const v = try handleBatchStatus(@ptrCast(&ctx), try objParams(a, "{\"ghost\":null}"), a);
-    const r = v.object.get("ghost").?.object;
-    try testing.expectEqualStrings("strip_not_found", r.get("error").?.string);
+    ctx.setIo(testing.io);
+    try ctx.addStrip(.{ .name = "s", .transport = .{ .serial = .{ .path = missing, .baud = default_baud } } });
+    try testing.expectError(error.DeviceRequestFailed, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"off\",\"_method\":\"POST\"}"), a));
+    try testing.expectEqualStrings("WLED: Error FileNotFound", ctx.findStrip("s").?.error_state.?);
 }
 
-// ---- buildStripInfo ----
-
-test "buildStripInfo: full key set" {
+test "http strip: POSTs JSON with Core released" {
+    const DeviceDouble = power.DeviceDouble;
+    const io = testing.io;
+    var core = Core.init();
+    var device = try DeviceDouble.bind(io, "HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"success\":true}");
+    defer device.server.deinit(io);
+    device.core = &core;
+    var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(io);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var chain_data = [_]u8{ 0xff, 0x00, 0xab };
-    const s: Strip = .{ .name = "t", .status = "on", .chain_count = 5, .chain_data = &chain_data, .preset = 2, .initial_preset = 3, .initial_colors = null, .brightness = 200, .intensity = 100, .speed = 50, .error_state = null, .send_full_chain_data = true };
-    const v = try buildStripInfo(a, &s);
-    const o = v.object;
-    try testing.expectEqualStrings("t", o.get("strip").?.string);
-    try testing.expectEqualStrings("on", o.get("status").?.string);
-    try testing.expectEqual(@as(i64, 5), o.get("chain_count").?.integer);
-    try testing.expectEqual(@as(i64, 2), o.get("preset").?.integer);
-    try testing.expectEqual(@as(i64, 200), o.get("brightness").?.integer);
-    try testing.expectEqual(@as(i64, 100), o.get("intensity").?.integer);
-    try testing.expectEqual(@as(i64, 50), o.get("speed").?.integer);
-    try testing.expect(o.get("error").? == .null);
-    try testing.expectEqualStrings("ff00ab", o.get("chain_data").?.string);
-}
-
-test "buildStripInfo: chain_data empty when send_full_chain_data is false" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var chain_data2 = [_]u8{ 0xde, 0xad };
-    const s: Strip = .{ .name = "t", .status = "off", .chain_count = 3, .chain_data = &chain_data2, .preset = 0, .initial_preset = 0, .initial_colors = null, .brightness = 255, .intensity = -1, .speed = -1, .error_state = null, .send_full_chain_data = false };
-    const v = try buildStripInfo(a, &s);
-    try testing.expectEqualStrings("", v.object.get("chain_data").?.string);
-}
-
-// ---- Strip methods ----
-
-test "Strip.wledOn: sets preset" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, 5, null, false, null, 80, null);
-    var strip = ctx.findStrip("leds").?;
-    strip.wledOn(3);
-    try testing.expectEqual(@as(i64, 3), strip.preset);
+    ctx.setIo(io);
+    ctx.core = &core;
+    var url_buf: [64]u8 = undefined;
+    try ctx.addStrip(.{ .name = "s", .transport = .{ .http = try device.url(&url_buf, "/json") } });
+    const params = try objParams(a, "{\"strip\":\"s\",\"action\":\"off\",\"_method\":\"POST\"}");
+    _ = try core.run(io, handleSingleStrip, .{ @as(*anyopaque, @ptrCast(&ctx)), params, a });
+    try testing.expectEqualStrings("POST /json HTTP/1.1\r\n", device.request_line[0..device.request_len]);
+    try testing.expect(ctx.findStrip("s").?.error_state == null);
 }
 
-test "Strip.wledOff: does not crash (no-op stub)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
+test "applyInitialStates: initial preset or colours, strip lit" {
+    var cap = try Capture.init();
+    defer cap.deinit();
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    var strip = ctx.findStrip("leds").?;
-    strip.wledOff();
-}
-
-test "Strip.wledControl: applies brightness, intensity, speed" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    var strip = ctx.findStrip("leds").?;
-    _ = strip.wledControl(128, 200, 50);
-    try testing.expectEqual(@as(i64, 128), strip.brightness);
-    try testing.expectEqual(@as(i64, 200), strip.intensity);
-    try testing.expectEqual(@as(i64, 50), strip.speed);
-}
-
-test "Strip.wledControl: negative values are not applied (keep current)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    var strip = ctx.findStrip("leds").?;
-    strip.brightness = 100;
-    strip.intensity = 150;
-    strip.speed = 75;
-    _ = strip.wledControl(-1, -1, -1);
-    try testing.expectEqual(@as(i64, 100), strip.brightness);
-    try testing.expectEqual(@as(i64, 150), strip.intensity);
-    try testing.expectEqual(@as(i64, 75), strip.speed);
-}
-
-// ---- addStrip: new fields ----
-
-test "addStrip: stores chain_data and initial_preset" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, &.{ 0x01, 0x02, 0x03 }, 0, 7, "red,green", true, null, 80, null);
-    const s = ctx.findStrip("leds").?;
-    try testing.expectEqual(@as(i64, 7), s.initial_preset);
-    try testing.expectEqualStrings("red,green", s.initial_colors.?);
-    try testing.expectEqual(true, s.send_full_chain_data);
-    try testing.expectEqual(@as(usize, 3), s.chain_data.len);
-    try testing.expectEqual(@as(u8, 0x01), s.chain_data[0]);
-    try testing.expectEqual(@as(u8, 0x02), s.chain_data[1]);
-    try testing.expectEqual(@as(u8, 0x03), s.chain_data[2]);
-}
-
-test "addStrip: null initial_colors stored as null" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    try testing.expect(ctx.findStrip("leds").?.initial_colors == null);
-}
-
-// ---- fuzz: new fields ----
-
-test "fuzz_single_strip: arbitrary params never crash handleSingleStrip" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [32]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-            ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null) catch {};
-
-            const names = [_][]const u8{ "leds", "ghost", "" };
-            const nm = names[buf[0] % names.len];
-            const actions = [_][]const u8{ "on", "off", "toggle", "control", "status", "bad" };
-            const act = actions[buf[1] % actions.len];
-            const params_str = std.fmt.allocPrint(a, "{{\"strip\":\"{s}\",\"action\":\"{s}\"}}", .{ nm, act }) catch return;
-            const pv = std.json.parseFromSlice(std.json.Value, a, params_str, .{}) catch return;
-            _ = handleSingleStrip(@ptrCast(&ctx), pv.value, a) catch {};
-        }
-    }.run, .{});
-}
-
-test "fuzz_batch_wled: arbitrary params never crash batch handlers" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [16]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-            ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null) catch {};
-
-            const names = [_][]const u8{ "leds", "ghost", "another" };
-            const nm = names[buf[0] % names.len];
-            const params_str = std.fmt.allocPrint(a, "{{\"{s}\":null}}", .{nm}) catch return;
-            const pv = std.json.parseFromSlice(std.json.Value, a, params_str, .{}) catch return;
-            _ = handleBatchOn(@ptrCast(&ctx), pv.value, a) catch {};
-            _ = handleBatchOff(@ptrCast(&ctx), pv.value, a) catch {};
-            _ = handleBatchToggle(@ptrCast(&ctx), pv.value, a) catch {};
-            _ = handleBatchStatus(@ptrCast(&ctx), pv.value, a) catch {};
-        }
-    }.run, .{});
-}
-
-test "fuzz_handleStrips: arbitrary params never crash" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [16]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-            ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null) catch {};
-            _ = handleStrips(@ptrCast(&ctx), .null, a) catch {};
-        }
-    }.run, .{});
+    ctx.setIo(testing.io);
+    try ctx.addStrip(cap.strip("s", 1, 6));
+    ctx.applyInitialStates();
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings("{\"on\":true,\"ps\":6}", try cap.take(&buf));
+    const strip = ctx.findStrip("s").?;
+    try testing.expect(strip.on);
+    try testing.expectEqual(@as(i64, 6), strip.preset);
+    try testing.expectEqualSlices(u8, &.{ 128, 128, 128, 128 }, strip.chain_data);
 }
 
 test "registerWled: wires expected routes and JSON-RPC methods" {
@@ -1232,11 +963,9 @@ test "registerWled: wires expected routes and JSON-RPC methods" {
     defer d.deinit();
     var reg = Registry.init(testing.allocator, &d);
     defer reg.deinit();
-
-    var ctx = testCtx(testing.allocator);
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
     try registerWled(&reg, &ctx);
-
     try testing.expect(reg.lookup(.GET, "/machine/wled/strips") != null);
     try testing.expect(reg.lookup(.GET, "/machine/wled/status") != null);
     try testing.expect(reg.lookup(.GET, "/machine/wled/strip") != null);
@@ -1244,513 +973,79 @@ test "registerWled: wires expected routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/machine/wled/off") != null);
     try testing.expect(reg.lookup(.POST, "/machine/wled/toggle") != null);
     try testing.expect(reg.lookup(.POST, "/machine/wled/strip") != null);
-}
-
-// --- Fuzz tests for internal functions ---
-
-test "fuzz buildStripInfo: never panics, returns all keys" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-
-            var cd = [_]u8{ buf[0], buf[1] };
-            const s: Strip = .{
-                .name = "t",
-                .status = if (buf[2] % 2 == 0) "on" else "off",
-                .chain_count = @as(i64, @intCast(buf[3])),
-                .chain_data = cd[0..],
-                .preset = @as(i64, @intCast(buf[4])) - 1,
-                .initial_preset = @as(i64, @intCast(buf[5])) - 1,
-                .initial_colors = null,
-                .brightness = @as(i64, @intCast(buf[6])),
-                .intensity = @as(i64, @intCast(buf[7])) - 1,
-                .speed = -1,
-                .error_state = null,
-                .send_full_chain_data = buf[0] % 2 == 0,
-            };
-
-            const info = try buildStripInfo(a, &s);
-            try testing.expect(info.object.get("strip") != null);
-            try testing.expect(info.object.get("status") != null);
-            try testing.expect(info.object.get("chain_count") != null);
-            try testing.expect(info.object.get("preset") != null);
-            try testing.expect(info.object.get("brightness") != null);
-            try testing.expect(info.object.get("intensity") != null);
-            try testing.expect(info.object.get("speed") != null);
-            try testing.expect(info.object.get("error") != null);
-        }
-    }.run, .{});
-}
-
-test "fuzz processRequest: never panics, handles all actions" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            ctx.addStrip("s", 10, "", -1, -1, null, false, null, 80, null) catch return;
-            const strip = ctx.findStrip("s") orelse return;
-            const actions = [_][]const u8{ "on", "off", "toggle", "status", "bad" };
-            const action = actions[buf[0] % actions.len];
-
-            _ = processRequest(&ctx, strip, action) catch {};
-        }
-    }.run, .{});
-}
-
-test "fuzz addStrip/findStrip: round-trip consistency" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [16]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            const alphabet = "abcdefghijklmnopqrstuvwxyz_-";
-            var name_buf: [12]u8 = undefined;
-            for (buf[0..@min(8, buf.len)], 0..) |b, i| {
-                name_buf[i] = alphabet[b % alphabet.len];
-            }
-            const name = name_buf[0..@min(6, @max(1, buf[0] % 8))];
-
-            ctx.addStrip(name, @as(i64, @intCast(buf[1])), "", -1, @as(i64, @intCast(buf[2])), null, buf[3] % 2 == 0, null, 80, null) catch {};
-
-            const found = ctx.findStrip(name);
-            if (found) |s| {
-                try testing.expectEqualStrings(name, s.name);
-            }
-        }
-    }.run, .{});
-}
-
-test "fuzz setStatus/setStripControl: never panics" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null) catch return;
-
-            const new_status = if (buf[0] % 2 == 0) "on" else "off";
-            ctx.setStatus("leds", new_status) catch return;
-            try testing.expectEqualStrings(new_status, ctx.findStrip("leds").?.status);
-
-            // setStripControl with arbitrary values
-            ctx.setStripControl(
-                "leds",
-                @as(i64, @intCast(buf[1])),
-                @as(i64, @intCast(buf[2])) - 1,
-                @as(i64, @intCast(buf[3])) - 1,
-                @as(i64, @intCast(buf[4])) - 1,
-            ) catch return;
-        }
-    }.run, .{});
-}
-
-// ---- New: setIo / sendWledBody / address/port/protocol ----
-
-test "setIo: stores io handle" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try testing.expect(ctx.io == null);
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    ctx.setIo(io);
-    try testing.expect(ctx.io != null);
-}
-
-test "sendWledBody: no address returns immediately, no error_state" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    const strip = ctx.findStrip("leds").?;
-    try testing.expect(strip.address == null);
-
-    // Should be a no-op — no crash, no error_state set.
-    ctx.sendWledBody(strip, "{\"on\":true}");
-    try testing.expect(strip.error_state == null);
-}
-
-test "sendWledBody: no io returns immediately, no error_state" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, "192.168.1.100", 80, null);
-    const strip = ctx.findStrip("leds").?;
-    try testing.expect(strip.address != null);
-    try testing.expect(ctx.io == null);
-
-    // io is null, so sendWledBody should return early.
-    ctx.sendWledBody(strip, "{\"on\":true}");
-    try testing.expect(strip.error_state == null);
-}
-
-test "addStrip: stores address, port, and protocol" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addStrip("wled_strip", 15, "", -1, -1, null, false, "10.0.0.5", 8080, "http");
-    const s = ctx.findStrip("wled_strip").?;
-    try testing.expectEqualStrings("10.0.0.5", s.address.?);
-    try testing.expectEqual(@as(u16, 8080), s.port);
-    try testing.expectEqualStrings("http", s.protocol);
-}
-
-test "addStrip: null address stored as null" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addStrip("wled_strip", 15, "", -1, -1, null, false, null, 80, null);
-    const s = ctx.findStrip("wled_strip").?;
-    try testing.expect(s.address == null);
-    try testing.expectEqual(@as(u16, 80), s.port);
-    try testing.expectEqualStrings("http", s.protocol);
-}
-
-test "addStrip: custom protocol is stored" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addStrip("wled_strip", 15, "", -1, -1, null, false, "10.0.0.5", 80, "wled");
-    const s = ctx.findStrip("wled_strip").?;
-    try testing.expectEqualStrings("wled", s.protocol);
-}
-
-test "processRequest: on with address sends HTTP body, state changed" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, "10.0.0.5", 80, null);
-    ctx.setStatus("leds", "off") catch unreachable;
-
-    const strip = ctx.findStrip("leds").?;
-    const result = try processRequest(&ctx, strip, "on");
-    try testing.expectEqualStrings("on", result);
-    try testing.expectEqualStrings("on", ctx.findStrip("leds").?.status);
-    // io is null so HTTP is skipped, but in-memory state is correct.
-}
-
-test "processRequest: off with address sends HTTP body, state changed" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, "10.0.0.5", 80, null);
-    ctx.setStatus("leds", "on") catch unreachable;
-
-    const strip = ctx.findStrip("leds").?;
-    const result = try processRequest(&ctx, strip, "off");
-    try testing.expectEqualStrings("off", result);
-    try testing.expectEqualStrings("off", ctx.findStrip("leds").?.status);
-}
-
-test "processRequest: on with preset builds correct body" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", 3, -1, null, false, "10.0.0.5", 80, null);
-
-    const strip = ctx.findStrip("leds").?;
-    try testing.expectEqual(@as(i64, 3), strip.preset);
-    const result = try processRequest(&ctx, strip, "on");
-    try testing.expectEqualStrings("on", result);
-    // preset remains 3 (was set by addStrip, wledOn keeps it).
-    try testing.expectEqual(@as(i64, 3), strip.preset);
-}
-
-test "setStripControl: with address builds HTTP body, state changed" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, "10.0.0.5", 80, null);
-
-    try ctx.setStripControl("leds", 128, 2, 64, 32);
-    const s = ctx.findStrip("leds").?;
-    try testing.expectEqualStrings("on", s.status);
-    try testing.expectEqual(@as(i64, 128), s.brightness);
-    try testing.expectEqual(@as(i64, 64), s.intensity);
-    try testing.expectEqual(@as(i64, 32), s.speed);
-    try testing.expectEqual(@as(i64, 2), s.preset);
-}
-
-test "fuzz wledOn/wledOff/wledControl: Strip methods never panic" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            ctx.addStrip("s", 10, "", -1, -1, null, false, null, 80, null) catch return;
-            var strip = ctx.findStrip("s") orelse return;
-
-            const preset = @as(i64, @intCast(buf[0])) - 1;
-            strip.wledOn(preset);
-            try testing.expectEqual(preset, strip.preset);
-
-            const b = @as(i64, @intCast(buf[1]));
-            const i = @as(i64, @intCast(buf[2])) - 1;
-            const sp = @as(i64, @intCast(buf[3])) - 1;
-            _ = strip.wledControl(b, i, sp);
-            // Values >= 1 are applied for brightness (minval=1), >= 0 for
-            // intensity and speed (minval=0); -1 keeps current.
-            if (b >= 1) try testing.expectEqual(b, strip.brightness);
-            if (i >= 0) try testing.expectEqual(i, strip.intensity);
-            if (sp >= 0) try testing.expectEqual(sp, strip.speed);
-
-            strip.wledOff(); // no-op, never panics
-        }
-    }.run, .{});
-}
-
-test "fuzz sendWledBody: never panics with arbitrary body/address/io combinations" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            const combo = buf[0] % 3;
-            switch (combo) {
-                0 => {
-                    // No address, no io → early return.
-                    ctx.addStrip("s", 10, "", -1, -1, null, false, null, 80, null) catch return;
-                },
-                1 => {
-                    // Address but no io → early return.
-                    ctx.addStrip("s", 10, "", -1, -1, null, false, "10.0.0.1", 80, "http") catch return;
-                },
-                else => {
-                    // No address, so sendWledBody returns early.
-                    ctx.addStrip("s", 10, "", -1, -1, null, false, null, 80, null) catch return;
-                },
-            }
-
-            const strip = ctx.findStrip("s") orelse return;
-            const bodies = [_][]const u8{ "{\"on\":true}", "{\"on\":false}", "", "bad-json", "{}" };
-            const body = bodies[buf[2] % bodies.len];
-
-            ctx.sendWledBody(strip, body);
-            // No crash. Error state is only set when both address and io exist
-            // AND the real HTTP call fails; we never trigger a real call here.
-            _ = strip.error_state;
-        }
-    }.run, .{});
-}
-
-test "fuzz addStrip: arbitrary address/port/protocol never panics" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            const has_address = buf[0] % 2 == 0;
-            const address: ?[]const u8 = if (has_address) "192.168.1.42" else null;
-            const port: u16 = (@as(u16, buf[1]) * 256) + @as(u16, buf[2]);
-            const protocols = [_][]const u8{ "http", "wled", "https" };
-            const proto: ?[]const u8 = if (buf[3] % 3 == 0) null else protocols[buf[3] % protocols.len];
-
-            ctx.addStrip("s", 10, "", -1, -1, null, false, address, port, proto) catch return;
-
-            const s = ctx.findStrip("s") orelse return;
-            if (has_address) {
-                try testing.expectEqualStrings("192.168.1.42", s.address.?);
-                try testing.expectEqual(port, s.port);
-            } else {
-                try testing.expect(s.address == null);
-            }
-            if (proto) |p| {
-                try testing.expectEqualStrings(p, s.protocol);
-            } else {
-                try testing.expectEqualStrings("http", s.protocol);
-            }
-        }
-    }.run, .{});
-}
-
-test "fuzz processRequest: with address never panics, no real HTTP" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            const has_address = buf[0] % 2 == 0;
-
-            if (has_address) {
-                ctx.addStrip("s", 10, "", buf[2] % 10, -1, null, false, "10.0.0.1", 80, "http") catch return;
-            } else {
-                ctx.addStrip("s", 10, "", buf[2] % 10, -1, null, false, null, 80, null) catch return;
-            }
-
-            // Never set io to avoid real HTTP calls; sendWledBody from
-            // processRequest will just return early when io is null.
-
-            const strip = ctx.findStrip("s") orelse return;
-            const actions = [_][]const u8{ "on", "off", "toggle", "status" };
-            const action = actions[buf[3] % actions.len];
-
-            _ = processRequest(&ctx, strip, action) catch {};
-
-            // State should reflect the action (except "status" which does not change state).
-            const updated = ctx.findStrip("s") orelse return;
-            _ = updated.status;
-        }
-    }.run, .{});
-}
-
-test "fuzz setStripControl: with address never panics, no real HTTP" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = WledCtx.init(a);
-            defer ctx.deinit();
-
-            const has_address = buf[0] % 2 == 0;
-
-            if (has_address) {
-                ctx.addStrip("s", 10, "", -1, -1, null, false, "10.0.0.1", 80, "http") catch return;
-            } else {
-                ctx.addStrip("s", 10, "", -1, -1, null, false, null, 80, null) catch return;
-            }
-
-            // Never set io to avoid real HTTP calls; sendWledBody from
-            // setStripControl will just return early when io is null.
-
-            const brightness: i64 = @as(i64, @intCast(buf[2])) - 1;
-            const preset: i64 = @as(i64, @intCast(buf[3])) - 1;
-            const intensity: i64 = @as(i64, @intCast(buf[4])) - 1;
-            const speed: i64 = @as(i64, @intCast(buf[5])) - 1;
-
-            ctx.setStripControl("s", brightness, preset, intensity, speed) catch {};
-
-            const s = ctx.findStrip("s") orelse return;
-            try testing.expectEqualStrings("on", s.status);
-            if (brightness >= 0) try testing.expectEqual(brightness, s.brightness);
-            if (intensity >= 0) try testing.expectEqual(intensity, s.intensity);
-            if (speed >= 0) try testing.expectEqual(speed, s.speed);
-            if (preset >= 0) try testing.expectEqual(preset, s.preset);
-        }
-    }.run, .{});
-}
-
-// --- WLED serial output ---
-
-test "sendWledBody: serial strip writes newline-terminated JSON to the device" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "wled", .data = "" });
-    const path = try tmp.dir.realPathFileAlloc(io, "wled", std.testing.allocator);
-    defer std.testing.allocator.free(path);
-
-    var ctx = testCtx(std.testing.allocator);
-    defer ctx.deinit();
-    ctx.setIo(io);
-    try ctx.addStrip("leds", 10, "", -1, -1, null, false, null, 80, null);
-    try ctx.setStripSerial("leds", path, 115200);
-
-    const strip = ctx.findStrip("leds").?;
-    ctx.sendWledBody(strip, "{\"on\":true}");
-    try std.testing.expect(strip.error_state == null);
-
-    const fh = try tmp.dir.openFile(io, "wled", .{});
-    defer fh.close(io);
-    var buf: [64]u8 = undefined;
-    var r = fh.reader(io, &.{});
-    const n = try r.interface.readSliceShort(&buf);
-    try std.testing.expectEqualStrings("{\"on\":true}\n", buf[0..n]);
+    try testing.expect(d.methods.get("set_wled_state") != null);
+    try testing.expect(d.methods.get("set_wled") != null);
 }
 
 test "WLED strips free partial and replaced records on allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn check(alloc: std.mem.Allocator) !void {
             var ctx = WledCtx.init(alloc);
             defer ctx.deinit();
-            for (0..2) |_| try ctx.addStrip("led", 1, "abcd", 0, 0, "colors", true, "localhost", 80, "https");
-            try ctx.setStatus("led", ctx.strips.getPtr("led").?.status);
-            try ctx.setStripControl("led", 10, 0, 0, 0);
-            try std.testing.expectEqualStrings("on", ctx.strips.getPtr("led").?.status);
+            try ctx.addStrip(.{ .name = "s", .chain_count = 2, .transport = .{ .http = "http://h:80/json" } });
+            try ctx.addStrip(.{ .name = "s", .transport = .{ .serial = .{ .path = "/dev/x", .baud = default_baud } } });
+            try testing.expectEqual(@as(usize, 1), ctx.findStrip("s").?.chain_count);
         }
     }.check, .{});
 }
 
-test "WLED color updates use the available pixel buffer" {
-    var ctx = WledCtx.init(std.testing.allocator);
+test "updateColorData: whole chain, one pixel, out-of-range index ignored" {
+    var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
-    try ctx.addStrip("led", std.math.maxInt(i64), "abcd", 0, 0, null, false, null, 80, null);
-    const strip = ctx.strips.getPtr("led").?;
-    strip.updateColorData(1, 0, 0, 0, null);
-    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0 }, strip.chain_data);
-    strip.chain_count = -1;
-    strip.updateColorData(0, 1, 0, 0, 1);
-    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0 }, strip.chain_data);
+    try ctx.addStrip(.{ .name = "s", .chain_count = 2 });
+    const strip = ctx.findStrip("s").?;
+    strip.updateColorData(.{ 1, 0, 0, 0 }, null);
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0, 255, 0, 0, 0 }, strip.chain_data);
+    strip.updateColorData(.{ 0, 0, 2.0, -1 }, 2);
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0, 0, 0, 255, 0 }, strip.chain_data);
+    strip.updateColorData(.{ 0, 1, 0, 0 }, 3);
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0, 0, 0, 255, 0 }, strip.chain_data);
+}
+
+test "getOptFloat: numbers, numeric strings, defaults" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const p = try objParams(arena.allocator(), "{\"a\":0.25,\"b\":1,\"c\":\"0.5\",\"d\":true}");
+    try testing.expectEqual(@as(f64, 0.25), getOptFloat(p, "a"));
+    try testing.expectEqual(@as(f64, 1), getOptFloat(p, "b"));
+    try testing.expectEqual(@as(f64, 0.5), getOptFloat(p, "c"));
+    try testing.expectEqual(@as(f64, 0), getOptFloat(p, "d"));
+    try testing.expectEqual(@as(f64, 0), getOptFloat(p, "missing"));
+}
+
+test "fuzz WLED handlers: arbitrary actions and params never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var ctx = WledCtx.init(testing.allocator);
+            defer ctx.deinit();
+            try ctx.addStrip(.{ .name = "s", .chain_count = smith.valueRangeAtMostWithHash(u8, 1, 8, 0), .initial_preset = smith.valueRangeAtMostWithHash(i8, -1, 3, 1) });
+            const actions = [_][]const u8{ "on", "off", "toggle", "control", "status", "x" };
+            for (0..4) |round| {
+                const action = actions[smith.valueRangeLessThanWithHash(u8, 0, actions.len, 2)];
+                const ints = [_]i64{ -1, 0, 1, 128, 255, 256, std.math.minInt(i64) };
+                const json = try std.fmt.allocPrint(a, "{{\"strip\":\"s\",\"action\":\"{s}\",\"_method\":\"POST\",\"preset\":{d},\"brightness\":{d},\"intensity\":{d},\"speed\":{d},\"index\":{d},\"red\":{d},\"transmit\":{d}}}", .{
+                    action,
+                    ints[smith.valueRangeLessThanWithHash(u8, 0, ints.len, 3)],
+                    ints[smith.valueRangeLessThanWithHash(u8, 0, ints.len, 4)],
+                    ints[smith.valueRangeLessThanWithHash(u8, 0, ints.len, 5)],
+                    ints[smith.valueRangeLessThanWithHash(u8, 0, ints.len, 6)],
+                    ints[smith.valueRangeLessThanWithHash(u8, 0, ints.len, 7)],
+                    ints[smith.valueRangeLessThanWithHash(u8, 0, ints.len, 8)],
+                    round % 2,
+                });
+                const params = try objParams(a, json);
+                _ = handleSingleStrip(@ptrCast(&ctx), params, a) catch {};
+                _ = handleSetWledState(@ptrCast(&ctx), params, a) catch {};
+                _ = handleSetWled(@ptrCast(&ctx), params, a) catch {};
+                _ = try handleBatchStatus(@ptrCast(&ctx), try objParams(a, "{\"s\":null}"), a);
+            }
+            const strip = ctx.findStrip("s").?;
+            try testing.expect(strip.brightness >= -1 and strip.brightness <= 255);
+            try testing.expect(strip.intensity >= -1 and strip.intensity <= 255);
+            try testing.expect(strip.speed >= -1 and strip.speed <= 255);
+        }
+    }.run, .{});
 }

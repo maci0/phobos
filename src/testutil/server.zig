@@ -1698,7 +1698,7 @@ test "wled: on/off/toggle batch and single strip endpoints work correctly" {
     defer ts.stop();
 
     // Add a strip via the wled_ctx.
-    ts.app.wled_ctx.addStrip("test_strip", 30, "", -1, -1, null, false, null, 80, null) catch unreachable;
+    try ts.app.wled_ctx.addStrip(.{ .name = "test_strip", .chain_count = 30 });
 
     // GET strip → initial state "off".
     const get_body = try ts.get(alloc, "/machine/wled/strip?strip=test_strip");
