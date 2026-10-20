@@ -1160,6 +1160,41 @@ test "files: upload → list → metadata → download round-trip" {
     try std.testing.expectEqualStrings("G28\nG1 X1 Y2\n", dl);
 }
 
+test "files: metadata thumbnails persist and their advertised URLs serve image bytes" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jBqkAAAAASUVORK5CYII=";
+    const gcode = try std.fmt.allocPrint(alloc, "; thumbnail begin 1x1 {d}\n; {s}\n; thumbnail end\nG28\n", .{ encoded.len, encoded });
+    defer alloc.free(gcode);
+    const upload = try ts.uploadFile(alloc, "gcodes", "sub", "model.gcode", gcode);
+    defer alloc.free(upload);
+    const metadata = try ts.get(alloc, "/server/files/metadata?filename=sub/model.gcode");
+    defer alloc.free(metadata);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, metadata, .{});
+    defer parsed.deinit();
+    const thumb = parsed.value.object.get("result").?.object.get("thumbnails").?.array.items[0].object;
+    try std.testing.expect(thumb.get("relative_path") != null);
+    try std.testing.expectEqualStrings(".thumbs/model-1x1.png", thumb.get("relative_path").?.string);
+    try std.testing.expect(thumb.get("data") == null);
+    const path = try std.fmt.allocPrint(alloc, "/server/files/gcodes/sub/{s}", .{thumb.get("relative_path").?.string});
+    defer alloc.free(path);
+    const image = try ts.get(alloc, path);
+    defer alloc.free(image);
+    const expected = try alloc.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded));
+    defer alloc.free(expected);
+    try std.base64.standard.Decoder.decode(expected, encoded);
+    try std.testing.expectEqualSlices(u8, expected, image);
+    try std.testing.expectEqual(@as(i64, @intCast(expected.len)), thumb.get("size").?.integer);
+    const thumbs = try ts.get(alloc, "/server/files/thumbnails?filename=sub/model.gcode");
+    defer alloc.free(thumbs);
+    const thumbnail_response = try std.json.parseFromSlice(std.json.Value, alloc, thumbs, .{});
+    defer thumbnail_response.deinit();
+    const listed = thumbnail_response.value.object.get("result").?.array.items[0].object;
+    try std.testing.expectEqualStrings("sub/.thumbs/model-1x1.png", listed.get("thumbnail_path").?.string);
+    try std.testing.expect(listed.get("relative_path") == null);
+}
+
 test "files: encoded names work through metadata download and delete" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

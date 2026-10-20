@@ -1088,7 +1088,7 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     // re-reading 256 KiB + re-parsing the gcode header on every request.
     if (ctx.cachedMetadata(alloc, resolved.abs, st.size, mtime)) |cached| return cached;
 
-    const value = try buildMetadata(io, ctx.gpa, alloc, file, st, filename);
+    const value = try buildMetadata(io, ctx.gpa, alloc, file, st, resolved);
     ctx.cacheMetadata(resolved.abs, st.size, mtime, value);
     return value;
 }
@@ -1098,17 +1098,17 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 /// temperatures). Reads the first 256 KiB of the file to extract comment-header
 /// metadata via `gcode_metadata.parse`. `st` is the open file's stat.
 /// Transient reads use gpa; only the returned JSON survives in response_alloc.
-fn buildMetadata(io: std.Io, gpa: std.mem.Allocator, response_alloc: std.mem.Allocator, file: std.Io.File, st: std.Io.File.Stat, filename: []const u8) !std.json.Value {
+fn buildMetadata(io: std.Io, gpa: std.mem.Allocator, response_alloc: std.mem.Allocator, file: std.Io.File, st: std.Io.File.Stat, resolved: Resolved) !std.json.Value {
     var scratch = std.heap.ArenaAllocator.init(gpa);
     defer scratch.deinit();
     const alloc = scratch.allocator();
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "size", .{ .integer = @intCast(st.size) });
     try obj.put(alloc, "modified", .{ .float = mtimeSecs(st) });
-    try obj.put(alloc, "uuid", .{ .string = try stableUuid(alloc, filename) });
+    try obj.put(alloc, "uuid", .{ .string = try stableUuid(alloc, resolved.rel) });
     try obj.put(alloc, "print_start_time", .null);
     try obj.put(alloc, "job_id", .null);
-    try obj.put(alloc, "filename", .{ .string = filename });
+    try obj.put(alloc, "filename", .{ .string = resolved.rel });
 
     // Deep gcode header parsing: read up to 256 KiB of the file header
     // to extract slicer info, layer count, estimated time, filament usage,
@@ -1132,20 +1132,35 @@ fn buildMetadata(io: std.Io, gpa: std.mem.Allocator, response_alloc: std.mem.All
     if (meta.layer_height) |lh| try obj.put(alloc, "layer_height", .{ .float = lh });
     if (meta.object_height) |oh| try obj.put(alloc, "object_height", .{ .float = oh });
     if (meta.nozzle_diameter) |nd| try obj.put(alloc, "nozzle_diameter", .{ .float = nd });
-    try obj.put(alloc, "thumbnails", try thumbnailsJson(alloc, meta.thumbnails));
+    try obj.put(alloc, "thumbnails", try thumbnailsJson(io, alloc, resolved, meta.thumbnails));
 
     return jv.deepCopy(response_alloc, .{ .object = obj });
 }
 
-/// `[{width, height, size, data}]` for parsed thumbnails, in `alloc`.
-fn thumbnailsJson(alloc: std.mem.Allocator, thumbnails: []const gcode_metadata.Thumbnail) !std.json.Value {
+/// Persist embedded PNGs atomically; the returned paths and JSON belong to alloc.
+fn thumbnailsJson(io: std.Io, alloc: std.mem.Allocator, gcode: Resolved, thumbnails: []const gcode_metadata.Thumbnail) !std.json.Value {
     var thumbs: std.json.Array = try .initCapacity(alloc, thumbnails.len);
+    if (!gcode.root.full_access) return .{ .array = thumbs };
     for (thumbnails) |t| {
+        if (t.width <= 0 or t.height <= 0 or t.size != t.data.len) continue;
+        const size = std.base64.standard.Decoder.calcSizeForSlice(t.data) catch continue;
+        const image = try alloc.alloc(u8, size);
+        std.base64.standard.Decoder.decode(image, t.data) catch continue;
+        const relative_path = try std.fmt.allocPrint(alloc, ".thumbs/{s}-{d}x{d}.png", .{ std.fs.path.stem(gcode.rel), t.width, t.height });
+        const image_rel = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(gcode.rel) orelse "", relative_path });
+        const target: Resolved = .{ .root = gcode.root, .rel = image_rel, .abs = "" };
+        var parent = try target.parent(io, alloc, .{ .make_path = true });
+        defer parent.close(io);
+        var output = try parent.dir.createFileAtomic(io, parent.name, .{ .replace = true });
+        defer output.deinit(io);
+        try output.file.writePositionalAll(io, image, 0);
+        try output.file.sync(io);
+        try output.replace(io);
         var tobj: std.json.ObjectMap = .empty;
         try tobj.put(alloc, "width", .{ .integer = t.width });
         try tobj.put(alloc, "height", .{ .integer = t.height });
-        try tobj.put(alloc, "size", .{ .integer = t.size });
-        try tobj.put(alloc, "data", .{ .string = t.data });
+        try tobj.put(alloc, "size", .{ .integer = @intCast(size) });
+        try tobj.put(alloc, "relative_path", .{ .string = relative_path });
         thumbs.appendAssumeCapacity(.{ .object = tobj });
     }
     return .{ .array = thumbs };
@@ -1213,32 +1228,35 @@ pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
     defer file.close(io);
     if (!isGcodeExt(filename)) return error.InvalidParams;
-    return buildMetadata(io, ctx.gpa, alloc, file, try file.stat(io), filename);
+    const st = try file.stat(io);
+    const value = try buildMetadata(io, ctx.gpa, alloc, file, st, resolved);
+    ctx.cacheMetadata(resolved.abs, st.size, mtimeSecs(st), value);
+    return value;
 }
 
 // ---------------------------------------------------------------------------
 // GET /server/files/thumbnails → server.files.thumbnails
 // ---------------------------------------------------------------------------
-// Returns embedded thumbnail data parsed from gcode header comments.
-// Reads the file header and extracts `; thumbnail begin … end` blocks.
+// Returns persisted thumbnail paths relative to the gcodes root.
 
 pub fn handleThumbnails(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
-    const io = try ctx.requireIo();
     // Moonraker get_str("filename") is 400 "No data for argument: filename"
     // when the argument is absent. A present empty string looks up metadata
     // and returns an empty list.
     const filename = (try webreq.optional([]const u8, params, "filename")) orelse return error.MissingFilename;
     if (filename.len == 0) return .{ .array = .init(alloc) };
-    const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
-    const resolved = try resolveRequestPath(ctx, alloc, req);
-    const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
-    defer file.close(io);
-    if (!isGcodeExt(filename)) return .{ .array = .init(alloc) };
-
-    const st = try file.stat(io);
-    const header_text = readFileHeader(io, alloc, file, st.size) catch return .{ .array = .init(alloc) };
-    return thumbnailsJson(alloc, gcode_metadata.parse(alloc, header_text).thumbnails);
+    const metadata = handleMetadata(ctx_ptr, params, alloc) catch |err| switch (err) {
+        error.MetadataNotAvailable => return .{ .array = .init(alloc) },
+        else => return err,
+    };
+    const thumbs = metadata.object.get("thumbnails").?;
+    for (thumbs.array.items) |*thumb| {
+        if (thumb.object.fetchOrderedRemove("relative_path")) |entry| {
+            const path = try std.fs.path.join(alloc, &.{ std.fs.path.dirname(filename) orelse "", entry.value.string });
+            try thumb.object.put(alloc, "thumbnail_path", .{ .string = path });
+        }
+    }
+    return thumbs;
 }
 
 // ---------------------------------------------------------------------------
@@ -2054,7 +2072,7 @@ test "handleCopy: source == destination is rejected (no self-truncation)" {
     // The source file is untouched (still its original size, not truncated to 0).
     const file = try Dir.cwd().openFile(tr.io, try std.fs.path.join(a, &.{ tr.roots[0].path, "a.gcode" }), .{});
     defer file.close(tr.io);
-    const md = try buildMetadata(tr.io, testing.allocator, a, file, try file.stat(tr.io), "a.gcode");
+    const md = try buildMetadata(tr.io, testing.allocator, a, file, try file.stat(tr.io), .{ .root = tr.roots[0], .rel = "a.gcode", .abs = "" });
     try testing.expectEqual(@as(i64, @intCast(contents.len)), md.object.get("size").?.integer);
 }
 
@@ -2244,7 +2262,9 @@ test "extended directory metadata releases per-file parsing buffers" {
                 try testing.expectEqualStrings("PrusaSlicer", file.object.get("slicer").?.string);
                 try testing.expectEqualStrings("2.7.4", file.object.get("slicer_version").?.string);
                 try testing.expectEqual(@as(f64, 5), file.object.get("estimated_time").?.float);
-                try testing.expectEqualStrings("QUJD", file.object.get("thumbnails").?.array.items[0].object.get("data").?.string);
+                const thumbnail = file.object.get("thumbnails").?.array.items[0].object;
+                try testing.expect(std.mem.endsWith(u8, thumbnail.get("relative_path").?.string, "-1x1.png"));
+                try testing.expectEqual(@as(i64, 3), thumbnail.get("size").?.integer);
             }
             const live = memory.allocated_bytes - memory.freed_bytes;
             peak_retained = @max(peak_retained, live);
@@ -2268,7 +2288,7 @@ test "metadata releases parsing buffers when copying its response fails" {
     var failed_response = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     var response = std.heap.ArenaAllocator.init(failed_response.allocator());
     defer response.deinit();
-    try testing.expectError(error.OutOfMemory, buildMetadata(tr.io, scratch_memory.allocator(), response.allocator(), file, try file.stat(tr.io), "m.gcode"));
+    try testing.expectError(error.OutOfMemory, buildMetadata(tr.io, scratch_memory.allocator(), response.allocator(), file, try file.stat(tr.io), .{ .root = tr.roots[0], .rel = "m.gcode", .abs = "" }));
     try testing.expect(scratch_memory.allocated_bytes > 0);
     try testing.expectEqual(scratch_memory.allocated_bytes, scratch_memory.freed_bytes);
 }
@@ -2292,7 +2312,7 @@ test "fuzz metadata snapshots: parsed strings survive scratch teardown" {
             try tr.writeFile("gcodes/m.gcode", body);
             const value = try handleMetascan(@ptrCast(&ctx), try objParams(a, "{\"filename\":\"m.gcode\"}"), a);
             try testing.expectEqualStrings(version, value.object.get("slicer_version").?.string);
-            try testing.expectEqualStrings("QUJD", value.object.get("thumbnails").?.array.items[0].object.get("data").?.string);
+            try testing.expectEqualStrings(".thumbs/m-1x1.png", value.object.get("thumbnails").?.array.items[0].object.get("relative_path").?.string);
         }
     }.run, .{});
 }
@@ -2315,7 +2335,7 @@ test "handleMetadata: thumbnail-heavy records keep the cache under its byte cap"
         const params = try objParams(a, try std.fmt.allocPrint(a, "{{\"filename\":\"{s}\"}}", .{name}));
         for (0..2) |_| {
             const md = try handleMetadata(@ptrCast(&c), params, a);
-            try testing.expectEqual(@as(usize, thumb_len), md.object.get("thumbnails").?.array.items[0].object.get("data").?.string.len);
+            try testing.expectEqual(@as(i64, thumb_len / 4 * 3), md.object.get("thumbnails").?.array.items[0].object.get("size").?.integer);
         }
         try testing.expect(c.metadata_cache_bytes <= metadata_cache_max_bytes);
         var sum: usize = 0;
@@ -2323,7 +2343,7 @@ test "handleMetadata: thumbnail-heavy records keep the cache under its byte cap"
         while (it.next()) |e| sum += e.bytes;
         try testing.expectEqual(sum, c.metadata_cache_bytes);
     }
-    try testing.expect(c.metadata_cache.count() < names.len);
+    try testing.expectEqual(names.len, c.metadata_cache.count());
 }
 
 test "handleMetadata: missing file → MetadataNotAvailable" {
@@ -2369,7 +2389,7 @@ test "handleMetadata: gcode header parsing extracts slicer and stats" {
         \\; layer_height = 0.2
         \\; max_z_height: 155.0
         \\; thumbnail begin 16x16 12
-        \\iVBORw0==
+        \\iVBORw0KGgo=
         \\; thumbnail end
         \\G28 X0 Y0
         \\
@@ -2479,7 +2499,7 @@ test "handleThumbnails: parses embedded thumbnails from gcode header" {
 
     // Write a gcode file with a thumbnail block.
     const gcode =
-        \\; thumbnail begin 32x32 44
+        \\; thumbnail begin 32x32 24
         \\iVBORw0KGgoAAAANSUhEUg==
         \\; thumbnail end
         \\G28 X0 Y0
@@ -2494,7 +2514,8 @@ test "handleThumbnails: parses embedded thumbnails from gcode header" {
     const t = result.array.items[0].object;
     try testing.expectEqual(@as(i64, 32), t.get("width").?.integer);
     try testing.expectEqual(@as(i64, 32), t.get("height").?.integer);
-    try testing.expectEqualStrings("iVBORw0KGgoAAAANSUhEUg==", t.get("data").?.string);
+    try testing.expectEqualStrings(".thumbs/test-32x32.png", t.get("thumbnail_path").?.string);
+    try testing.expectEqual(@as(i64, 16), t.get("size").?.integer);
 
     // Missing filename is 400. An empty string is a lookup that finds nothing.
     try testing.expectError(error.MissingFilename, handleThumbnails(@ptrCast(&c), .null, a));
@@ -2516,14 +2537,62 @@ test "handleThumbnails: non-gcode file returns empty list" {
     try testing.expectEqual(@as(usize, 0), result.array.items.len);
 }
 
-test "handleThumbnails: missing file returns NotFound" {
+test "thumbnail writes cannot follow a .thumbs link outside the gcode root" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("gcodes/model.gcode", "; thumbnail begin 1x1 4\n; QUJD\n; thumbnail end\n");
+    try tr.writeFile("config/model-1x1.png", "keep");
+    try tr.tmp.dir.symLink(tr.io, tr.roots[1].path, "gcodes/.thumbs", .{});
+    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(a, "{\"filename\":\"model.gcode\"}"), a));
+    const contents = try tr.tmp.dir.readFileAlloc(tr.io, "config/model-1x1.png", a, .limited(16));
+    try testing.expectEqualStrings("keep", contents);
+}
+
+test "fuzz thumbnail persistence validates dimensions and base64 before writing" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var tr = try TestRoots.init(a);
+            defer tr.deinit();
+            var data: [64]u8 = undefined;
+            smith.bytesWithHash(&data, 0);
+            const encoded: []const u8 = if (smith.value(bool)) "QUJD" else data[0 .. smith.value(u8) % data.len];
+            const thumbnails = [_]gcode_metadata.Thumbnail{.{
+                .width = smith.value(i8),
+                .height = smith.value(i8),
+                .size = if (smith.value(bool)) @intCast(encoded.len) else smith.value(i8),
+                .data = encoded,
+            }};
+            const value = try thumbnailsJson(tr.io, a, .{ .root = tr.roots[0], .rel = "model.gcode", .abs = "" }, &thumbnails);
+            for (value.array.items) |thumbnail| {
+                const rel = thumbnail.object.get("relative_path").?.string;
+                try testing.expect(std.mem.startsWith(u8, rel, ".thumbs/model-"));
+                const image = try tr.tmp.dir.readFileAlloc(tr.io, try std.fs.path.join(a, &.{ "gcodes", rel }), a, .limited(data.len));
+                try testing.expectEqual(@as(i64, @intCast(image.len)), thumbnail.object.get("size").?.integer);
+                const expected = try a.alloc(u8, try std.base64.standard.Decoder.calcSizeForSlice(encoded));
+                try std.base64.standard.Decoder.decode(expected, encoded);
+                try testing.expectEqualSlices(u8, expected, image);
+            }
+        }
+    }.run, .{});
+}
+
+test "handleThumbnails: missing file returns an empty list" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var tr = try TestRoots.init(a);
     defer tr.deinit();
     var c = tr.ctx();
-    try testing.expectError(error.NotFound, handleThumbnails(@ptrCast(&c), try objParams(a, "{\"filename\":\"nonexistent.gcode\"}"), a));
+    const result = try handleThumbnails(@ptrCast(&c), try objParams(a, "{\"filename\":\"nonexistent.gcode\"}"), a);
+    try testing.expectEqual(@as(usize, 0), result.array.items.len);
 }
 
 test "handleZip: response shape destination + action" {

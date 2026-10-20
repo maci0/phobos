@@ -631,10 +631,16 @@ fn sendFileStreaming(io: Io, req: *std.http.Server.Request, file_request: file_m
 
     var rbuf: [64 * 1024]u8 = undefined;
     var fr = f.reader(io, &rbuf);
+    const file_headers = try alloc.dupe(std.http.Header, headers);
+    const extension = std.fs.path.extension(file_request.rel);
+    const mime: []const u8 = if (std.ascii.eqlIgnoreCase(extension, ".png")) "image/png" else if (std.ascii.eqlIgnoreCase(extension, ".jpg") or std.ascii.eqlIgnoreCase(extension, ".jpeg")) "image/jpeg" else if (std.ascii.eqlIgnoreCase(extension, ".zip")) "application/zip" else "application/octet-stream";
+    for (file_headers) |*header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "content-type")) header.value = mime;
+    }
     var send_buf: [16 * 1024]u8 = undefined;
     var bw = try req.respondStreaming(&send_buf, .{
         .content_length = st.size,
-        .respond_options = .{ .status = .ok, .extra_headers = headers },
+        .respond_options = .{ .status = .ok, .extra_headers = file_headers },
     });
     // Send the advertised size; growth is ignored and truncation aborts the response.
     fr.interface.streamExact64(&bw.writer, st.size) catch return error.DownloadAborted;
