@@ -1815,33 +1815,49 @@ pub fn handleUsb(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
     return .{ .object = obj };
 }
 
-/// Build the JSON object for one USB device folder `base` (e.g.
-/// /sys/bus/usb/devices/1-1). Returns null if `base` is not a device folder
-/// (no bDeviceClass). class/subclass/protocol carry the raw hex codes
-/// (Moonraker falls back to these when usb.ids name resolution is unavailable).
-fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8) !?std.json.Value {
-    const cls = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceClass" })) orelse return null;
-    const subcls = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceSubClass" })) orelse "";
-    const proto = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceProtocol" })) orelse "";
-    const devnum = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "devnum" })) orelse "";
-    const busnum = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "busnum" })) orelse "";
-    const vid = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idVendor" })) orelse "";
-    const pid = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idProduct" })) orelse "";
+/// Moonraker's built-in usb.ids entries (`UsbIdData._usb_info_cache`). phobos
+/// has no usb.ids database, so these are the only names it resolves.
+const usb_vendor_names = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "1d50", "OpenMoko, Inc" },
+});
+const usb_product_names = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "1d50:614e", "Klipper 3d-Printer Firmware" },
+    .{ "1d50:6177", "Katapult Bootloader (CDC_ACM)" },
+});
 
+/// Build the JSON object for one USB device folder `base` (e.g.
+/// /sys/bus/usb/devices/1-1), as `sysfs_devs.find_usb_devices` plus machine.py
+/// `_do_usb_detect`. Returns null when `base` is not a device folder or a
+/// required attribute is missing or malformed. Without usb.ids, class,
+/// subclass and protocol are null, and manufacturer, product and description
+/// fall back to the built-in vendor entries.
+fn buildUsbDevice(io: std.Io, alloc: std.mem.Allocator, base: []const u8) !?std.json.Value {
+    _ = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "bDeviceClass" })) orelse return null;
+    const devnum_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "devnum" })) orelse return null;
+    const busnum_text = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "busnum" })) orelse return null;
+    const devnum = std.fmt.parseInt(i64, devnum_text, 10) catch return null;
+    const busnum = std.fmt.parseInt(i64, busnum_text, 10) catch return null;
+    const vid = try std.ascii.allocLowerString(alloc, sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idVendor" })) orelse return null);
+    const pid = try std.ascii.allocLowerString(alloc, sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "idProduct" })) orelse return null);
+
+    const vendor_name = usb_vendor_names.get(vid);
+    const product_name = if (vendor_name != null) usb_product_names.get(try std.fmt.allocPrint(alloc, "{s}:{s}", .{ vid, pid })) else null;
     var dev: std.json.ObjectMap = .empty;
-    try dev.put(alloc, "device_num", .{ .integer = std.fmt.parseInt(i64, devnum, 10) catch 0 });
-    try dev.put(alloc, "bus_num", .{ .integer = std.fmt.parseInt(i64, busnum, 10) catch 0 });
-    try dev.put(alloc, "vendor_id", .{ .string = try toLowerDup(alloc, vid) });
-    try dev.put(alloc, "product_id", .{ .string = try toLowerDup(alloc, pid) });
-    try dev.put(alloc, "usb_location", .{ .string = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ busnum, devnum }) });
-    try dev.put(alloc, "manufacturer", manuf(io, alloc, base));
-    try dev.put(alloc, "product", attrOrNull(io, alloc, base, "product"));
-    try dev.put(alloc, "serial", attrOrNull(io, alloc, base, "serial"));
-    // Raw hex class codes (no usb.ids DB to resolve names → description null).
-    try dev.put(alloc, "class", if (cls.len > 0) .{ .string = try toLowerDup(alloc, cls) } else .null);
-    try dev.put(alloc, "subclass", if (subcls.len > 0) .{ .string = try toLowerDup(alloc, subcls) } else .null);
-    try dev.put(alloc, "protocol", if (proto.len > 0) .{ .string = try toLowerDup(alloc, proto) } else .null);
-    try dev.put(alloc, "description", .null);
+    try dev.put(alloc, "device_num", .{ .integer = devnum });
+    try dev.put(alloc, "bus_num", .{ .integer = busnum });
+    try dev.put(alloc, "vendor_id", .{ .string = vid });
+    try dev.put(alloc, "product_id", .{ .string = pid });
+    try dev.put(alloc, "usb_location", .{ .string = try std.fmt.allocPrint(alloc, "{d}:{d}", .{ busnum, devnum }) });
+    try dev.put(alloc, "manufacturer", attrOrDefault(io, alloc, base, "manufacturer", vendor_name));
+    try dev.put(alloc, "product", attrOrDefault(io, alloc, base, "product", product_name));
+    try dev.put(alloc, "serial", attrOrDefault(io, alloc, base, "serial", null));
+    try dev.put(alloc, "class", .null);
+    try dev.put(alloc, "subclass", .null);
+    try dev.put(alloc, "protocol", .null);
+    try dev.put(alloc, "description", if (vendor_name) |v|
+        .{ .string = if (product_name) |p| try std.fmt.allocPrint(alloc, "{s} {s}", .{ v, p }) else v }
+    else
+        .null);
     return .{ .object = dev };
 }
 
@@ -1855,13 +1871,10 @@ fn enumUsb(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
     }
 }
 
-fn manuf(io: std.Io, alloc: std.mem.Allocator, base: []const u8) std.json.Value {
-    return attrOrNull(io, alloc, base, "manufacturer");
-}
-
-fn attrOrNull(io: std.Io, alloc: std.mem.Allocator, base: []const u8, name: []const u8) std.json.Value {
+/// The sysfs attribute `base/name` as a string, else `default` or null.
+fn attrOrDefault(io: std.Io, alloc: std.mem.Allocator, base: []const u8, name: []const u8, default: ?[]const u8) std.json.Value {
     const p = std.fs.path.join(alloc, &.{ base, name }) catch return .null;
-    const v = sysAttr(io, alloc, p) orelse return .null;
+    const v = sysAttr(io, alloc, p) orelse default orelse return .null;
     return .{ .string = v };
 }
 
@@ -1872,9 +1885,18 @@ fn sysAttr(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?[]const u8 {
     return t;
 }
 
-fn toLowerDup(alloc: std.mem.Allocator, s: []const u8) ![]const u8 {
-    const buf = try alloc.alloc(u8, s.len);
-    return std.ascii.lowerString(buf, s);
+/// `sysfs_devs.find_usb_folder`: "<busnum>:<devnum>" from the nearest
+/// ancestor of the resolved `device_dir` that holds both files, else null.
+fn findUsbLocation(io: std.Io, alloc: std.mem.Allocator, device_dir: []const u8) ?[]const u8 {
+    var path: []const u8 = Dir.cwd().realPathFileAlloc(io, device_dir, alloc) catch return null;
+    while (std.fs.path.dirname(path)) |parent| : (path = parent) {
+        const devnum = sysAttr(io, alloc, std.fs.path.join(alloc, &.{ path, "devnum" }) catch return null) orelse continue;
+        const busnum = sysAttr(io, alloc, std.fs.path.join(alloc, &.{ path, "busnum" }) catch return null) orelse continue;
+        const d = std.fmt.parseInt(u32, devnum, 10) catch return null;
+        const b = std.fmt.parseInt(u32, busnum, 10) catch return null;
+        return std.fmt.allocPrint(alloc, "{d}:{d}", .{ b, d }) catch null;
+    }
+    return null;
 }
 
 /// GET /machine/peripherals/serial → { "serial_devices": [...] }
@@ -1898,14 +1920,14 @@ fn readLinkBasename(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ?[]c
     return alloc.dupe(u8, std.fs.path.basename(buf[0..n])) catch null;
 }
 
-/// A /dev/serial/by-{id,path} symlink: its full path + the tty basename it
+/// A /dev/{serial,v4l}/by-{id,path} symlink: its full path + the device basename it
 /// points at (e.g. link=/dev/serial/by-id/usb-Klipper..., target_base=ttyACM0).
-const SerialLink = struct { link: []const u8, target_base: []const u8 };
+const DevLink = struct { link: []const u8, target_base: []const u8 };
 
-/// Scan a /dev/serial/by-* directory into a list of (link, target-basename).
+/// Scan a /dev/*/by-* directory into a list of (link, target-basename).
 /// Returns an empty slice when the directory is absent.
-fn collectSerialLinks(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) []const SerialLink {
-    var list: std.ArrayList(SerialLink) = .empty;
+fn collectDevLinks(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8) []const DevLink {
+    var list: std.ArrayList(DevLink) = .empty;
     var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return &.{};
     defer dir.close(io);
     var it = dir.iterate();
@@ -1917,49 +1939,61 @@ fn collectSerialLinks(io: std.Io, alloc: std.mem.Allocator, dir_path: []const u8
     return list.items;
 }
 
-fn findSerialLink(links: []const SerialLink, dev_name: []const u8) ?[]const u8 {
+/// The by-* link for `dev_name` as a JSON string, or null.
+fn findDevLink(links: []const DevLink, dev_name: []const u8) std.json.Value {
     for (links) |l| {
-        if (std.mem.eql(u8, l.target_base, dev_name)) return l.link;
+        if (std.mem.eql(u8, l.target_base, dev_name)) return .{ .string = l.link };
     }
-    return null;
+    return .null;
 }
 
-/// Build the JSON object for one tty under `tty_root` (e.g. /sys/class/tty).
-/// Returns null when the tty has no backing `device` folder. driver_name comes
-/// from the `device/driver` symlink; device_type from `device/subsystem`
-/// (usb → "usb", else "hardware_uart"). path_by_id/by_hardware are resolved from
-/// the supplied by-id/by-path link tables. Matches machine.py find_serial_devices.
+/// Build the JSON object for one tty under `tty_root` (e.g. /sys/class/tty),
+/// as `sysfs_devs.find_serial_devices`. Returns null when the tty has no
+/// backing `device` folder, or is a serial8250 port with a non-zero `port`.
+/// A tty with `uartclk` and `port` is a hardware_uart; otherwise it is usb when
+/// an ancestor of its device folder holds devnum/busnum, else unknown.
 fn buildSerialDevice(
     io: std.Io,
     alloc: std.mem.Allocator,
     tty_root: []const u8,
     dev_name: []const u8,
-    by_id: []const SerialLink,
-    by_path: []const SerialLink,
+    by_id: []const DevLink,
+    by_path: []const DevLink,
 ) !?std.json.Value {
-    const dev_dir = try std.fs.path.join(alloc, &.{ tty_root, dev_name, "device" });
+    const tty_dir = try std.fs.path.join(alloc, &.{ tty_root, dev_name });
+    const dev_dir = try std.fs.path.join(alloc, &.{ tty_dir, "device" });
     _ = Dir.cwd().statFile(io, dev_dir, .{}) catch return null;
     const driver = readLinkBasename(io, alloc, try std.fs.path.join(alloc, &.{ dev_dir, "driver" })) orelse "";
-    const subsystem = readLinkBasename(io, alloc, try std.fs.path.join(alloc, &.{ dev_dir, "subsystem" }));
-    const device_type: []const u8 = if (subsystem) |s|
-        (if (std.mem.eql(u8, s, "usb")) "usb" else "hardware_uart")
-    else
-        "unknown";
+
+    var device_type: []const u8 = "unknown";
+    var usb_location: std.json.Value = .null;
+    const has_uartclk = if (Dir.cwd().access(io, try std.fs.path.join(alloc, &.{ tty_dir, "uartclk" }), .{})) true else |_| false;
+    const port = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ tty_dir, "port" }));
+    if (has_uartclk and port != null) {
+        if (std.mem.eql(u8, driver, "serial8250")) {
+            const digits = std.mem.cutPrefix(u8, port.?, "0x") orelse port.?;
+            if ((std.fmt.parseInt(u64, digits, 16) catch return null) != 0) return null;
+        }
+        device_type = "hardware_uart";
+    } else if (findUsbLocation(io, alloc, dev_dir)) |loc| {
+        device_type = "usb";
+        usb_location = .{ .string = loc };
+    }
 
     var dev: std.json.ObjectMap = .empty;
     try dev.put(alloc, "device_type", .{ .string = device_type });
     try dev.put(alloc, "device_path", .{ .string = try std.fmt.allocPrint(alloc, "/dev/{s}", .{dev_name}) });
     try dev.put(alloc, "device_name", .{ .string = try alloc.dupe(u8, dev_name) });
     try dev.put(alloc, "driver_name", .{ .string = driver });
-    try dev.put(alloc, "path_by_hardware", if (findSerialLink(by_path, dev_name)) |p| .{ .string = p } else .null);
-    try dev.put(alloc, "path_by_id", if (findSerialLink(by_id, dev_name)) |p| .{ .string = p } else .null);
-    try dev.put(alloc, "usb_location", .null);
+    try dev.put(alloc, "path_by_hardware", findDevLink(by_path, dev_name));
+    try dev.put(alloc, "path_by_id", findDevLink(by_id, dev_name));
+    try dev.put(alloc, "usb_location", usb_location);
     return .{ .object = dev };
 }
 
 fn enumSerial(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
-    const by_id = collectSerialLinks(io, alloc, "/dev/serial/by-id");
-    const by_path = collectSerialLinks(io, alloc, "/dev/serial/by-path");
+    const by_id = collectDevLinks(io, alloc, "/dev/serial/by-id");
+    const by_path = collectDevLinks(io, alloc, "/dev/serial/by-path");
     var dir = Dir.cwd().openDir(io, "/sys/class/tty", .{ .iterate = true }) catch return;
     defer dir.close(io);
     var it = dir.iterate();
@@ -1993,11 +2027,15 @@ const V4l2Capability = extern struct {
     reserved: [3]u32,
 };
 const VIDIOC_QUERYCAP = std.os.linux.IOCTL.IOR('V', 0, V4l2Capability);
+/// V4L2_CAP_VIDEO_CAPTURE: Moonraker lists only nodes whose device_caps have it.
+const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x00000001;
 
 const V4l2Cap = struct {
     driver: []const u8,
+    card: []const u8,
     bus_info: []const u8,
     version: u32,
+    /// The node's `device_caps` (not the physical device's `capabilities`).
     caps: u32,
 
     fn read(io: std.Io, file: std.Io.File, alloc: std.mem.Allocator) !?V4l2Cap {
@@ -2006,11 +2044,14 @@ const V4l2Cap = struct {
         if (result.device_io_control < 0) return null;
         const driver = try alloc.dupe(u8, cField(&raw.driver));
         errdefer alloc.free(driver);
+        const card = try alloc.dupe(u8, cField(&raw.card));
+        errdefer alloc.free(card);
         return .{
             .driver = driver,
+            .card = card,
             .bus_info = try alloc.dupe(u8, cField(&raw.bus_info)),
             .version = raw.version,
-            .caps = raw.capabilities,
+            .caps = raw.device_caps,
         };
     }
 };
@@ -2021,21 +2062,39 @@ fn cField(buf: []const u8) []const u8 {
     return buf[0..end];
 }
 
-/// Decode a v4l2 capability bitmask into Moonraker-style capability names.
+/// Decode a v4l2 capability bitmask into the `V4L2Capability` flag names of
+/// `sysfs_devs.py`, in bit order.
 fn decodeV4l2Caps(alloc: std.mem.Allocator, caps: u32) std.json.Array {
     const flags = [_]struct { bit: u32, name: []const u8 }{
         .{ .bit = 0x00000001, .name = "VIDEO_CAPTURE" },
-        .{ .bit = 0x00001000, .name = "VIDEO_CAPTURE_MPLANE" },
         .{ .bit = 0x00000002, .name = "VIDEO_OUTPUT" },
-        .{ .bit = 0x00002000, .name = "VIDEO_OUTPUT_MPLANE" },
         .{ .bit = 0x00000004, .name = "VIDEO_OVERLAY" },
         .{ .bit = 0x00000010, .name = "VBI_CAPTURE" },
-        .{ .bit = 0x00800000, .name = "META_CAPTURE" },
+        .{ .bit = 0x00000020, .name = "VBI_OUTPUT" },
+        .{ .bit = 0x00000040, .name = "SLICED_VBI_CAPTURE" },
+        .{ .bit = 0x00000080, .name = "SLICED_VBI_OUTPUT" },
+        .{ .bit = 0x00000100, .name = "RDS_CAPTURE" },
+        .{ .bit = 0x00000200, .name = "VIDEO_OUTPUT_OVERLAY" },
+        .{ .bit = 0x00000400, .name = "HW_FREQ_SEEK" },
+        .{ .bit = 0x00000800, .name = "RDS_OUTPUT" },
+        .{ .bit = 0x00001000, .name = "VIDEO_CAPTURE_MPLANE" },
+        .{ .bit = 0x00002000, .name = "VIDEO_OUTPUT_MPLANE" },
+        .{ .bit = 0x00004000, .name = "VIDEO_M2M_MPLANE" },
+        .{ .bit = 0x00008000, .name = "VIDEO_M2M" },
         .{ .bit = 0x00010000, .name = "TUNER" },
         .{ .bit = 0x00020000, .name = "AUDIO" },
+        .{ .bit = 0x00040000, .name = "RADIO" },
+        .{ .bit = 0x00080000, .name = "MODULATOR" },
+        .{ .bit = 0x00100000, .name = "SDR_CAPTURE" },
+        .{ .bit = 0x00200000, .name = "EXT_PIX_FORMAT" },
+        .{ .bit = 0x00400000, .name = "SDR_OUTPUT" },
+        .{ .bit = 0x00800000, .name = "META_CAPTURE" },
         .{ .bit = 0x01000000, .name = "READWRITE" },
         .{ .bit = 0x04000000, .name = "STREAMING" },
-        .{ .bit = 0x80000000, .name = "DEVICE_CAPS" },
+        .{ .bit = 0x08000000, .name = "META_OUTPUT" },
+        .{ .bit = 0x10000000, .name = "TOUCH" },
+        .{ .bit = 0x20000000, .name = "IO_MC" },
+        .{ .bit = 0x80000000, .name = "SET_DEVICE_CAPS" },
     };
     var arr: std.json.Array = .init(alloc);
     for (flags) |f| {
@@ -2057,51 +2116,59 @@ fn queryV4l2Cap(io: std.Io, alloc: std.mem.Allocator, dev_path: []const u8) ?V4l
     return V4l2Cap.read(io, f, alloc) catch null;
 }
 
+/// `sysfs_devs.find_video_devices` without `modes` (no format enumeration):
+/// only nodes whose QUERYCAP succeeds with VIDEO_CAPTURE in device_caps.
 fn enumVideo(io: std.Io, alloc: std.mem.Allocator, arr: *std.json.Array) !void {
+    const by_path = collectDevLinks(io, alloc, "/dev/v4l/by-path");
+    const by_id = collectDevLinks(io, alloc, "/dev/v4l/by-id");
+    var found: std.ArrayList(VideoEntry) = .empty;
     var dir = Dir.cwd().openDir(io, "/sys/class/video4linux", .{ .iterate = true }) catch return;
     defer dir.close(io);
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        var dev: std.json.ObjectMap = .empty;
+        const dev_path = try std.fmt.allocPrint(alloc, "/dev/{s}", .{entry.name});
+        const cap = queryV4l2Cap(io, alloc, dev_path) orelse continue;
+        if (cap.caps & V4L2_CAP_VIDEO_CAPTURE == 0) continue;
         const base = try std.fs.path.join(alloc, &.{ "/sys/class/video4linux", entry.name });
-        const name = sysAttr(io, alloc, try std.fs.path.join(alloc, &.{ base, "name" })) orelse "";
-        try dev.put(alloc, "device_name", .{ .string = try alloc.dupe(u8, entry.name) });
-        try dev.put(alloc, "device_path", .{ .string = try std.fmt.allocPrint(alloc, "/dev/{s}", .{entry.name}) });
-        try dev.put(alloc, "camera_name", .{ .string = name });
-        // Read driver name from device/uevent if available.
-        var drv_name: []const u8 = "";
-        const uevent_path = try std.fs.path.join(alloc, &.{ base, "device", "uevent" });
-        if (sysAttr(io, alloc, uevent_path)) |uevent| {
-            var lines = std.mem.splitScalar(u8, uevent, '\n');
-            while (lines.next()) |line| {
-                if (std.mem.startsWith(u8, line, "DRIVER=")) {
-                    drv_name = try alloc.dupe(u8, line["DRIVER=".len..]);
-                    break;
-                }
-            }
-        }
-        // Query the device for bus_info / version / capabilities (read-only
-        // ioctl; degrades to the sysfs-only values when no device is present).
-        var hardware_bus: []const u8 = "";
-        var version: []const u8 = "";
-        var caps_arr: std.json.Array = .init(alloc);
-        if (queryV4l2Cap(io, alloc, try std.fmt.allocPrint(alloc, "/dev/{s}", .{entry.name}))) |cap| {
-            hardware_bus = cap.bus_info;
-            version = formatV4l2Version(alloc, cap.version);
-            caps_arr = decodeV4l2Caps(alloc, cap.caps);
-            if (drv_name.len == 0 and cap.driver.len > 0) drv_name = cap.driver;
-        }
-        try dev.put(alloc, "driver_name", .{ .string = drv_name });
-        try dev.put(alloc, "hardware_bus", .{ .string = hardware_bus });
-        try dev.put(alloc, "capabilities", .{ .array = caps_arr });
-        try dev.put(alloc, "version", .{ .string = version });
-        try dev.put(alloc, "path_by_hardware", .null);
-        try dev.put(alloc, "path_by_id", .null);
-        try dev.put(alloc, "alt_name", .{ .string = name });
-        try dev.put(alloc, "usb_location", .null);
+        const name = try alloc.dupe(u8, entry.name);
+        var dev: std.json.ObjectMap = .empty;
+        try dev.put(alloc, "device_name", .{ .string = name });
+        try dev.put(alloc, "device_path", .{ .string = dev_path });
+        try dev.put(alloc, "camera_name", .{ .string = cap.card });
+        try dev.put(alloc, "driver_name", .{ .string = cap.driver });
+        try dev.put(alloc, "hardware_bus", .{ .string = cap.bus_info });
+        try dev.put(alloc, "capabilities", .{ .array = decodeV4l2Caps(alloc, cap.caps) });
+        try dev.put(alloc, "version", .{ .string = formatV4l2Version(alloc, cap.version) });
+        try dev.put(alloc, "path_by_hardware", findDevLink(by_path, name));
+        try dev.put(alloc, "path_by_id", findDevLink(by_id, name));
+        try dev.put(alloc, "alt_name", attrOrDefault(io, alloc, base, "name", null));
+        const loc = findUsbLocation(io, alloc, try std.fs.path.join(alloc, &.{ base, "device" }));
+        try dev.put(alloc, "usb_location", if (loc) |l| .{ .string = l } else .null);
         try dev.put(alloc, "modes", .{ .array = .init(alloc) });
-        try arr.append(.{ .object = dev });
+        try found.append(alloc, .{ .name = name, .dev = .{ .object = dev } });
     }
+    std.mem.sort(VideoEntry, found.items, {}, VideoEntry.lessThan);
+    for (found.items) |e| try arr.append(e.dev);
+}
+
+const VideoEntry = struct {
+    name: []const u8,
+    dev: std.json.Value,
+
+    /// Moonraker's video sort: by the index after "video" (names without one
+    /// first), then by device name.
+    fn lessThan(_: void, a: VideoEntry, b: VideoEntry) bool {
+        const ai = videoIndex(a.name);
+        const bi = videoIndex(b.name);
+        if (ai != bi) return ai < bi;
+        return std.mem.lessThan(u8, a.name, b.name);
+    }
+};
+
+/// `int(device_name[5:])`, or -1 when that is not an integer.
+fn videoIndex(name: []const u8) i64 {
+    if (name.len < 5) return -1;
+    return std.fmt.parseInt(i64, name[5..], 10) catch -1;
 }
 
 /// GET /machine/peripherals/canbus → { "can_uuids": [...] }
@@ -2301,16 +2368,16 @@ test "parseVirtualization: bare metal yields none" {
 
 // ---- decodeV4l2Caps / formatV4l2Version ----
 
-test "decodeV4l2Caps: capture + streaming + device_caps" {
+test "decodeV4l2Caps: sysfs_devs.py names in bit order" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // VIDEO_CAPTURE | STREAMING | DEVICE_CAPS
-    const arr = decodeV4l2Caps(a, 0x00000001 | 0x04000000 | 0x80000000);
-    try testing.expectEqual(@as(usize, 3), arr.items.len);
-    try testing.expectEqualStrings("VIDEO_CAPTURE", arr.items[0].string);
-    try testing.expectEqualStrings("STREAMING", arr.items[1].string);
-    try testing.expectEqualStrings("DEVICE_CAPS", arr.items[2].string);
+    // A UVC capture node: VIDEO_CAPTURE | EXT_PIX_FORMAT | STREAMING, plus SET_DEVICE_CAPS.
+    const arr = decodeV4l2Caps(a, 0x00000001 | 0x00200000 | 0x04000000 | 0x80000000);
+    try testing.expectEqual(@as(usize, 4), arr.items.len);
+    for ([_][]const u8{ "VIDEO_CAPTURE", "EXT_PIX_FORMAT", "STREAMING", "SET_DEVICE_CAPS" }, arr.items) |want, got| {
+        try testing.expectEqualStrings(want, got.string);
+    }
     try testing.expectEqual(@as(usize, 0), decodeV4l2Caps(a, 0).items.len);
 }
 
@@ -2335,7 +2402,7 @@ test "fuzz decodeV4l2Caps: any bitmask never crashes" {
 
 // ---- buildSerialDevice ----
 
-test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
+test "buildSerialDevice: device_type, port filter and usb_location from a sysfs fixture" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -2345,36 +2412,52 @@ test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try std.fmt.allocPrint(a, "{s}/{s}", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
-    // ttyACM0: a USB serial device (subsystem→usb, driver→cdc_acm).
-    try tmp.dir.createDirPath(io, "ttyACM0/device");
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
     try tmp.dir.createDirPath(io, "drivers/cdc_acm");
-    try tmp.dir.createDirPath(io, "bus/usb");
-    try tmp.dir.symLink(io, "../drivers/cdc_acm", "ttyACM0/device/driver", .{});
-    try tmp.dir.symLink(io, "../bus/usb", "ttyACM0/device/subsystem", .{});
-
-    // A by-id symlink pointing at ttyACM0.
+    try tmp.dir.createDirPath(io, "drivers/serial8250");
+    // ttyACM0: device folder inside a USB device (1-1 holds busnum/devnum).
+    try tmp.dir.createDirPath(io, "usb/1-1/1-1:1.0");
+    try tmp.dir.writeFile(io, .{ .sub_path = "usb/1-1/busnum", .data = "1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "usb/1-1/devnum", .data = "5\n" });
+    try tmp.dir.symLink(io, "../../../drivers/cdc_acm", "usb/1-1/1-1:1.0/driver", .{});
+    try tmp.dir.createDirPath(io, "tty/ttyACM0");
+    try tmp.dir.symLink(io, "../../usb/1-1/1-1:1.0", "tty/ttyACM0/device", .{});
+    // ttyS0 / ttyS1: serial8250 ports; only port 0 is a usable UART.
+    inline for (.{ .{ "ttyS0", "0x0" }, .{ "ttyS1", "0x2F8" } }) |p| {
+        try tmp.dir.createDirPath(io, "tty/" ++ p[0] ++ "/device");
+        try tmp.dir.symLink(io, "../../../drivers/serial8250", "tty/" ++ p[0] ++ "/device/driver", .{});
+        try tmp.dir.writeFile(io, .{ .sub_path = "tty/" ++ p[0] ++ "/uartclk", .data = "1843200\n" });
+        try tmp.dir.writeFile(io, .{ .sub_path = "tty/" ++ p[0] ++ "/port", .data = p[1] ++ "\n" });
+    }
+    // ttyGS0: a device with neither uart files nor a USB ancestor.
+    try tmp.dir.createDirPath(io, "tty/ttyGS0/device");
+    // tty0: no device folder.
+    try tmp.dir.createDirPath(io, "tty/tty0");
     try tmp.dir.createDirPath(io, "by-id");
-    try tmp.dir.symLink(io, "../../ttyACM0", "by-id/usb-Klipper_stm32-if00", .{});
+    try tmp.dir.symLink(io, "../tty/ttyACM0", "by-id/usb-Klipper_stm32-if00", .{});
     const byid_dir = try std.fs.path.join(a, &.{ root, "by-id" });
-    const by_id = collectSerialLinks(io, a, byid_dir);
+    const by_id = collectDevLinks(io, a, byid_dir);
+    const tty_root = try std.fs.path.join(a, &.{ root, "tty" });
 
-    const v = (try buildSerialDevice(io, a, root, "ttyACM0", by_id, &.{})).?;
-    const o = v.object;
-    try testing.expectEqualStrings("/dev/ttyACM0", o.get("device_path").?.string);
-    try testing.expectEqualStrings("cdc_acm", o.get("driver_name").?.string);
-    try testing.expectEqualStrings("usb", o.get("device_type").?.string);
-    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ byid_dir, "usb-Klipper_stm32-if00" }), o.get("path_by_id").?.string);
-    try testing.expectEqual(std.json.Value.null, o.get("path_by_hardware").?);
+    const acm = (try buildSerialDevice(io, a, tty_root, "ttyACM0", by_id, &.{})).?.object;
+    try testing.expectEqualStrings("/dev/ttyACM0", acm.get("device_path").?.string);
+    try testing.expectEqualStrings("cdc_acm", acm.get("driver_name").?.string);
+    try testing.expectEqualStrings("usb", acm.get("device_type").?.string);
+    try testing.expectEqualStrings("1:5", acm.get("usb_location").?.string);
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ byid_dir, "usb-Klipper_stm32-if00" }), acm.get("path_by_id").?.string);
+    try testing.expectEqual(std.json.Value.null, acm.get("path_by_hardware").?);
 
-    // A tty with no device folder → null.
-    try tmp.dir.createDirPath(io, "tty0");
-    try testing.expect((try buildSerialDevice(io, a, root, "tty0", &.{}, &.{})) == null);
+    const uart = (try buildSerialDevice(io, a, tty_root, "ttyS0", &.{}, &.{})).?.object;
+    try testing.expectEqualStrings("hardware_uart", uart.get("device_type").?.string);
+    try testing.expectEqualStrings("serial8250", uart.get("driver_name").?.string);
+    try testing.expectEqual(std.json.Value.null, uart.get("usb_location").?);
+    try testing.expect((try buildSerialDevice(io, a, tty_root, "ttyS1", &.{}, &.{})) == null);
+    const gadget = (try buildSerialDevice(io, a, tty_root, "ttyGS0", &.{}, &.{})).?.object;
+    try testing.expectEqualStrings("unknown", gadget.get("device_type").?.string);
+    try testing.expect((try buildSerialDevice(io, a, tty_root, "tty0", &.{}, &.{})) == null);
 }
 
-// ---- buildUsbDevice ----
-
-test "buildUsbDevice: emits ids + raw hex class/subclass/protocol" {
+test "buildUsbDevice: ids, null class fields and built-in vendor names" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -2384,31 +2467,67 @@ test "buildUsbDevice: emits ids + raw hex class/subclass/protocol" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try std.fmt.allocPrint(a, "{s}/{s}", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
-    const base = try std.fs.path.join(a, &.{ root, "1-1" });
-    try tmp.dir.createDirPath(io, "1-1");
-    inline for (.{
-        .{ "bDeviceClass", "00" }, .{ "bDeviceSubClass", "00" },   .{ "bDeviceProtocol", "00" },
-        .{ "devnum", "4" },        .{ "busnum", "1" },             .{ "idVendor", "1D50" },
-        .{ "idProduct", "614E" },  .{ "manufacturer", "Klipper" }, .{ "product", "stm32" },
-    }) |kv| {
-        try tmp.dir.writeFile(io, .{ .sub_path = "1-1/" ++ kv[0], .data = kv[1] });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    inline for (.{ "1-1", "1-2" }, .{ "614E", "6177" }) |dev, pid| {
+        try tmp.dir.createDirPath(io, dev);
+        inline for (.{
+            .{ "bDeviceClass", "02" }, .{ "bDeviceSubClass", "00" }, .{ "bDeviceProtocol", "00" },
+            .{ "devnum", "4" },        .{ "busnum", "1" },           .{ "idVendor", "1D50" },
+            .{ "idProduct", pid },
+        }) |kv| {
+            try tmp.dir.writeFile(io, .{ .sub_path = dev ++ "/" ++ kv[0], .data = kv[1] ++ "\n" });
+        }
     }
+    // 1-1 reports its own strings; 1-2 has none and takes the built-in names.
+    try tmp.dir.writeFile(io, .{ .sub_path = "1-1/manufacturer", .data = "Klipper\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "1-1/product", .data = "stm32f446xx\n" });
 
-    const v = (try buildUsbDevice(io, a, base)).?;
-    const o = v.object;
+    const o = (try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-1" }))).?.object;
     try testing.expectEqual(@as(i64, 4), o.get("device_num").?.integer);
     try testing.expectEqual(@as(i64, 1), o.get("bus_num").?.integer);
     try testing.expectEqualStrings("1d50", o.get("vendor_id").?.string); // lower-cased
     try testing.expectEqualStrings("614e", o.get("product_id").?.string);
     try testing.expectEqualStrings("1:4", o.get("usb_location").?.string);
-    try testing.expectEqualStrings("00", o.get("class").?.string);
-    try testing.expectEqualStrings("00", o.get("subclass").?.string);
-    try testing.expectEqualStrings("00", o.get("protocol").?.string);
+    try testing.expectEqualStrings("Klipper", o.get("manufacturer").?.string);
+    try testing.expectEqualStrings("stm32f446xx", o.get("product").?.string);
+    try testing.expectEqual(std.json.Value.null, o.get("serial").?);
+    for ([_][]const u8{ "class", "subclass", "protocol" }) |k| try testing.expectEqual(std.json.Value.null, o.get(k).?);
+    try testing.expectEqualStrings("OpenMoko, Inc Klipper 3d-Printer Firmware", o.get("description").?.string);
 
-    // A non-device folder (no bDeviceClass) → null.
+    const k = (try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-2" }))).?.object;
+    try testing.expectEqualStrings("OpenMoko, Inc", k.get("manufacturer").?.string);
+    try testing.expectEqualStrings("Katapult Bootloader (CDC_ACM)", k.get("product").?.string);
+
+    // A non-device folder (no bDeviceClass) and a malformed devnum → null.
     try tmp.dir.createDirPath(io, "usb1");
     try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "usb1" }))) == null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "1-2/devnum", .data = "x\n" });
+    try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "1-2" }))) == null);
+}
+
+test "video entries sort by device index, then name" {
+    var entries = [_]VideoEntry{
+        .{ .name = "video10", .dev = .null },
+        .{ .name = "video2", .dev = .null },
+        .{ .name = "v4l-subdev0", .dev = .null },
+        .{ .name = "video0", .dev = .null },
+    };
+    std.mem.sort(VideoEntry, &entries, {}, VideoEntry.lessThan);
+    for ([_][]const u8{ "v4l-subdev0", "video0", "video2", "video10" }, entries) |want, got| {
+        try testing.expectEqualStrings(want, got.name);
+    }
+    try testing.expectEqual(@as(i64, -1), videoIndex("vid"));
+}
+
+test "fuzz videoIndex: arbitrary device names" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const n = smith.valueRangeAtMostWithHash(u8, 0, buf.len, 1);
+            _ = videoIndex(buf[0..n]);
+        }
+    }.run, .{});
 }
 
 // ---- parseIpAddrJson ----
@@ -3477,16 +3596,21 @@ test "video query uses native device control and owns typed capability fields" {
     @memcpy(stub.raw.driver[0..6], "uvcvid");
     @memcpy(stub.raw.bus_info[0..5], "usb-1");
     stub.raw.version = 0x060c05;
-    stub.raw.capabilities = 0x04000001;
+    // The physical device also has a metadata node; the node's device_caps decide.
+    stub.raw.capabilities = 0x84a00001;
+    stub.raw.device_caps = 0x04200001;
+    @memcpy(stub.raw.card[0..9], "HD Webcam");
     const file: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
     const cap = (try V4l2Cap.read(stub.io(), file, std.testing.allocator)).?;
     defer std.testing.allocator.free(cap.driver);
+    defer std.testing.allocator.free(cap.card);
     defer std.testing.allocator.free(cap.bus_info);
     @memset(std.mem.asBytes(&stub.raw), 0);
     try std.testing.expectEqualStrings("uvcvid", cap.driver);
+    try std.testing.expectEqualStrings("HD Webcam", cap.card);
     try std.testing.expectEqualStrings("usb-1", cap.bus_info);
     try std.testing.expectEqual(@as(u32, 0x060c05), cap.version);
-    try std.testing.expectEqual(@as(u32, 0x04000001), cap.caps);
+    try std.testing.expectEqual(@as(u32, 0x04200001), cap.caps);
     stub.result = -1;
     try std.testing.expectEqual(null, try V4l2Cap.read(stub.io(), file, std.testing.allocator));
     stub.canceled = true;
@@ -3499,6 +3623,7 @@ test "video query uses native device control and owns typed capability fields" {
         fn read(alloc: std.mem.Allocator, peer: *V4l2IoStub, f: std.Io.File) !void {
             const result = (try V4l2Cap.read(peer.io(), f, alloc)).?;
             defer alloc.free(result.driver);
+            defer alloc.free(result.card);
             defer alloc.free(result.bus_info);
         }
     }.read, .{ &stub, file });
@@ -3512,8 +3637,10 @@ test "fuzz video capability fields stay bounded with native device control" {
             const file: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
             const cap = (try V4l2Cap.read(stub.io(), file, std.testing.allocator)).?;
             defer std.testing.allocator.free(cap.driver);
+            defer std.testing.allocator.free(cap.card);
             defer std.testing.allocator.free(cap.bus_info);
             try std.testing.expect(cap.driver.len <= stub.raw.driver.len);
+            try std.testing.expect(cap.card.len <= stub.raw.card.len);
             try std.testing.expect(cap.bus_info.len <= stub.raw.bus_info.len);
             try std.testing.expectEqual(stub.raw.version, cap.version);
         }
