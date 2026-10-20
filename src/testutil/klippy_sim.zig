@@ -1,6 +1,6 @@
 //! Minimal Klippy simulator for integration-testing the phobos Klippy bridge.
 //!
-//! Runs on its own thread with a `std.Io.Threaded` backend, creates a
+//! Runs as an owned task with a `std.Io.Threaded` backend, creates a
 //! Unix-domain socket, accepts a single connection, and speaks the
 //! \x03-delimited JSON-RPC 2.0 protocol that the real Klippy uses.  The
 //! simulator answers the bridge handshake (`info` polls, `objects/subscribe`,
@@ -32,12 +32,12 @@ pub const KlippySim = struct {
     threaded: ?*std.Io.Threaded = null,
     io: ?Io = null,
 
-    /// Listener socket (created by start, closed by stop to unblock accept).
+    /// Listener socket (created by start, closed after the task is joined).
     listener: ?net.Server = null,
     read_buffer: [4096]u8 = undefined,
     reader: ?net.Stream.Reader = null,
 
-    thread: ?std.Thread = null,
+    task: ?Io.Future(void) = null,
 
     /// Atomic flags for synchronisation with the test thread.
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -64,12 +64,12 @@ pub const KlippySim = struct {
         self.alloc.destroy(self);
     }
 
-    /// Start the simulator on a background thread.  Returns immediately.
+    /// Start the simulator as a concurrent task. Returns immediately.
     /// On error the simulator is left stopped, with no I/O backend.
     pub fn start(self: *Self) !void {
         const threaded = try self.alloc.create(std.Io.Threaded);
         errdefer self.alloc.destroy(threaded);
-        threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+        threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
         errdefer threaded.deinit();
         const io = threaded.io();
 
@@ -85,11 +85,12 @@ pub const KlippySim = struct {
             std.Io.Dir.cwd().deleteFile(io, self.socket_path) catch {};
         }
 
-        // runThread reads these, so publish them before spawning it.
+        // runTask reads these, so publish them before spawning it.
         self.threaded = threaded;
         self.io = io;
         self.listener = listener;
         self.stop_flag.store(false, .release);
+        self.ready.store(false, .release);
         self.running.store(true, .release);
         errdefer {
             self.running.store(false, .release);
@@ -97,7 +98,7 @@ pub const KlippySim = struct {
             self.io = null;
             self.listener = null;
         }
-        self.thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, runThread, .{self});
+        self.task = try io.concurrent(runTask, .{self});
     }
 
     /// Wait up to `ready_polls` x `ready_poll_ns` for the handshake. Fails
@@ -110,19 +111,13 @@ pub const KlippySim = struct {
         }
     }
 
-    /// Signal the simulator to stop and join its thread.  Idempotent.
+    /// Cancel and join pending accept, read or write operations. Idempotent.
     pub fn stop(self: *Self) void {
         self.running.store(false, .release);
         self.stop_flag.store(true, .release);
-        // Closing a listener does not wake a thread blocked in accept on
-        // Linux; shutting it down does.
-        if (self.listener) |l| {
-            const s: net.Stream = .{ .socket = l.socket };
-            s.shutdown(self.io.?, .both) catch {};
-        }
-        if (self.thread) |th| {
-            th.join();
-            self.thread = null;
+        if (self.task) |*task| {
+            task.cancel(self.io.?);
+            self.task = null;
         }
         if (self.listener) |l| l.socket.close(self.io.?);
         self.listener = null;
@@ -139,11 +134,14 @@ pub const KlippySim = struct {
     }
 
     // -----------------------------------------------------------------------
-    // Internal: background thread
+    // Internal: concurrent task
     // -----------------------------------------------------------------------
 
-    fn runThread(self: *Self) void {
+    fn runTask(self: *Self) void {
         defer self.running.store(false, .release);
+        var task_gpa: std.heap.DebugAllocator(.{}) = .init;
+        defer if (task_gpa.deinit() == .leak) std.log.err("KlippySim: the task leaked memory", .{});
+        const alloc = task_gpa.allocator();
 
         const io = self.io.?;
 
@@ -157,31 +155,31 @@ pub const KlippySim = struct {
         self.reader = stream.reader(io, &self.read_buffer);
 
         // ----- Handshake -----
-        if (!self.doHandshake(io, stream)) return;
+        if (!self.doHandshake(io, stream, alloc)) return;
 
         self.ready.store(true, .release);
 
         // ----- Ready: read/respond loop -----
-        self.readLoop(io, stream);
+        self.readLoop(io, stream, alloc);
     }
 
     // -----------------------------------------------------------------------
     // Handshake
     // -----------------------------------------------------------------------
 
-    fn doHandshake(self: *Self, io: Io, stream: net.Stream) bool {
+    fn doHandshake(self: *Self, io: Io, stream: net.Stream, alloc: std.mem.Allocator) bool {
         var poll_count: u32 = 0;
         var ready_sent: bool = false;
         var sub_done: bool = false;
         var gcode_done: bool = false;
 
         while (!self.stop_flag.load(.acquire)) {
-            const payload = self.readFrame() catch {
+            const payload = self.readFrame(alloc) catch {
                 return false;
             };
-            defer self.alloc.free(payload);
+            defer alloc.free(payload);
 
-            const parsed = std.json.parseFromSlice(std.json.Value, self.alloc, payload, .{}) catch {
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch {
                 return false;
             };
             defer parsed.deinit();
@@ -252,17 +250,17 @@ pub const KlippySim = struct {
     // Read/respond loop (post-handshake)
     // -----------------------------------------------------------------------
 
-    fn readLoop(self: *Self, io: Io, stream: net.Stream) void {
+    fn readLoop(self: *Self, io: Io, stream: net.Stream, alloc: std.mem.Allocator) void {
         var resp_id: u32 = 1000;
 
         while (!self.stop_flag.load(.acquire)) {
             // Read and handle one frame.
-            const payload = self.readFrame() catch {
+            const payload = self.readFrame(alloc) catch {
                 return;
             };
-            defer self.alloc.free(payload);
+            defer alloc.free(payload);
 
-            const parsed = std.json.parseFromSlice(std.json.Value, self.alloc, payload, .{}) catch continue;
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch continue;
             defer parsed.deinit();
             const frame = parsed.value;
 
@@ -294,12 +292,7 @@ pub const KlippySim = struct {
                 else
                     "";
                 if (std.mem.eql(u8, script, "RESTART") or std.mem.eql(u8, script, "FIRMWARE_RESTART")) {
-                    // Real Klippy keeps running for a moment after sending the
-                    // gcode response before the restart tears down the socket.
-                    // Settle briefly so the client reliably drains the buffered
-                    // `result:"ok"` frame above before it observes EOF from the
-                    // `defer stream.close()` in runThread — otherwise the close
-                    // races the response and the pending request fails flakily.
+                    // Let the buffered result drain before the restart closes the socket.
                     std.Io.sleep(io, .{ .nanoseconds = 50_000_000 }, .real) catch {};
                     self.stop_flag.store(true, .release);
                     return;
@@ -351,9 +344,9 @@ pub const KlippySim = struct {
     // Wire helpers
     // -----------------------------------------------------------------------
 
-    fn readFrame(self: *Self) ![]const u8 {
+    fn readFrame(self: *Self, alloc: std.mem.Allocator) ![]const u8 {
         if (self.stop_flag.load(.acquire)) return error.SimulatorStopped;
-        return framing.read(self.alloc, &self.reader.?.interface);
+        return framing.read(alloc, &self.reader.?.interface);
     }
 
     fn writeFrame(self: *Self, io: Io, stream: net.Stream, payload: []const u8) !void {
@@ -436,6 +429,38 @@ test "KlippySim: stop wakes a thread blocked in accept" {
     try testing.expect(!sim.running.load(.acquire));
 }
 
+test "KlippySim: stop interrupts an accepted silent peer" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const sim = try KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, "sim.sock"));
+    defer sim.deinit();
+    try sim.start();
+    const io = testing.io;
+    const stream = try (try net.UnixAddress.init(sim.socket_path)).connect(io);
+    defer stream.close(io);
+    var write_buf: [128]u8 = undefined;
+    var writer = stream.writer(io, &write_buf);
+    try writer.interface.writeAll("{\"method\":\"info\",\"id\":\"1\"}\x03");
+    try writer.interface.flush();
+    var read_buf: [512]u8 = undefined;
+    var data = [_][]u8{&read_buf};
+    const response = try io.operateTimeout(.{ .net_read = .{ .socket_handle = stream.socket.handle, .data = &data } }, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    const read_result = try response.net_read;
+    try testing.expect(read_result.data_len != 0);
+    var release = try io.concurrent(struct {
+        fn later(pio: Io, peer: net.Stream) !void {
+            try pio.sleep(.fromMilliseconds(500), .awake);
+            try peer.shutdown(pio, .both);
+        }
+    }.later, .{ io, stream });
+    defer release.cancel(io) catch {};
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    sim.stop();
+    try testing.expect(start.untilNow(io).raw.toMilliseconds() < 250);
+    try testing.expect(!sim.running.load(.acquire));
+}
+
 test "KlippySim: waitReady fails when no bridge connects" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -465,6 +490,14 @@ test "KlippySim: fuzz init/start/stop never panics" {
             defer sim.deinit();
             try sim.start();
             try testing.expect(sim.running.load(.acquire));
+            const peer = if (smith.valueWithHash(bool, 1)) try (try net.UnixAddress.init(sim.socket_path)).connect(testing.io) else null;
+            defer if (peer) |stream| stream.close(testing.io);
+            if (peer) |stream| {
+                var write_buf: [128]u8 = undefined;
+                var writer = stream.writer(testing.io, &write_buf);
+                try writer.interface.writeAll("{\"method\":\"info\"");
+                try writer.interface.flush();
+            }
             sim.stop();
             try testing.expect(!sim.running.load(.acquire));
         }

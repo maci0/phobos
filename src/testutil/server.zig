@@ -3,7 +3,7 @@
 //! `TestServer` owns a `std.Io.Threaded` event loop, binds a `Listener` on an
 //! ephemeral 127.0.0.1 port, and runs the real `http_transport.serveConn` accept
 //! loop in the background. `get` / `postJson` issue requests via
-//! `std.http.Client.fetch` and return the response body, so tests exercise the
+//! `std.http.Client` and return the response body, so tests exercise the
 //! full socket → std.http.Server → registry → handler → std.http.Client path.
 //!
 //! `TestServer` now builds on `App` (src/app.zig) so tests and the production
@@ -21,6 +21,8 @@ const connections_mod = @import("../server/connections.zig");
 const MachineCtx = @import("../components/machine.zig").MachineCtx;
 const authz = @import("../components/authorization.zig");
 const klippy_sim_mod = @import("klippy_sim.zig");
+const http_get = @import("../components/http_get.zig");
+const default_request_timeout: Io.Duration = .fromSeconds(5);
 
 /// Mock command runner for integration tests: returns fake service state for
 /// "systemctl show" calls and no-op for everything else, so tests never
@@ -44,6 +46,8 @@ pub const TestServer = struct {
     io: Io,
     listener: ioz.Listener,
     bound_port: u16,
+    /// Maximum duration of one HTTP request or WebSocket upgrade.
+    request_timeout: Io.Duration = default_request_timeout,
 
     app: *app_mod.App,
     srv: *http_transport.Server,
@@ -81,6 +85,7 @@ pub const TestServer = struct {
         errdefer alloc.destroy(self);
 
         self.klippy_sim = null;
+        self.request_timeout = default_request_timeout;
         self.alloc = alloc;
         self.app_gpa = .init;
         // The leak report on this error path is logged by the allocator itself.
@@ -292,19 +297,80 @@ pub const TestServer = struct {
         var aw: std.Io.Writer.Allocating = .init(alloc);
         defer aw.deinit();
 
-        const result = try client.fetch(.{
-            .location = .{ .url = full },
-            .method = method,
-            .payload = body,
-            .extra_headers = headers,
-            .response_writer = &aw.writer,
-        });
-        _ = result;
+        const Outcome = union(enum) {
+            fetched: anyerror!void,
+            expired: Io.Cancelable!void,
+        };
+        var outcomes: [2]Outcome = undefined;
+        var select: Io.Select(Outcome) = .init(self.io, &outcomes);
+        defer select.cancelDiscard();
+        try select.concurrent(.fetched, fetchResponse, .{ &client, method, full, body, headers, &aw.writer });
+        try select.concurrent(.expired, Io.sleep, .{ self.io, self.request_timeout, .awake });
+        switch (try select.await()) {
+            .expired => |result| {
+                try result;
+                return error.Timeout;
+            },
+            .fetched => |result| _ = try result,
+        }
+        // Cancellation joins the fetch before its client and writer are freed.
+        select.cancelDiscard();
         return aw.toOwnedSlice();
+    }
+
+    fn fetchResponse(client: *std.http.Client, method: std.http.Method, full: []const u8, body: ?[]const u8, headers: []const std.http.Header, writer: *Io.Writer) !void {
+        var req = try client.request(method, try std.Uri.parse(full), .{
+            .extra_headers = headers,
+            .redirect_behavior = if (body == null) @fromBackingInt(3) else .unhandled,
+            .keep_alive = false,
+            .headers = http_get.identity_headers,
+        });
+        defer req.deinit();
+        req.accept_encoding = http_get.identity_only;
+        if (body) |payload| {
+            req.transfer_encoding = .{ .content_length = payload.len };
+            var request_body = try req.sendBodyUnflushed(&.{});
+            try request_body.writer.writeAll(payload);
+            try request_body.end();
+            try req.connection.?.flush();
+        } else {
+            try req.sendBodiless();
+        }
+        var redirect_buf: [8 * 1024]u8 = undefined;
+        var response = try req.receiveHead(if (body == null) &redirect_buf else &.{});
+        // Client.fetch unwraps a missing bodyErr when a socket read is cancelled.
+        _ = response.reader(&.{}).streamRemaining(writer) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
+            else => return err,
+        };
     }
 };
 
 // --- tests ---------------------------------------------------------------
+
+test "HTTP test requests time out on silent headers and incomplete bodies" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    ts.request_timeout = .fromMilliseconds(20);
+    for ([_][]const u8{ "", "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx" }) |prefix| {
+        var listener = try ioz.Listener.bind(ts.io, "127.0.0.1", 0);
+        defer listener.deinit(ts.io);
+        ts.bound_port = listener.port();
+        var peer = try ts.io.concurrent(struct {
+            fn serve(io: Io, server: *ioz.Listener, response: []const u8) !void {
+                const stream = try server.server.accept(io);
+                defer stream.close(io);
+                var buf: [256]u8 = undefined;
+                var writer = stream.writer(io, &buf);
+                try writer.interface.writeAll(response);
+                try writer.interface.flush();
+                try io.sleep(.fromMilliseconds(500), .awake);
+            }
+        }.serve, .{ ts.io, &listener, prefix });
+        defer peer.cancel(ts.io) catch {};
+        try std.testing.expectError(error.Timeout, ts.get(std.testing.allocator, "/stalled"));
+    }
+}
 
 /// Connection writer that records every notification frame. Frames use
 /// smp_allocator, not the testing allocator: the write runs on a server thread

@@ -208,6 +208,8 @@ pub fn connect(ts: *TestServer, alloc: std.mem.Allocator) !*WsTestConn {
     };
     self.reader = stream.reader(.{ .userdata = self, .vtable = &WsTestConn.read_vtable }, self.rbuf);
     self.writer = stream.writer(io, self.wbuf);
+    self.read_deadline = .fromNow(io, .{ .raw = ts.request_timeout, .clock = .awake });
+    defer self.read_deadline = null;
 
     // Send the upgrade request. The Sec-WebSocket-Key is a fixed base64 value
     // (16 bytes encoded); the server computes the accept hash but we don't
@@ -223,12 +225,86 @@ pub fn connect(ts: *TestServer, alloc: std.mem.Allocator) !*WsTestConn {
     try self.writer.interface.flush();
 
     var http: std.http.Reader = .{ .in = &self.reader.interface, .interface = undefined, .state = .ready, .max_head_len = self.rbuf.len };
-    const head = try std.http.Client.Response.Head.parse(try http.receiveHead());
+    const response_head = http.receiveHead() catch |err| {
+        if (self.reader.err) |read_err| {
+            if (read_err == error.ConnectionTimedOut) return error.Timeout;
+        }
+        return err;
+    };
+    const head = try std.http.Client.Response.Head.parse(response_head);
     if (head.status != .switching_protocols) return error.HandshakeFailed;
     return self;
 }
 
 // --- tests ---------------------------------------------------------------
+
+test "WS upgrade times out on silent and incomplete response headers" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    ts.request_timeout = .fromMilliseconds(20);
+    for ([_][]const u8{ "", "HTTP/1.1 101 Switching Protocols\r\nUpgrade:" }) |prefix| {
+        var address = try net.IpAddress.parseIp4("127.0.0.1", 0);
+        var listener = try address.listen(ts.io, .{});
+        defer listener.deinit(ts.io);
+        ts.bound_port = listener.socket.address.getPort();
+        var peer = try ts.io.concurrent(struct {
+            fn serve(io: Io, server: *net.Server, response: []const u8) !void {
+                const stream = try server.accept(io);
+                defer stream.close(io);
+                var buf: [256]u8 = undefined;
+                var writer = stream.writer(io, &buf);
+                try writer.interface.writeAll(response);
+                try writer.interface.flush();
+                try io.sleep(.fromMilliseconds(500), .awake);
+            }
+        }.serve, .{ ts.io, &listener, prefix });
+        defer peer.cancel(ts.io) catch {};
+        try std.testing.expectError(error.Timeout, connect(ts, std.testing.allocator));
+    }
+}
+
+test "fuzz test clients clean up truncated HTTP responses" {
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    ts.request_timeout = .fromMilliseconds(20);
+    try std.testing.fuzz(ts, struct {
+        fn run(server: *TestServer, smith: *std.testing.Smith) !void {
+            var payload: [64]u8 = undefined;
+            smith.bytesWithHash(&payload, 0);
+            for ([_]bool{ false, true }) |websocket| {
+                var address = try net.IpAddress.parseIp4("127.0.0.1", 0);
+                var listener = try address.listen(server.io, .{});
+                defer listener.deinit(server.io);
+                server.bound_port = listener.socket.address.getPort();
+                var response_buf: [256]u8 = undefined;
+                const response = try std.fmt.bufPrint(&response_buf, "HTTP/1.1 {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{
+                    if (websocket) @as([]const u8, "101 Switching Protocols") else "200 OK",
+                    smith.valueRangeAtMostWithHash(u16, 0, 128, 1),
+                    &payload,
+                });
+                const n = smith.valueRangeAtMostWithHash(u16, 0, @intCast(response.len), 2);
+                var peer = try server.io.concurrent(struct {
+                    fn serve(pio: Io, fake: *net.Server, bytes: []const u8) !void {
+                        const stream = try fake.accept(pio);
+                        defer stream.close(pio);
+                        var buf: [256]u8 = undefined;
+                        var writer = stream.writer(pio, &buf);
+                        try writer.interface.writeAll(bytes);
+                        try writer.interface.flush();
+                        try pio.sleep(.fromMilliseconds(500), .awake);
+                    }
+                }.serve, .{ server.io, &listener, response[0..n] });
+                defer peer.cancel(server.io) catch {};
+                if (websocket) {
+                    if (connect(server, std.testing.allocator)) |client| client.close() else |_| {}
+                } else {
+                    const result = if (smith.valueWithHash(bool, 3)) server.get(std.testing.allocator, "/fuzz") else server.postJson(std.testing.allocator, "/fuzz", "{}");
+                    if (result) |body| std.testing.allocator.free(body) else |_| {}
+                }
+            }
+        }
+    }.run, .{});
+}
 
 test "WS: server.websocket.id returns the connection id" {
     const alloc = std.testing.allocator;
