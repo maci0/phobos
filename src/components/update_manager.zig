@@ -457,7 +457,7 @@ fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: 
         alloc.free(result.stdout);
         return null;
     }
-    if (result.stdout.len == 0) {
+    if (result.stdout.len == 0 or !std.unicode.utf8ValidateSlice(result.stdout)) {
         alloc.free(result.stdout);
         return null;
     }
@@ -1685,6 +1685,39 @@ test "gitFetch: fetches only the local fixture origin" {
     const remote = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "origin/main" }, null).?;
     defer testing.allocator.free(remote);
     try testing.expectEqualStrings(head, remote);
+}
+
+test "gitOutput rejects invalid UTF8 version names before JSON serialization" {
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "tag", "release-\xff" }, null));
+    const output = gitOutput(testing.io, testing.allocator, repo.path, &.{ "describe", "--tags", "--always" }, null);
+    defer if (output) |bytes| testing.allocator.free(bytes);
+    try testing.expectEqual(null, output);
+}
+
+test "fuzz Git version output is valid UTF8 or unavailable" {
+    try testing.fuzz({}, struct {
+        fn check(_: void, smith: *testing.Smith) !void {
+            var repo = try TestRepo.init();
+            defer repo.deinit();
+            var tag: [18]u8 = undefined;
+            tag[0] = 'v';
+            tag[1] = '-';
+            smith.bytes(tag[2..]);
+            for (tag[2..]) |*byte| {
+                if (byte.* < 0x80) byte.* = 'a' + byte.* % 26;
+            }
+            try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "tag", &tag }, null));
+            const output = gitOutput(testing.io, testing.allocator, repo.path, &.{ "describe", "--tags", "--always" }, null);
+            defer if (output) |bytes| testing.allocator.free(bytes);
+            if (std.unicode.utf8ValidateSlice(&tag)) {
+                try testing.expectEqualStrings(&tag, output orelse return error.MissingGitOutput);
+            } else {
+                try testing.expectEqual(null, output);
+            }
+        }
+    }.check, .{});
 }
 
 test "Git ignores inherited repository overrides and preserves connection environment" {

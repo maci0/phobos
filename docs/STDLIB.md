@@ -166,6 +166,8 @@ The daemon copies its startup environment once for Git commands, excluding every
 `GIT_*` override while retaining HOME, proxy and SSH-agent settings. Fixture Git
 commands use an explicit empty environment. Inherited `GIT_DIR`, `GIT_WORK_TREE`
 and index/config overrides cannot redirect a fixture command into another checkout.
+Git text used in JSON must pass `std.unicode.utf8ValidateSlice`; invalid version
+or log output uses the existing unavailable-status fallback.
 
 Base32, UUID layout and CIDR prefix matching remain small local codecs. The
 standard library has no matching complete API. Address comparison for trusted
