@@ -702,9 +702,7 @@ pub const App = struct {
         wled_ctx.* = WledCtx.init(alloc);
 
         // --- TD-1 context (machine.td1.*) ---
-        // Devices are auto-discovered by USB vid/pid and read over the serial
-        // port (see td1.zig: findTd1Devices + pollSerialOnce, started after io
-        // is wired). None present on a host without a TD-1.
+        // Discovery owns persistent per-device readers after I/O is wired.
         const td1_ctx = try alloc.create(Td1Ctx);
         errdefer alloc.destroy(td1_ctx);
         td1_ctx.* = Td1Ctx.init(alloc, aio);
@@ -868,6 +866,15 @@ pub const App = struct {
                     self.klippy_uds_owned = true;
                 } else |_| {}
             }
+        }
+
+        if (cfg.hasSection("td1")) {
+            const baud = std.math.cast(u32, cfg.getInt("td1", "baudrate") catch |err| switch (err) {
+                error.NoOption => 115200,
+                else => return err,
+            }) orelse return error.InvalidConfig;
+            _ = try @import("components/serial.zig").Serial.baudToSpeed(baud);
+            self.td1_ctx.baud = baud;
         }
 
         if (cfg.hasSection("paneldue")) {
@@ -1690,7 +1697,8 @@ pub const App = struct {
         // TD-1 filament sensor: background USB discovery + serial polling.
         self.td1_ctx.setIo(io);
         self.td1_ctx.setCore(self.core);
-        self.td1_ctx.startPolling();
+        if (self.cfg != null and self.cfg.?.hasSection("td1")) self.td1_ctx.startPolling() catch |err|
+            std.debug.print("phobos: warning: TD1 discovery disabled: {}\n", .{err});
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
         self.analysis_ctx.io = io;
@@ -2484,6 +2492,44 @@ test "setConfig [wled] builds http and serial transports and rejects bad strips"
     try std.testing.expectEqual(wled_component.default_baud, shelf.transport.serial.baud);
     try std.testing.expect(app.wled_ctx.findStrip("nowhere") == null);
     try std.testing.expect(app.wled_ctx.findStrip("odd") == null);
+}
+
+test "httpServer does not start TD1 discovery without its configuration section" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(aio, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    var app = try testApp(std.heap.smp_allocator, aio, &tmp);
+    defer app.deinit(aio);
+    app.td1_ctx.tty_root = root;
+    _ = app.httpServer(aio);
+    try std.testing.expect(app.td1_ctx.poll_thread == null);
+}
+
+test "setConfig validates TD1 baudrate and preserves rejected configuration until teardown" {
+    const alloc = std.testing.allocator;
+    const aio = std.testing.io;
+    for ([_][]const u8{ "9600", "-1", "123456", "bad" }) |baud| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var cfg_buf: [96]u8 = undefined;
+        const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+        var body: [64]u8 = undefined;
+        try std.Io.Dir.cwd().writeFile(aio, .{ .sub_path = cfg_path, .data = try std.fmt.bufPrint(&body, "[td1]\nbaudrate: {s}\n", .{baud}) });
+        var app = try testApp(alloc, aio, &tmp);
+        defer app.deinit(aio);
+        if (std.mem.eql(u8, baud, "9600")) {
+            try app.setConfig(aio, cfg_path);
+            try std.testing.expectEqual(@as(u32, 9600), app.td1_ctx.baud);
+        } else {
+            if (app.setConfig(aio, cfg_path)) |_| return error.AcceptedInvalidBaud else |_| {}
+            try std.testing.expect(app.cfg != null);
+            try std.testing.expect(app.info.cfg == app.cfg);
+        }
+    }
 }
 
 test "setConfig [paneldue] processPanelDueLine strips checksummed file commands" {

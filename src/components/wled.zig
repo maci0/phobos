@@ -333,6 +333,7 @@ pub const WledCtx = struct {
 
     /// Add or replace a strip, copying all configuration strings.
     pub fn addStrip(self: *WledCtx, config: Config) !void {
+        if (config.transport == .serial) _ = try serial_mod.Serial.baudToSpeed(config.transport.serial.baud);
         const k = try self.gpa.dupe(u8, config.name);
         errdefer self.gpa.free(k);
         var strip: Strip = .{
@@ -1353,6 +1354,16 @@ test "WLED strips free partial and replaced records on allocation failure" {
     }.check, .{});
 }
 
+test "WLED rejects unsupported serial baud before allocating or starting retries" {
+    var ctx = WledCtx.init(testing.failing_allocator);
+    defer ctx.deinit();
+    try testing.expectError(error.UnsupportedBaud, ctx.addStrip(.{
+        .name = "invalid",
+        .transport = .{ .serial = .{ .path = "unused", .baud = 123456 } },
+    }));
+    try testing.expectEqual(@as(usize, 0), ctx.strips.count());
+}
+
 test "updateColorData: whole chain, one pixel, out-of-range index ignored" {
     var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
@@ -1386,6 +1397,9 @@ test "fuzz WLED handlers: arbitrary actions and params never crash" {
             var ctx = WledCtx.init(testing.allocator);
             defer ctx.deinit();
             try ctx.addStrip(.{ .name = "s", .chain_count = smith.valueRangeAtMostWithHash(u8, 1, 8, 0), .initial_preset = smith.valueRangeAtMostWithHash(i8, -1, 3, 1) });
+            const baud = [_]u32{ 115200, 0, 123456, 9600 };
+            ctx.addStrip(.{ .name = "baud", .transport = .{ .serial = .{ .path = "unused", .baud = baud[smith.valueRangeLessThanWithHash(u8, 0, baud.len, 12)] } } }) catch |err|
+                try testing.expectEqual(error.UnsupportedBaud, err);
             const actions = [_][]const u8{ "on", "off", "toggle", "control", "status", "x" };
             for (0..4) |round| {
                 const action = actions[smith.valueRangeLessThanWithHash(u8, 0, actions.len, 2)];

@@ -8,17 +8,11 @@
 //!
 //! The TD-1 is a USB serial device (VID=0xE4B2, PID=0x0045) that reports
 //! filament TD (transparency/diameter) and color data. A background thread
-//! scans every `scan_interval` (td1.py `_watch_for_new_devices`): it finds TD-1
-//! ttys in sysfs (`findTd1Devices`, matching `_find_td1_devices`), reads one
-//! complete CSV line per device through `serial.zig` (`readTd1Line`, parsed by
-//! `parseTd1Line` like td1.py `_parse_line`: field[4]=td, field[5]=color), then
-//! under Core adds new devices, records readings and drops unplugged ones.
-//! Discovery and serial reads run outside Core; each read waits at most the
-//! serial read timeout, and the whole device scan has a shared time budget.
-//!
-//! Not implemented (TODO.md): the `retrieve file` error-file handshake (so
-//! `error` stays null), the reboot handshake (reboot only forgets the device),
-//! and a persistent per-device connection. On-hardware timing is unverified.
+//! discovers ttys every five seconds and owns one persistent serial reader per
+//! device. Readers retrieve errors.txt before exposing nullable readings and
+//! record CSV updates under Core. Device reboot uses the TD-1 settings protocol,
+//! never host reboot commands. Every reader is stopped and joined on removal.
+//! Protocol tests use pseudo-terminals; physical device timing is unverified.
 
 const std = @import("std");
 const webreq = @import("../json/params.zig");
@@ -27,17 +21,10 @@ const serial_mod = @import("serial.zig");
 
 const Registry = registry.Registry;
 const Core = @import("../server/core.zig").Core;
-const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
 
 /// Discovery interval (td1.py `_watch_for_new_devices` sleeps 5 s).
 const scan_interval: std.Io.Duration = .fromSeconds(5);
-/// Longest TD-1 line kept; a longer line is discarded.
-const max_line_bytes = 256;
-/// Bytes read from one device per scan before giving up on a parseable line.
-const max_scan_bytes = 4 * max_line_bytes;
-/// One serial timeout for a scan, plus at most its final in-flight read.
-const max_scan_time: std.Io.Duration = .fromMilliseconds(@as(i64, serial_mod.read_timeout_ds) * 100);
 
 /// Parsed TD-1 serial line. Mirrors td1.py `_parse_line`: the device emits
 /// comma-separated lines; when there are ≥6 fields, field[4] is the TD value
@@ -51,6 +38,7 @@ pub const ParsedTd1Line = struct {
 /// Parse one TD-1 CSV line. Returns null when the line has fewer than 6 fields
 /// or field[4] is not a valid float — matching td1.py's guarded parse.
 pub fn parseTd1Line(line: []const u8) ?ParsedTd1Line {
+    if (!std.unicode.utf8ValidateSlice(line)) return null;
     var it = std.mem.splitScalar(u8, line, ',');
     var fields: [6][]const u8 = undefined;
     var n: usize = 0;
@@ -61,41 +49,6 @@ pub fn parseTd1Line(line: []const u8) ?ParsedTd1Line {
     if (n < 6) return null;
     const td = std.fmt.parseFloat(f64, std.mem.trim(u8, fields[4], " \t\r\n")) catch return null;
     return .{ .td = td, .color = std.mem.trim(u8, fields[5], " \t\r\n") };
-}
-
-/// Open the TD-1 at `path`, skip the partial line the port opened into, and
-/// return the next complete line that parses, its color copied into `alloc`.
-/// Null when the device stays silent for a serial read timeout or sends no
-/// parseable line within `max_scan_bytes` or the scan time budget. An in-flight
-/// read can exceed the budget by at most one serial read timeout.
-pub fn readTd1Line(io: std.Io, alloc: std.mem.Allocator, path: []const u8, baud: u32) !?ParsedTd1Line {
-    var port = try serial_mod.Serial.open(io, path, baud);
-    defer port.close();
-    var buf: [max_line_bytes]u8 = undefined;
-    var len: usize = 0;
-    var synced = false;
-    var total: usize = 0;
-    const start = std.Io.Clock.Timestamp.now(io, .awake);
-    while (total < max_scan_bytes) {
-        if (start.untilNow(io).raw.nanoseconds >= max_scan_time.nanoseconds) return null;
-        const n = try port.readSome(buf[len..]);
-        if (n == 0) return null;
-        total += n;
-        len += n;
-        while (std.mem.indexOfScalar(u8, buf[0..len], '\n')) |end| {
-            if (synced) if (parseTd1Line(buf[0..end])) |parsed|
-                return .{ .td = parsed.td, .color = try alloc.dupe(u8, parsed.color) };
-            synced = true;
-            std.mem.copyForwards(u8, &buf, buf[end + 1 .. len]);
-            len -= end + 1;
-        }
-        if (len == buf.len) {
-            // Overlong line: drop it and resynchronise on the next newline.
-            len = 0;
-            synced = false;
-        }
-    }
-    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,8 +141,9 @@ pub fn findTd1Devices(io: std.Io, alloc: std.mem.Allocator, tty_root: []const u8
     defer dir.close(io);
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
+        if (list.items.len == max_devices) break;
         const ids = readTd1Ids(io, alloc, tty_root, entry.name) orelse continue;
-        if (!isTd1VidPid(ids.vid, ids.pid) or ids.serial.len == 0) {
+        if (!isTd1VidPid(ids.vid, ids.pid) or ids.serial.len == 0 or !std.unicode.utf8ValidateSlice(ids.serial)) {
             alloc.free(ids.serial);
             continue;
         }
@@ -235,6 +189,185 @@ pub const Td1Connection = struct {
     }
 };
 
+/// Moonraker uses UTC datetime.isoformat() followed by an extra `Z`.
+pub fn scanTimestamp(io: std.Io, buf: []u8) []const u8 {
+    const ns = @max(0, std.Io.Clock.real.now(io).toNanoseconds());
+    const seconds: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(0, @divFloor(ns, std.time.ns_per_s))) };
+    const yd = seconds.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = seconds.getDaySeconds();
+    const micros: u32 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_us));
+    const prefix = std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{
+        yd.year,              md.month.numeric(),      @as(u32, md.day_index) + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    }) catch return "1970-01-01T00:00:00+00:00Z";
+    const tail = if (micros == 0)
+        std.fmt.bufPrint(buf[prefix.len..], "+00:00Z", .{})
+    else
+        std.fmt.bufPrint(buf[prefix.len..], ".{d:0>6}+00:00Z", .{micros});
+    return buf[0 .. prefix.len + (tail catch return "1970-01-01T00:00:00+00:00Z").len];
+}
+
+const protocol_timeout: std.Io.Duration = .fromSeconds(5);
+const reboot_wait: std.Io.Duration = .fromSeconds(10);
+const max_error_bytes = 4096;
+const max_error_blocks = 64;
+const max_devices = 64;
+
+const Lines = struct {
+    bytes: [max_error_bytes]u8 = undefined,
+    start: usize = 0,
+    end: usize = 0,
+
+    /// The returned line includes its newline and borrows until the next call.
+    fn next(self: *Lines, reader: *DeviceReader, port: *serial_mod.Serial, deadline: std.Io.Timeout, abort_for_reboot: bool) ![]const u8 {
+        while (true) {
+            if (reader.stop.isSet()) return error.Canceled;
+            if (abort_for_reboot and reader.reboot_requested.load(.acquire)) return error.RebootRequested;
+            if (deadline.deadline.untilNow(reader.io).raw.nanoseconds >= 0) return error.Timeout;
+            if (std.mem.indexOfScalar(u8, self.bytes[self.start..self.end], '\n')) |at| {
+                const line = self.bytes[self.start..][0 .. at + 1];
+                self.start += at + 1;
+                return line;
+            }
+            std.mem.copyForwards(u8, &self.bytes, self.bytes[self.start..self.end]);
+            self.end -= self.start;
+            self.start = 0;
+            if (self.end == self.bytes.len) return error.LineTooLong;
+            const n = try port.readSomeTimeout(self.bytes[self.end..], deadline);
+            self.end += n;
+            if (n == 0 and deadline.deadline.untilNow(reader.io).raw.nanoseconds >= 0) return error.Timeout;
+        }
+    }
+};
+
+/// One owner keeps the reader joined; handlers pin it while Core is released.
+const DeviceReader = struct {
+    ctx: *Td1Ctx,
+    io: std.Io,
+    core: *Core,
+    path: []const u8,
+    serial: []const u8,
+    baud: u32,
+    refs: std.atomic.Value(u32) = .init(1),
+    thread: ?std.Thread = null,
+    stop: std.Io.Event = .unset,
+    finished: std.Io.Event = .unset,
+    reboot_requested: std.atomic.Value(bool) = .init(false),
+    reboot_ok: std.atomic.Value(bool) = .init(false),
+
+    fn create(ctx: *Td1Ctx, io: std.Io, core: *Core, device: Td1Device) !*DeviceReader {
+        const self = try ctx.gpa.create(DeviceReader);
+        errdefer ctx.gpa.destroy(self);
+        const path = try ctx.gpa.dupe(u8, device.path);
+        errdefer ctx.gpa.free(path);
+        const serial = try ctx.gpa.dupe(u8, device.serial);
+        self.* = .{ .ctx = ctx, .io = io, .core = core, .path = path, .serial = serial, .baud = ctx.baud };
+        return self;
+    }
+
+    fn retain(self: *DeviceReader) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    fn release(self: *DeviceReader) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        std.debug.assert(self.thread == null);
+        const gpa = self.ctx.gpa;
+        gpa.free(self.path);
+        gpa.free(self.serial);
+        gpa.destroy(self);
+    }
+
+    fn start(self: *DeviceReader) !void {
+        self.thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, run, .{self});
+    }
+
+    fn stopAndJoin(self: *DeviceReader) void {
+        self.stop.set(self.io);
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+    }
+
+    fn deadline(self: *DeviceReader) std.Io.Timeout {
+        return (std.Io.Timeout{ .duration = .{ .raw = protocol_timeout, .clock = .awake } }).toDeadline(self.io);
+    }
+
+    fn checkErrorFile(self: *DeviceReader, port: *serial_mod.Serial, lines: *Lines) !void {
+        while (!self.stop.isSet()) {
+            const until = self.deadline();
+            try port.writeTimeout("retrieve file\nerrors.txt\n", until);
+            const ready = while (true) {
+                const raw = lines.next(self, port, until, true) catch |err| {
+                    if (err == error.Timeout) break false;
+                    return err;
+                };
+                const ack = std.mem.trim(u8, raw, " \t\r\n");
+                if (std.mem.eql(u8, ack, "No file named errors.txt")) {
+                    try self.core.run(self.io, Td1Ctx.recordInitialization, .{ self.ctx, self.serial, @as(?[]const u8, null) });
+                    return;
+                }
+                if (std.mem.eql(u8, ack, "ready")) break true;
+            };
+            if (!ready) continue;
+            const size_line = try lines.next(self, port, until, true);
+            const size = try std.fmt.parseInt(usize, std.mem.trim(u8, size_line, " \t\r\n"), 10);
+            if (size > max_error_bytes) return error.ErrorFileTooLong;
+            const blocks_line = try lines.next(self, port, until, true);
+            const blocks = try std.fmt.parseInt(usize, std.mem.trim(u8, blocks_line, " \t\r\n"), 10);
+            if (blocks > max_error_blocks) return error.TooManyBlocks;
+            var content: [max_error_bytes]u8 = undefined;
+            var used: usize = 0;
+            for (0..blocks) |_| {
+                _ = try lines.next(self, port, until, true);
+                const block = try lines.next(self, port, until, true);
+                if (block.len > content.len - used) return error.ErrorFileTooLong;
+                if (!std.unicode.utf8ValidateSlice(block)) return error.InvalidUtf8;
+                @memcpy(content[used..][0..block.len], block);
+                used += block.len;
+                try port.writeTimeout("ready\n", until);
+            }
+            try self.core.run(self.io, Td1Ctx.recordInitialization, .{ self.ctx, self.serial, @as(?[]const u8, content[0..used]) });
+            return;
+        }
+        return error.Canceled;
+    }
+
+    fn reboot(self: *DeviceReader, port: *serial_mod.Serial, lines: *Lines) !void {
+        const until = self.deadline();
+        try port.writeTimeout("change settings\n", until);
+        while (true) {
+            const ack = std.mem.trim(u8, try lines.next(self, port, until, false), " \t\r\n");
+            if (std.mem.eql(u8, ack, "ready")) break;
+        }
+        try port.writeTimeout("RGB_Enabled = True\ndone\n", until);
+        if (!std.unicode.utf8ValidateSlice(try lines.next(self, port, until, false))) return error.InvalidUtf8;
+        self.reboot_ok.store(true, .release);
+    }
+
+    fn run(self: *DeviceReader) void {
+        defer self.finished.set(self.io);
+        var port = serial_mod.Serial.open(self.io, self.path, self.baud) catch return;
+        defer port.close();
+        var lines: Lines = .{};
+        self.checkErrorFile(&port, &lines) catch |err| {
+            if (err != error.RebootRequested) return;
+        };
+        while (!self.stop.isSet()) {
+            if (self.reboot_requested.load(.acquire)) {
+                self.reboot(&port, &lines) catch return;
+                return;
+            }
+            const raw = lines.next(self, &port, self.deadline(), true) catch |err| switch (err) {
+                error.Timeout, error.RebootRequested => continue,
+                else => return,
+            };
+            const reading = parseTd1Line(raw) orelse continue;
+            self.core.run(self.io, Td1Ctx.recordReading, .{ self.ctx, self.serial, reading }) catch continue;
+        }
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
@@ -244,6 +377,8 @@ pub const Td1Ctx = struct {
     gpa: std.mem.Allocator,
     /// Read and written only under Core.
     conns: std.StringHashMap(Td1Connection),
+    /// Core protects the map; its owner stops and joins readers outside Core.
+    readers: std.StringHashMap(*DeviceReader),
     /// Background discovery/poll plumbing (set via setIo/setCore + startPolling).
     io: ?std.Io = null,
     core: ?*Core = null,
@@ -254,7 +389,7 @@ pub const Td1Ctx = struct {
     baud: u32 = 115200,
 
     pub fn init(alloc: std.mem.Allocator, clock_io: std.Io) Td1Ctx {
-        return .{ .clock_io = clock_io, .gpa = alloc, .conns = std.StringHashMap(Td1Connection).init(alloc) };
+        return .{ .clock_io = clock_io, .gpa = alloc, .conns = std.StringHashMap(Td1Connection).init(alloc), .readers = std.StringHashMap(*DeviceReader).init(alloc) };
     }
 
     pub fn setIo(self: *Td1Ctx, io: std.Io) void {
@@ -266,11 +401,11 @@ pub const Td1Ctx = struct {
 
     /// Start the background discovery/poll loop (no-op without io/core or if
     /// already running). On a host without a TD-1, scanOnce simply finds nothing.
-    pub fn startPolling(self: *Td1Ctx) void {
+    pub fn startPolling(self: *Td1Ctx) !void {
         if (self.poll_thread != null) return;
         if (self.io == null or self.core == null) return;
         self.poll_stop.reset();
-        self.poll_thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, pollLoop, .{self}) catch null;
+        self.poll_thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, pollLoop, .{self});
     }
 
     pub fn stopPolling(self: *Td1Ctx) void {
@@ -279,12 +414,30 @@ pub const Td1Ctx = struct {
             t.join();
             self.poll_thread = null;
         }
+        const io = self.io orelse return;
+        const core = self.core orelse return;
+        while (true) {
+            core.lock(io);
+            var it = self.readers.iterator();
+            const entry = it.next() orelse {
+                core.unlock(io);
+                break;
+            };
+            const reader = entry.value_ptr.*;
+            _ = self.readers.remove(entry.key_ptr.*);
+            core.unlock(io);
+            reader.stopAndJoin();
+            reader.release();
+        }
     }
 
     fn pollLoop(self: *Td1Ctx) void {
         const io = self.io orelse return;
         const core = self.core orelse return;
-        while (!sleep.untilStopped(io, scan_interval, &self.poll_stop)) self.scanOnce(io, core);
+        while (!self.poll_stop.isSet()) {
+            self.scanOnce(io, core);
+            if (sleep.untilStopped(io, scan_interval, &self.poll_stop)) return;
+        }
     }
 
     pub fn deinit(self: *Td1Ctx) void {
@@ -295,6 +448,7 @@ pub const Td1Ctx = struct {
             self.gpa.free(entry.key_ptr.*);
         }
         self.conns.deinit();
+        self.readers.deinit();
     }
 
     fn freeConnection(gpa: std.mem.Allocator, conn: Td1Connection) void {
@@ -318,13 +472,21 @@ pub const Td1Ctx = struct {
         const conn = self.conns.getPtr(serial_number) orelse return error.NotFound;
         const new_color = try self.gpa.dupe(u8, reading.color);
         errdefer self.gpa.free(new_color);
-        var ts_buf: [32]u8 = undefined;
-        const new_scan = try self.gpa.dupe(u8, clock.iso8601(self.clock_io, &ts_buf));
+        var ts_buf: [40]u8 = undefined;
+        const new_scan = try self.gpa.dupe(u8, scanTimestamp(self.clock_io, &ts_buf));
         if (conn.color) |c| self.gpa.free(c);
         conn.color = new_color;
         self.gpa.free(conn.scan_time);
         conn.scan_time = new_scan;
         conn.td = reading.td;
+        conn.done_initializing = true;
+    }
+
+    fn recordInitialization(self: *Td1Ctx, serial_number: []const u8, content: ?[]const u8) !void {
+        const conn = self.conns.getPtr(serial_number) orelse return error.NotFound;
+        const owned = if (content) |text| try self.gpa.dupe(u8, text) else null;
+        if (conn.error_msg) |old| self.gpa.free(old);
+        conn.error_msg = owned;
         conn.done_initializing = true;
     }
 
@@ -355,40 +517,68 @@ pub const Td1Ctx = struct {
         }
     }
 
-    /// One discovery pass (td1.py `_watch_for_new_devices`): scan sysfs and
-    /// read each device outside Core, then apply the results under `core`.
-    /// A device that cannot be opened or read is retried on the next pass.
+    /// Discover, start new readers and reap disconnected or finished readers.
+    /// Device protocol I/O runs only on each device's owned worker.
     pub fn scanOnce(self: *Td1Ctx, io: std.Io, core: *Core) void {
         if (self.poll_stop.isSet()) return;
+        self.io = io;
+        self.core = core;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
         const devs = findTd1Devices(io, a, self.tty_root, self.dev_prefix);
-        const readings = a.alloc(?ParsedTd1Line, devs.len) catch return;
-        for (devs, readings) |d, *reading| {
+        for (devs) |device| {
             if (self.poll_stop.isSet()) return;
-            reading.* = readTd1Line(io, a, d.path, self.baud) catch null;
+            core.lock(io);
+            if (self.readers.get(device.serial)) |existing| {
+                if (!existing.finished.isSet()) {
+                    core.unlock(io);
+                    continue;
+                }
+                _ = self.readers.remove(device.serial);
+                _ = self.removeConnection(device.serial);
+                core.unlock(io);
+                existing.stopAndJoin();
+                existing.release();
+            } else core.unlock(io);
+            const reader = DeviceReader.create(self, io, core, device) catch continue;
+            const added = core.run(io, addReader, .{ self, reader }) catch false;
+            if (!added) {
+                reader.release();
+                continue;
+            }
+            reader.start() catch |err| {
+                std.debug.print("phobos: warning: TD1 reader {s} failed: {}\n", .{ reader.serial, err });
+                reader.finished.set(io);
+            };
         }
-        core.run(io, applyScan, .{ self, a, devs, readings });
+        while (true) {
+            core.lock(io);
+            var removed: ?*DeviceReader = null;
+            var it = self.readers.valueIterator();
+            outer: while (it.next()) |entry| {
+                for (devs) |device| if (std.mem.eql(u8, device.serial, entry.*.serial)) continue :outer;
+                removed = entry.*;
+                break;
+            }
+            if (removed) |reader| {
+                _ = self.readers.remove(reader.serial);
+                _ = self.removeConnection(reader.serial);
+            }
+            core.unlock(io);
+            const reader = removed orelse break;
+            reader.stopAndJoin();
+            reader.release();
+        }
     }
 
-    /// Add new devices, record readings and drop devices that are no longer
-    /// present (td1.py prunes `disconnected_serials`). Runs under Core.
-    fn applyScan(self: *Td1Ctx, a: std.mem.Allocator, devs: []const Td1Device, readings: []const ?ParsedTd1Line) void {
-        for (devs, readings) |d, reading| {
-            if (!self.conns.contains(d.serial)) {
-                var ts_buf: [32]u8 = undefined;
-                self.addConnection(.{ .serial_number = d.serial, .scan_time = clock.iso8601(self.clock_io, &ts_buf) }) catch continue;
-            }
-            if (reading) |r| self.recordReading(d.serial, r) catch {};
-        }
-        var gone: std.ArrayList([]const u8) = .empty;
-        var it = self.conns.keyIterator();
-        outer: while (it.next()) |key| {
-            for (devs) |d| if (std.mem.eql(u8, d.serial, key.*)) continue :outer;
-            gone.append(a, key.*) catch return;
-        }
-        for (gone.items) |serial_number| _ = self.removeConnection(serial_number);
+    fn addReader(self: *Td1Ctx, reader: *DeviceReader) !bool {
+        if (self.readers.count() >= max_devices or self.readers.contains(reader.serial)) return false;
+        var timestamp: [40]u8 = undefined;
+        try self.addConnection(.{ .serial_number = reader.serial, .scan_time = scanTimestamp(self.clock_io, &timestamp) });
+        errdefer _ = self.removeConnection(reader.serial);
+        try self.readers.put(reader.serial, reader);
+        return true;
     }
 };
 
@@ -424,18 +614,29 @@ pub fn handleGetData(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 // POST /machine/td1/reboot → machine.td1.reboot
 // ---------------------------------------------------------------------------
 
-/// Reboot a TD-1 device by serial number: a known serial is forgotten
-/// (`status: ok`) and rediscovered by the next scan while still plugged in;
-/// an unknown one returns `serial_error`. The serial reboot handshake is not
-/// sent (TODO.md).
-///
-/// AGENT: NEVER open a USB/serial device here, and NEVER call systemctl,
-/// reboot, shutdown, or poweroff. Doing so halts the machine that runs the tests.
+/// Ask the device's owned reader to complete its settings reboot handshake.
+/// Core is released while waiting. No board or host command is executed.
 pub fn handleReboot(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *Td1Ctx = @ptrCast(@alignCast(ctx_ptr));
     const serial = try webreq.required([]const u8, params, "serial");
+    var found = false;
+    if (ctx.readers.get(serial)) |reader| {
+        reader.retain();
+        defer reader.release();
+        reader.reboot_requested.store(true, .release);
+        const io = reader.io;
+        const result = blk: {
+            if (ctx.core) |core| core.unlock(io);
+            defer if (ctx.core) |core| core.lock(io);
+            break :blk reader.finished.waitTimeout(io, .{ .duration = .{ .raw = reboot_wait, .clock = .awake } });
+        };
+        try result;
+        if (!reader.reboot_ok.load(.acquire)) return error.Td1RebootFailed;
+        if (ctx.readers.get(serial) == reader) _ = ctx.removeConnection(serial);
+        found = true;
+    } else found = ctx.removeConnection(serial);
     var out: std.json.ObjectMap = .empty;
-    try out.put(alloc, "status", .{ .string = if (ctx.removeConnection(serial)) "ok" else "serial_error" });
+    try out.put(alloc, "status", .{ .string = if (found) "ok" else "serial_error" });
     return .{ .object = out };
 }
 
@@ -513,6 +714,7 @@ test "findTd1Devices: matches TD-1 vid/pid in a temp sysfs tree, skips others" {
     var ttys = try FakeTtys.init(&.{
         .{ "ttyACM0", "e4b2\n", "0045\n", "TD1ABC\n" },
         .{ "ttyACM1", "1234\n", "5678\n", "OTHER\n" },
+        .{ "ttyACM2", "e4b2\n", "0045\n", "\xff\n" },
     });
     defer ttys.deinit();
     try ttys.tmp.dir.createDirPath(testing.io, "sys/ttyS0");
@@ -551,129 +753,273 @@ test "fuzz parseUsbHex: arbitrary inputs never crash" {
     }.run, .{});
 }
 
-test "readTd1Line: skips the partial first line, drops overlong lines" {
-    const io = testing.io;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const cases = [_]struct { data: []const u8, td: ?f64 }{
-        .{ .data = "1.5,Red\nts,sn,fw,batt,1.72,Green\n", .td = 1.72 },
-        // A line at open may be the tail of a longer one: never trusted.
-        .{ .data = "ts,sn,fw,batt,1.72,Green\n", .td = null },
-        .{ .data = "\nbad\nts,sn,fw,batt,2.5, Blue \r\n", .td = 2.5 },
-        .{ .data = "\nts,sn,fw,batt,1.0,Cyan", .td = null }, // no newline yet
-    };
-    for (cases) |case| {
-        try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = case.data });
-        const path = try tmp.dir.realPathFileAlloc(io, "td1", a);
-        const reading = try readTd1Line(io, a, path, 115200);
-        try testing.expectEqual(case.td, if (reading) |r| r.td else null);
-    }
-    var long: [max_line_bytes + 40]u8 = @splat('x');
-    const tail = "\nts,sn,fw,batt,3.0,Pink\n";
-    var data: [long.len + tail.len]u8 = undefined;
-    @memcpy(data[0..long.len], &long);
-    @memcpy(data[long.len..], tail);
-    try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = &data });
-    const reading = (try readTd1Line(io, a, try tmp.dir.realPathFileAlloc(io, "td1", a), 115200)).?;
-    try testing.expectEqualStrings("Pink", reading.color);
-}
+test "persistent TD1 reader initializes nullable data, records CSV and completes device reboot" {
+    const Pty = @import("../testutil/pty.zig").Pty;
+    const Peer = struct {
+        pty: *Pty,
+        allow_reading: std.Io.Event = .unset,
+        done: std.Io.Event = .unset,
 
-test "readTd1Line bounds the whole scan when a device keeps supplying bytes" {
-    const Fake = struct {
-        elapsed: i96 = 0,
-
-        fn now(raw: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            return .{ .nanoseconds = self.elapsed };
+        fn expectBytes(master: *serial_mod.Serial, expected: []const u8) !void {
+            const timeout = (std.Io.Timeout{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }).toDeadline(master.io);
+            var bytes: [64]u8 = undefined;
+            var used: usize = 0;
+            while (used < expected.len) used += try master.readSomeTimeout(bytes[used..expected.len], timeout);
+            try testing.expectEqualStrings(expected, bytes[0..used]);
         }
 
-        fn open(_: ?*anyopaque, dir: Dir, path: []const u8, options: Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
-            return dir.openFile(testing.io, path, options);
-        }
-
-        fn close(_: ?*anyopaque, files: []const std.Io.File) void {
-            for (files) |file| file.close(testing.io);
-        }
-
-        fn read(raw: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-            const self: *@This() = @ptrCast(@alignCast(raw.?));
-            const op = operation.file_read_streaming;
-            self.elapsed += std.time.ns_per_s / 2;
-            return testing.io.operate(.{ .file_read_streaming = .{ .file = op.file, .data = &.{op.data[0][0..1]} } });
+        fn run(self: *@This()) !void {
+            defer self.done.set(self.pty.master.io);
+            const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+            try expectBytes(&self.pty.master, "retrieve file\nerrors.txt\n");
+            try self.pty.master.writeTimeout("No file named errors.txt\n", timeout);
+            try self.allow_reading.waitTimeout(self.pty.master.io, timeout);
+            try self.pty.master.writeTimeout("ts,sn,fw,batt,1.72,Green\n", timeout);
+            try expectBytes(&self.pty.master, "change settings\n");
+            try self.pty.master.writeTimeout("ts,sn,fw,batt,2.0,stale\nready\n", timeout);
+            try expectBytes(&self.pty.master, "RGB_Enabled = True\ndone\n");
+            try self.pty.master.writeTimeout("restarting\n", timeout);
         }
     };
-    var fake: Fake = .{};
-    var vtable = std.Io.failing.vtable.*;
-    vtable.now = Fake.now;
-    vtable.dirOpenFile = Fake.open;
-    vtable.fileClose = Fake.close;
-    vtable.operate = Fake.read;
-    const aio: std.Io = .{ .userdata = &fake, .vtable = &vtable };
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "td1", .data = "\nts,sn,fw,batt,1.72,Green\n" });
-    const path = try tmp.dir.realPathFileAlloc(testing.io, "td1", testing.allocator);
-    defer testing.allocator.free(path);
-    const result = try readTd1Line(aio, testing.allocator, path, 115200);
-    defer if (result) |value| testing.allocator.free(value.color);
-    try testing.expect(result == null);
-    try testing.expect(fake.elapsed <= 2 * std.time.ns_per_s);
-}
-
-test "fuzz readTd1Line: arbitrary device bytes never crash" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *testing.Smith) anyerror!void {
-            const io = testing.io;
-            var tmp = testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var data: [600]u8 = undefined;
-            smith.bytesWithHash(&data, 0);
-            try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = &data });
-            var arena = std.heap.ArenaAllocator.init(testing.allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            if (try readTd1Line(io, a, try tmp.dir.realPathFileAlloc(io, "td1", a), 115200)) |r| {
-                try testing.expect(r.color.len < max_line_bytes);
-            }
-        }
-    }.run, .{});
-}
-
-test "scanOnce: adds a device with its reading, then drops it when unplugged" {
-    const io = testing.io;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pty = try Pty.init(io);
+    defer pty.deinit();
+    var keepalive = try serial_mod.Serial.open(io, pty.path(), 115200);
+    defer keepalive.close();
+    var peer: Peer = .{ .pty = &pty };
+    var serving = try io.concurrent(Peer.run, .{&peer});
+    defer _ = serving.cancel(io) catch {};
     var ttys = try FakeTtys.init(&.{.{ "ttyACM0", "e4b2\n", "0045\n", "SCANME\n" }});
     defer ttys.deinit();
-    try ttys.tmp.dir.writeFile(io, .{ .sub_path = "dev/ttyACM0", .data = "1.0,Old\nts,sn,fw,batt,1.72,Green\n" });
+    try ttys.tmp.dir.symLink(io, pty.path(), "dev/ttyACM0", .{});
     var core = Core.init();
-    var ctx = Td1Ctx.init(testing.allocator, io);
+    var ctx = Td1Ctx.init(std.heap.smp_allocator, io);
     defer ctx.deinit();
     ctx.tty_root = ttys.sys;
     ctx.dev_prefix = ttys.dev;
 
     ctx.scanOnce(io, &core);
-    const conn = ctx.conns.get("SCANME").?;
-    try testing.expect(conn.done_initializing);
-    try testing.expectEqual(@as(?f64, 1.72), conn.td);
-    try testing.expectEqualStrings("Green", conn.color.?);
+    const State = struct {
+        fn initialized(context: *Td1Ctx) bool {
+            return if (context.conns.get("SCANME")) |conn| conn.done_initializing else false;
+        }
+        fn hasReading(context: *Td1Ctx) bool {
+            return if (context.conns.get("SCANME")) |conn| conn.td != null else false;
+        }
+    };
+    var start = std.Io.Clock.Timestamp.now(io, .awake);
+    while (!core.run(io, State.initialized, .{&ctx})) {
+        if (start.untilNow(io).raw.nanoseconds > std.time.ns_per_s) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try core.run(io, handleGetData, .{ @as(*anyopaque, @ptrCast(&ctx)), .null, a });
+    const initial_data = initial.object.get("devices").?.object.get("SCANME").?.object;
+    try testing.expect(initial_data.get("td").? == .null);
+    try testing.expect(initial_data.get("error").? == .null);
+    try testing.expect(std.mem.endsWith(u8, initial_data.get("scan_time").?.string, "+00:00Z"));
+    peer.allow_reading.set(io);
+    start = std.Io.Clock.Timestamp.now(io, .awake);
+    while (!core.run(io, State.hasReading, .{&ctx})) {
+        if (start.untilNow(io).raw.nanoseconds > std.time.ns_per_s) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    const data = try core.run(io, handleGetData, .{ @as(*anyopaque, @ptrCast(&ctx)), .null, a });
+    const reading = data.object.get("devices").?.object.get("SCANME").?.object;
+    try testing.expectEqual(@as(f64, 1.72), reading.get("td").?.float);
+    try testing.expectEqualStrings("Green", reading.get("color").?.string);
+    const reboot = try core.run(io, handleReboot, .{ @as(*anyopaque, @ptrCast(&ctx)), try objParams(a, "{\"serial\":\"SCANME\"}"), a });
+    try testing.expectEqualStrings("ok", reboot.object.get("status").?.string);
+    try peer.done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    try serving.await(io);
 
     try ttys.tmp.dir.deleteTree(io, "sys/ttyACM0");
     ctx.scanOnce(io, &core);
     try testing.expectEqual(@as(usize, 0), ctx.conns.count());
+    try testing.expectEqual(@as(usize, 0), ctx.readers.count());
 }
 
 test "scanOnce: a device node that cannot be opened is still listed" {
     var ttys = try FakeTtys.init(&.{.{ "ttyACM0", "e4b2\n", "0045\n", "NODEV\n" }});
     defer ttys.deinit();
     var core = Core.init();
-    var ctx = Td1Ctx.init(testing.allocator, testing.io);
+    var ctx = Td1Ctx.init(std.heap.smp_allocator, testing.io);
     defer ctx.deinit();
     ctx.tty_root = ttys.sys;
     ctx.dev_prefix = ttys.dev;
     ctx.scanOnce(testing.io, &core);
     try testing.expect(!ctx.conns.get("NODEV").?.done_initializing);
+}
+
+test "TD1 errors.txt blocks are acknowledged and exposed before any reading" {
+    const Pty = @import("../testutil/pty.zig").Pty;
+    const Peer = struct {
+        pty: *Pty,
+        done: std.Io.Event = .unset,
+        oversized: bool = false,
+
+        fn readExpected(self: *@This(), expected: []const u8) !void {
+            const until = (std.Io.Timeout{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }).toDeadline(self.pty.master.io);
+            var buf: [64]u8 = undefined;
+            var n: usize = 0;
+            while (n < expected.len) n += try self.pty.master.readSomeTimeout(buf[n..expected.len], until);
+            try testing.expectEqualStrings(expected, buf[0..n]);
+        }
+
+        fn run(self: *@This()) !void {
+            defer self.done.set(self.pty.master.io);
+            const until: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+            try self.readExpected("retrieve file\nerrors.txt\n");
+            if (self.oversized) {
+                try self.pty.master.writeTimeout("ready\n4097\n", until);
+                return;
+            }
+            try self.pty.master.writeTimeout("ready\n7\n2\n4\nbad\n", until);
+            try self.readExpected("ready\n");
+            try self.pty.master.writeTimeout("3\nio\n", until);
+            try self.readExpected("ready\n");
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    for ([_]bool{ false, true }) |oversized| {
+        var pty = try Pty.init(aio);
+        defer pty.deinit();
+        var keepalive = try serial_mod.Serial.open(aio, pty.path(), 115200);
+        defer keepalive.close();
+        var peer: Peer = .{ .pty = &pty, .oversized = oversized };
+        var serving = try aio.concurrent(Peer.run, .{&peer});
+        defer _ = serving.cancel(aio) catch {};
+        var core = Core.init();
+        var ctx = Td1Ctx.init(std.heap.smp_allocator, aio);
+        defer ctx.deinit();
+        ctx.io = aio;
+        ctx.core = &core;
+        const reader = try DeviceReader.create(&ctx, aio, &core, .{ .path = pty.path(), .serial = "ERROR" });
+        const added = try core.run(aio, Td1Ctx.addReader, .{ &ctx, reader });
+        try testing.expect(added);
+        try reader.start();
+        try peer.done.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+        try serving.await(aio);
+        if (oversized) {
+            try reader.finished.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+            try testing.expect(!ctx.conns.get("ERROR").?.done_initializing);
+        } else {
+            const Check = struct {
+                fn initialized(context: *Td1Ctx) bool {
+                    return context.conns.get("ERROR").?.done_initializing;
+                }
+            };
+            const start = std.Io.Clock.Timestamp.now(aio, .awake);
+            while (!core.run(aio, Check.initialized, .{&ctx})) {
+                if (start.untilNow(aio).raw.nanoseconds > std.time.ns_per_s) return error.Timeout;
+                try std.Io.sleep(aio, .fromMilliseconds(1), .awake);
+            }
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const result = try core.run(aio, handleGetData, .{ @as(*anyopaque, @ptrCast(&ctx)), .null, arena.allocator() });
+            const data = result.object.get("devices").?.object.get("ERROR").?.object;
+            try testing.expectEqualStrings("bad\nio\n", data.get("error").?.string);
+            try testing.expect(data.get("td").? == .null);
+            try testing.expect(data.get("color").? == .null);
+        }
+    }
+}
+
+test "TD1 reader records release partial allocations and replace initialization data" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var core = Core.init();
+            var ctx = Td1Ctx.init(alloc, testing.io);
+            defer ctx.deinit();
+            const reader = try DeviceReader.create(&ctx, testing.io, &core, .{ .path = "fixture", .serial = "ALLOC" });
+            defer reader.release();
+            try testing.expect(try ctx.addReader(reader));
+            defer _ = ctx.readers.remove(reader.serial);
+            try ctx.recordInitialization("ALLOC", "first error");
+            try ctx.recordInitialization("ALLOC", "second error");
+            try ctx.recordReading("ALLOC", .{ .td = 1.75, .color = "blue" });
+            try testing.expectEqualStrings("second error", ctx.conns.get("ALLOC").?.error_msg.?);
+        }
+    }.run, .{});
+}
+
+test "TD1 timestamps retain UTC offset and microseconds from datetime isoformat" {
+    const Fake = struct {
+        nanos: i96,
+        fn now(raw: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return .{ .nanoseconds = self.nanos };
+        }
+    };
+    var fake: Fake = .{ .nanos = 1_700_000_000 * std.time.ns_per_s + 123_456 * std.time.ns_per_us };
+    var vtable = std.Io.failing.vtable.*;
+    vtable.now = Fake.now;
+    const aio: std.Io = .{ .userdata = &fake, .vtable = &vtable };
+    var buf: [40]u8 = undefined;
+    try testing.expectEqualStrings("2023-11-14T22:13:20.123456+00:00Z", scanTimestamp(aio, &buf));
+    fake.nanos = 0;
+    try testing.expectEqualStrings("1970-01-01T00:00:00+00:00Z", scanTimestamp(aio, &buf));
+}
+
+test "fuzz TD1 line reader consumes arbitrary bounded serial bytes or times out" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const aio = testing.io;
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var bytes: [128]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            try tmp.dir.writeFile(aio, .{ .sub_path = "serial", .data = &bytes });
+            const path = try tmp.dir.realPathFileAlloc(aio, "serial", testing.allocator);
+            defer testing.allocator.free(path);
+            var port = try serial_mod.Serial.open(aio, path, 115200);
+            defer port.close();
+            var core = Core.init();
+            var ctx = Td1Ctx.init(testing.allocator, aio);
+            defer ctx.deinit();
+            const reader = try DeviceReader.create(&ctx, aio, &core, .{ .path = path, .serial = "FUZZ" });
+            defer reader.release();
+            var lines: Lines = .{};
+            const until = (std.Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(5), .clock = .awake } }).toDeadline(aio);
+            var count: usize = 0;
+            while (lines.next(reader, &port, until, true)) |line| {
+                try testing.expect(line.len <= max_error_bytes);
+                try testing.expect(std.mem.endsWith(u8, line, "\n"));
+                count += line.len;
+            } else |err| try testing.expectEqual(error.Timeout, err);
+            try testing.expect(count <= bytes.len);
+        }
+    }.run, .{});
+}
+
+test "fuzz TD1 timestamps format bounded UTC dates" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const Fake = struct {
+                nanos: i96,
+                fn now(raw: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+                    const self: *@This() = @ptrCast(@alignCast(raw.?));
+                    return .{ .nanoseconds = self.nanos };
+                }
+            };
+            const seconds = smith.valueRangeAtMostWithHash(u64, 0, 253_402_300_799, 0);
+            const micros = smith.valueRangeAtMostWithHash(u32, 0, 999_999, 1);
+            var fake: Fake = .{ .nanos = @as(i96, seconds) * std.time.ns_per_s + @as(i96, micros) * std.time.ns_per_us };
+            var vtable = std.Io.failing.vtable.*;
+            vtable.now = Fake.now;
+            const aio: std.Io = .{ .userdata = &fake, .vtable = &vtable };
+            var buf: [40]u8 = undefined;
+            const text = scanTimestamp(aio, &buf);
+            try testing.expectEqual(@as(usize, if (micros == 0) 26 else 33), text.len);
+            try testing.expect(std.mem.endsWith(u8, text, "+00:00Z"));
+        }
+    }.run, .{});
 }
 
 test "scanOnce leaves tracked devices unchanged after polling stops" {
@@ -690,6 +1036,35 @@ test "scanOnce leaves tracked devices unchanged after polling stops" {
     ctx.scanOnce(aio, &core);
     try testing.expectEqual(@as(usize, 1), ctx.conns.count());
     try testing.expect(ctx.conns.contains("OLD"));
+}
+
+test "TD1 polling starts discovery immediately and joins every reader on stop" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var ttys = try FakeTtys.init(&.{.{ "ttyACM0", "e4b2\n", "0045\n", "POLL\n" }});
+    defer ttys.deinit();
+    var core = Core.init();
+    var ctx = Td1Ctx.init(std.heap.smp_allocator, aio);
+    defer ctx.deinit();
+    ctx.io = aio;
+    ctx.core = &core;
+    ctx.tty_root = ttys.sys;
+    ctx.dev_prefix = ttys.dev;
+    try ctx.startPolling();
+    const Check = struct {
+        fn found(context: *Td1Ctx) bool {
+            return context.readers.contains("POLL");
+        }
+    };
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    while (!core.run(aio, Check.found, .{&ctx})) {
+        if (start.untilNow(aio).raw.nanoseconds > std.time.ns_per_s) return error.Timeout;
+        try std.Io.sleep(aio, .fromMilliseconds(1), .awake);
+    }
+    ctx.stopPolling();
+    try testing.expect(ctx.poll_thread == null);
+    try testing.expectEqual(@as(usize, 0), ctx.readers.count());
 }
 
 // ---- handleGetData ----
@@ -972,6 +1347,7 @@ test "parseTd1Line: extracts td and color from CSV (>=6 fields)" {
     try std.testing.expect(parseTd1Line("a,b,c") == null);
     // Non-numeric td → null.
     try std.testing.expect(parseTd1Line("a,b,c,d,notnum,RED") == null);
+    try std.testing.expect(parseTd1Line("a,b,c,d,2.0,\xff") == null);
 }
 
 test "fuzz parseTd1Line: arbitrary input never crashes" {
@@ -979,7 +1355,8 @@ test "fuzz parseTd1Line: arbitrary input never crashes" {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [48]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            _ = parseTd1Line(&buf);
+            if (parseTd1Line(&buf)) |reading|
+                try std.testing.expect(std.unicode.utf8ValidateSlice(reading.color));
         }
     }.run, .{});
 }

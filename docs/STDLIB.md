@@ -186,16 +186,26 @@ and a write that fills the peer's queue. Physical UART timing remains unverified
 WLED startup queries `{"v":true}` before its configured initial state. An owned
 worker retries only pending strips every two seconds for 120 seconds; it stops
 before context teardown. HTTP commands make at most three attempts, with a 100 ms
-pause between failed attempts. Each serial strip owns a persistent port and joined
+pause between failed attempts. Unsupported serial baud rates fail when a strip
+is added. Each serial strip owns a persistent port and joined
 reader that drains replies, validates bounded JSON lines, and wakes a pending state
 query. Commands serialize through the strip's mutex while Core is released; pinned
 connections survive concurrent strip replacement. Klippy registers `set_wled` and
 `set_wled_state` through App's existing remote queue. Protocol tests use loopback
 HTTP and pseudo-terminals, not physical strips.
 
-TD-1 scans use `std.Io.Clock` to share one serial-timeout budget across reads;
-their final in-flight read can add at most one further serial timeout. Polling
-checks its stop event before opening each device.
+TD-1 discovery starts immediately and runs every five seconds. It owns at most
+64 persistent readers, each stopped and joined outside Core before removal. A
+reader retrieves `errors.txt` before exposing `td: null`, receives at most 4 KiB
+across 64 blocks, and acknowledges each block. Protocol reads and writes share
+absolute five-second deadlines. Continuous CSV updates and error text enter the
+device map under Core; external text must be UTF-8. `[td1] baudrate` defaults to
+115200 and rejects unsupported rates at configuration load. Scan times match
+Moonraker's UTC `datetime.isoformat() + "Z"`, including microseconds and offset.
+Device reboot is queued to its reader and waits outside Core for the `change
+settings` / `RGB_Enabled = True` / `done` exchange. Board and host reboot APIs
+remain deliberate no-ops. Protocol and teardown tests use pseudo-terminals;
+physical TD-1 timing remains unverified.
 Announcement refreshes check their stop event before starting the next feed
 download, so shutdown does not wait through every configured feed timeout.
 
