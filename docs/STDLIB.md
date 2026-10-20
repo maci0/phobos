@@ -16,7 +16,7 @@ vendored libraries retain their upstream implementations.
 | TLS and certificate validation | `std.crypto.tls.Client` and `std.crypto.Certificate.Bundle` |
 | Clocks, deadlines and cancellation | `std.Io.Clock`, `Event`, `Future`, `operateTimeout` |
 | Secret entropy and cryptography | `io.randomSecure`, `std.crypto` |
-| Process arguments and execution | `std.mem.concat` and `std.process.run`, without shell interpolation |
+| Process arguments and execution | `std.mem.concat`, `std.process.run` and `std.Io.Select` cancellation, without shell interpolation |
 | Bounded temperature and G-code stores | `std.Deque.initCapacity` with eviction before `pushBackAssumeCapacity` |
 | Klippy message delimiters | `Reader.streamDelimiterLimit` and `Writer.writeByte` |
 | MQTT remaining lengths | `Reader.takeLeb128` and `Writer.writeLeb128`, with the four-byte MQTT limit |
@@ -39,6 +39,13 @@ return an owned slice rather than returning an `ArrayList.items` allocation.
 The standard LEB128 reader permits extended encodings. MQTT restricts a remaining
 length to four bytes; the limited reader uses one byte of lookahead so packet
 data cannot be consumed into a discarded temporary buffer.
+
+`std.process.run` applies its timeout while draining output, then waits for the
+child without a deadline. `util/process.zig` cancels the whole operation at the
+deadline so closing stdout and stderr cannot leave a service or Git command hung.
+Service actions require a discovered unit for systemd and supervisord. Simple
+and none providers accept only fixed allowed names; requests cannot add arbitrary
+service names or script paths.
 
 ## Platform adapters
 

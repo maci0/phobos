@@ -29,6 +29,9 @@ fn updateShellOk(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!vo
 
 fn mockRunCmd(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
     _ = ctx;
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "list-units")) {
+        return .{ .stdout = try gpa.dupe(u8, "klipper.service loaded active running\nmoonraker.service loaded active running\n"), .stderr = &.{} };
+    }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "show")) {
         const out = try gpa.dupe(u8, "active\nrunning\n");
         return .{ .stdout = out, .stderr = &.{} };

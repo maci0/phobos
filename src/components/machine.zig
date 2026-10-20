@@ -45,6 +45,7 @@ const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
 const clock = @import("../util/clock.zig");
 const sleep = @import("../util/sleep.zig");
+const process = @import("../util/process.zig");
 
 const Registry = registry.Registry;
 const NotifyBus = notify.NotifyBus;
@@ -201,9 +202,8 @@ pub const MachineCtx = struct {
     system_info_cache: ?std.json.Value = null,
     system_info_arena: ?std.heap.ArenaAllocator = null,
     /// Service state: name → { active_state, sub_state }, in discovery order.
-    /// Holds the allowed services `discoverServices` found (Moonraker's
-    /// provider `available_services`) plus any service a start/stop/restart
-    /// action named. Keys are owned by `gpa`.
+    /// Holds discovered allowed services, or a fixed allowed name for providers
+    /// without discovery. Requests cannot add arbitrary names. Keys own `gpa` storage.
     services: std.StringArrayHashMapUnmanaged(ServiceEntry) = .empty,
     /// Set once service discovery has run (it runs at most once, like Moonraker).
     services_discovered: bool = false,
@@ -300,7 +300,7 @@ pub const MachineCtx = struct {
                 .raw = .fromNanoseconds(std.math.lossyCast(i96, timeout_s * std.time.ns_per_s)),
                 .clock = .awake,
             };
-            const result = try std.process.run(alloc, io, .{
+            const result = try process.run(alloc, io, .{
                 .argv = argv,
                 .stdout_limit = .limited(cmd_output_limit),
                 .stderr_limit = .limited(cmd_output_limit),
@@ -1500,9 +1500,9 @@ const allowed_services_set = std.StaticStringMap(void).initComptime(blk: {
 });
 
 pub fn isServiceAllowed(name: []const u8) bool {
-    return allowed_services_set.has(name) or
+    return std.unicode.utf8ValidateSlice(name) and std.mem.indexOfAny(u8, name, "/\\\x00") == null and (allowed_services_set.has(name) or
         std.mem.startsWith(u8, name, "moonraker") or
-        std.mem.startsWith(u8, name, "klipper");
+        std.mem.startsWith(u8, name, "klipper"));
 }
 
 /// Optimistic post-action state for a service when the manager can't be queried
@@ -1546,13 +1546,20 @@ fn runDiscardingOutput(ctx: *MachineCtx, alloc: std.mem.Allocator, argv: []const
 fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allocator, action: ServiceAction) !std.json.Value {
     const name = try webreq.required([]const u8, params, "service");
     if (!isServiceAllowed(name)) return error.ServiceNotAllowed;
+    const provider = providerKind(ctx.provider_name);
+    if ((provider == .systemd or provider == .supervisord) and (ctx.io != null or ctx.run_cmd_fn != null)) {
+        try discoverServices(ctx, alloc);
+        if (!ctx.services.contains(name)) return error.ServiceNotAllowed;
+    } else if (!allowed_services_set.has(name) and !std.mem.eql(u8, name, "moonraker")) {
+        return error.ServiceNotAllowed;
+    }
     // This action changes service_state, so the cached system_info is now stale —
     // drop it (covers every exit below). Runs under Core, same as handleSystemInfo.
     defer invalidateSystemInfo(ctx);
 
     const action_str = @tagName(action);
     var new_active: []const u8, var new_sub: []const u8 = optimisticState(action);
-    if (ctx.io != null or ctx.run_cmd_fn != null) switch (providerKind(ctx.provider_name)) {
+    if (ctx.io != null or ctx.run_cmd_fn != null) switch (provider) {
         .none => {},
         .systemd => {
             runDiscardingOutput(ctx, alloc, &.{ "systemctl", action_str, "--no-block", name }, cmd_timeout_s);
@@ -2022,6 +2029,9 @@ const V4l2Cap = struct {
         var raw: V4l2Capability = std.mem.zeroes(V4l2Capability);
         const result = try io.operate(.{ .device_io_control = .{ .file = file, .code = VIDIOC_QUERYCAP, .arg = &raw } });
         if (result.device_io_control < 0) return null;
+        for ([_][]const u8{ cField(&raw.driver), cField(&raw.card), cField(&raw.bus_info) }) |field| {
+            if (!std.unicode.utf8ValidateSlice(field)) return error.InvalidUtf8;
+        }
         const driver = try alloc.dupe(u8, cField(&raw.driver));
         errdefer alloc.free(driver);
         const card = try alloc.dupe(u8, cField(&raw.card));
@@ -2954,7 +2964,7 @@ test "provider abstraction: service action dispatches to the right manager" {
             if (self.first_cmd == null and argv.len > 0) self.first_cmd = argv[0];
             self.calls += 1;
             const is_status = argv.len >= 2 and (std.mem.eql(u8, argv[1], "status") or std.mem.eql(u8, argv[1], "show"));
-            const out = try gpa.dupe(u8, if (is_status) "klipper RUNNING pid 1\n" else "");
+            const out = try gpa.dupe(u8, if (argv.len >= 2 and std.mem.eql(u8, argv[1], "list-units")) "klipper.service loaded active running\n" else if (is_status) "klipper RUNNING pid 1\n" else "");
             return .{ .stdout = out, .stderr = &.{} };
         }
     };
@@ -3034,6 +3044,9 @@ test "service handler with runCmd mock: uses mock output for state" {
         fn runCmd(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             self.call_count += 1;
+            if (argv.len >= 2 and std.mem.eql(u8, argv[1], "list-units")) {
+                return .{ .stdout = try gpa.dupe(u8, "klipper.service loaded active running\n"), .stderr = &.{} };
+            }
             if (argv.len >= 2 and std.mem.eql(u8, argv[1], "show")) {
                 const out = try gpa.dupe(u8, "inactive\ndead\n");
                 return .{ .stdout = out, .stderr = &.{} };
@@ -3052,7 +3065,7 @@ test "service handler with runCmd mock: uses mock output for state" {
 
     const ok = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
     try testing.expectEqualStrings("ok", ok.string);
-    try testing.expectEqual(@as(usize, 2), mock.call_count);
+    try testing.expectEqual(@as(usize, 3), mock.call_count);
     try testing.expect(c.services.get("klipper") != null);
     try testing.expectEqualStrings("inactive", c.services.get("klipper").?.active_state);
     try testing.expectEqualStrings("dead", c.services.get("klipper").?.sub_state);
@@ -3113,6 +3126,40 @@ test "service discovery: no runner and simple provider report nothing" {
     try c.setProvider("simple");
     _ = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
     try testing.expectEqual(@as(usize, 0), (try buildServiceState(&c, a)).object.count());
+}
+
+test "service actions accept discovered units and fixed script names only" {
+    const Mock = struct {
+        commands: usize = 0,
+        fn run(raw: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) !MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (std.mem.eql(u8, argv[1], "list-units")) {
+                return .{ .stdout = try alloc.dupe(u8, "klipper.service loaded active running\n"), .stderr = &.{} };
+            }
+            self.commands += 1;
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    var mock: Mock = .{};
+    var ctx: MachineCtx = .{ .gpa = testing.allocator, .clock_io = testing.io };
+    defer ctx.deinit();
+    ctx.setRunCmdFn(Mock.run, &mock);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    for ([_][]const u8{ "klipper-unavailable", "moonraker-extra", "klipper/../../other", "klipper\xff" }) |name| {
+        var params: std.json.ObjectMap = .empty;
+        try params.put(alloc, "service", .{ .string = name });
+        try testing.expectError(error.ServiceNotAllowed, handleServiceRestart(&ctx, .{ .object = params }, alloc));
+    }
+    try testing.expectEqual(@as(usize, 0), mock.commands);
+    try testing.expectEqual(@as(usize, 1), ctx.services.count());
+    for ([_][]const u8{ "simple", "none" }) |provider| {
+        try ctx.setProvider(provider);
+        try testing.expectError(error.ServiceNotAllowed, handleServiceStart(&ctx, try objParams(alloc, "{\"service\":\"klipper-extra\"}"), alloc));
+    }
+    try testing.expectEqual(@as(usize, 0), mock.commands);
+    try testing.expectEqual(@as(usize, 1), ctx.services.count());
 }
 
 test "fuzz service discovery: arbitrary list-units output" {
@@ -3591,6 +3638,9 @@ test "video query uses native device control and owns typed capability fields" {
     try std.testing.expectEqualStrings("usb-1", cap.bus_info);
     try std.testing.expectEqual(@as(u32, 0x060c05), cap.version);
     try std.testing.expectEqual(@as(u32, 0x04200001), cap.caps);
+    stub.raw.card[0] = 0xff;
+    try std.testing.expectError(error.InvalidUtf8, V4l2Cap.read(stub.io(), file, std.testing.allocator));
+    stub.raw.card[0] = 'H';
     stub.result = -1;
     try std.testing.expectEqual(null, try V4l2Cap.read(stub.io(), file, std.testing.allocator));
     stub.canceled = true;
@@ -3615,7 +3665,10 @@ test "fuzz video capability fields stay bounded with native device control" {
             var stub: V4l2IoStub = .{};
             smith.bytesWithHash(std.mem.asBytes(&stub.raw), 0);
             const file: std.Io.File = .{ .handle = -1, .flags = .{ .nonblocking = false } };
-            const cap = (try V4l2Cap.read(stub.io(), file, std.testing.allocator)).?;
+            const cap = (V4l2Cap.read(stub.io(), file, std.testing.allocator) catch |err| switch (err) {
+                error.InvalidUtf8 => return,
+                else => return err,
+            }).?;
             defer std.testing.allocator.free(cap.driver);
             defer std.testing.allocator.free(cap.card);
             defer std.testing.allocator.free(cap.bus_info);
