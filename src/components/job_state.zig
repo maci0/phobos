@@ -393,7 +393,8 @@ test "fuzz isActive: arbitrary state string never crashes" {
                 try initial.put(testing.allocator, "state", .{ .string = &sbuf });
                 js.statusUpdate(.{ .object = initial });
             }
-            _ = js.isActive();
+            const s: []const u8 = &sbuf;
+            try testing.expectEqual(std.mem.eql(u8, s, "printing") or std.mem.eql(u8, s, "paused"), js.isActive());
         }
     }.run, .{});
 }
@@ -661,13 +662,15 @@ test "fuzz job_state statusUpdate" {
             try initial.put(testing.allocator, "state", .{ .string = from });
             js.statusUpdate(.{ .object = initial });
         }
+        var last: []const u8 = from;
         for (states, 0..) |to, idx| {
+            defer last = to;
             var ps_map: std.json.ObjectMap = .empty;
             defer ps_map.deinit(std.heap.smp_allocator);
             try ps_map.put(std.heap.smp_allocator, "state", .{ .string = to });
             try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "fuzz.gcode" });
             try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = @floatFromInt(@backingInt(js.last_event)) });
-            // Exercise layer_changed path on even iterations.
+            // Nested info object on even iterations.
             var info_obj: std.json.ObjectMap = .empty;
             defer info_obj.deinit(std.heap.smp_allocator);
             if (idx % 2 == 0) {
@@ -677,22 +680,28 @@ test "fuzz job_state statusUpdate" {
             }
             const ps_val = std.json.Value{ .object = ps_map };
             js.statusUpdate(ps_val);
+            try testing.expectEqualStrings(to, js.getLastStats().get("state").?.string);
+            try testing.expectEqual(std.mem.eql(u8, to, "printing") or std.mem.eql(u8, to, "paused"), js.isActive());
+            if (!std.mem.eql(u8, last, to) and !std.mem.eql(u8, to, "printing")) {
+                try testing.expectEqual(JobEvent.fromString(to), js.getLastEvent());
+            }
         }
     }
 }
 
 test "fuzz job_state fromString" {
-    const strings = [_][]const u8{ "", "standby", "started", "paused", "resumed", "complete", "error", "cancelled", "printing", "garbage", "STANDBY", "Standby" };
-    for (strings) |s| {
-        _ = JobEvent.fromString(s);
+    inline for (@typeInfo(JobEvent).@"enum".field_names) |name| {
+        try testing.expectEqual(@field(JobEvent, name), JobEvent.fromString(name));
+    }
+    // Unknown names, including print_stats' "printing", fall back to standby.
+    for ([_][]const u8{ "", "printing", "garbage", "STANDBY", "Standby" }) |s| {
+        try testing.expectEqual(JobEvent.standby, JobEvent.fromString(s));
     }
 }
 
 test "fuzz checkIdle" {
-    const inputs = [_][]const u8{ "standby", "complete", "cancelled", "error", "printing", "paused", "", "unknown", "STANDBY" };
-    for (inputs) |s| {
-        _ = checkIdle(s);
-    }
+    for ([_][]const u8{ "standby", "complete", "cancelled", "error" }) |s| try testing.expect(checkIdle(s));
+    for ([_][]const u8{ "printing", "paused", "", "unknown", "STANDBY" }) |s| try testing.expect(!checkIdle(s));
 }
 
 test "fuzz checkResumed" {
@@ -719,7 +728,8 @@ test "fuzz checkResumed" {
                             newm.put(std.heap.smp_allocator, "filename", .{ .string = nf }) catch continue;
                             newm.put(std.heap.smp_allocator, "total_duration", .{ .float = nd }) catch continue;
 
-                            _ = checkResumed(prev, newm);
+                            const expected = std.mem.eql(u8, prev_state, "paused") and std.mem.eql(u8, pf, nf) and pd < nd;
+                            try testing.expectEqual(expected, checkResumed(prev, newm));
                         }
                     }
                 }
@@ -729,12 +739,22 @@ test "fuzz checkResumed" {
 }
 
 test "fuzz JobEvent methods" {
-    // Enumerate all enum values — finished/aborted/isPrinting must not crash.
-    const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
-    for (events) |e| {
-        _ = e.finished();
-        _ = e.aborted();
-        _ = e.isPrinting();
+    // common.JobEvent: finished = complete/error/cancelled, aborted =
+    // error/cancelled, is_printing = started/resumed.
+    const Row = struct { e: JobEvent, finished: bool, aborted: bool, printing: bool };
+    const rows = [_]Row{
+        .{ .e = .standby, .finished = false, .aborted = false, .printing = false },
+        .{ .e = .started, .finished = false, .aborted = false, .printing = true },
+        .{ .e = .paused, .finished = false, .aborted = false, .printing = false },
+        .{ .e = .resumed, .finished = false, .aborted = false, .printing = true },
+        .{ .e = .complete, .finished = true, .aborted = false, .printing = false },
+        .{ .e = .@"error", .finished = true, .aborted = true, .printing = false },
+        .{ .e = .cancelled, .finished = true, .aborted = true, .printing = false },
+    };
+    for (rows) |r| {
+        try testing.expectEqual(r.finished, r.e.finished());
+        try testing.expectEqual(r.aborted, r.e.aborted());
+        try testing.expectEqual(r.printing, r.e.isPrinting());
     }
 }
 
@@ -748,9 +768,12 @@ test "fuzz handleDisconnect" {
         defer ps.deinit(testing.allocator);
         try ps.put(testing.allocator, "state", .{ .string = s });
         js.statusUpdate(.{ .object = ps });
+        const event_before = js.getLastEvent();
         js.handleDisconnect();
-        _ = js.getLastEvent();
-        _ = js.getLastStats();
+        const was_active = std.mem.eql(u8, s, "printing") or std.mem.eql(u8, s, "paused");
+        try testing.expectEqualStrings(if (was_active) "error" else s, js.getLastStats().get("state").?.string);
+        try testing.expectEqual(if (was_active) JobEvent.@"error" else event_before, js.getLastEvent());
+        try testing.expect(!js.isActive());
     }
 }
 
@@ -761,8 +784,8 @@ test "fuzz getLastStats/getLastEvent" {
     const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
     for (events) |e| {
         js.last_event = e;
-        _ = js.getLastStats();
-        _ = js.getLastEvent();
+        try testing.expectEqual(@as(usize, 0), js.getLastStats().count());
+        try testing.expectEqual(e, js.getLastEvent());
     }
 }
 
