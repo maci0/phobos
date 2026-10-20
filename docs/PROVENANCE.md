@@ -477,3 +477,77 @@ input with both-edge detection and read its value before closing the handle.
 No output-value write was issued; physical effects were not measured. Later
 GPIO tests use temporary roots or injected events. No printer, external broker,
 real update, board restart, deployment or live printer database was used.
+
+## 2026-10-21: complete daemon integration and final verification
+
+Requested by the user: finish all listed TODOs. Source checkpoint `f5f2dd4`
+includes injected estimator execution (`6234999`) and the final daemon wiring.
+The estimator serializes native cancellable calls outside Core, snapshots
+inputs into a private workspace and rechecks the source before atomic
+replacement. No default runner, download, automatic metadata analysis or
+ready-triggered config dump was added. `docs/ANALYSIS.md` states those limits.
+
+Klippy state, status and gcode callbacks now reach MQTT, Spoolman, power,
+PanelDue and analysis readiness. MQTT selectors join the aggregate Klippy
+subscription; initial snapshots seed reporting before final readiness. Queue
+commits notify power outside the queue mutex. Internal power calls preserve
+`force`; button calls enforce internal transport and the handler's Core
+requirements. Daemon startup validates service bindings before initial power
+states, then starts the owned power/button, sampling, announcement, USB and
+observer workers. Teardown joins callback producers and dispatchers before
+freeing consumers, and closes storage after its users.
+
+An independent regular-file CLI check exposed a separate stdout defect:
+constructing a positional writer for each chunk overwrote earlier chunks.
+The shared output helper now uses `std.Io.File.writerStreaming`. A real-file
+unit/fuzz regression and compiled CLI checks cover the fix. API dumps also
+honor an explicit `-d`, so development checks keep their files under `.scratch`.
+
+`b9e1f46` reconciles TODO, owning documents and curated API deltas with the
+implemented source. Only the per-call table and affected client method sets
+were regenerated; the pinned API baseline was retained. The client set now
+contains 147 methods, including the two internal helpers. Its nine existing
+plugin/nonstandard gaps are unchanged. Name coverage is not a claim of full
+behavioral conformance. Video/libcamera, rate-limit telemetry, partial power
+backends, reverse-DNS authorization and the deliberate exclusions remain
+explicit in TODO and the generated table.
+
+Final evidence and checks:
+
+- The working tree and an independent clean checkout of `f5f2dd4` each passed
+  the full standalone Debug suite: 1714 passed, 1 skipped, 0 failed;
+  324 bounded fuzz harnesses. The skipped test requires real Klippy.
+- Native static Debug and Cortex-A7 static ARM ReleaseSmall builds passed
+  from tracked SQLite sources. ARM was built into an isolated scratch prefix;
+  `zig-out/bin/phobos` remains the native Debug binary. ARM execution was not
+  performed. The independent ARM SHA-256 is
+  `448279ff575048bc442b5eb1ef48a6c4bcb280ceb78ea3ca54b05e2dd85ba3eb`.
+- Compiled CLI output was checked for exact text or parsed JSON, through both
+  regular-file redirection and pipes: version, JSON version, CLI Spec, help
+  and API dump with an explicit scratch datadir.
+- API coverage passed: 123/123 endpoints, 130/130 baseline methods and 27/27
+  notifications. The reviewed generated table passed `table --check`.
+- Four bounded LLVM-guided WebSocket/MQTT targets passed 70,334 actual runs:
+  WebSocket 20,201/135 unique inputs, MQTT parser 30,098/103, malformed
+  fragments 10,031/4 and MQTT encoder 10,004/0. Their production source blobs
+  are identical at the final source checkpoint.
+- Python scanner/client/helper tests passed 88/88. Strict checking with the
+  installed tree-sitter types exposed two scanner annotation gaps; `_text`
+  now asserts its retained-source invariant, and tuple-router extraction
+  reuses the checked function node. The extractor also uses built-in collection
+  and optional annotations, as required by its lint rules. Tests and mypy
+  passed afterward.
+- Helper smoke tests, ShellCheck, Ruff, the table formatter check, mypy,
+  `zig fmt --check` and `git diff --check` passed. Black was unavailable in the
+  offline cache; Ruff checked the edited table's formatting. Graphify was
+  unavailable, so its existing generated graph was not updated.
+
+Commands: `zig build test-artifact -Doptimize=Debug`, the standalone artifact
+with `--cache-dir=./.zig-cache`, `zig build -Doptimize=Debug`, and
+`zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`.
+Guided runs used the production modules, LLVM and `--fuzz=10K` with recorded
+seeds. API generation and Python checks used the project scratch datadir and
+cached dependencies. No physical printer was contacted, restarted or deployed
+to; no real update, live database, golden image, QEMU, push or tag was used.
+Hardware timing, ARM runtime and performance measurements remain unverified
+for these changes. The earlier host GPIO input exception is recorded above.

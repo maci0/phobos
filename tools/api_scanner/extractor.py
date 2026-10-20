@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import tree_sitter as ts
 import tree_sitter_python as tspy
@@ -36,19 +36,19 @@ ENDPOINT_PREFIXES = [
 @dataclass
 class Endpoint:
     path: str
-    request_types: List[str]
-    transports: List[str]
-    wrap_result: Optional[bool]
-    content_type: Optional[str]
-    auth_required: Optional[bool]
+    request_types: list[str]
+    transports: list[str]
+    wrap_result: bool | None
+    content_type: str | None
+    auth_required: bool | None
     is_remote: bool
     debug_only: bool
     component: str
     source: str
-    jsonrpc_methods: List[str] = field(default_factory=list)
+    jsonrpc_methods: list[str] = field(default_factory=list)
     multi_verb: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
             "request_types": self.request_types,
@@ -71,7 +71,7 @@ class RemoteMethod:
     component: str
     source: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "component": self.component,
                 "source": self.source}
 
@@ -83,7 +83,7 @@ class StaticHandler:
     component: str
     source: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "pattern": self.pattern,
                 "component": self.component, "source": self.source}
 
@@ -91,11 +91,11 @@ class StaticHandler:
 @dataclass
 class Notification:
     name: str  # the wire name, e.g. "notify_status_update"
-    event_name: Optional[str]
+    event_name: str | None
     component: str
     source: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "event_name": self.event_name,
                 "component": self.component, "source": self.source}
 
@@ -108,7 +108,7 @@ class RouterRoute:
     component: str
     source: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "path": self.path, "handler": self.handler,
                 "component": self.component, "source": self.source}
 
@@ -138,10 +138,12 @@ def component_from_path(path: str, source_root: str) -> str:
 # punctuation children (commas, parens, ``=``) and work off the node ``type``.
 
 def _text(node: ts.Node) -> str:
-    return node.text.decode("utf-8")
+    text = node.text
+    assert text is not None
+    return text.decode("utf-8")
 
 
-def _decode_string(node: ts.Node) -> Optional[str]:
+def _decode_string(node: ts.Node) -> str | None:
     """Return the Python value of a ``string`` node, or None if it is not a
     plain ``str`` literal (bytes prefix, or a value we cannot reduce).
 
@@ -180,7 +182,7 @@ def _unescape(escape: str) -> str:
         return escape
 
 
-def _string_value(node: Optional[ts.Node]) -> Any:
+def _string_value(node: ts.Node | None) -> Any:
     """Best-effort literal value of a string-bearing node.
 
     Plain ``str`` literals decode to their value.  f-strings return the trailing
@@ -229,13 +231,13 @@ def _fstring_suffix(node: ts.Node) -> Any:
     return DYNAMIC
 
 
-def _flag_names(node: ts.Node) -> List[str]:
+def _flag_names(node: ts.Node) -> list[str]:
     """Collect the leaf attribute names of an OR-chain of ``X.NAME`` accesses.
 
     ``RequestType.GET | RequestType.POST`` yields ``["GET", "POST"]``.
     Unknown / dynamic operands are recorded as DYNAMIC.
     """
-    names: List[str] = []
+    names: list[str] = []
 
     def visit(n: ts.Node) -> None:
         if n.type == "binary_operator":
@@ -274,7 +276,7 @@ def _flag_names(node: ts.Node) -> List[str]:
     return names
 
 
-def _bool_value(node: Optional[ts.Node]) -> Any:
+def _bool_value(node: ts.Node | None) -> Any:
     """Return the Python bool for a ``True``/``False`` node, else DYNAMIC/None."""
     if node is None:
         return None
@@ -286,8 +288,8 @@ def _bool_value(node: Optional[ts.Node]) -> Any:
 
 
 def derive_rpc_methods(
-    path: str, request_types: List[str], transports: List[str], is_remote: bool
-) -> Tuple[List[str], bool]:
+    path: str, request_types: list[str], transports: list[str], is_remote: bool
+) -> tuple[list[str], bool]:
     """Replicate common.py::APIDefinition.create rpc-method derivation.
 
     Returns ``(methods, multi_verb)``.  ``multi_verb`` is True when the endpoint
@@ -318,7 +320,7 @@ def derive_rpc_methods(
         _VERB_ORDER = {"GET": 0, "POST": 1, "DELETE": 2}
         concrete_verbs = sorted(
             concrete_verbs, key=lambda v: _VERB_ORDER.get(v, 99))
-        methods: List[str] = []
+        methods: list[str] = []
         for rtype in concrete_verbs:
             func_name = rtype.lower() + "_" + name_parts[-1]
             methods.append(".".join(name_parts[:-1] + [func_name]))
@@ -328,12 +330,12 @@ def derive_rpc_methods(
     return [".".join(name_parts)], False
 
 
-def _call_args(call: ts.Node) -> List[ts.Node]:
+def _call_args(call: ts.Node) -> list[ts.Node]:
     """Positional argument nodes of a ``call`` (keyword args excluded)."""
     arglist = call.child_by_field_name("arguments")
     if arglist is None:
         return []
-    args: List[ts.Node] = []
+    args: list[ts.Node] = []
     for child in arglist.named_children:
         if child.type in ("keyword_argument", "comment"):
             continue
@@ -341,7 +343,7 @@ def _call_args(call: ts.Node) -> List[ts.Node]:
     return args
 
 
-def _kw(call: ts.Node, name: str) -> Optional[ts.Node]:
+def _kw(call: ts.Node, name: str) -> ts.Node | None:
     arglist = call.child_by_field_name("arguments")
     if arglist is None:
         return None
@@ -364,7 +366,7 @@ def _bool_kw(call: ts.Node, name: str, default: Any) -> Any:
     return DYNAMIC
 
 
-def _attr_name(node: ts.Node) -> Optional[str]:
+def _attr_name(node: ts.Node) -> str | None:
     """``register_endpoint`` from a ``X.Y.register_endpoint`` call target."""
     if node.type == "attribute":
         attr = node.child_by_field_name("attribute")
@@ -375,16 +377,16 @@ def _attr_name(node: ts.Node) -> Optional[str]:
 class _Visitor:
     """Recursive descent over the tree-sitter CST collecting API records."""
 
-    def __init__(self, path: str, source_root: str, str_consts: Dict[str, str]):
+    def __init__(self, path: str, source_root: str, str_consts: dict[str, str]):
         self.path = path
         self.source_root = source_root
         self.component = component_from_path(path, source_root)
         self.str_consts = str_consts
-        self.endpoints: List[Endpoint] = []
-        self.remote_methods: List[RemoteMethod] = []
-        self.static_handlers: List[StaticHandler] = []
-        self.notifications: List[Notification] = []
-        self.router_routes: List[RouterRoute] = []
+        self.endpoints: list[Endpoint] = []
+        self.remote_methods: list[RemoteMethod] = []
+        self.static_handlers: list[StaticHandler] = []
+        self.notifications: list[Notification] = []
+        self.router_routes: list[RouterRoute] = []
         # add_handler Call nodes already unpacked via a for-loop, so the plain
         # call visit doesn't produce a duplicate <dynamic> entry for them.
         self._handled_call_ids: set = set()
@@ -405,7 +407,7 @@ class _Visitor:
         rel = os.path.relpath(self.path, self.source_root)
         return f"{rel}:{node.start_point[0] + 1}"
 
-    def _resolve_str(self, node: Optional[ts.Node]) -> Any:
+    def _resolve_str(self, node: ts.Node | None) -> Any:
         """Literal parse, also resolving module-level string constants by name."""
         if node is not None and node.type == "identifier":
             name = _text(node)
@@ -464,8 +466,8 @@ class _Visitor:
         # Body must contain exactly one add_handler call using those variables.
         body_calls = [
             c for c in _statement_calls(body)
-            if (c.child_by_field_name("function") is not None and
-                _attr_name(c.child_by_field_name("function")) == "add_handler")
+            if ((function := c.child_by_field_name("function")) is not None and
+                _attr_name(function) == "add_handler")
         ]
         if len(body_calls) != 1:
             return
@@ -521,11 +523,11 @@ class _Visitor:
         if not isinstance(path, str):
             path = DYNAMIC
 
-        request_types: List[str] = []
+        request_types: list[str] = []
         if len(args) >= 2:
             request_types = _flag_names(args[1])
 
-        transports_node: Optional[ts.Node] = None
+        transports_node: ts.Node | None = None
         if len(args) >= 4:
             transports_node = args[3]
         kw_transports = _kw(node, "transports")
@@ -662,9 +664,9 @@ class _Visitor:
             component=self.component, source=self._src(node)))
 
 
-def _statement_calls(block: ts.Node) -> List[ts.Node]:
+def _statement_calls(block: ts.Node) -> list[ts.Node]:
     """``call`` nodes that are the sole expression of a statement in ``block``."""
-    calls: List[ts.Node] = []
+    calls: list[ts.Node] = []
     for stmt in block.named_children:
         if stmt.type != "expression_statement":
             continue
@@ -674,9 +676,9 @@ def _statement_calls(block: ts.Node) -> List[ts.Node]:
     return calls
 
 
-def _collect_str_consts(root: ts.Node) -> Dict[str, str]:
+def _collect_str_consts(root: ts.Node) -> dict[str, str]:
     """Module-level ``NAME = "literal"`` assignments, for resolving constants."""
-    consts: Dict[str, str] = {}
+    consts: dict[str, str] = {}
     for stmt in root.named_children:
         if stmt.type != "expression_statement":
             continue
