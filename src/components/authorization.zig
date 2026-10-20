@@ -45,6 +45,9 @@
 //! Persistence: users are stored in the DataStore namespace "authorized_users"
 //!   (Moonraker uses a SQL table; phobos uses the namespaced KV store). Each row
 //!   is keyed by username and carries the UserInfo fields.
+//! Startup aborts on unreadable or malformed auth data. Credential changes
+//! become visible only after persistence succeeds. Usernames are nonempty
+//! single DataStore record keys and cannot contain dots.
 
 const std = @import("std");
 const webreq = @import("../json/params.zig");
@@ -81,6 +84,11 @@ pub const default_login_timeout_days: i64 = 90; // login_timeout default
 
 pub fn isReservedUser(name: []const u8) bool {
     return std.mem.eql(u8, name, api_user) or std.mem.eql(u8, name, trusted_user);
+}
+
+/// DataStore keys use dots for paths, so each username must be one record key.
+fn validateUsername(name: []const u8) error{InvalidParams}!void {
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, '.') != null) return error.InvalidParams;
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +411,19 @@ pub const User = struct {
     /// Build a User from a DB row. `owned_key` is the hashmap-owned username
     /// string (borrowed as `username`); value fields are duped with `alloc`.
     fn fromDbValue(alloc: std.mem.Allocator, owned_key: []const u8, obj: std.json.ObjectMap) !User {
+        const password = obj.get("password") orelse return error.BackendError;
+        if (password != .string) return error.BackendError;
+        inline for (.{ "username", "password", "salt", "source", "jwt_secret", "jwk_id" }) |field| {
+            if (obj.get(field)) |value| {
+                if (value != .string and !(value == .null and (std.mem.eql(u8, field, "salt") or std.mem.eql(u8, field, "jwt_secret") or std.mem.eql(u8, field, "jwk_id")))) return error.BackendError;
+            }
+        }
+        if (obj.get("username")) |name| if (!std.mem.eql(u8, name.string, owned_key)) return error.BackendError;
+        if (obj.get("created_on")) |created| switch (created) {
+            .integer => {},
+            .float => |n| if (!std.math.isFinite(n)) return error.BackendError,
+            else => return error.BackendError,
+        };
         const sfield = struct {
             fn f(o: std.json.ObjectMap, k: []const u8) []const u8 {
                 const v = o.get(k) orelse return "";
@@ -590,6 +611,9 @@ pub const AuthCtx = struct {
     /// authenticate outside Core while access.* handlers mutate under Core.
     /// Leaf lock: never acquire Core or another lock while holding it.
     mutex: std.Io.Mutex = .init,
+    /// Called after persisted logout/deletion, with `mutex` released.
+    on_user_logout: ?*const fn (*anyopaque, []const u8) void = null,
+    on_user_logout_ctx: ?*anyopaque = null,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, store: DataStore, issuer: []const u8) !AuthCtx {
         var ctx = AuthCtx{
@@ -602,8 +626,9 @@ pub const AuthCtx = struct {
         var raw: [16]u8 = undefined;
         try io.randomSecure(&raw);
         ctx.api_key = std.fmt.bytesToHex(raw, .lower);
-        ctx.loadFromStore() catch {};
-        ctx.ensureApiUser() catch {};
+        errdefer ctx.deinit();
+        try ctx.loadFromStore();
+        try ctx.ensureApiUser();
         return ctx;
     }
 
@@ -661,27 +686,26 @@ pub const AuthCtx = struct {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const ns_data = self.store.getNamespace(a, user_namespace) catch return;
-        if (ns_data != .object) return;
+        const ns_data = self.store.getNamespace(a, user_namespace) catch |err| switch (err) {
+            error.NamespaceNotFound => return,
+            else => return err,
+        };
+        if (ns_data != .object) return error.BackendError;
         var it = ns_data.object.iterator();
         while (it.next()) |e| {
             const username = e.key_ptr.*;
-            if (e.value_ptr.* != .object) continue;
-            const key_owned = self.gpa.dupe(u8, username) catch continue;
-            const u = User.fromDbValue(self.gpa, key_owned, e.value_ptr.object) catch {
-                self.gpa.free(key_owned);
-                continue;
-            };
-            self.users.put(self.gpa, key_owned, u) catch {
-                var uu = u;
-                uu.freeValues(self.gpa);
-                self.gpa.free(key_owned);
-                continue;
-            };
+            validateUsername(username) catch return error.BackendError;
+            if (e.value_ptr.* != .object) return error.BackendError;
+            const key_owned = try self.gpa.dupe(u8, username);
+            errdefer self.gpa.free(key_owned);
+            var u = try User.fromDbValue(self.gpa, key_owned, e.value_ptr.object);
+            errdefer u.freeValues(self.gpa);
             // Adopt the persisted api key if the API user already exists.
-            if (std.mem.eql(u8, username, api_user) and u.password.len == self.api_key.len) {
+            if (std.mem.eql(u8, username, api_user)) {
+                if (u.password.len != self.api_key.len) return error.BackendError;
                 @memcpy(&self.api_key, u.password);
             }
+            try self.users.put(self.gpa, key_owned, u);
         }
     }
 
@@ -693,52 +717,34 @@ pub const AuthCtx = struct {
             .created_on = nowSeconds(self.io),
         };
         try self.putUser(u);
-        self.syncUser(api_user);
     }
 
-    /// Insert or replace a user. The map key owns the username string; the
-    /// value's fields are duped with the gpa. On replace the old value fields
-    /// are freed while the owned key is preserved.
+    /// Allocate and persist the complete replacement before changing live credentials.
     fn putUser(self: *AuthCtx, template: User) !void {
-        const gop = try self.users.getOrPut(self.gpa, template.username);
+        try validateUsername(template.username);
+        const key = try self.gpa.dupe(u8, template.username);
+        errdefer self.gpa.free(key);
+        var owned = try template.dupeValues(self.gpa, key);
+        errdefer owned.freeValues(self.gpa);
+        if (!self.users.contains(key)) try self.users.ensureUnusedCapacity(self.gpa, 1);
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        try self.store.insertItem(a, user_namespace, key, try owned.toDbValue(a));
+        const gop = self.users.getOrPutAssumeCapacity(key);
         if (gop.found_existing) {
-            const key = gop.key_ptr.*;
-            // Dupe BEFORE freeing the old value, so a template that borrows the
-            // existing user's fields is not used-after-free.
-            const new_val = try template.dupeValues(self.gpa, key);
             gop.value_ptr.freeValues(self.gpa);
-            gop.value_ptr.* = new_val;
-        } else {
-            const key = self.gpa.dupe(u8, template.username) catch |err| {
-                _ = self.users.remove(template.username);
-                return err;
-            };
-            gop.key_ptr.* = key;
-            gop.value_ptr.* = template.dupeValues(self.gpa, key) catch |err| {
-                _ = self.users.remove(key);
-                self.gpa.free(key);
-                return err;
-            };
+            self.gpa.free(gop.key_ptr.*);
         }
+        gop.key_ptr.* = key;
+        gop.value_ptr.* = owned;
     }
 
-    /// Persist a single user row to the DataStore.
-    fn syncUser(self: *AuthCtx, username: []const u8) void {
-        const u = self.users.getPtr(username) orelse return;
+    fn deleteUserFromStore(self: *AuthCtx, username: []const u8) !void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const val = u.toDbValue(a) catch return;
-        self.store.insertItem(a, user_namespace, username, val) catch |err|
-            std.debug.print("phobos: warning: failed to persist user '{s}': {} — change will be lost on restart\n", .{ username, err });
-    }
-
-    fn deleteUserFromStore(self: *AuthCtx, username: []const u8) void {
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const a = arena.allocator();
-        _ = self.store.deleteItem(a, user_namespace, username) catch |err|
-            std.debug.print("phobos: warning: failed to delete user '{s}' from store: {} — user may reappear on restart\n", .{ username, err });
+        _ = try self.store.deleteItem(a, user_namespace, username);
     }
 
     /// Resolve the public key for a kid by searching users for a matching jwk_id.
@@ -846,6 +852,7 @@ fn loginOrCreate(
     new_user: bool,
 ) anyerror!std.json.Value {
     const username = webreq.required([]const u8, params, "username") catch return error.InvalidParams;
+    try validateUsername(username);
     const password = webreq.required([]const u8, params, "password") catch return error.InvalidParams;
     const source_in = (try webreq.optional([]const u8, params, "source")) orelse c.default_source;
     // Lowercase the source.
@@ -867,8 +874,7 @@ fn loginOrCreate(
             .source = "moonraker",
             .created_on = nowSeconds(c.io),
         };
-        try c.putUser(u);
-        c.syncUser(username);
+        return issueTokens(c, alloc, u, true);
     } else {
         const u = c.users.getPtr(username) orelse return error.UnknownUser;
         if (!std.mem.eql(u8, u.source, source)) return error.Unauthorized;
@@ -877,9 +883,8 @@ fn loginOrCreate(
         const salt_bytes = std.fmt.hexToBytes(&salt, u.salt) catch return error.InvalidPassword;
         const hashed = hashPassword(password, salt_bytes);
         if (!constEql(64, &hashed, u.password)) return error.InvalidPassword;
+        return issueTokens(c, alloc, u.*, false);
     }
-
-    return issueTokens(c, alloc, username, new_user);
 }
 
 /// Ensure the user has an Ed25519 keypair (jwt_secret/jwk_id), generating one
@@ -887,18 +892,14 @@ fn loginOrCreate(
 fn issueTokens(
     c: *AuthCtx,
     alloc: std.mem.Allocator,
-    username: []const u8,
+    template: User,
     new_user: bool,
 ) anyerror!std.json.Value {
-    const u = c.users.getPtr(username) orelse return error.UnknownUser;
-
+    var u = template;
     var seed: [32]u8 = undefined;
+    var secret_hex: [64]u8 = undefined;
     var jwk_id_buf: [64]u8 = undefined;
-    var jwk_id: []const u8 = undefined;
-
-    // jwk_id must outlive token generation; back it with a heap copy when newly
-    // generated, or borrow the stored one.
-    var jwk_owned: ?[]const u8 = null;
+    var persist = new_user;
 
     if (u.jwt_secret.len == 64) {
         _ = std.fmt.hexToBytes(&seed, u.jwt_secret) catch return error.Unauthorized;
@@ -906,40 +907,31 @@ fn issueTokens(
             var rnd: [32]u8 = undefined;
             try c.io.randomSecure(&rnd);
             const new_kid = b64url.Encoder.encode(&jwk_id_buf, &rnd);
-            var tmpl = u.*;
-            tmpl.jwk_id = new_kid;
-            try c.putUser(tmpl);
-            c.syncUser(username);
-            jwk_owned = try alloc.dupe(u8, new_kid);
-            jwk_id = jwk_owned.?;
-        } else {
-            jwk_id = try alloc.dupe(u8, u.jwk_id);
+            u.jwk_id = new_kid;
+            persist = true;
         }
     } else {
         try c.io.randomSecure(&seed);
-        const secret_hex = std.fmt.bytesToHex(seed, .lower);
+        secret_hex = std.fmt.bytesToHex(seed, .lower);
         var rnd: [32]u8 = undefined;
         try c.io.randomSecure(&rnd);
         const new_kid = b64url.Encoder.encode(&jwk_id_buf, &rnd);
-        var tmpl = u.*;
-        tmpl.jwt_secret = &secret_hex;
-        tmpl.jwk_id = new_kid;
-        try c.putUser(tmpl);
-        c.syncUser(username);
-        jwk_id = try alloc.dupe(u8, new_kid);
+        u.jwt_secret = &secret_hex;
+        u.jwk_id = new_kid;
+        persist = true;
     }
 
     const now = nowSecondsInt(c.io);
-    const token = try generateJwt(alloc, c.issuer, username, jwk_id, seed, .access, now, jwt_exp_seconds);
-    const refresh = try generateJwt(alloc, c.issuer, username, jwk_id, seed, .refresh, now, c.login_timeout_days * 24 * 3600);
+    const token = try generateJwt(alloc, c.issuer, u.username, u.jwk_id, seed, .access, now, jwt_exp_seconds);
+    const refresh = try generateJwt(alloc, c.issuer, u.username, u.jwk_id, seed, .refresh, now, c.login_timeout_days * 24 * 3600);
 
-    const src = c.users.getPtr(username).?.source;
     var obj: std.json.ObjectMap = .empty;
-    try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, username) });
+    try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, u.username) });
     try obj.put(alloc, "token", .{ .string = token });
-    try obj.put(alloc, "source", .{ .string = try alloc.dupe(u8, src) });
+    try obj.put(alloc, "source", .{ .string = try alloc.dupe(u8, u.source) });
     try obj.put(alloc, "refresh_token", .{ .string = refresh });
     try obj.put(alloc, "action", .{ .string = if (new_user) "user_created" else "user_logged_in" });
+    if (persist) try c.putUser(u);
     return .{ .object = obj };
 }
 
@@ -963,7 +955,7 @@ pub fn handleLogin(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
 pub fn handleLogout(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
     c.mutex.lockUncancelable(c.io);
-    defer c.mutex.unlock(c.io);
+    errdefer c.mutex.unlock(c.io);
     // Only the authenticated user can log out (Moonraker has no username param).
     const username = currentUser(params) orelse return error.NotFound;
     if (isReservedUser(username)) return error.Forbidden;
@@ -972,12 +964,12 @@ pub fn handleLogout(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
     var tmpl = u.*;
     tmpl.jwt_secret = "";
     tmpl.jwk_id = "";
-    try c.putUser(tmpl);
-    c.syncUser(username);
-
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, username) });
     try obj.put(alloc, "action", .{ .string = "user_logged_out" });
+    try c.putUser(tmpl);
+    c.mutex.unlock(c.io);
+    if (c.on_user_logout) |notify| notify(c.on_user_logout_ctx.?, obj.get("username").?.string);
     return .{ .object = obj };
 }
 
@@ -1080,22 +1072,23 @@ pub fn handleUserPost(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Al
 pub fn handleUserDelete(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c = ctxOf(ctx);
     c.mutex.lockUncancelable(c.io);
-    defer c.mutex.unlock(c.io);
+    errdefer c.mutex.unlock(c.io);
     const username = webreq.required([]const u8, params, "username") catch return error.InvalidParams;
     if (currentUser(params)) |cur| {
         if (std.mem.eql(u8, cur, username)) return error.Forbidden;
     }
     if (isReservedUser(username)) return error.Forbidden;
     const entry = c.users.getEntry(username) orelse return error.NotFound;
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, username) });
+    try obj.put(alloc, "action", .{ .string = "user_deleted" });
+    try c.deleteUserFromStore(username);
     const key = entry.key_ptr.*;
     entry.value_ptr.freeValues(c.gpa);
     _ = c.users.remove(username);
     c.gpa.free(key);
-    c.deleteUserFromStore(username);
-
-    var obj: std.json.ObjectMap = .empty;
-    try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, username) });
-    try obj.put(alloc, "action", .{ .string = "user_deleted" });
+    c.mutex.unlock(c.io);
+    if (c.on_user_logout) |notify| notify(c.on_user_logout_ctx.?, obj.get("username").?.string);
     return .{ .object = obj };
 }
 
@@ -1140,12 +1133,10 @@ pub fn handlePasswordReset(ctx: *anyopaque, params: std.json.Value, alloc: std.m
     const new_hash = hashPassword(new_password, salt_bytes);
     var tmpl = u.*;
     tmpl.password = &new_hash;
-    try c.putUser(tmpl);
-    c.syncUser(username);
-
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "username", .{ .string = try alloc.dupe(u8, username) });
     try obj.put(alloc, "action", .{ .string = "user_password_reset" });
+    try c.putUser(tmpl);
     return .{ .object = obj };
 }
 
@@ -1166,15 +1157,16 @@ pub fn handlePostApiKey(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     _ = params;
     var raw: [16]u8 = undefined;
     try c.io.randomSecure(&raw);
-    c.api_key = std.fmt.bytesToHex(raw, .lower);
+    const new_key = std.fmt.bytesToHex(raw, .lower);
+    const response = try alloc.dupe(u8, &new_key);
+    errdefer alloc.free(response);
     // Update the API user's password.
-    if (c.users.getPtr(api_user)) |u| {
-        var tmpl = u.*;
-        tmpl.password = &c.api_key;
-        try c.putUser(tmpl);
-        c.syncUser(api_user);
-    }
-    return .{ .string = try alloc.dupe(u8, &c.api_key) };
+    const u = c.users.getPtr(api_user) orelse return error.NotFound;
+    var tmpl = u.*;
+    tmpl.password = &new_key;
+    try c.putUser(tmpl);
+    c.api_key = new_key;
+    return .{ .string = response };
 }
 
 /// GET /access/oneshot_token → mint a single-use token bound to the caller IP.
@@ -1496,40 +1488,67 @@ const testing = std.testing;
 const MemStore = struct {
     alloc: std.mem.Allocator,
     map: std.StringHashMapUnmanaged(std.json.Value) = .{},
+    read_error: ?ds.Error = null,
+    write_error: ?ds.Error = null,
+    delete_error: ?ds.Error = null,
+    namespace_override: ?std.json.Value = null,
+    writes: usize = 0,
 
     fn init(alloc: std.mem.Allocator) MemStore {
         return .{ .alloc = alloc };
     }
     fn deinit(self: *MemStore) void {
-        var it = self.map.keyIterator();
-        while (it.next()) |k| self.alloc.free(k.*);
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.alloc.free(entry.key_ptr.*);
+            jv.free(self.alloc, entry.value_ptr.*);
+        }
         self.map.deinit(self.alloc);
     }
-    fn vtGetItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!?std.json.Value {
-        return null;
+    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds.Error!?std.json.Value {
+        const self: *MemStore = @ptrCast(@alignCast(ctx));
+        if (self.read_error) |err| return err;
+        return if (self.map.get(key)) |value| try jv.deepCopy(arena, value) else null;
     }
     fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
-        const gop = self.map.getOrPut(self.alloc, key) catch return ds.Error.OutOfMemory;
-        if (!gop.found_existing) {
-            gop.key_ptr.* = self.alloc.dupe(u8, key) catch return ds.Error.OutOfMemory;
+        if (self.write_error) |err| return err;
+        const owned_key = try self.alloc.dupe(u8, key);
+        errdefer self.alloc.free(owned_key);
+        const owned_value = try jv.deepCopy(self.alloc, value);
+        errdefer jv.free(self.alloc, owned_value);
+        const gop = try self.map.getOrPut(self.alloc, owned_key);
+        if (gop.found_existing) {
+            self.alloc.free(gop.key_ptr.*);
+            jv.free(self.alloc, gop.value_ptr.*);
         }
-        gop.value_ptr.* = value;
+        gop.key_ptr.* = owned_key;
+        gop.value_ptr.* = owned_value;
+        self.writes += 1;
     }
     fn vtUpdateItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {}
-    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
+    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
+        if (self.delete_error) |err| return err;
+        const removed = try jv.deepCopy(arena, self.map.get(key) orelse return error.KeyNotFound);
         if (self.map.fetchRemove(key)) |kv| {
             self.alloc.free(kv.key);
-            return kv.value;
+            jv.free(self.alloc, kv.value);
+            return removed;
         }
-        return ds.Error.KeyNotFound;
+        unreachable;
     }
     fn vtListNamespaces(_: *anyopaque, arena: std.mem.Allocator) ds.Error![][]const u8 {
         return arena.alloc([]const u8, 0);
     }
-    fn vtGetNamespace(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8) ds.Error!std.json.Value {
-        return .{ .object = .empty };
+    fn vtGetNamespace(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8) ds.Error!std.json.Value {
+        const self: *MemStore = @ptrCast(@alignCast(ctx));
+        if (self.read_error) |err| return err;
+        if (self.namespace_override) |value| return jv.deepCopy(arena, value);
+        var obj: std.json.ObjectMap = .empty;
+        var it = self.map.iterator();
+        while (it.next()) |entry| try obj.put(arena, entry.key_ptr.*, entry.value_ptr.*);
+        return jv.deepCopy(arena, .{ .object = obj });
     }
     const vtable: ds.VTable = .{
         .getItem = vtGetItem,
@@ -1551,6 +1570,248 @@ fn mkCtx(alloc: std.mem.Allocator, mem: *MemStore) !AuthCtx {
 fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     const p = try std.json.parseFromSlice(std.json.Value, alloc, json_str, .{});
     return p.value;
+}
+
+test "auth startup propagates store failures without replacing persisted credentials" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    for ([_]ds.Error{ error.BackendError, error.OutOfMemory }) |failure| {
+        mem.read_error = failure;
+        if (mkCtx(testing.allocator, &mem)) |created| {
+            var unexpected = created;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expectEqual(failure, err);
+        try testing.expectEqual(@as(usize, 0), mem.writes);
+    }
+    mem.read_error = error.NamespaceNotFound;
+    var fresh = try mkCtx(testing.allocator, &mem);
+    fresh.deinit();
+    try testing.expectEqual(@as(usize, 1), mem.writes);
+    mem.read_error = null;
+    mem.write_error = error.BackendError;
+    var existing = try mkCtx(testing.allocator, &mem);
+    defer existing.deinit();
+    try testing.expect(validateApiKey(&existing, mem.map.get(api_user).?.object.get("password").?.string));
+}
+
+test "auth startup refuses corrupt namespaces and user records" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const invalid = [_][]const u8{
+        "null",
+        "[]",
+        "{\"alice\":null}",
+        "{\"alice\":{\"password\":false}}",
+        "{\"alice\":{\"password\":\"hash\",\"source\":[]}}",
+        "{\"_API_KEY_USER_\":{\"password\":\"short\"}}",
+    };
+    for (invalid) |text| {
+        var mem = MemStore.init(testing.allocator);
+        defer mem.deinit();
+        mem.namespace_override = try mkParams(a, text);
+        if (mkCtx(testing.allocator, &mem)) |created| {
+            var unexpected = created;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expectEqual(error.BackendError, err);
+        try testing.expectEqual(@as(usize, 0), mem.writes);
+    }
+}
+
+test "auth mutations preserve credentials when persistence fails" {
+    const Operation = enum { api_key, password, logout, delete, create, login };
+    for (std.enums.values(Operation)) |operation| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var mem = MemStore.init(testing.allocator);
+        defer mem.deinit();
+        var ctx = try mkCtx(testing.allocator, &mem);
+        defer ctx.deinit();
+        const created = try handleUserPost(&ctx, try mkParams(a, "{\"username\":\"alice\",\"password\":\"secret\"}"), a);
+        const token = created.object.get("token").?.string;
+        const identity = try mkParams(a, "{\"_current_user\":\"alice\"}");
+        if (operation == .login) _ = try handleLogout(&ctx, identity, a);
+        const old_key = ctx.api_key;
+        const before = try std.json.Stringify.valueAlloc(a, try ctx.users.getPtr("alice").?.toDbValue(a), .{});
+        const persisted = try std.json.Stringify.valueAlloc(a, mem.map.get("alice").?, .{});
+        mem.write_error = error.BackendError;
+        mem.delete_error = error.BackendError;
+        const result = switch (operation) {
+            .api_key => handlePostApiKey(&ctx, .null, a),
+            .password => handlePasswordReset(&ctx, try mkParams(a, "{\"_current_user\":\"alice\",\"password\":\"secret\",\"new_password\":\"changed\"}"), a),
+            .logout => handleLogout(&ctx, identity, a),
+            .delete => handleUserDelete(&ctx, try mkParams(a, "{\"username\":\"alice\"}"), a),
+            .create => handleUserPost(&ctx, try mkParams(a, "{\"username\":\"bob\",\"password\":\"secret\"}"), a),
+            .login => handleLogin(&ctx, try mkParams(a, "{\"username\":\"alice\",\"password\":\"secret\"}"), a),
+        };
+        try testing.expectError(error.BackendError, result);
+        try testing.expectEqualSlices(u8, &old_key, &ctx.api_key);
+        try testing.expect(validateApiKey(&ctx, &old_key));
+        try testing.expectEqualStrings(before, try std.json.Stringify.valueAlloc(a, try ctx.users.getPtr("alice").?.toDbValue(a), .{}));
+        try testing.expectEqualStrings(persisted, try std.json.Stringify.valueAlloc(a, mem.map.get("alice").?, .{}));
+        try testing.expect(!ctx.users.contains("bob"));
+        try testing.expect(!mem.map.contains("bob"));
+        if (operation != .login) try testing.expectEqualStrings("alice", validateJwt(&ctx, a, token).?);
+    }
+}
+
+test "auth startup and API-key rotation clean up every allocation failure" {
+    const Check = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            var ctx = try mkCtx(alloc, &mem);
+            defer ctx.deinit();
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            defer arena.deinit();
+            const old_key = ctx.api_key;
+            const result = handlePostApiKey(&ctx, .null, arena.allocator()) catch |err| {
+                try testing.expectEqualSlices(u8, &old_key, &ctx.api_key);
+                try testing.expect(validateApiKey(&ctx, &old_key));
+                try testing.expectEqualStrings(&old_key, mem.map.get(api_user).?.object.get("password").?.string);
+                return err;
+            };
+            try testing.expectEqualStrings(&ctx.api_key, result.string);
+            try testing.expectEqualStrings(&ctx.api_key, mem.map.get(api_user).?.object.get("password").?.string);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+}
+
+test "auth startup preserves loaded users and keys across allocation failures" {
+    const Check = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            try mem.dataStore().insertItem(a, user_namespace, api_user, try mkParams(a, "{\"password\":\"0123456789abcdef0123456789abcdef\"}"));
+            try mem.dataStore().insertItem(a, user_namespace, "alice", try mkParams(a, "{\"password\":\"hash\",\"source\":\"moonraker\"}"));
+            var ctx = try mkCtx(alloc, &mem);
+            defer ctx.deinit();
+            ctx.force_logins = true;
+            try testing.expectEqual(@as(usize, 2), ctx.users.count());
+            try testing.expectEqualStrings("0123456789abcdef0123456789abcdef", &ctx.api_key);
+            try testing.expect(authenticateRequest(&ctx, a, .HTTP, .{ .remote_ip = "127.0.0.1" }, true) == .unauthorized);
+            try testing.expectEqual(@as(usize, 2), mem.writes);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+}
+
+test "auth creation remains absent after every allocation failure before persistence" {
+    const Check = struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            var ctx = try mkCtx(alloc, &mem);
+            defer ctx.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const params = try mkParams(a, "{\"username\":\"alice\",\"password\":\"secret\"}");
+            _ = handleUserPost(&ctx, params, a) catch |err| {
+                try testing.expect(!ctx.users.contains("alice"));
+                try testing.expect(!mem.map.contains("alice"));
+                try testing.expectEqual(@as(usize, 1), mem.writes);
+                return err;
+            };
+            try testing.expect(ctx.users.contains("alice"));
+            try testing.expect(mem.map.contains("alice"));
+            try testing.expectEqual(@as(usize, 2), mem.writes);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+}
+
+test "auth logout and deletion notify only after persistence and without the auth lock" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var ctx = try mkCtx(testing.allocator, &mem);
+    defer ctx.deinit();
+    const Probe = struct {
+        auth: *AuthCtx,
+        calls: usize = 0,
+        unlocked: bool = false,
+        correct_name: bool = false,
+        fn notify(raw: *anyopaque, username: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.correct_name = std.mem.eql(u8, username, "alice");
+            self.unlocked = self.auth.mutex.tryLock();
+            if (self.unlocked) self.auth.mutex.unlock(self.auth.io);
+        }
+    };
+    var probe: Probe = .{ .auth = &ctx };
+    ctx.on_user_logout = Probe.notify;
+    ctx.on_user_logout_ctx = &probe;
+    _ = try handleUserPost(&ctx, try mkParams(a, "{\"username\":\"alice\",\"password\":\"secret\"}"), a);
+    mem.write_error = error.BackendError;
+    const identity = try mkParams(a, "{\"_current_user\":\"alice\"}");
+    try testing.expectError(error.BackendError, handleLogout(&ctx, identity, a));
+    try testing.expectEqual(@as(usize, 0), probe.calls);
+    mem.write_error = null;
+    _ = try handleLogout(&ctx, identity, a);
+    try testing.expectEqual(@as(usize, 1), probe.calls);
+    try testing.expect(probe.unlocked and probe.correct_name);
+    mem.delete_error = error.BackendError;
+    const deletion = try mkParams(a, "{\"username\":\"alice\"}");
+    try testing.expectError(error.BackendError, handleUserDelete(&ctx, deletion, a));
+    try testing.expectEqual(@as(usize, 1), probe.calls);
+    mem.delete_error = null;
+    _ = try handleUserDelete(&ctx, deletion, a);
+    try testing.expectEqual(@as(usize, 2), probe.calls);
+    try testing.expect(probe.unlocked and probe.correct_name);
+}
+
+test "fuzz auth creation rejects unrepresentable usernames before persistence" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [16]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            var ctx = try mkCtx(testing.allocator, &mem);
+            defer ctx.deinit();
+            const suffix = std.fmt.bytesToHex(&bytes, .lower);
+            const name = if (bytes[0] & 1 == 0) "" else try std.fmt.allocPrint(a, "user.{s}", .{suffix});
+            var params: std.json.ObjectMap = .empty;
+            try params.put(a, "username", .{ .string = name });
+            try params.put(a, "password", .{ .string = "secret" });
+            try testing.expectError(error.InvalidParams, handleUserPost(&ctx, .{ .object = params }, a));
+            try testing.expectEqual(@as(usize, 1), ctx.users.count());
+            try testing.expectEqual(@as(usize, 1), mem.writes);
+        }
+    }.run, .{});
+}
+
+test "fuzz auth startup rejects malformed user field types without rewriting the store" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [16]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            const value = try mkParams(a, "{\"alice\":{\"password\":\"hash\",\"source\":false}} ");
+            value.object.getPtr("alice").?.object.getPtr("source").?.* = if (bytes[0] & 1 == 0) .{ .bool = bytes[1] & 1 == 0 } else .{ .integer = std.mem.readInt(i64, bytes[0..8], .little) };
+            mem.namespace_override = value;
+            try testing.expectError(error.BackendError, mkCtx(testing.allocator, &mem));
+            try testing.expectEqual(@as(usize, 0), mem.writes);
+        }
+    }.run, .{});
 }
 
 // --- Crypto unit tests ---

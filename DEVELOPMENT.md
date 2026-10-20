@@ -129,6 +129,11 @@ These differ from older Zig docs:
 
 Trusted-client authentication accepts forwarded addresses only from a trusted
 socket peer, including endpoints where authentication is optional.
+Unreadable or malformed auth records abort startup. User creation, key rotation,
+password reset, logout and deletion persist before changing live credentials.
+Successful logout and deletion notify connection revocation after releasing the
+auth mutex. Usernames must be nonempty and contain no dots because the store
+uses dots for record paths; unsupported names return 400 before changing state.
 
 ## 5. Adding (or completing) a component
 
