@@ -419,77 +419,64 @@ fn freeTcpPort(io: Io) !u16 {
 }
 
 // End-to-end MQTT over TLS: socat TLS-terminates and forwards to the plaintext
-// TestBroker (std has no TLS server, so socat is the TLS peer). Skips cleanly if
+// TestBroker (std has no TLS server, so socat is the TLS peer). Skips if
 // openssl/socat aren't installed; a real handshake/CONNACK failure still fails.
 test "client connects over TLS (socat OpenSSL proxy → plaintext broker)" {
-    const alloc = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    const dir = "/tmp/phobos-mqtt-tls-test";
-    std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
-    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    const cert = try std.fs.path.join(alloc, &.{ dir, "cert.pem" });
+    const key = try std.fs.path.join(alloc, &.{ dir, "key.pem" });
 
-    // Generate a self-signed cert (skip the test if openssl is unavailable).
-    const gen = std.process.run(alloc, io, .{ .argv = &.{
-        "openssl",  "req",              "-x509",   "-newkey",
-        "rsa:2048", "-nodes",           "-keyout", dir ++ "/key.pem",
-        "-out",     dir ++ "/cert.pem", "-days",   "1",
-        "-subj",    "/CN=localhost",
-    } }) catch return;
-    alloc.free(gen.stdout);
-    alloc.free(gen.stderr);
-    if (gen.term != .exited or gen.term.exited != 0) return;
+    const gen = std.process.run(alloc, io, .{ .argv = &.{ "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost" } }) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expect(gen.term == .exited and gen.term.exited == 0);
 
     var broker = try TestBroker.bind(io);
-    const bport = broker.port();
+    defer broker.deinit();
     const tport = try freeTcpPort(io);
 
-    // socat: TLS listener on tport, forwarding plaintext to the broker on bport.
-    var lbuf: [128]u8 = undefined;
-    var fbuf: [64]u8 = undefined;
-    const listen = std.fmt.bufPrint(&lbuf, "OPENSSL-LISTEN:{d},cert={s}/cert.pem,key={s}/key.pem,verify=0,reuseaddr,fork", .{ tport, dir, dir }) catch return;
-    const fwd = std.fmt.bufPrint(&fbuf, "TCP:127.0.0.1:{d}", .{bport}) catch return;
-    var socat = std.process.spawn(io, .{
-        .argv = &.{ "socat", listen, fwd },
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch {
-        broker.deinit();
-        return;
+    // socat: TLS listener on tport, forwarding plaintext to the broker.
+    const listen = try std.fmt.allocPrint(alloc, "OPENSSL-LISTEN:{d},bind=127.0.0.1,cert={s},key={s},verify=0,reuseaddr,fork", .{ tport, cert, key });
+    const fwd = try std.fmt.allocPrint(alloc, "TCP:127.0.0.1:{d}", .{broker.port()});
+    var socat = std.process.spawn(io, .{ .argv = &.{ "socat", listen, fwd }, .stdout = .ignore, .stderr = .ignore }) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
     };
     defer socat.kill(io); // kill() reaps; wait() would assert id != null
 
+    // Cancel, not close, unblocks the broker's accept if the client never connects.
     var bf = io.async(TestBroker.run, .{ &broker, @as(usize, 1) });
+    defer bf.cancel(io);
 
     // Connect over TLS, retrying while socat comes up (~up to 5 s).
     var client: ?MqttClient = null;
     var tries: usize = 0;
     while (tries < 50) : (tries += 1) {
-        if (MqttClient.connectTls(alloc, io, "127.0.0.1", tport, .{ .client_id = "phobos-tls" }, .{ .host = "localhost", .insecure = true })) |c| {
+        if (MqttClient.connectTls(testing.allocator, io, "127.0.0.1", tport, .{ .client_id = "phobos-tls" }, .{ .host = "localhost", .insecure = true })) |c| {
             client = c;
             break;
         } else |_| {
             io.sleep(std.Io.Duration.fromMilliseconds(100), .awake) catch {};
         }
     }
+    const c = if (client) |*cl| cl else return error.TlsConnectFailed;
+    defer c.deinit();
 
-    if (client) |*c| {
-        try testing.expect(c.connected);
-        c.publish("phobos/tls", "secure-hi", 0, false) catch {};
-        bf.await(io);
-        c.deinit();
-        broker.deinit();
-        try testing.expectEqualStrings("phobos/tls", broker.got_topic[0..broker.got_topic_len]);
-        try testing.expectEqualStrings("secure-hi", broker.got_payload[0..broker.got_payload_len]);
-    } else {
-        // Never connected: unblock the broker's accept, drain, then fail.
-        broker.deinit();
-        bf.await(io);
-        return error.TlsConnectFailed;
-    }
+    try testing.expect(c.connected);
+    try c.publish("phobos/tls", "secure-hi", 0, false);
+    bf.await(io);
+    try testing.expectEqualStrings("phobos/tls", broker.got_topic[0..broker.got_topic_len]);
+    try testing.expectEqualStrings("secure-hi", broker.got_payload[0..broker.got_payload_len]);
 }
 
 test "client subscribes and receives an injected publish" {

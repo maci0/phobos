@@ -902,10 +902,11 @@ test "pollSerialOnce: reads a line from the device and updates the connection" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const path = "/tmp/phobos_td1_serial.dev";
-    Dir.cwd().deleteFile(io, path) catch {};
-    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "ts,sn,fw,batt,1.72,Green\n" });
-    defer Dir.cwd().deleteFile(io, path) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "td1", .data = "ts,sn,fw,batt,1.72,Green\n" });
+    const path = try tmp.dir.realPathFileAlloc(io, "td1", std.testing.allocator);
+    defer std.testing.allocator.free(path);
 
     var ctx = Td1Ctx.init(std.testing.allocator, std.testing.io);
     defer ctx.deinit();

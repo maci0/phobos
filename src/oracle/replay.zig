@@ -143,10 +143,16 @@ test "conformance: snapshots — all golden cases return valid JSON-RPC" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(data_path);
+    var app = try App.init(alloc, io, data_path);
     defer app.deinit(io);
     // Wire live io into components so handlers that need it (file_manager,
     // spoolman, etc.) don't crash on null-io dereference.
+    // Disable the proc_stat timer thread, as TestServer does: it deadlocks the harness.
+    app.machine_ctx.no_proc_stat_timer = true;
     _ = app.httpServer(io);
 
     const results = try replay(alloc, app.dispatcher, goldenCases);
@@ -193,7 +199,11 @@ test "conformance: server.info has required fields" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(data_path);
+    var app = try App.init(alloc, io, data_path);
     defer app.deinit(io);
 
     const resp = try callEndpoint(alloc, app.dispatcher, "server.info", "{}");
@@ -221,7 +231,11 @@ test "conformance: server.config has required fields" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(data_path);
+    var app = try App.init(alloc, io, data_path);
     defer app.deinit(io);
 
     const resp = try callEndpoint(alloc, app.dispatcher, "server.config", "{}");
@@ -302,21 +316,25 @@ test "result_only: fails when response has error" {
     try testing.expect(!try resultShapeOk(alloc, resp));
 }
 
-// Capture tests write Zig fixture source to .scratch/phobos_golden_captures.txt.
+// The capture test writes Zig fixture source to golden_captures.txt in its
+// temporary directory and checks that it parses.
 test "capture: print all golden case responses" {
     const alloc = testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(data_path);
+    var app = try App.init(alloc, io, data_path);
     defer app.deinit(io);
+    // Disable the proc_stat timer thread, as TestServer does: it deadlocks the harness.
+    app.machine_ctx.no_proc_stat_timer = true;
     _ = app.httpServer(io);
 
-    const cwd = std.Io.Dir.cwd();
-    try cwd.createDirPath(io, ".scratch");
-    const output_path = ".scratch/phobos_golden_captures.txt";
-    var file = try cwd.createFile(io, output_path, .{});
+    var file = try tmp.dir.createFile(io, "golden_captures.txt", .{});
     defer file.close(io);
 
     var wbuf: [4096]u8 = undefined;
@@ -334,7 +352,7 @@ test "capture: print all golden case responses" {
     }
     try writer.interface.writeAll("};\n");
     try writer.interface.flush();
-    const contents = try cwd.readFileAlloc(io, output_path, alloc, .limited(1 << 20));
+    const contents = try tmp.dir.readFileAlloc(io, "golden_captures.txt", alloc, .limited(1 << 20));
     defer alloc.free(contents);
     const source = try alloc.dupeSentinel(u8, contents, 0);
     defer alloc.free(source);

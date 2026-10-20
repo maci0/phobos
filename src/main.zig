@@ -244,8 +244,9 @@ fn run(init: std.process.Init) !void {
             config_path = args[i];
         } else if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "--data-path")) {
             // Moonraker-compatible datadir flag. Backs the file_manager roots
-            // (gcodes/config/logs). Without it phobos uses a temp dir under /tmp,
-            // which is tmpfs on embedded targets — never for real data.
+            // (gcodes/config/logs). Without it phobos uses a temp dir under /tmp
+            // and deletes it at exit; /tmp is tmpfs on embedded targets, never
+            // for real data.
             i += 1;
             if (i >= args.len) return usageError(a, " requires a <path> value");
             data_path = args[i];
@@ -326,8 +327,8 @@ pub fn resolveDbBackend(gpa: std.mem.Allocator, aio: std.Io, config_path: ?[]con
 
 /// Read `[database] path` when the config sets it. Otherwise, a `-d` data
 /// path opens `<data>/database/moonraker-sql.db`, which is where Moonraker
-/// stores the printer database. Null means the ephemeral `/tmp` file used
-/// by tests that pass no data path.
+/// stores the printer database. Null (no `[database] path`, no `-d`) puts it in
+/// the temporary datadir that `App.deinit` deletes.
 pub fn resolveDbPath(
     gpa: std.mem.Allocator,
     arena_alloc: std.mem.Allocator,
@@ -402,9 +403,10 @@ pub fn extractBindAddr(cfg: *const config.ConfigParser, default_host: []const u8
 ///   { "endpoints": [...], "jsonrpc_methods": [...], "notifications": [...],
 ///     "router_routes": [...] }
 ///
-/// All arrays are sorted. Does NOT bind any sockets.
+/// All arrays are sorted. Does NOT bind any sockets. The roots live in a
+/// temp datadir that is deleted on return; the database is in memory.
 pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io) !void {
-    const out = try buildDumpApiJson(alloc, aio);
+    const out = try buildDumpApiJson(alloc, aio, null);
     defer alloc.free(out);
 
     const stdout = std.Io.File.stdout();
@@ -415,9 +417,10 @@ pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io) !void {
     try sw.interface.flush();
 }
 
-/// Build the --dump-api JSON without touching stdout (testable).
-pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io) ![]u8 {
-    var server_app = try app.App.init(alloc, aio);
+/// Build the --dump-api JSON without touching stdout (testable). `data_path`
+/// is as for `App.initWithStore`.
+pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8) ![]u8 {
+    var server_app = try app.App.init(alloc, aio, data_path);
     defer server_app.deinit(aio);
 
     // Collect endpoints from the registry, grouped by path.
@@ -588,7 +591,11 @@ test "dumpApi: output contains server.info and server.config" {
     defer threaded.deinit();
     const aio = threaded.io();
 
-    const out = try buildDumpApiJson(alloc, aio);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
+    defer alloc.free(data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"server.info\"") != null);
@@ -601,7 +608,11 @@ test "dumpApi: output contains WS-only methods" {
     defer threaded.deinit();
     const aio = threaded.io();
 
-    const out = try buildDumpApiJson(alloc, aio);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
+    defer alloc.free(data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"server.connection.identify\"") != null);
@@ -614,7 +625,11 @@ test "dumpApi: output contains 27 notifications" {
     defer threaded.deinit();
     const aio = threaded.io();
 
-    const out = try buildDumpApiJson(alloc, aio);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
+    defer alloc.free(data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path);
     defer alloc.free(out);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out, .{});
@@ -630,7 +645,11 @@ test "dumpApi: output contains all four router routes" {
     defer threaded.deinit();
     const aio = threaded.io();
 
-    const out = try buildDumpApiJson(alloc, aio);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
+    defer alloc.free(data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"/server/jsonrpc\"") != null);
@@ -650,7 +669,11 @@ test "dumpApi: output is valid JSON with all required top-level keys" {
     defer threaded.deinit();
     const aio = threaded.io();
 
-    const out = try buildDumpApiJson(alloc, aio);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
+    defer alloc.free(data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path);
     defer alloc.free(out);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out, .{});
@@ -675,7 +698,11 @@ test "fuzz_dumpApi: output is always valid JSON" {
             defer threaded.deinit();
             const io2 = threaded.io();
 
-            const out = try buildDumpApiJson(std.heap.smp_allocator, io2);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const data_path = try tmp.dir.realPathFileAlloc(io2, ".", std.heap.smp_allocator);
+            defer std.heap.smp_allocator.free(data_path);
+            const out = try buildDumpApiJson(std.heap.smp_allocator, io2, data_path);
             defer std.heap.smp_allocator.free(out);
 
             const parsed = std.json.parseFromSlice(
@@ -772,19 +799,17 @@ test "resolveDbPath: -d uses moonraker-sql.db unless the config sets a path" {
     var req_arena = std.heap.ArenaAllocator.init(alloc);
     defer req_arena.deinit();
     const a = req_arena.allocator();
-    const base = ".scratch/phobos-datapath-test";
-    std.Io.Dir.cwd().deleteTree(aio, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(aio, base) catch {};
-    try std.Io.Dir.cwd().createDirPath(aio, base ++ "/config");
-    var dir = try std.Io.Dir.cwd().openDir(aio, base, .{});
-    defer dir.close(aio);
-    try dir.writeFile(aio, .{ .sub_path = "config/moonraker.conf", .data = "[server]\nport: 7125\n" });
-    const implied = resolveDbPath(alloc, a, aio, base ++ "/config/moonraker.conf", base).?;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const base = try std.fmt.allocPrint(a, "{s}/{s}", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    try tmp.dir.createDirPath(aio, "config");
+    try tmp.dir.writeFile(aio, .{ .sub_path = "config/moonraker.conf", .data = "[server]\nport: 7125\n" });
+    const implied = resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/moonraker.conf" }), base).?;
     try std.testing.expect(std.mem.endsWith(u8, implied, "/database/moonraker-sql.db"));
     try std.testing.expect(std.mem.indexOf(u8, implied, base) != null);
 
-    try dir.writeFile(aio, .{ .sub_path = "config/override.conf", .data = "[database]\npath: /var/lib/moonraker-sql.db\n" });
-    const over = resolveDbPath(alloc, a, aio, base ++ "/config/override.conf", base).?;
+    try tmp.dir.writeFile(aio, .{ .sub_path = "config/override.conf", .data = "[database]\npath: /var/lib/moonraker-sql.db\n" });
+    const over = resolveDbPath(alloc, a, aio, try std.fs.path.join(a, &.{ base, "config/override.conf" }), base).?;
     try std.testing.expectEqualStrings("/var/lib/moonraker-sql.db", over);
 
     try std.testing.expect(resolveDbPath(alloc, a, aio, null, null) == null);

@@ -2187,8 +2187,7 @@ test "registerFileManager: wires routes and JSON-RPC methods" {
     var reg = Registry.init(alloc, &d);
     defer reg.deinit();
 
-    const roots = [_]Root{.{ .name = "gcodes", .path = "/tmp", .full_access = true }};
-    var ctx = FileCtx{ .gpa = alloc, .roots = &roots, .bus = null };
+    var ctx = FileCtx{ .gpa = alloc, .roots = &.{}, .bus = null };
     try registerFileManager(&reg, &ctx);
 
     try testing.expect(reg.lookup(.GET, "/server/files/roots") != null);

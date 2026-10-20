@@ -40,9 +40,12 @@ pub const WsTestConn = struct {
     alloc: std.mem.Allocator,
     /// Deterministic-but-nonzero mask source so each frame is masked.
     mask_rng: std.Random.DefaultPrng = .init(0x1234_5678),
-    /// Deadline for the next complete data frame, including buffered bytes.
-    read_timeout_secs: ?u32 = null,
+    /// Seconds allowed for the next complete data frame or call response,
+    /// including buffered bytes, so a server that never answers fails the test.
+    read_timeout_secs: u32 = default_read_timeout_secs,
     read_deadline: ?Io.Clock.Timestamp = null,
+
+    const default_read_timeout_secs = 5;
 
     const read_vtable: Io.VTable = blk: {
         var vtable = Io.failing.vtable.*;
@@ -131,6 +134,8 @@ pub const WsTestConn = struct {
     /// Send a JSON-RPC text request and return the result payload as owned JSON
     /// bytes (the full JSON-RPC response envelope). Caller frees with `alloc`.
     pub fn callRaw(self: *WsTestConn, alloc: std.mem.Allocator, request_json: []const u8) ![]u8 {
+        self.read_deadline = .fromNow(self.io, .{ .raw = .fromSeconds(self.read_timeout_secs), .clock = .awake });
+        defer self.read_deadline = null;
         try self.sendFrame(.text, request_json);
         var frame = try self.readFrame();
         // Tolerate interleaved server->client frames that are not the response.
@@ -358,10 +363,11 @@ test "WS: connection cleanup removes it from Connections after disconnect" {
     // Disconnect; the server's serve loop must remove the connection.
     c.close();
 
-    // Poll briefly for the async cleanup to land.
-    var spins: usize = 0;
-    while (ts.conns.has(ts.io, id) and spins < 1000) : (spins += 1) {
-        std.Thread.yield() catch {};
+    // Poll for the async cleanup to land, bounded by time rather than by
+    // scheduler yields so a loaded machine does not fail spuriously.
+    const start = Io.Clock.Timestamp.now(ts.io, .awake);
+    while (ts.conns.has(ts.io, id) and start.untilNow(ts.io).raw.toSeconds() < WsTestConn.default_read_timeout_secs) {
+        try std.Io.sleep(ts.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake);
     }
     try std.testing.expect(!ts.conns.has(ts.io, id));
 }
@@ -418,10 +424,7 @@ fn arrayParam(alloc: std.mem.Allocator, s: []const u8) !std.json.Value {
 const DataFrame = struct { opcode: Opcode, data: []u8 };
 
 fn nextDataFrame(c: *WsTestConn) anyerror!DataFrame {
-    c.read_deadline = if (c.read_timeout_secs) |secs|
-        .fromNow(c.io, .{ .raw = .fromSeconds(secs), .clock = .awake })
-    else
-        null;
+    c.read_deadline = .fromNow(c.io, .{ .raw = .fromSeconds(c.read_timeout_secs), .clock = .awake });
     defer c.read_deadline = null;
     while (true) {
         const f = c.readFrame() catch |err| {
@@ -520,13 +523,13 @@ const EmitterCtx = struct {
     alloc: std.mem.Allocator,
 };
 
-fn emitterTask(ctx: *EmitterCtx) void {
+fn emitterTask(ctx: *EmitterCtx) !void {
     var i: usize = 0;
     while (i < ctx.n) : (i += 1) {
         var arena = std.heap.ArenaAllocator.init(ctx.alloc);
         defer arena.deinit();
-        const p = arrayParam(arena.allocator(), "notif") catch return;
-        ctx.ts.emit(notify.names.gcode_response, p) catch return;
+        const p = try arrayParam(arena.allocator(), "notif");
+        try ctx.ts.emit(notify.names.gcode_response, p);
     }
 }
 
@@ -549,13 +552,15 @@ test "WS: response and notifications never interleave (each frame is intact vali
     // object; if writes interleaved, JSON parsing would fail.
     var ectx = EmitterCtx{ .ts = ts, .n = notif_count, .alloc = alloc };
     var fut = ts.io.async(emitterTask, .{&ectx});
+    // Joins the emitter if the test fails before `await`; its error is reported there.
+    defer fut.cancel(ts.io) catch {};
 
     // Send a request; its response is one of the frames we will read back.
     try c.sendFrame(.text,
         \\{"jsonrpc":"2.0","method":"server.info","id":99}
     );
 
-    fut.await(ts.io);
+    try fut.await(ts.io);
 
     // We expect notif_count notifications plus exactly one response (id:99),
     // each a self-contained valid JSON object, in some order. Background
@@ -604,8 +609,9 @@ fn setReadTimeout(c: *WsTestConn, secs: u32) void {
     c.read_timeout_secs = secs;
 }
 
-fn clearReadTimeout(c: *WsTestConn) void {
-    c.read_timeout_secs = null;
+/// Restore the default receive timeout.
+fn resetReadTimeout(c: *WsTestConn) void {
+    c.read_timeout_secs = WsTestConn.default_read_timeout_secs;
 }
 
 test "WS: spoolman POST spool_id emits notify_active_spool_set" {
@@ -628,7 +634,7 @@ test "WS: spoolman POST spool_id emits notify_active_spool_set" {
 
     // Bounded wait: set a 3-second receive timeout so a regression fails fast.
     setReadTimeout(c, 3);
-    defer clearReadTimeout(c);
+    defer resetReadTimeout(c);
     const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
@@ -660,7 +666,7 @@ test "WS: webcam POST item emits notify_webcams_changed" {
     defer alloc.free(body);
 
     setReadTimeout(c, 3);
-    defer clearReadTimeout(c);
+    defer resetReadTimeout(c);
     const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
@@ -705,7 +711,7 @@ test "WS: job_queue POST job emits notify_job_queue_changed" {
     defer alloc.free(body);
 
     setReadTimeout(c, 3);
-    defer clearReadTimeout(c);
+    defer resetReadTimeout(c);
     const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
@@ -743,7 +749,7 @@ test "WS: power device action=on emits notify_power_changed" {
     defer alloc.free(body);
 
     setReadTimeout(c, 3);
-    defer clearReadTimeout(c);
+    defer resetReadTimeout(c);
     const frame = try nextDataFrameSkipProcStat(c);
     defer alloc.free(frame.data);
 
@@ -773,7 +779,7 @@ test "WS deadline reads buffered frames and permits reuse after an idle timeout"
     defer std.testing.allocator.free(frame.data);
     try std.testing.expectEqualStrings("x", frame.data);
     try std.testing.expectError(error.Timeout, nextDataFrame(client));
-    clearReadTimeout(client);
+    resetReadTimeout(client);
     const response = try client.call(std.testing.allocator, "server.info", null);
     defer std.testing.allocator.free(response);
     try std.testing.expect(std.mem.indexOf(u8, response, "phobos") != null);

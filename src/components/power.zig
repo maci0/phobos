@@ -1368,19 +1368,18 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const Dir = std.Io.Dir;
 
-    const root = "/tmp/phobos_power_gpio_root";
-    const pindir = root ++ "/gpio23";
-    Dir.cwd().deleteTree(io, root) catch {};
-    try Dir.cwd().createDirPath(io, pindir);
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/direction", .data = "in" });
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
-    defer Dir.cwd().deleteTree(io, root) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "gpio23");
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio23/direction", .data = "in" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio23/value", .data = "0" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
 
     const readVal = struct {
-        fn f(i: std.Io) ![]const u8 {
-            const fh = try Dir.cwd().openFile(i, pindir ++ "/value", .{});
+        fn f(i: std.Io, d: std.Io.Dir) ![]const u8 {
+            const fh = try d.openFile(i, "gpio23/value", .{});
             defer fh.close(i);
             var buf: [8]u8 = undefined;
             var r = fh.reader(i, &.{});
@@ -1400,13 +1399,13 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
 
     ctx.driveGpio(dev, true);
     {
-        const v = try readVal(io);
+        const v = try readVal(io, tmp.dir);
         defer testing.allocator.free(v);
         try testing.expectEqualStrings("1", v);
     }
     ctx.driveGpio(dev, false);
     {
-        const v = try readVal(io);
+        const v = try readVal(io, tmp.dir);
         defer testing.allocator.free(v);
         try testing.expectEqualStrings("0", v);
     }
@@ -1415,7 +1414,7 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
     dev.gpio_active_low = true;
     ctx.driveGpio(dev, true);
     {
-        const v = try readVal(io);
+        const v = try readVal(io, tmp.dir);
         defer testing.allocator.free(v);
         try testing.expectEqualStrings("0", v);
     }

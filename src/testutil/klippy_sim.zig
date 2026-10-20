@@ -9,11 +9,11 @@
 //! responses, and trigger shutdown/disconnect.
 //!
 //! Usage:
-//!   var sim = try KlippySim.init(alloc, "/tmp/phobos_test_klippy");
+//!   var sim = try KlippySim.init(alloc, ".zig-cache/tmp/<sub_path>/klippy.sock");
 //!   defer sim.deinit();
 //!   try sim.start();
 //!   defer sim.stop();
-//!   sim.waitReady();
+//!   try sim.waitReady();
 //!   sim.pushStatus(.printing, "test.gcode");
 //!   sim.pushShutdown();
 
@@ -49,6 +49,9 @@ pub const Command = union(enum) {
 
 pub const KlippySim = struct {
     const Self = @This();
+
+    const ready_polls = 200;
+    const ready_poll_ns = 10 * std.time.ns_per_ms;
 
     alloc: std.mem.Allocator,
     socket_path: []const u8,
@@ -115,7 +118,7 @@ pub const KlippySim = struct {
 
         // Remove any stale socket file.
         const io = self.io.?;
-        std.Io.Dir.deleteFileAbsolute(io, self.socket_path) catch {};
+        std.Io.Dir.cwd().deleteFile(io, self.socket_path) catch {};
 
         const addr = try net.UnixAddress.init(self.socket_path);
         self.listener = try addr.listen(io, .{});
@@ -123,7 +126,7 @@ pub const KlippySim = struct {
         self.thread = std.Thread.spawn(.{ .stack_size = 1 << 20 }, runThread, .{self}) catch |e| {
             self.listener.?.deinit(io);
             self.listener = null;
-            std.Io.Dir.deleteFileAbsolute(io, self.socket_path) catch {};
+            std.Io.Dir.cwd().deleteFile(io, self.socket_path) catch {};
             self.threaded.?.deinit();
             self.alloc.destroy(self.threaded.?);
             self.threaded = null;
@@ -132,10 +135,13 @@ pub const KlippySim = struct {
         };
     }
 
-    /// Block until the handshake completes (or the simulator stops).
-    pub fn waitReady(self: *Self) void {
-        while (!self.ready.load(.acquire) and self.running.load(.acquire)) {
-            std.Thread.yield() catch {};
+    /// Wait up to `ready_polls` x `ready_poll_ns` for the handshake. Fails
+    /// when the simulator stops or the bridge never completes it.
+    pub fn waitReady(self: *Self) !void {
+        var polls: u32 = 0;
+        while (!self.ready.load(.acquire)) : (polls += 1) {
+            if (polls == ready_polls or !self.running.load(.acquire)) return error.KlippySimNotReady;
+            std.Io.sleep(self.io.?, .{ .nanoseconds = ready_poll_ns }, .awake) catch {};
         }
     }
 
@@ -143,19 +149,21 @@ pub const KlippySim = struct {
     pub fn stop(self: *Self) void {
         self.running.store(false, .release);
         self.stop_flag.store(true, .release);
-        // Close the listener socket to unblock a pending accept.
-        if (self.listener) |*l| {
-            l.socket.close(self.io.?);
+        // Closing a listener does not wake a thread blocked in accept on
+        // Linux; shutting it down does.
+        if (self.listener) |l| {
+            const s: net.Stream = .{ .socket = l.socket };
+            s.shutdown(self.io.?, .both) catch {};
         }
         if (self.thread) |th| {
             th.join();
             self.thread = null;
         }
-        // Now safe to null the listener (socket already closed).
+        if (self.listener) |l| l.socket.close(self.io.?);
         self.listener = null;
         // Clean up the socket file.
         if (self.io) |sio| {
-            std.Io.Dir.deleteFileAbsolute(sio, self.socket_path) catch {};
+            std.Io.Dir.cwd().deleteFile(sio, self.socket_path) catch {};
         }
         if (self.threaded) |thr| {
             thr.deinit();
@@ -495,13 +503,24 @@ pub const KlippySim = struct {
 
 const testing = std.testing;
 
+/// `name` inside `tmp`, relative to the cwd (short enough for `sun_path`).
+fn tmpSocketPath(buf: []u8, tmp: *const testing.TmpDir, name: []const u8) ![]u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}/{s}", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path, name });
+}
+
 test "KlippySim: init/deinit" {
-    const sim = try KlippySim.init(testing.allocator, "/tmp/phobos_test_sim_init");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const sim = try KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, "sim.sock"));
     defer sim.deinit();
 }
 
 test "KlippySim: start/stop" {
-    const sim = try KlippySim.init(testing.allocator, "/tmp/phobos_test_sim_start");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const sim = try KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, "sim.sock"));
     defer sim.deinit();
     try sim.start();
     try testing.expect(sim.isRunning());
@@ -510,10 +529,36 @@ test "KlippySim: start/stop" {
 }
 
 test "KlippySim: start/stop with no client — stops cleanly" {
-    const sim = try KlippySim.init(testing.allocator, "/tmp/phobos_test_sim_noclient");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const sim = try KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, "sim.sock"));
     defer sim.deinit();
     try sim.start();
     sim.stop();
+}
+
+test "KlippySim: stop wakes a thread blocked in accept" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const sim = try KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, "sim.sock"));
+    defer sim.deinit();
+    try sim.start();
+    // Give the sim thread time to block in accept before stopping it.
+    try std.Io.sleep(sim.io.?, .{ .nanoseconds = 200 * std.time.ns_per_ms }, .awake);
+    sim.stop();
+    try testing.expect(!sim.isRunning());
+}
+
+test "KlippySim: waitReady fails when no bridge connects" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [128]u8 = undefined;
+    const sim = try KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, "sim.sock"));
+    defer sim.deinit();
+    try sim.start();
+    try testing.expectError(error.KlippySimNotReady, sim.waitReady());
 }
 
 test "KlippySim: fuzz init/start/stop never panics" {
@@ -528,9 +573,10 @@ test "KlippySim: fuzz init/start/stop never panics" {
                 safe[len] = c;
                 len += 1;
             }
-            const path = try std.fmt.allocPrint(testing.allocator, "/tmp/phobos_sim_fuzz_{s}", .{safe[0..len]});
-            defer testing.allocator.free(path);
-            const sim = KlippySim.init(testing.allocator, path) catch return;
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var buf: [128]u8 = undefined;
+            const sim = KlippySim.init(testing.allocator, try tmpSocketPath(&buf, &tmp, safe[0..len])) catch return;
             defer sim.deinit();
             sim.start() catch return;
             sim.stop();

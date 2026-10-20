@@ -171,6 +171,11 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
     - tests run under `std.testing.allocator` — it detects leaks/double-free, so
       exercise allocation paths with it (arenas mask these bugs)
     - keep fuzz harnesses deterministic and bounded
+    - fixtures (datadirs, config files, sockets, fake sysfs roots, missing
+      paths) live in a `std.testing.tmpDir`, never a fixed `/tmp` or cwd path.
+      `App.init` takes the datadir; Unix sockets use the relative
+      `.zig-cache/tmp/<sub_path>/...` path to fit the 108-byte `sun_path`.
+      Every wait in a test has a time deadline.
     - update tests fetch only local temporary repositories. Never use the
       checkout's `origin` or a real deployment for refresh/recovery tests.
     - the Klippy sim (`testutil/klippy_sim.zig`) does NOT reproduce a real

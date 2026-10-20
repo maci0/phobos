@@ -1705,12 +1705,12 @@ test "sendWledBody: serial strip writes newline-terminated JSON to the device" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const Dir = std.Io.Dir;
 
-    const path = "/tmp/phobos_wled_serial.dev";
-    Dir.cwd().deleteFile(io, path) catch {};
-    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
-    defer Dir.cwd().deleteFile(io, path) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "wled", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(io, "wled", std.testing.allocator);
+    defer std.testing.allocator.free(path);
 
     var ctx = testCtx(std.testing.allocator);
     defer ctx.deinit();
@@ -1722,7 +1722,7 @@ test "sendWledBody: serial strip writes newline-terminated JSON to the device" {
     ctx.sendWledBody(strip, "{\"on\":true}");
     try std.testing.expect(strip.error_state == null);
 
-    const fh = try Dir.cwd().openFile(io, path, .{});
+    const fh = try tmp.dir.openFile(io, "wled", .{});
     defer fh.close(io);
     var buf: [64]u8 = undefined;
     var r = fh.reader(io, &.{});

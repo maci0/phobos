@@ -82,10 +82,11 @@ test "Serial: open/write then reopen/read round-trips bytes" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const path = "/tmp/phobos_serial_test.dev";
-    Dir.cwd().deleteFile(io, path) catch {};
-    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = "" });
-    defer Dir.cwd().deleteFile(io, path) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "serial", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(io, "serial", testing.allocator);
+    defer testing.allocator.free(path);
 
     {
         var s = try Serial.open(io, path, 115200);
@@ -105,7 +106,11 @@ test "Serial.open: nonexistent device errors (no crash)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expectError(error.FileNotFound, Serial.open(io, "/tmp/phobos_serial_nope_xyz", 115200));
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/{s}/nope", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    defer testing.allocator.free(path);
+    try testing.expectError(error.FileNotFound, Serial.open(io, path, 115200));
 }
 
 test "baudToSpeed: known + fallback" {

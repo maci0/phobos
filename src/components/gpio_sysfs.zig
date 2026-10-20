@@ -75,8 +75,8 @@ pub const SysfsGpio = struct {
 
 const testing = std.testing;
 
-fn readSmall(io: Io, path: []const u8, buf: []u8) ![]u8 {
-    const f = try Dir.cwd().openFile(io, path, .{});
+fn readSmall(io: Io, dir: Dir, path: []const u8, buf: []u8) ![]u8 {
+    const f = try dir.openFile(io, path, .{});
     defer f.close(io);
     var r = f.reader(io, &.{});
     const n = try r.interface.readSliceShort(buf);
@@ -88,40 +88,40 @@ test "SysfsGpio.setValue: writes direction=out and value high/low" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const root = "/tmp/phobos_gpio_test_root";
-    const pindir = root ++ "/gpio17";
     // Fresh tree simulating an exported pin (gpio17/{direction,value}).
-    Dir.cwd().deleteTree(io, root) catch {};
-    try Dir.cwd().createDirPath(io, pindir);
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/direction", .data = "in" });
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
-    defer Dir.cwd().deleteTree(io, root) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "gpio17");
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio17/direction", .data = "in" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio17/value", .data = "0" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
 
     const gpio = SysfsGpio{ .io = io, .root = root };
 
     try gpio.setValue(testing.allocator, 17, true);
     var buf: [8]u8 = undefined;
-    try testing.expectEqualStrings("out", try readSmall(io, pindir ++ "/direction", &buf));
+    try testing.expectEqualStrings("out", try readSmall(io, tmp.dir, "gpio17/direction", &buf));
     var buf2: [8]u8 = undefined;
-    try testing.expectEqualStrings("1", try readSmall(io, pindir ++ "/value", &buf2));
+    try testing.expectEqualStrings("1", try readSmall(io, tmp.dir, "gpio17/value", &buf2));
 
     try gpio.setValue(testing.allocator, 17, false);
     var buf3: [8]u8 = undefined;
-    try testing.expectEqualStrings("0", try readSmall(io, pindir ++ "/value", &buf3));
+    try testing.expectEqualStrings("0", try readSmall(io, tmp.dir, "gpio17/value", &buf3));
 
     // export wrote the pin number to <root>/export.
     var buf4: [8]u8 = undefined;
-    try testing.expectEqualStrings("17", try readSmall(io, root ++ "/export", &buf4));
+    try testing.expectEqualStrings("17", try readSmall(io, tmp.dir, "export", &buf4));
 }
 
 test "SysfsGpio.setValue: missing pin dir errors (no crash)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const root = "/tmp/phobos_gpio_test_missing";
-    Dir.cwd().deleteTree(io, root) catch {};
-    try Dir.cwd().createDirPath(io, root);
-    defer Dir.cwd().deleteTree(io, root) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
 
     const gpio = SysfsGpio{ .io = io, .root = root };
     // No gpio99 dir → writing direction fails; must return an error, not crash.
@@ -137,7 +137,11 @@ test "fuzz SysfsGpio.setValue: arbitrary pins never crash" {
             var buf: [5]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const pin = std.mem.readInt(u32, buf[0..4], .little) % 1024;
-            const gpio = SysfsGpio{ .io = io, .root = "/tmp/phobos_gpio_fuzz_nonexistent" };
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var root_buf: [64]u8 = undefined;
+            const root = try std.fmt.bufPrint(&root_buf, "{s}/{s}/nonexistent", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
+            const gpio = SysfsGpio{ .io = io, .root = root };
             // Nonexistent root → always errors, never crashes.
             gpio.setValue(testing.allocator, pin, buf[4] & 1 == 1) catch {};
         }
@@ -154,8 +158,6 @@ test "GPIO reads keep the leading bytes when the file exceeds the read buffer" {
     defer testing.allocator.free(root);
     const gpio: SysfsGpio = .{ .io = io, .root = root };
     try testing.expectEqual(@as(u1, 1), try gpio.readValue(testing.allocator, 17));
-    const path = try std.fs.path.join(testing.allocator, &.{ root, "gpio17/value" });
-    defer testing.allocator.free(path);
     var bytes: [4]u8 = undefined;
-    try testing.expectEqualStrings("1000", try readSmall(io, path, &bytes));
+    try testing.expectEqualStrings("1000", try readSmall(io, tmp.dir, "gpio17/value", &bytes));
 }

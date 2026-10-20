@@ -2461,21 +2461,20 @@ test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const root = "/tmp/phobos_tty_test";
-    Dir.cwd().deleteTree(io, root) catch {};
-    defer Dir.cwd().deleteTree(io, root) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, "{s}/{s}", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
     // ttyACM0: a USB serial device (subsystem→usb, driver→cdc_acm).
-    const dd = root ++ "/ttyACM0/device";
-    try Dir.cwd().createDirPath(io, dd);
-    try Dir.cwd().createDirPath(io, root ++ "/drivers/cdc_acm");
-    try Dir.cwd().createDirPath(io, root ++ "/bus/usb");
-    Dir.cwd().symLink(io, "../drivers/cdc_acm", dd ++ "/driver", .{}) catch {};
-    Dir.cwd().symLink(io, "../bus/usb", dd ++ "/subsystem", .{}) catch {};
+    try tmp.dir.createDirPath(io, "ttyACM0/device");
+    try tmp.dir.createDirPath(io, "drivers/cdc_acm");
+    try tmp.dir.createDirPath(io, "bus/usb");
+    try tmp.dir.symLink(io, "../drivers/cdc_acm", "ttyACM0/device/driver", .{});
+    try tmp.dir.symLink(io, "../bus/usb", "ttyACM0/device/subsystem", .{});
 
     // A by-id symlink pointing at ttyACM0.
-    const byid_dir = root ++ "/by-id";
-    try Dir.cwd().createDirPath(io, byid_dir);
-    Dir.cwd().symLink(io, "../../ttyACM0", byid_dir ++ "/usb-Klipper_stm32-if00", .{}) catch {};
+    try tmp.dir.createDirPath(io, "by-id");
+    try tmp.dir.symLink(io, "../../ttyACM0", "by-id/usb-Klipper_stm32-if00", .{});
+    const byid_dir = try std.fs.path.join(a, &.{ root, "by-id" });
     const by_id = collectSerialLinks(io, a, byid_dir);
 
     const v = (try buildSerialDevice(io, a, root, "ttyACM0", by_id, &.{})).?;
@@ -2483,11 +2482,11 @@ test "buildSerialDevice: driver_name + device_type from sysfs symlinks" {
     try testing.expectEqualStrings("/dev/ttyACM0", o.get("device_path").?.string);
     try testing.expectEqualStrings("cdc_acm", o.get("driver_name").?.string);
     try testing.expectEqualStrings("usb", o.get("device_type").?.string);
-    try testing.expectEqualStrings(byid_dir ++ "/usb-Klipper_stm32-if00", o.get("path_by_id").?.string);
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ byid_dir, "usb-Klipper_stm32-if00" }), o.get("path_by_id").?.string);
     try testing.expectEqual(std.json.Value.null, o.get("path_by_hardware").?);
 
     // A tty with no device folder → null.
-    try Dir.cwd().createDirPath(io, root ++ "/tty0");
+    try tmp.dir.createDirPath(io, "tty0");
     try testing.expect((try buildSerialDevice(io, a, root, "tty0", &.{}, &.{})) == null);
 }
 
@@ -2501,16 +2500,17 @@ test "buildUsbDevice: emits ids + raw hex class/subclass/protocol" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const base = "/tmp/phobos_usb_test/1-1";
-    Dir.cwd().deleteTree(io, "/tmp/phobos_usb_test") catch {};
-    try Dir.cwd().createDirPath(io, base);
-    defer Dir.cwd().deleteTree(io, "/tmp/phobos_usb_test") catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(a, "{s}/{s}", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    const base = try std.fs.path.join(a, &.{ root, "1-1" });
+    try tmp.dir.createDirPath(io, "1-1");
     inline for (.{
         .{ "bDeviceClass", "00" }, .{ "bDeviceSubClass", "00" },   .{ "bDeviceProtocol", "00" },
         .{ "devnum", "4" },        .{ "busnum", "1" },             .{ "idVendor", "1D50" },
         .{ "idProduct", "614E" },  .{ "manufacturer", "Klipper" }, .{ "product", "stm32" },
     }) |kv| {
-        try Dir.cwd().writeFile(io, .{ .sub_path = base ++ "/" ++ kv[0], .data = kv[1] });
+        try tmp.dir.writeFile(io, .{ .sub_path = "1-1/" ++ kv[0], .data = kv[1] });
     }
 
     const v = (try buildUsbDevice(io, a, base)).?;
@@ -2525,9 +2525,8 @@ test "buildUsbDevice: emits ids + raw hex class/subclass/protocol" {
     try testing.expectEqualStrings("00", o.get("protocol").?.string);
 
     // A non-device folder (no bDeviceClass) → null.
-    const empty = "/tmp/phobos_usb_test/usb1";
-    try Dir.cwd().createDirPath(io, empty);
-    try testing.expect((try buildUsbDevice(io, a, empty)) == null);
+    try tmp.dir.createDirPath(io, "usb1");
+    try testing.expect((try buildUsbDevice(io, a, try std.fs.path.join(a, &.{ root, "usb1" }))) == null);
 }
 
 // ---- parseIpAddrJson ----

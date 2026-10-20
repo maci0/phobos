@@ -48,6 +48,9 @@ pub const TestServer = struct {
     /// ws_client tests that inspect connection state directly.
     conns: *connections_mod.Connections,
 
+    /// Datadir and Klippy simulator socket. Deleted by `stop`.
+    tmp: std.testing.TmpDir,
+
     /// Optional Klippy simulator for end-to-end bridge testing.
     klippy_sim: ?*klippy_sim_mod.KlippySim = null,
 
@@ -76,12 +79,17 @@ pub const TestServer = struct {
         self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{});
         self.io = self.threaded.io();
 
+        self.tmp = std.testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        const data_path = try self.tmp.dir.realPathFileAlloc(self.io, ".", alloc);
+        defer alloc.free(data_path);
+
         self.app = try alloc.create(app_mod.App);
         errdefer alloc.destroy(self.app);
         // The server runs on other threads. Zig 0.17's testing allocator is
         // SafeAllocator; sharing it with those threads deadlocks once a
         // handler notifies a connection while the test thread is allocating.
-        self.app.* = try app_mod.App.init(std.heap.smp_allocator, self.io);
+        self.app.* = try app_mod.App.init(std.heap.smp_allocator, self.io, data_path);
 
         // Prevent tests from accidentally running real systemctl/reboot/shutdown.
         self.app.setMachineRunCmdFn(mockRunCmd, @ptrCast(self));
@@ -129,9 +137,11 @@ pub const TestServer = struct {
 
     /// Start a Klippy simulator on a background thread and wire the App's
     /// Klippy bridge to connect to it. Must be called after `init()` and
-    /// before any printer.* requests. The socket path must be unique per test
-    /// to avoid collisions (e.g. `/tmp/phobos_test_klippy_<test_name>`).
-    pub fn startKlippyBridge(self: *TestServer, socket_path: []const u8) !void {
+    /// before any printer.* requests. The socket is `klippy.sock` in `tmp`,
+    /// by relative path to stay under the 108-byte `sun_path` limit.
+    pub fn startKlippyBridge(self: *TestServer) !void {
+        var path_buf: [64]u8 = undefined;
+        const socket_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/klippy.sock", .{ std.testing.TmpDir.parent_dir_path, &self.tmp.sub_path });
         const sim = try klippy_sim_mod.KlippySim.init(self.alloc, socket_path);
         errdefer sim.deinit();
 
@@ -147,9 +157,11 @@ pub const TestServer = struct {
         // Start the background Klippy bridge task so it connects to the
         // simulator and runs the handshake.
         try self.app.klippy_ctx.start();
+        // The bridge reads `sim.socket_path`; stop it before the sim is freed.
+        errdefer self.app.klippy_ctx.stop(self.io);
 
         // Wait for the simulator handshake to complete.
-        sim.waitReady();
+        try sim.waitReady();
 
         self.klippy_sim = sim;
     }
@@ -177,6 +189,7 @@ pub const TestServer = struct {
             // will see the disconnect and exit its read loop.
         }
         self.app.deinit(self.io);
+        self.tmp.cleanup();
         self.threaded.deinit();
 
         const alloc = self.alloc;
@@ -293,12 +306,14 @@ test "use_xheaders false ignores X-Real-Ip and X-Forwarded-For on the live serve
     defer threaded.deinit();
     const io = threaded.io();
 
-    const off_path = ".zig-cache/phobos-xheaders-off.cfg";
-    const on_path = ".zig-cache/phobos-xheaders-on.cfg";
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = off_path, .data = "[server]\nuse_xheaders: false\n" });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = on_path, .data = "[server]\nuse_xheaders: true\n" });
-    defer std.Io.Dir.cwd().deleteFile(io, off_path) catch {};
-    defer std.Io.Dir.cwd().deleteFile(io, on_path) catch {};
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "off.cfg", .data = "[server]\nuse_xheaders: false\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "on.cfg", .data = "[server]\nuse_xheaders: true\n" });
+    const off_path = try tmp.dir.realPathFileAlloc(io, "off.cfg", alloc);
+    defer alloc.free(off_path);
+    const on_path = try tmp.dir.realPathFileAlloc(io, "on.cfg", alloc);
+    defer alloc.free(on_path);
 
     const loopback = (try authz.parseTrustedEntry("127.0.0.1")).ip;
     const ips = [_]std.Io.net.IpAddress{loopback};
@@ -368,8 +383,10 @@ test "fuzz Klippy task start and stop owns each reconnect future" {
             const ts = try TestServer.init(std.testing.allocator);
             defer ts.stop();
             const count = smith.valueRangeAtMostWithHash(u8, 1, 3, 0);
+            var path_buf: [64]u8 = undefined;
+            const missing = try std.fmt.bufPrint(&path_buf, "{s}/{s}/missing.sock", .{ std.testing.TmpDir.parent_dir_path, &ts.tmp.sub_path });
             for (0..count) |_| {
-                try ts.connectRealKlippy(".scratch/missing-klippy-task.sock");
+                try ts.connectRealKlippy(missing);
                 ts.app.klippy_ctx.stop(ts.io);
                 try std.testing.expect(ts.app.klippy_ctx.task == null);
                 try std.testing.expect(ts.app.klippy_ctx.stream == null);
@@ -1429,8 +1446,8 @@ test "update: POST /machine/update/refresh returns status and emits notify_updat
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
-    defer conns.detachWriter(ts.io, cid);
     defer conns.remove(ts.io, cid);
+    defer conns.detachWriter(ts.io, cid);
 
     const body = try ts.postJson(alloc, "/machine/update/refresh", "{}");
     defer alloc.free(body);
@@ -1471,8 +1488,8 @@ test "update: POST /machine/update/upgrade emits notify_update_response and acks
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
-    defer conns.detachWriter(ts.io, cid);
     defer conns.remove(ts.io, cid);
+    defer conns.detachWriter(ts.io, cid);
 
     const body = try ts.postJson(alloc, "/machine/update/moonraker", "{}");
     defer alloc.free(body);
@@ -1622,8 +1639,8 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
-    defer conns.detachWriter(ts.io, cid);
     defer conns.remove(ts.io, cid);
+    defer conns.detachWriter(ts.io, cid);
 
     // Add a device via the power_ctx directly (no config loading in tests).
     ts.app.power_ctx.addDevice("test_psu", "gpio", "off", false) catch unreachable;
@@ -1863,7 +1880,7 @@ test "printer: with Klippy sim, server.info reports klippy_connected" {
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    try ts.startKlippyBridge("/tmp/phobos_test_e2e_klippy_connected");
+    try ts.startKlippyBridge();
     try std.testing.expect(waitKlippyConnected(ts));
 
     const body = try ts.get(alloc, "/server/info");
@@ -1882,7 +1899,7 @@ test "printer: with Klippy sim, print.start returns success" {
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    try ts.startKlippyBridge("/tmp/phobos_test_e2e_print_start");
+    try ts.startKlippyBridge();
     try std.testing.expect(waitKlippyConnected(ts));
 
     const body = try ts.postJson(alloc, "/printer/print/start",
@@ -1901,7 +1918,7 @@ test "printer: with Klippy sim, JSON-RPC printer.print.start succeeds" {
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    try ts.startKlippyBridge("/tmp/phobos_test_e2e_jsonrpc_start");
+    try ts.startKlippyBridge();
     try std.testing.expect(waitKlippyConnected(ts));
 
     const body = try ts.postJson(alloc, "/server/jsonrpc",
@@ -1919,7 +1936,7 @@ test "printer: with Klippy sim, pause/resume/cancel all succeed" {
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    try ts.startKlippyBridge("/tmp/phobos_test_e2e_pause_resume");
+    try ts.startKlippyBridge();
     try std.testing.expect(waitKlippyConnected(ts));
 
     const paths = [_][]const u8{
@@ -1944,7 +1961,7 @@ test "printer: with Klippy sim, restart and firmware_restart succeed" {
         const ts = try TestServer.init(alloc);
         defer ts.stop();
 
-        try ts.startKlippyBridge("/tmp/phobos_test_e2e_restart");
+        try ts.startKlippyBridge();
         try std.testing.expect(waitKlippyConnected(ts));
 
         const body = try ts.postJson(alloc, path, "{}");
@@ -1961,7 +1978,7 @@ test "printer: with Klippy sim, emergency_stop succeeds" {
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    try ts.startKlippyBridge("/tmp/phobos_test_e2e_emergency");
+    try ts.startKlippyBridge();
     try std.testing.expect(waitKlippyConnected(ts));
 
     const body = try ts.postJson(alloc, "/printer/emergency_stop", "{}");
@@ -2169,8 +2186,8 @@ test "files: notify_filelist_changed emitted on upload with correct payload" {
     const conns = ts.connsRef();
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
-    defer conns.detachWriter(ts.io, cid);
     defer conns.remove(ts.io, cid);
+    defer conns.detachWriter(ts.io, cid);
 
     const up = try ts.uploadFile(alloc, "gcodes", null, "notif.gcode", "G28\n");
     defer alloc.free(up);

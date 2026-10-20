@@ -245,10 +245,6 @@ pub fn sourcesFromConfig(alloc: std.mem.Allocator, cfg: *const config_helper.Con
 
 test "sourcesFromConfig: forge-x clients and system updates off" {
     const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-update-sources-test.cfg";
     const body =
         \\[update_manager]
         \\enable_system_updates: False
@@ -272,12 +268,9 @@ test "sourcesFromConfig: forge-x clients and system updates off" {
         \\path: /no/such/guppy
         \\
     ;
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
-
     var cfg = config_helper.ConfigParser.init(alloc);
     defer cfg.deinit();
-    try cfg.parseFile(io, cfg_path);
+    try cfg.parseString(body, "<test>");
     const sources = try sourcesFromConfig(alloc, &cfg);
     defer freeSources(alloc, sources);
 

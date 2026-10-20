@@ -330,13 +330,12 @@ test "pollButton: detects a debounced edge against a temp sysfs root" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const Dir = std.Io.Dir;
-    const root = "/tmp/phobos_button_test_root";
-    const pindir = root ++ "/gpio26";
-    Dir.cwd().deleteTree(io, root) catch {};
-    try Dir.cwd().createDirPath(io, pindir);
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
-    defer Dir.cwd().deleteTree(io, root) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "gpio26");
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio26/value", .data = "0" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
 
     var ctx = ButtonCtx.init(testing.allocator, std.testing.io, null);
     defer ctx.deinit();
@@ -349,7 +348,7 @@ test "pollButton: detects a debounced edge against a temp sysfs root" {
     try testing.expect(!ctx.findButton("btn").?.event.pressed);
 
     // Drive the line high → next poll detects a press edge.
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "1" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio26/value", .data = "1" });
     try testing.expectEqual(true, try ctx.pollButton("btn"));
     try testing.expect(ctx.findButton("btn").?.event.pressed);
 
@@ -357,7 +356,7 @@ test "pollButton: detects a debounced edge against a temp sysfs root" {
     try testing.expectEqual(false, try ctx.pollButton("btn"));
 
     // Back to low → release edge.
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio26/value", .data = "0" });
     try testing.expectEqual(true, try ctx.pollButton("btn"));
     try testing.expect(!ctx.findButton("btn").?.event.pressed);
 }
@@ -366,13 +365,12 @@ test "pollButton: inverted pin (active-low) reads pressed at level 0" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const Dir = std.Io.Dir;
-    const root = "/tmp/phobos_button_inv_root";
-    const pindir = root ++ "/gpio9";
-    Dir.cwd().deleteTree(io, root) catch {};
-    try Dir.cwd().createDirPath(io, pindir);
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "1" });
-    defer Dir.cwd().deleteTree(io, root) catch {};
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "gpio9");
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio9/value", .data = "1" });
+    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(root);
 
     var ctx = ButtonCtx.init(testing.allocator, std.testing.io, null);
     defer ctx.deinit();
@@ -381,7 +379,7 @@ test "pollButton: inverted pin (active-low) reads pressed at level 0" {
     try ctx.addButton("b", "!gpio9", 0.0);
     _ = try ctx.pollButton("b"); // baseline: level 1 + inverted → not pressed
     try testing.expect(!ctx.findButton("b").?.event.pressed);
-    try Dir.cwd().writeFile(io, .{ .sub_path = pindir ++ "/value", .data = "0" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "gpio9/value", .data = "0" });
     try testing.expectEqual(true, try ctx.pollButton("b")); // level 0 + inverted → pressed
     try testing.expect(ctx.findButton("b").?.event.pressed);
 }

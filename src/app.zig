@@ -265,6 +265,8 @@ pub const App = struct {
     /// freed in deinit. The root paths in `file_roots` point into the joined
     /// strings owned alongside it.
     datadir: []u8,
+    /// `datadir` is the per-instance /tmp fallback; deinit deletes it.
+    temp_datadir: bool,
     /// Moonraker `.moonraker.uuid` (32 hex chars). Owned when `instance_uuid_owned`.
     instance_uuid: []u8 = &.{},
     instance_uuid_owned: bool = false,
@@ -294,15 +296,18 @@ pub const App = struct {
     /// True when `klippy_ctx.uds_path` was duped from config and must be freed.
     klippy_uds_owned: bool = false,
 
-    /// Default entry point with a temporary SQLite backend.
-    pub fn init(alloc: std.mem.Allocator, aio: std.Io) !App {
-        return initWithStore(alloc, .sqlite, aio, null, null);
+    /// App with an in-memory SQLite database (tests, --dump-api). `data_path`
+    /// is as for `initWithStore`.
+    pub fn init(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8) !App {
+        return initWithStore(alloc, .sqlite, aio, ":memory:", data_path);
     }
 
     /// Assemble the App with an explicit DataStore backend. `data_path` is
-    /// the file_manager datadir (Moonraker's `-d`); when null a per-instance temp
-    /// dir is used (tests / --dump-api only — never write real data under /tmp,
-    /// which is tmpfs on embedded targets).
+    /// the file_manager datadir (Moonraker's `-d`); when null, a per-instance
+    /// `/tmp/phobos-data-<addr>` is used and `deinit` deletes it. `db_path`
+    /// defaults to `<datadir>/database/moonraker-sql.db` (sqlite) or
+    /// `<datadir>/database` (file). Never keep real data under /tmp, which is
+    /// tmpfs on embedded targets.
     pub fn initWithStore(alloc: std.mem.Allocator, db_backend: StoreBackend, aio: std.Io, db_path: ?[]const u8, data_path: ?[]const u8) !App {
         // Validate an explicitly configured datadir up front (before any
         // allocation) so a rejection doesn't leak partially-built state. A
@@ -337,36 +342,47 @@ pub const App = struct {
         errdefer alloc.destroy(bus);
         bus.* = NotifyBus.init(core, conns);
 
+        var dd_buf: [64]u8 = undefined;
+        const datadir = if (data_path) |dp| dd: {
+            // Configured datadir (Moonraker's `-d`, validated absolute above):
+            // create it and any missing parents fail-fast so a bad/unwritable
+            // path is reported at startup, not at request time.
+            var data_dir = try std.Io.Dir.cwd().createDirPathOpen(aio, dp, .{});
+            data_dir.close(aio);
+            break :dd try alloc.dupe(u8, dp);
+        } else dd: {
+            const dd_tmp = try std.fmt.bufPrint(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(core)});
+            try std.Io.Dir.cwd().createDirPath(aio, dd_tmp);
+            break :dd try alloc.dupe(u8, dd_tmp);
+        };
+        errdefer alloc.free(datadir);
+        // Best-effort: a failed temp cleanup must not mask the init error.
+        errdefer if (data_path == null) std.Io.Dir.cwd().deleteTree(aio, datadir) catch {};
+
         const db_ctx = try alloc.create(DbCtx);
         errdefer alloc.destroy(db_ctx);
 
-        // Build the DataStore behind the selected backend. A temporary path keyed
-        // by `db_ctx`'s address keeps tests/dump-api isolated.
-        const db_store: StoreHolder = blk: {
-            var path_buf: [256]u8 = undefined;
-            switch (db_backend) {
-                .sqlite => {
-                    const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
-                    const store_ptr = try alloc.create(SqliteStore);
-                    errdefer alloc.destroy(store_ptr);
-                    const path_z = if (db_path) |p|
-                        try alloc.dupeSentinel(u8, p, 0)
-                    else
-                        try std.fmt.bufPrintSentinel(&path_buf, "/tmp/phobos-db-{x}.db", .{@intFromPtr(db_ctx)}, 0);
-                    defer if (db_path != null) alloc.free(path_z);
-                    store_ptr.* = try SqliteStore.open(alloc, aio, path_z);
-                    break :blk .{ .sqlite = store_ptr };
-                },
-                .file => {
-                    const io = aio;
-                    const FileStore = @import("store/file_store.zig").FileStore;
-                    const store_ptr = try alloc.create(FileStore);
-                    errdefer alloc.destroy(store_ptr);
-                    const dir_path = db_path orelse try std.fmt.bufPrint(&path_buf, "/tmp/phobos-db-{x}", .{@intFromPtr(db_ctx)});
-                    store_ptr.* = FileStore.open(alloc, io, dir_path) catch return error.BackendOpenFailed;
-                    break :blk .{ .file = store_ptr };
-                },
-            }
+        // Build the DataStore behind the selected backend.
+        const store_path = if (db_path) |p| try alloc.dupeSentinel(u8, p, 0) else switch (db_backend) {
+            .sqlite => try std.fs.path.joinZ(alloc, &.{ datadir, "database", "moonraker-sql.db" }),
+            .file => try std.fs.path.joinZ(alloc, &.{ datadir, "database" }),
+        };
+        defer alloc.free(store_path);
+        const db_store: StoreHolder = switch (db_backend) {
+            .sqlite => blk: {
+                const SqliteStore = @import("store/sqlite_store.zig").SqliteStore;
+                const store_ptr = try alloc.create(SqliteStore);
+                errdefer alloc.destroy(store_ptr);
+                store_ptr.* = try SqliteStore.open(alloc, aio, store_path);
+                break :blk .{ .sqlite = store_ptr };
+            },
+            .file => blk: {
+                const FileStore = @import("store/file_store.zig").FileStore;
+                const store_ptr = try alloc.create(FileStore);
+                errdefer alloc.destroy(store_ptr);
+                store_ptr.* = FileStore.open(alloc, aio, store_path) catch return error.BackendOpenFailed;
+                break :blk .{ .file = store_ptr };
+            },
         };
         errdefer db_store.deinit(alloc);
         db_ctx.* = .{ .store = db_store.dataStore() };
@@ -474,25 +490,6 @@ pub const App = struct {
         analysis_ctx.* = .{};
 
         // --- File manager context (server.files.*) ---
-        // Datadir defaults to a per-instance temp directory so tests and
-        // --dump-api have writable roots without polluting the cwd. The roots
-        // gcodes/config/logs are created beneath it using the startup io handle.
-        var dd_buf: [256]u8 = undefined;
-        const datadir = if (data_path) |dp| dd: {
-            // Configured datadir (Moonraker's `-d`, validated absolute above):
-            // create it and any missing parents fail-fast so a bad/unwritable
-            // path is reported at startup, not at request time.
-            var data_dir = try std.Io.Dir.cwd().createDirPathOpen(aio, dp, .{});
-            data_dir.close(aio);
-            break :dd try alloc.dupe(u8, dp);
-        } else dd: {
-            // No datadir given (tests / --dump-api): per-instance temp dir.
-            const dd_tmp = try std.fmt.bufPrintSentinel(&dd_buf, "/tmp/phobos-data-{x}", .{@intFromPtr(analysis_ctx)}, 0);
-            try std.Io.Dir.cwd().createDirPath(aio, dd_tmp);
-            break :dd try alloc.dupe(u8, dd_tmp);
-        };
-        errdefer alloc.free(datadir);
-
         const root_specs = [_]struct { name: []const u8, full: bool }{
             .{ .name = "config", .full = true },
             .{ .name = "logs", .full = false },
@@ -649,6 +646,7 @@ pub const App = struct {
             .octoprint_ctx = octoprint_ctx,
             .zeroconf_ctx = zeroconf_ctx,
             .datadir = datadir,
+            .temp_datadir = data_path == null,
             .file_roots = file_roots,
             .db_store = db_store,
         };
@@ -1166,7 +1164,6 @@ pub const App = struct {
         for (self.file_roots) |r| self.alloc.free(r.path);
         self.alloc.free(self.file_roots);
         if (self.instance_uuid_owned) self.alloc.free(self.instance_uuid);
-        self.alloc.free(self.datadir);
         self.file_ctx.deinit(); // frees the metadata cache
         self.alloc.destroy(self.file_ctx);
         if (self.update_sources_owned) update_manager_component.freeSources(self.alloc, self.update_ctx.sources);
@@ -1192,6 +1189,9 @@ pub const App = struct {
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
         self.db_store.deinit(self.alloc);
+        // Best-effort: shutdown continues if the temp tree cannot be removed.
+        if (self.temp_datadir) std.Io.Dir.cwd().deleteTree(io, self.datadir) catch {};
+        self.alloc.free(self.datadir);
         for (self.cors_domains) |d| self.alloc.free(d);
         if (self.cors_domains.len > 0) self.alloc.free(self.cors_domains);
         self.sensor_ctx.deinit();
@@ -1646,13 +1646,22 @@ fn jobQueueKlippyDispatch(klippy_opaque: *anyopaque, method: []const u8, params:
 
 // --- tests ---------------------------------------------------------------
 
+/// App whose datadir is `tmp`.
+fn testApp(alloc: std.mem.Allocator, io: std.Io, tmp: *std.testing.TmpDir) !App {
+    const data_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(data_path);
+    return App.init(alloc, io, data_path);
+}
+
 test "App.init registers server.info and server.config" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
 
     // HTTP routes present in the registry.
@@ -1670,11 +1679,13 @@ test "setConfig [server] use_xheaders false is what httpServer serves" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg_path = ".zig-cache/phobos-use-xheaders-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[server]\nuse_xheaders: false\n" });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     const before = app.httpServer(io);
     try std.testing.expect(before.use_xheaders);
@@ -1689,7 +1700,10 @@ test "setConfig loads trusted clients, update sources, and feather_updates" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg_path = ".zig-cache/phobos-printer-gap-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[server]
         \\klippy_uds_address: /no/such/klippy.sock
@@ -1718,9 +1732,8 @@ test "setConfig loads trusted clients, update sources, and feather_updates" {
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
 
@@ -1790,7 +1803,10 @@ test "dispatchFrame: id-less reset uses the daemon runner and does not spawn git
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-feather-daemon-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[feather_updates]
         \\update_key: forge-x
@@ -1804,9 +1820,8 @@ test "dispatchFrame: id-less reset uses the daemon runner and does not spawn git
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     app.bindFeather();
@@ -1887,7 +1902,10 @@ test "setConfig loads announcement subscriptions and gcode store size" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-announce-store-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[announcements]
         \\dev_mode: True
@@ -1900,9 +1918,8 @@ test "setConfig loads announcement subscriptions and gcode store size" {
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     try std.testing.expect(app.announcements_ctx.dev_mode);
@@ -1928,7 +1945,10 @@ test "setConfig [octoprint_compat] is what /api/settings returns" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-octo-config-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[octoprint_compat]
         \\enable_ufp: false
@@ -1939,9 +1959,8 @@ test "setConfig [octoprint_compat] is what /api/settings returns" {
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -1960,7 +1979,10 @@ test "setConfig loads [webcam name] cameras into the list" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-webcam-config-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[webcam cam]
         \\enabled: True
@@ -1975,9 +1997,8 @@ test "setConfig loads [webcam name] cameras into the list" {
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     const uuid_path = try std.fmt.allocPrint(alloc, "{s}/.moonraker.uuid", .{app.datadir});
     defer alloc.free(uuid_path);
@@ -2014,7 +2035,10 @@ test "setConfig [machine] provider simple restarts through script_path and does 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-machine-simple-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[machine]
         \\provider: simple
@@ -2025,9 +2049,8 @@ test "setConfig [machine] provider simple restarts through script_path and does 
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     try std.testing.expectEqualStrings("simple", app.machine_ctx.provider_name);
@@ -2072,7 +2095,10 @@ test "setConfig loads auto-refresh, excludes, observer none, and hidden objects"
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-parity-flags-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     const body =
         \\[update_manager]
         \\enable_auto_refresh: False
@@ -2092,9 +2118,8 @@ test "setConfig loads auto-refresh, excludes, observer none, and hidden objects"
         \\
     ;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     try std.testing.expect(!app.update_ctx.auto_refresh);
@@ -2118,11 +2143,13 @@ test "setConfig [paneldue] processPanelDueLine strips checksummed file commands"
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg_path = ".zig-cache/phobos-paneldue-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nenable_checksum: true\n" });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
 
@@ -2155,7 +2182,10 @@ test "setConfig loads an analysis platform and a notifier record" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const cfg_path = ".zig-cache/phobos-analysis-notifier-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data =
         \\[analysis]
         \\platform: linux
@@ -2167,9 +2197,8 @@ test "setConfig loads an analysis platform and a notifier record" {
         \\body_format: text
         \\
     });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_path, "klipper_estimator_linux"));
@@ -2198,16 +2227,13 @@ test "canonicalPath follows a directory symlink" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const base = ".scratch/phobos-canon-root";
-    std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    defer std.Io.Dir.cwd().deleteTree(io, base) catch {};
-    try std.Io.Dir.cwd().createDirPath(io, base ++ "/real/config");
-    const target = try std.Io.Dir.cwd().realPathFileAlloc(io, base ++ "/real", alloc);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "real/config");
+    const target = try tmp.dir.realPathFileAlloc(io, "real", alloc);
     defer alloc.free(target);
-    const link = try alloc.dupeSentinel(u8, base ++ "/data", 0);
-    defer alloc.free(link);
-    try std.Io.Dir.cwd().symLink(io, target, link, .{});
-    const joined = try std.fs.path.join(alloc, &.{ base, "data", "config" });
+    try tmp.dir.symLink(io, target, "data", .{});
+    const joined = try std.fs.path.join(alloc, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path, "data", "config" });
     const got = try canonicalPath(alloc, io, joined);
     defer alloc.free(got);
     try std.testing.expect(std.mem.endsWith(u8, got, "/real/config"));
@@ -2218,15 +2244,17 @@ test "registerKlipperRoots adds config_examples and docs when those directories 
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    var app = try App.init(alloc, io);
+    var klipper = std.testing.tmpDir(.{});
+    defer klipper.cleanup();
+    try klipper.dir.createDirPath(io, "config");
+    try klipper.dir.createDirPath(io, "docs");
+    const base = try klipper.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(base);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.file_ctx.setIo(io);
-    const relative_base = ".scratch/phobos-klipper-roots-test";
-    try std.Io.Dir.cwd().createDirPath(io, relative_base ++ "/config");
-    try std.Io.Dir.cwd().createDirPath(io, relative_base ++ "/docs");
-    defer std.Io.Dir.cwd().deleteTree(io, relative_base) catch {};
-    const base = try std.Io.Dir.cwd().realPathFileAlloc(io, relative_base, alloc);
-    defer alloc.free(base);
     try std.testing.expectEqual(@as(usize, 3), app.file_roots.len);
     app.registerKlipperRoots(base);
     try std.testing.expectEqual(@as(usize, 5), app.file_roots.len);
@@ -2250,14 +2278,16 @@ test "setConfig parses [sensor <name>] and wires topic + state_response_template
     defer threaded.deinit();
     const io = threaded.io();
 
-    const cfg_path = "/tmp/phobos-sensor-config-test.cfg";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[sensor chamber]\n" ++
         "type: mqtt\n" ++
         "state_topic: test/chamber\n" ++
         "state_response_template: {% set d = payload|fromjson %}{ set_result(\"temp\", d.t|float) }\n" });
-    defer std.Io.Dir.cwd().deleteFile(io, cfg_path) catch {};
 
-    var app = try App.init(alloc, io);
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
 
@@ -2278,10 +2308,16 @@ test "initWithStore: file backend builds + database round-trips" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dp = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(dp);
 
-    var app = try App.initWithStore(alloc, .file, io, null, null);
+    var app = try App.initWithStore(alloc, .file, io, null, dp);
     defer app.deinit(io);
     try std.testing.expect(app.db_store == .file);
+    // Without a db_path the store lives under <datadir>/database.
+    try tmp.dir.access(io, "database", .{});
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -2291,22 +2327,21 @@ test "initWithStore: file backend builds + database round-trips" {
     try std.testing.expectEqual(@as(i64, 7), got.integer);
 }
 
-test "initWithStore: data_path sets the datadir (Moonraker -d); null uses a temp dir" {
+test "initWithStore: data_path sets the datadir (Moonraker -d) and default database" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dp = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(dp);
 
-    const dp = "/tmp/phobos-datadir-test-xyz";
-    var app1 = try App.initWithStore(alloc, .sqlite, std.testing.io, null, dp);
-    defer app1.deinit(io);
-    try std.testing.expectEqualStrings(dp, app1.datadir);
-
-    var app2 = try App.initWithStore(alloc, .sqlite, std.testing.io, null, null);
-    defer app2.deinit(io);
-    // No data_path → a per-instance /tmp dir, never the configured one.
-    try std.testing.expect(std.mem.startsWith(u8, app2.datadir, "/tmp/phobos-data-"));
-    try std.testing.expect(!std.mem.eql(u8, app2.datadir, dp));
+    var app = try App.initWithStore(alloc, .sqlite, std.testing.io, null, dp);
+    defer app.deinit(io);
+    try std.testing.expectEqualStrings(dp, app.datadir);
+    try std.testing.expect(!app.temp_datadir);
+    try tmp.dir.access(io, "database/moonraker-sql.db", .{});
 }
 
 test "initWithStore: relative data_path is rejected at startup" {
@@ -2320,18 +2355,20 @@ test "initWithStore: nested absolute data_path is created (mkdir -p)" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(root);
     // Parent does not exist yet — ensureDirPathRaw must create the whole chain,
     // and each gcodes/config/logs root under it (mkdirChecked). If any step
     // failed, initWithStore would return an error rather than reach here.
-    const dp = "/tmp/phobos-ddtest-a/b/c";
-    const cwd = std.Io.Dir.cwd();
-    cwd.deleteTree(io, "/tmp/phobos-ddtest-a") catch {};
-    defer cwd.deleteTree(io, "/tmp/phobos-ddtest-a") catch {};
+    const dp = try std.fs.path.join(alloc, &.{ root, "a", "b", "c" });
+    defer alloc.free(dp);
     var app = try App.initWithStore(alloc, .sqlite, std.testing.io, null, dp);
     defer app.deinit(io);
     try std.testing.expectEqualStrings(dp, app.datadir);
     // The gcodes root beneath the nested datadir must now be openable.
-    var d = try cwd.openDir(io, "/tmp/phobos-ddtest-a/b/c/gcodes", .{});
+    var d = try tmp.dir.openDir(io, "a/b/c/gcodes", .{});
     d.close(io);
 }
 
@@ -2341,7 +2378,9 @@ test "App.init registers WS-only methods in the dispatcher" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
 
     try std.testing.expect(app.dispatcher.methods.get("server.connection.identify") != null);
@@ -2354,7 +2393,9 @@ test "App.init: dispatcher has exactly the expected methods" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var app = try App.init(alloc, io);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
 
     const expected = [_][]const u8{
@@ -2541,8 +2582,12 @@ test "App.init idempotency: double init+deinit does not corrupt allocator" {
     const io = threaded.io();
 
     // Two independent App instances must each init and deinit cleanly.
-    var a = try App.init(alloc, io);
-    var b = try App.init(alloc, io);
+    var tmp_a = std.testing.tmpDir(.{});
+    defer tmp_a.cleanup();
+    var tmp_b = std.testing.tmpDir(.{});
+    defer tmp_b.cleanup();
+    var a = try testApp(alloc, io, &tmp_a);
+    var b = try testApp(alloc, io, &tmp_b);
     defer a.deinit(io);
     defer b.deinit(io);
 
@@ -2563,7 +2608,9 @@ test "fuzz_app: App.init/deinit cycle never crashes" {
             defer threaded.deinit();
             const io = threaded.io();
 
-            var app = try App.init(std.heap.smp_allocator, io);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var app = try testApp(std.heap.smp_allocator, io, &tmp);
             app.deinit(io);
         }
     }.run, .{});
