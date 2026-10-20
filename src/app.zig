@@ -31,6 +31,7 @@ const sensor_component = @import("components/sensor.zig");
 const authorization_component = @import("components/authorization.zig");
 const spoolman_component = @import("components/spoolman.zig");
 const mqtt_component = @import("components/mqtt.zig");
+const mqtt_credentials = @import("components/mqtt_credentials.zig");
 const extensions_component = @import("components/extensions.zig");
 const analysis_component = @import("components/analysis.zig");
 const file_manager_component = @import("components/file_manager.zig");
@@ -1539,8 +1540,7 @@ pub const App = struct {
     }
 
     /// Read `[mqtt]` like mqtt.py: `address` is required, `instance_name`
-    /// defaults to the host name and `api_qos` to `default_qos`. phobos speaks
-    /// MQTT 3.1.1 only; another `mqtt_protocol` is reported and ignored.
+    /// defaults to the host name and `api_qos` to `default_qos`.
     fn applyMqttConfig(self: *App, aio: std.Io, cfg: *const config_helper.ConfigParser) !void {
         const address = cfg.get("mqtt", "address") orelse return error.MissingAddress;
         const port = cfg.getInt("mqtt", "port") catch |err| switch (err) {
@@ -1563,17 +1563,42 @@ pub const App = struct {
             error.NoOption => false,
             else => return err,
         };
-        if (cfg.get("mqtt", "mqtt_protocol")) |protocol| if (!std.mem.eql(u8, protocol, "v3.1.1"))
-            std.debug.print("phobos: warning: [mqtt] mqtt_protocol {s} unsupported, using v3.1.1\n", .{protocol});
+        const protocol = try @import("components/mqtt_proto.zig").Protocol.parse(cfg.get("mqtt", "mqtt_protocol") orelse "v3.1.1");
+        const status_interval = if (cfg.hasOption("mqtt", "status_interval")) blk: {
+            const value = try cfg.getFloat("mqtt", "status_interval");
+            if (!std.math.isFinite(value) or value <= 0.25) return error.InvalidStatusInterval;
+            break :blk value;
+        } else 0;
+        const split_status = cfg.getBoolean("mqtt", "publish_split_status") catch |err| switch (err) {
+            error.NoOption => false,
+            else => return err,
+        };
+        var config_arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer config_arena.deinit();
+        const objects = try mqtt_component.parseStatusObjects(config_arena.allocator(), cfg.get("mqtt", "status_objects") orelse "");
+        var generated_id: [23]u8 = undefined;
+        const requested_id = cfg.get("mqtt", "client_id") orelse "";
+        const client_id = if (protocol == .v31 and requested_id.len == 0) blk: {
+            var random: [8]u8 = undefined;
+            try aio.randomSecure(&random);
+            break :blk try std.fmt.bufPrint(&generated_id, "phobos{s}", .{std.fmt.bytesToHex(random, .lower)});
+        } else requested_id;
+        var credentials = try mqtt_credentials.load(self.alloc, aio, self.datadir, self.mqtt_ctx.home_directory, cfg);
+        defer credentials.deinit();
         var host_buf: [64]u8 = undefined; // HOST_NAME_MAX
         const instance_name = cfg.get("mqtt", "instance_name") orelse
             std.mem.trim(u8, try std.Io.Dir.cwd().readFile(aio, "/proc/sys/kernel/hostname", &host_buf), &std.ascii.whitespace);
         try self.mqtt_ctx.setConfig(.{
             .address = address,
+            .protocol = protocol,
+            .clock_io = aio,
+            .status_objects = objects,
+            .status_interval = status_interval,
+            .publish_split_status = split_status,
             .port = std.math.cast(u16, port) orelse return error.InvalidPort,
-            .username = cfg.get("mqtt", "username"),
-            .password = cfg.get("mqtt", "password"),
-            .client_id = cfg.get("mqtt", "client_id") orelse "",
+            .username = credentials.username,
+            .password = credentials.password,
+            .client_id = client_id,
             .instance_name = instance_name,
             .default_qos = default_qos,
             .api_qos = api_qos,
@@ -3357,4 +3382,47 @@ test "remote worker teardown drains pending calls under canceled lock contention
     teardown.cancel(io);
     holder.await(io);
     releaser.await(io);
+}
+
+test "setConfig renders MQTT secrets and selects protocol and status configuration" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [96]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    try tmp.dir.writeFile(io, .{ .sub_path = "moonraker.secrets", .data = "{\"mqtt\":{\"username\":\"user\",\"password\":\"pass\"}}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "password", .data = "file value\n" });
+    for ([_][]const u8{ "v3.1", "v3.1.1", "v5" }) |protocol| {
+        var source: std.Io.Writer.Allocating = .init(alloc);
+        defer source.deinit();
+        try source.writer.print(
+            "[mqtt]\naddress: broker.lan\nmqtt_protocol: {s}\nusername: {{secrets.mqtt.username}}\npassword: {{secrets.mqtt.password}}\npassword_file: ~/password\nstatus_objects:\n  extruder=temperature,target\n  heater_bed\nstatus_interval: 0.5\npublish_split_status: true\n",
+            .{protocol},
+        );
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = source.written() });
+        var app = try testApp(alloc, io, &tmp);
+        defer app.deinit(io);
+        try app.mqtt_ctx.setHomeDirectory(app.datadir);
+        try app.setConfig(io, cfg_path);
+        const mqtt = app.mqtt_ctx.config.?;
+        try std.testing.expectEqual(try @import("components/mqtt_proto.zig").Protocol.parse(protocol), mqtt.protocol);
+        try std.testing.expectEqualStrings("user", mqtt.username.?);
+        try std.testing.expectEqualStrings("pass", mqtt.password.?);
+        if (mqtt.protocol == .v31) {
+            try std.testing.expectEqual(@as(usize, 22), mqtt.client_id.len);
+            for (mqtt.client_id) |byte| try std.testing.expect(std.ascii.isAlphanumeric(byte));
+        }
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const selectors = try app.mqtt_ctx.statusSubscription(arena.allocator());
+        try std.testing.expectEqual(@as(usize, 2), selectors.object.count());
+        try std.testing.expectEqual(@as(usize, 2), selectors.object.get("extruder").?.array.items.len);
+        try std.testing.expect(selectors.object.get("heater_bed").? == .null);
+    }
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[mqtt]\naddress: broker.lan\nmqtt_protocol: unsupported\n" });
+    var invalid = try testApp(alloc, io, &tmp);
+    defer invalid.deinit(io);
+    try invalid.setConfig(io, cfg_path);
+    try std.testing.expect(invalid.mqtt_ctx.config == null);
 }

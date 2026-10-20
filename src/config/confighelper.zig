@@ -53,6 +53,8 @@ pub const ConfigParser = struct {
     sections_map: std.StringHashMap(Section),
     /// Moonraker config strips inline comments; secrets INI preserves them.
     inline_comments: bool = true,
+    /// Secrets INI treats include-named sections as ordinary data.
+    process_includes: bool = true,
 
     pub fn init(alloc: std.mem.Allocator) ConfigParser {
         return .{
@@ -217,7 +219,7 @@ pub const ConfigParser = struct {
                 const sec_name = std.mem.trim(u8, stripped[1..close], &std.ascii.whitespace);
 
                 // Include directive?
-                if (std.mem.startsWith(u8, sec_name, "include ")) {
+                if (self.process_includes and std.mem.startsWith(u8, sec_name, "include ")) {
                     const glob_pat = std.mem.trim(u8, sec_name[8..], &std.ascii.whitespace);
                     if (glob_pat.len == 0) return ConfigError.ParseError;
                     if (io_opt) |io| {

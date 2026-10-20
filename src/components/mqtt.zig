@@ -36,6 +36,8 @@ const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const mqtt_client = @import("mqtt_client.zig");
 const mqtt_proto = @import("mqtt_proto.zig");
+const mqtt_status = @import("mqtt_status.zig");
+const connections = @import("../server/connections.zig");
 
 const Registry = registry.Registry;
 const Io = std.Io;
@@ -50,10 +52,13 @@ const max_backoff_ms: i64 = 30_000;
 const max_timestamp_history = 20;
 /// Concurrent `server.mqtt.subscribe` waits; more return 503.
 const max_subscribe_waiters = 16;
+const max_permanent_topics = 128;
+const max_permanent_topic_bytes = 64 * 1024;
 /// Longest honoured subscribe `timeout`, keeping deadlines representable on 32-bit.
 const max_timeout_s: f64 = std.time.s_per_day;
 /// Best-effort offline publication must not delay shutdown behind broker I/O.
 const shutdown_timeout: Io.Duration = .fromSeconds(1);
+const subscription_timeout: Io.Duration = .fromSeconds(5);
 const local_transports = [_]registry.TransportType{ .HTTP, .WEBSOCKET, .INTERNAL };
 const scientific_min: f64 = 1e-4;
 const scientific_max: f64 = 1e16;
@@ -64,6 +69,11 @@ const offline_payload = "{\"server\":\"offline\"}";
 /// Moonraker `[mqtt]` options. Slices are borrowed; `setConfig` copies them.
 pub const Options = struct {
     address: []const u8,
+    protocol: mqtt_proto.Protocol = .v311,
+    clock_io: ?Io = null,
+    status_objects: std.json.Value = .{ .object = .empty },
+    status_interval: f64 = 0,
+    publish_split_status: bool = false,
     port: u16 = 1883,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
@@ -82,6 +92,7 @@ pub const Options = struct {
 pub const MqttConfig = struct {
     arena: std.heap.ArenaAllocator,
     address: []const u8,
+    protocol: mqtt_proto.Protocol,
     port: u16,
     username: ?[]const u8,
     password: ?[]const u8,
@@ -116,6 +127,8 @@ pub const MqttCtx = struct {
     gpa: std.mem.Allocator,
     config: ?MqttConfig = null,
     home_directory: ?[]const u8 = null,
+    status: ?mqtt_status.StatusCtx = null,
+    klippy_connected: bool = false,
     keepalive_s: u16 = default_keepalive_s,
     /// Live Io handle; null in `--dump-api` and unit tests without a broker.
     io: ?Io = null,
@@ -135,6 +148,9 @@ pub const MqttCtx = struct {
     waiters_closed: bool = false,
     waiters_mutex: Io.Mutex = .init,
     waiters_idle: Io.Condition = .init,
+    /// Sensor subscriptions survive individual subscribe requests.
+    permanent_topics: std.StringHashMapUnmanaged(u2) = .empty,
+    permanent_topic_bytes: usize = 0,
     /// Fixed-size fingerprints avoid retaining arbitrary request-owned JSON.
     api_timestamps: [max_timestamp_history][32]u8 = undefined,
     api_timestamp_len: usize = 0,
@@ -169,11 +185,17 @@ pub const MqttCtx = struct {
 
     /// Stop the supervisor, wake pending subscribers and free the config.
     pub fn deinit(self: *MqttCtx) void {
+        if (self.status) |*status| status.stop();
         if (self.io) |io| self.stop(io);
+        if (self.status) |*status| status.deinit();
+        self.status = null;
         if (self.config) |*cfg| cfg.arena.deinit();
         self.config = null;
         if (self.home_directory) |home| self.gpa.free(home);
         self.home_directory = null;
+        var topics = self.permanent_topics.keyIterator();
+        while (topics.next()) |topic| self.gpa.free(topic.*);
+        self.permanent_topics.deinit(self.gpa);
     }
 
     /// Validate and copy `[mqtt]` options. Replaces the previous config only on
@@ -182,6 +204,7 @@ pub const MqttCtx = struct {
         if (opts.instance_name.len != 0) mqtt_proto.validateTopicName(opts.instance_name) catch return error.InvalidInstanceName;
         const longest_suffix = "/moonraker/api/response";
         if (opts.instance_name.len > std.math.maxInt(u16) - longest_suffix.len) return error.InvalidInstanceName;
+        if (self.connect_thread != null) return error.AlreadyStarted;
         const default_qos = try qosValue(opts.default_qos);
         const api_qos = try qosValue(opts.api_qos orelse opts.default_qos);
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -191,6 +214,7 @@ pub const MqttCtx = struct {
         const cfg: MqttConfig = .{
             .arena = undefined,
             .address = try a.dupe(u8, opts.address),
+            .protocol = opts.protocol,
             .port = opts.port,
             .username = if (opts.username) |u| try a.dupe(u8, u) else null,
             .password = if (opts.password) |p| try a.dupe(u8, p) else null,
@@ -204,6 +228,19 @@ pub const MqttCtx = struct {
             .status_topic = try std.fmt.allocPrint(a, "{s}/moonraker/status", .{name}),
             .instance_name = name,
         };
+        const connect_packet = try mqtt_proto.encodeConnect(self.gpa, self.connectOptions(&cfg));
+        defer self.gpa.free(connect_packet);
+        var status: ?mqtt_status.StatusCtx = null;
+        errdefer if (status) |*owned| owned.deinit();
+        if (opts.status_objects != .object) return error.InvalidStatusObjects;
+        if (!std.math.isFinite(opts.status_interval) or (opts.status_interval != 0 and opts.status_interval <= 0.25)) return error.InvalidStatusInterval;
+        if (opts.status_objects.object.count() != 0) {
+            status = mqtt_status.StatusCtx.init(self.gpa, opts.clock_io orelse self.io orelse return error.MissingIo);
+            try status.?.setConfig(.{ .instance_name = name, .default_qos = default_qos, .status_objects = opts.status_objects, .status_interval = opts.status_interval, .publish_split_status = opts.publish_split_status });
+        }
+        if (self.status) |*old| old.deinit();
+        self.status = status;
+        self.klippy_connected = false;
         if (self.config) |*old| old.arena.deinit();
         self.config = cfg;
         self.config.?.arena = arena;
@@ -211,10 +248,15 @@ pub const MqttCtx = struct {
 
     /// Start the reconnect supervisor when a broker is configured and io is wired.
     pub fn start(self: *MqttCtx) void {
-        if (self.config == null) return;
+        if (self.config == null or self.connect_thread != null) return;
         const io = self.io orelse return;
+        if (self.status) |*status| status.start(publishStatus, self) catch |err| {
+            std.debug.print("phobos: warning: MQTT status worker not started: {}\n", .{err});
+            return;
+        };
         self.reader_stop.reset();
         self.connect_thread = io.concurrent(supervise, .{self}) catch |err| {
+            if (self.status) |*status| status.stop();
             std.debug.print("phobos: warning: MQTT worker not started: {}\n", .{err});
             return;
         };
@@ -223,7 +265,6 @@ pub const MqttCtx = struct {
     /// Wake subscribers, bound the offline write, then join all workers.
     fn stop(self: *MqttCtx, io: Io) void {
         self.reader_stop.set(io);
-        self.closeWaiters(io);
         self.client_lock.lockSharedUncancelable(io);
         if (self.client) |client| {
             var done: Io.Event = .unset;
@@ -231,12 +272,15 @@ pub const MqttCtx = struct {
                 var closing = future;
                 const deadline = Io.Clock.Timestamp.now(io, .awake).addDuration(.{ .raw = shutdown_timeout, .clock = .awake });
                 done.waitTimeout(io, .{ .deadline = deadline }) catch {};
+                client.cancelPending();
                 client.shutdownRecv();
                 closing.cancel(io);
             } else |_| {}
+            client.cancelPending();
             client.shutdownRecv();
         }
         self.client_lock.unlockShared(io);
+        self.closeWaiters(io);
         if (self.connect_thread) |*t| {
             t.cancel(io);
             self.connect_thread = null;
@@ -248,7 +292,7 @@ pub const MqttCtx = struct {
 
     fn disconnect(self: *MqttCtx, client: *MqttClient, done: *Io.Event) void {
         defer done.set(self.io.?);
-        if (self.config) |cfg| client.publish(cfg.status_topic, offline_payload, cfg.default_qos, true) catch return;
+        if (self.config) |cfg| client.publishAwait(cfg.status_topic, offline_payload, cfg.default_qos, true, shutdown_timeout) catch return;
         client.disconnect();
     }
 
@@ -256,6 +300,7 @@ pub const MqttCtx = struct {
     /// `will_set`) and credentials.
     fn connectOptions(self: *const MqttCtx, cfg: *const MqttConfig) mqtt_proto.ConnectOptions {
         return .{
+            .protocol = cfg.protocol,
             .client_id = cfg.client_id,
             .username = cfg.username,
             .password = if (cfg.username != null) cfg.password else null,
@@ -297,25 +342,35 @@ pub const MqttCtx = struct {
         errdefer client.deinit();
         client.on_publish = onPublish;
         client.on_publish_ctx = self;
-        try client.publish(cfg.status_topic, online_payload, cfg.default_qos, true);
-        if (cfg.enable_moonraker_api) try client.subscribe(cfg.api_request_topic, cfg.effectiveQos(cfg.api_qos));
+        var subscriptions = std.heap.ArenaAllocator.init(self.gpa);
+        defer subscriptions.deinit();
+        const a = subscriptions.allocator();
+        var topics: std.ArrayList([]const u8) = .empty;
         {
             self.waiters_mutex.lockUncancelable(io);
             defer self.waiters_mutex.unlock(io);
+            var permanent = self.permanent_topics.keyIterator();
+            while (permanent.next()) |topic| try topics.append(a, try a.dupe(u8, topic.*));
             var it = self.waiters.first;
             while (it) |node| : (it = node.next) {
                 const waiter: *Waiter = @fieldParentPtr("node", node);
-                try client.subscribe(waiter.topic, waiter.qos);
+                try topics.append(a, try a.dupe(u8, waiter.topic));
             }
-            // New waiters either occur in this pass or see the live client.
+            self.reader_done.reset();
+            self.reader_thread = try io.concurrent(runReader, .{ self, client });
             self.setClient(io, client);
         }
-        self.reader_done.reset();
-        self.reader_thread = io.concurrent(runReader, .{ self, client }) catch |err| {
+        errdefer {
             client.shutdownRecv();
+            self.reader_thread.?.await(io);
+            self.reader_thread = null;
             self.setClient(io, null);
-            return err;
-        };
+        }
+        // The reader must drain SUBACKs before a bounded window can be refilled.
+        try client.publish(cfg.status_topic, online_payload, cfg.default_qos, true);
+        if (cfg.enable_moonraker_api) try self.changeSubscription(io, cfg.api_request_topic, true);
+        for (topics.items) |topic| try self.changeSubscription(io, topic, true);
+        if (self.status) |*status| status.setBrokerConnected(true);
         if (self.on_connection) |cb| cb(self.on_connection_ctx.?, true);
         if (self.on_connected) |cb| cb(self.on_connected_ctx.?);
         // A stop that ran before the client was published missed it.
@@ -331,7 +386,12 @@ pub const MqttCtx = struct {
 
     /// Ping every half keepalive until the reader exits or the task is canceled.
     fn keepAlive(self: *MqttCtx, io: Io, client: *MqttClient) void {
-        const interval: Io.Duration = .fromMilliseconds(@as(i64, self.keepalive_s) * (std.time.ms_per_s / 2));
+        const keepalive = client.limits.server_keepalive orelse self.keepalive_s;
+        if (keepalive == 0) {
+            self.reader_done.wait(io) catch {};
+            return;
+        }
+        const interval: Io.Duration = .fromMilliseconds(@as(i64, keepalive) * (std.time.ms_per_s / 2));
         var missed: u2 = 0;
         while (!sleep.untilStopped(io, interval, &self.reader_done)) {
             if (client.ping_pending.load(.acquire)) {
@@ -353,6 +413,7 @@ pub const MqttCtx = struct {
             self.reader_thread = null;
         }
         self.setClient(io, null);
+        if (self.status) |*status| status.setBrokerConnected(false);
         if (self.on_connection) |cb| cb(self.on_connection_ctx.?, false);
         client.deinit();
         self.gpa.destroy(client);
@@ -360,14 +421,13 @@ pub const MqttCtx = struct {
 
     fn runReader(self: *MqttCtx, client: *MqttClient) void {
         defer self.reader_done.set(self.io.?);
-        while (!self.reader_stop.isSet()) {
-            _ = client.readOne() catch return;
-        }
+        while (true) _ = client.readOne() catch return;
     }
 
     /// MqttClient.on_publish (reader thread).
     fn onPublish(ctx: *anyopaque, topic: []const u8, payload: []const u8) void {
         const self: *MqttCtx = @ptrCast(@alignCast(ctx));
+        if (self.reader_stop.isSet()) return;
         const cfg = &self.config.?;
         if (cfg.enable_moonraker_api and std.mem.eql(u8, topic, cfg.api_request_topic)) {
             var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -389,6 +449,34 @@ pub const MqttCtx = struct {
         if (jv.exceedsDepth(root, jv.max_value_depth)) return try jv.errorResponse(alloc, .null, -32600, "Invalid Request");
         const response = try dispatch(self.api_dispatch_ctx.?, root, alloc);
         return if (response.len == 0) null else response;
+    }
+
+    /// Caller owns the configured object/field selector tree.
+    pub fn statusSubscription(self: *const MqttCtx, alloc: std.mem.Allocator) !std.json.Value {
+        return if (self.status) |*status| status.subscription(alloc) else .{ .object = .empty };
+    }
+
+    /// Called under Core; status transport work is queued for its own worker.
+    pub fn klippyState(self: *MqttCtx, connected: bool) !void {
+        if (self.klippy_connected == connected) return;
+        const status = if (self.status) |*status| status else return;
+        if (connected) try status.klippyStarted(.{ .object = .empty }, 0) else try status.klippyDisconnected();
+        self.klippy_connected = connected;
+    }
+
+    pub fn klippyStatus(self: *MqttCtx, status: std.json.Value, eventtime: std.json.Value) !void {
+        const owner = if (self.status) |*owner| owner else return;
+        const timestamp: f64 = switch (eventtime) {
+            .integer => |number| @floatFromInt(number),
+            .float => |number| number,
+            else => return error.InvalidStatus,
+        };
+        try owner.ingest(status, timestamp);
+    }
+
+    fn publishStatus(ctx: *anyopaque, topic: []const u8, payload: []const u8, qos: u2, retain: bool) !void {
+        const self: *MqttCtx = @ptrCast(@alignCast(ctx));
+        try self.publishAwait(topic, payload, qos, retain, null);
     }
 
     /// Called after method lookup so invalid requests do not consume timestamps.
@@ -422,33 +510,126 @@ pub const MqttCtx = struct {
         };
     }
 
-    /// Subscribe `topic` on the live connection; `null` qos means
-    /// `default_qos`. No-op while disconnected: the next connect subscribes
-    /// pending subscribe requests and calls `on_connected`.
+    fn publishAwait(self: *MqttCtx, topic: []const u8, bytes: []const u8, qos: u2, retain: bool, timeout: ?Io.Duration) !void {
+        const io = self.io orelse return error.ServiceUnavailable;
+        try self.client_lock.lockShared(io);
+        defer self.client_lock.unlockShared(io);
+        const client = self.client orelse return error.ServiceUnavailable;
+        client.publishAwait(topic, bytes, qos, retain, timeout) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.PublishTimeout => error.MqttPublishTimeout,
+            error.InvalidTopic, error.InvalidUtf8, error.StringTooLong, error.ValueTooLarge => error.InvalidParams,
+            else => error.ServiceUnavailable,
+        };
+    }
+
+    /// Register a persistent sensor filter and subscribe when connected. Off Core.
     pub fn subscribeTopicLive(self: *MqttCtx, topic: []const u8, qos: ?u2) void {
         const io = self.io orelse return;
         const cfg = &(self.config orelse return);
+        mqtt_proto.validateTopicFilter(topic) catch return;
+        const requested = qos orelse cfg.default_qos;
+        self.waiters_mutex.lockUncancelable(io);
+        if (self.permanent_topics.getPtr(topic)) |existing| {
+            if (existing.* >= requested) {
+                self.waiters_mutex.unlock(io);
+                return;
+            }
+            existing.* = requested;
+        } else {
+            if (self.permanent_topics.count() == max_permanent_topics or topic.len > max_permanent_topic_bytes - self.permanent_topic_bytes) {
+                self.waiters_mutex.unlock(io);
+                std.debug.print("phobos: warning: MQTT sensor subscription limit exceeded\n", .{});
+                return;
+            }
+            const owned = self.gpa.dupe(u8, topic) catch {
+                self.waiters_mutex.unlock(io);
+                return;
+            };
+            self.permanent_topics.put(self.gpa, owned, requested) catch {
+                self.gpa.free(owned);
+                self.waiters_mutex.unlock(io);
+                return;
+            };
+            self.permanent_topic_bytes += owned.len;
+        }
+        self.waiters_mutex.unlock(io);
+        self.changeSubscription(io, topic, true) catch {}; // Reconnect retries registered filters.
+    }
+
+    fn subscriptionQosLocked(self: *MqttCtx, topic: []const u8) ?u2 {
+        var qos = self.permanent_topics.get(topic);
+        if (self.config) |cfg| if (cfg.enable_moonraker_api and std.mem.eql(u8, topic, cfg.api_request_topic)) {
+            qos = @max(qos orelse 0, cfg.effectiveQos(cfg.api_qos));
+        };
+        var it = self.waiters.first;
+        while (it) |node| : (it = node.next) {
+            const waiter: *Waiter = @fieldParentPtr("node", node);
+            if (std.mem.eql(u8, topic, waiter.topic)) qos = @max(qos orelse 0, waiter.qos);
+        }
+        return qos;
+    }
+
+    /// Serialize topic changes, releasing locks while waiting for ACK capacity.
+    fn changeSubscription(self: *MqttCtx, io: Io, topic: []const u8, subscribe: bool) !void {
+        const deadline = Io.Clock.Timestamp.fromNow(io, .{ .raw = subscription_timeout, .clock = .awake });
+        while (true) {
+            self.waiters_mutex.lockUncancelable(io);
+            const qos = self.subscriptionQosLocked(topic);
+            if (subscribe != (qos != null)) {
+                self.waiters_mutex.unlock(io);
+                return;
+            }
+            self.client_lock.lockSharedUncancelable(io);
+            const result: anyerror!void = if (self.client) |client|
+                if (subscribe) client.subscribe(topic, qos.?) else client.unsubscribe(topic)
+            else
+                error.ServiceUnavailable;
+            self.client_lock.unlockShared(io);
+            self.waiters_mutex.unlock(io);
+            result catch |err| {
+                if (err != error.MessageQueueFull) {
+                    if (err != error.ServiceUnavailable) self.shutdownClient(io);
+                    return err;
+                }
+                if (Io.Clock.Timestamp.now(io, .awake).compare(.gte, deadline)) {
+                    self.shutdownClient(io);
+                    return error.SubscriptionTimeout;
+                }
+                if (sleep.untilStopped(io, .fromMilliseconds(1), &self.reader_stop)) return error.Canceled;
+                continue;
+            };
+            return;
+        }
+    }
+
+    fn shutdownClient(self: *MqttCtx, io: Io) void {
         self.client_lock.lockSharedUncancelable(io);
         defer self.client_lock.unlockShared(io);
-        const client = self.client orelse return;
-        // A failed write means the connection is dropping; the reconnect
-        // resubscribes.
-        client.subscribe(topic, qos orelse cfg.default_qos) catch {};
+        if (self.client) |client| client.shutdownRecv();
     }
 
     fn addWaiter(self: *MqttCtx, io: Io, waiter: *Waiter) !void {
         self.waiters_mutex.lockUncancelable(io);
-        defer self.waiters_mutex.unlock(io);
-        if (self.waiters_closed or self.waiter_count == max_subscribe_waiters) return error.ServiceUnavailable;
+        if (self.waiters_closed or self.waiter_count == max_subscribe_waiters) {
+            self.waiters_mutex.unlock(io);
+            return error.ServiceUnavailable;
+        }
         self.waiters.append(&waiter.node);
         self.waiter_count += 1;
+        self.waiters_mutex.unlock(io);
+        self.changeSubscription(io, waiter.topic, true) catch {}; // Reconnect retries linked waiters.
     }
 
-    /// Unlink `waiter`; returns its gpa-owned payload for the caller to free.
+    /// Remove a one-shot subscription only after its last waiter exits.
     fn removeWaiter(self: *MqttCtx, io: Io, waiter: *Waiter) ?[]u8 {
         self.waiters_mutex.lockUncancelable(io);
-        defer self.waiters_mutex.unlock(io);
         self.waiters.remove(&waiter.node);
+        const last = self.subscriptionQosLocked(waiter.topic) == null;
+        self.waiters_mutex.unlock(io);
+        if (last) self.changeSubscription(io, waiter.topic, false) catch {}; // Disconnect removes this clean-session subscription.
+        self.waiters_mutex.lockUncancelable(io);
+        defer self.waiters_mutex.unlock(io);
         self.waiter_count -= 1;
         if (self.waiter_count == 0) self.waiters_idle.broadcast(io);
         return waiter.payload;
@@ -622,7 +803,9 @@ fn publishParams(ctx: *MqttCtx, topic: []const u8, params: std.json.Value) !void
         error.InvalidParams => error.InvalidParams,
         error.WriteFailed => error.OutOfMemory,
     };
-    try ctx.publishRaw(topic, aw.written(), qos, retain);
+    const timeout = try requestTimeout(params);
+    if (timeout) |seconds| if (seconds <= 0) return error.MqttPublishTimeout;
+    try ctx.publishAwait(topic, aw.written(), qos, retain, if (timeout) |seconds| .fromNanoseconds(std.math.lossyCast(i96, @min(seconds, max_timeout_s) * std.time.ns_per_s)) else null);
 }
 
 // ---------------------------------------------------------------------------
@@ -630,8 +813,7 @@ fn publishParams(ctx: *MqttCtx, topic: []const u8, params: std.json.Value) !void
 // ---------------------------------------------------------------------------
 
 /// POST /server/mqtt/publish → {"topic": <topic>}. Runs off the Core lock.
-/// `timeout` is accepted; the reply follows the socket write, not the broker
-/// acknowledgement.
+/// QoS 1 and 2 wait for PUBACK/PUBCOMP within the optional timeout.
 pub fn handlePublish(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *MqttCtx = @ptrCast(@alignCast(ctx_ptr));
     const topic = try webreq.required([]const u8, params, "topic");
@@ -656,7 +838,6 @@ pub fn handleSubscribe(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.m
 
     var waiter: Waiter = .{ .topic = topic, .qos = qos };
     try ctx.addWaiter(io, &waiter);
-    ctx.subscribeTopicLive(topic, qos);
     const woken = if (timeout) |t|
         sleep.untilStopped(io, .fromNanoseconds(std.math.lossyCast(i96, @min(t, max_timeout_s) * std.time.ns_per_s)), &waiter.done)
     else blk: {
@@ -1305,10 +1486,10 @@ test "live broker: online status, raw publish, offline status on shutdown" {
     var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 5) });
     defer bf.cancel(io);
 
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = MqttCtx.init(testing.allocator);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
     try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "phobos" });
     ctx.io = io;
     ctx.start();
@@ -1341,10 +1522,10 @@ test "live broker: subscribe returns the first message and api requests stay uns
     var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 16) });
     defer bf.cancel(io);
 
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = MqttCtx.init(testing.allocator);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
     defer ctx.deinit();
     try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "phobos", .enable_moonraker_api = false });
     ctx.io = io;
@@ -1375,7 +1556,7 @@ test "live broker: keepalive sends PINGREQ every half interval" {
     defer broker.deinit();
     var bf = io.async(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 16) });
     defer bf.cancel(io);
-    var ctx = MqttCtx.init(testing.allocator);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
     defer ctx.deinit();
     try ctx.setConfig(test_options);
     ctx.config.?.port = broker.port();
@@ -1492,7 +1673,7 @@ test "stop cancels a broker stalled before CONNACK" {
     };
     var peer = try io.concurrent(Peer.run, .{ &server, &accepted, io });
     defer peer.cancel(io);
-    var ctx = MqttCtx.init(testing.allocator);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
     defer ctx.deinit();
     try ctx.setConfig(test_options);
     ctx.config.?.port = server.socket.address.getPort();
@@ -1560,4 +1741,310 @@ test "MQTT home directory owns replacement and preserves it on allocation failur
     try testing.expectEqualStrings("replaced", ctx.home_directory.?);
     try ctx.setHomeDirectory(null);
     try testing.expect(ctx.home_directory == null);
+}
+
+/// Parse Moonraker getdict status objects, one `object = field, field` per line.
+pub fn parseStatusObjects(alloc: std.mem.Allocator, text: []const u8) !std.json.Value {
+    var objects: std.json.ObjectMap = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+        if (trimmed.len == 0) continue;
+        const separator = std.mem.indexOfScalar(u8, trimmed, '=');
+        const name = std.mem.trim(u8, trimmed[0 .. separator orelse trimmed.len], &std.ascii.whitespace);
+        if (name.len == 0 or name.len > connections.max_subscription_name_len) return error.InvalidStatusObjects;
+        if (!objects.contains(name) and objects.count() == connections.max_subscription_objects) return error.InvalidStatusObjects;
+        var fields: std.json.Array = .init(alloc);
+        if (separator) |index| {
+            var values = std.mem.splitScalar(u8, trimmed[index + 1 ..], ',');
+            while (values.next()) |value| {
+                const field = std.mem.trim(u8, value, &std.ascii.whitespace);
+                if (field.len == 0) continue;
+                if (fields.items.len == connections.max_subscription_objects or field.len > connections.max_subscription_name_len) return error.InvalidStatusObjects;
+                try fields.append(.{ .string = try alloc.dupe(u8, field) });
+            }
+        }
+        try objects.put(alloc, try alloc.dupe(u8, name), if (separator != null) .{ .array = fields } else .null);
+    }
+    return .{ .object = objects };
+}
+
+test "MQTT status config parses all fields, field lists, empty selections, and replacement" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const value = try parseStatusObjects(arena.allocator(), "extruder\nheater_bed = temperature, target, \nprint_stats=\nextruder=temperature\n");
+    try testing.expectEqual(@as(usize, 3), value.object.count());
+    try testing.expectEqualStrings("temperature", value.object.get("extruder").?.array.items[0].string);
+    try testing.expectEqual(@as(usize, 2), value.object.get("heater_bed").?.array.items.len);
+    try testing.expectEqual(@as(usize, 0), value.object.get("print_stats").?.array.items.len);
+    const all = try parseStatusObjects(arena.allocator(), "extruder");
+    try testing.expect(all.object.get("extruder").? == .null);
+}
+
+test "fuzz MQTT status config parsing is bounded" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var text: [256]u8 = undefined;
+            smith.bytesWithHash(&text, 0);
+            const value = parseStatusObjects(arena.allocator(), &text) catch return;
+            try testing.expect(value.object.count() <= connections.max_subscription_objects);
+        }
+    }.run, .{});
+}
+
+test "MQTT status integration owns selectors and follows connected lifecycle" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "local", .instance_name = "p", .clock_io = io, .status_objects = try parseStatusObjects(a, "extruder=temperature"), .status_interval = 0.5 });
+    const selectors = try ctx.statusSubscription(a);
+    try testing.expectEqualStrings("temperature", selectors.object.get("extruder").?.array.items[0].string);
+    ctx.status.?.setBrokerConnected(true);
+    try ctx.klippyState(true);
+    try ctx.klippyStatus(try mkParams(a, "{\"extruder\":{\"temperature\":22,\"target\":0}}"), .{ .float = 5 });
+    try testing.expectEqual(@as(usize, 2), ctx.status.?.pending.len);
+    try ctx.klippyState(true);
+    try testing.expectEqual(@as(usize, 2), ctx.status.?.pending.len);
+    try ctx.klippyState(false);
+    try testing.expectEqual(@as(usize, 3), ctx.status.?.pending.len);
+    try ctx.klippyState(false);
+    try testing.expectEqual(@as(usize, 3), ctx.status.?.pending.len);
+    try testing.expectError(error.InvalidStatus, ctx.klippyStatus(.{ .object = .empty }, .null));
+    try testing.expectError(error.InvalidStatusObjects, ctx.setConfig(.{ .address = "other", .instance_name = "x", .status_objects = .null }));
+    try testing.expectEqualStrings("p", ctx.config.?.instance_name);
+}
+
+test "live MQTT requests await acknowledgements and unsubscribe one-shot filters across versions" {
+    const io = testing.io;
+    for ([_]mqtt_proto.Protocol{ .v31, .v311, .v5 }) |protocol| {
+        var broker = try mqtt_client.TestBroker.bind(io);
+        defer broker.deinit();
+        var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 64) });
+        defer peer.cancel(io);
+        var ctx = MqttCtx.init(std.heap.smp_allocator);
+        defer ctx.deinit();
+        try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p", .client_id = "phobosTest", .protocol = protocol, .enable_moonraker_api = false });
+        ctx.io = io;
+        ctx.start();
+        try waitConnected(&ctx, io);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        for ([_][]const u8{ "{\"topic\":\"out\",\"payload\":1,\"qos\":1,\"timeout\":1}", "{\"topic\":\"out\",\"payload\":2,\"qos\":2,\"timeout\":1}" }) |request| {
+            const response = try handlePublish(@ptrCast(&ctx), try mkParams(a, request), a);
+            try testing.expectEqualStrings("out", response.object.get("topic").?.string);
+        }
+        try testing.expectError(error.MqttTimeout, handleSubscribe(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"one-shot\",\"timeout\":0.01}"), a));
+        try testing.expect(waitFor(io, &broker.unsubscribes, 1));
+        try testing.expectEqualStrings("one-shot", broker.last_unsubscribe[0..broker.last_unsubscribe_len]);
+        ctx.subscribeTopicLive("sensor", null);
+        try testing.expectError(error.MqttTimeout, handleSubscribe(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"sensor\",\"timeout\":0.01}"), a));
+        try testing.expectEqual(@as(u32, 1), broker.unsubscribes.load(.acquire));
+    }
+}
+
+test "live MQTT publish timeout disconnects and connection hooks observe both transitions" {
+    const io = testing.io;
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    broker.reply_publishes = false;
+    var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 64) });
+    defer peer.cancel(io);
+    const Observed = struct {
+        connected: std.atomic.Value(u32) = .init(0),
+        disconnected: std.atomic.Value(u32) = .init(0),
+        fn connection(ctx: *anyopaque, up: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            _ = if (up) self.connected.fetchAdd(1, .release) else self.disconnected.fetchAdd(1, .release);
+        }
+    };
+    var observed: Observed = .{};
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p" });
+    ctx.on_connection = Observed.connection;
+    ctx.on_connection_ctx = &observed;
+    ctx.io = io;
+    ctx.start();
+    try testing.expect(waitFor(io, &observed.connected, 1));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectError(error.MqttPublishTimeout, handlePublish(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"out\",\"qos\":1,\"timeout\":0.02}"), a));
+    try testing.expect(waitFor(io, &observed.disconnected, 1));
+    try testing.expectError(error.MqttPublishTimeout, handlePublish(@ptrCast(&ctx), try mkParams(a, "{\"topic\":\"out\",\"timeout\":0}"), a));
+}
+
+test "live MQTT shared subscribe waiters unsubscribe only after the last exits" {
+    const io = testing.io;
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 64) });
+    defer peer.cancel(io);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p", .enable_moonraker_api = false });
+    ctx.io = io;
+    ctx.start();
+    try waitConnected(&ctx, io);
+    const Subscriber = struct {
+        fn run(owner: *MqttCtx) !void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const response = try handleSubscribe(@ptrCast(owner), try mkParams(a, "{\"topic\":\"shared\",\"timeout\":2}"), a);
+            try testing.expectEqualStrings("reply", response.object.get("payload").?.string);
+        }
+    };
+    var first = try io.concurrent(Subscriber.run, .{&ctx});
+    defer first.cancel(io) catch {};
+    var second = try io.concurrent(Subscriber.run, .{&ctx});
+    defer second.cancel(io) catch {};
+    try testing.expect(waitFor(io, &broker.subscribes, 2));
+    try broker.injectPublish("shared", "reply");
+    try first.await(io);
+    try second.await(io);
+    try testing.expect(waitFor(io, &broker.unsubscribes, 1));
+    try testing.expectEqual(@as(u32, 1), broker.unsubscribes.load(.acquire));
+}
+
+test "live MQTT lifecycle publishes selected Klippy snapshots through the joined worker" {
+    const io = testing.io;
+    for ([_]bool{ false, true }) |split| {
+        var broker = try mqtt_client.TestBroker.bind(io);
+        defer broker.deinit();
+        var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 64) });
+        defer peer.cancel(io);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var ctx = MqttCtx.init(std.heap.smp_allocator);
+        defer ctx.deinit();
+        try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p", .clock_io = io, .status_objects = try parseStatusObjects(a, "extruder=temperature"), .publish_split_status = split, .default_qos = 1 });
+        ctx.io = io;
+        ctx.start();
+        try waitConnected(&ctx, io);
+        var connected = false;
+        for (0..400) |_| {
+            ctx.status.?.mutex.lockUncancelable(io);
+            connected = ctx.status.?.broker_connected;
+            ctx.status.?.mutex.unlock(io);
+            if (connected) break;
+            try io.sleep(.fromMilliseconds(5), .awake);
+        }
+        try testing.expect(connected);
+        try ctx.klippyState(true);
+        try ctx.klippyStatus(try mkParams(a, "{\"extruder\":{\"temperature\":22,\"target\":0}}"), .{ .float = 5.25 });
+        try testing.expect(waitFor(io, &broker.publishes, 2));
+        const payload = try mkParams(a, broker.got_payload[0..broker.got_payload_len]);
+        try testing.expectEqual(@as(f64, 5.25), payload.object.get("eventtime").?.float);
+        if (split) {
+            try testing.expectEqualStrings("p/klipper/state/extruder/temperature", broker.got_topic[0..broker.got_topic_len]);
+            try testing.expect(broker.got_retain);
+            try testing.expectEqual(@as(i64, 22), payload.object.get("value").?.integer);
+        } else {
+            try testing.expectEqualStrings("p/klipper/status", broker.got_topic[0..broker.got_topic_len]);
+            try testing.expect(!broker.got_retain);
+            const fields = payload.object.get("status").?.object.get("extruder").?.object;
+            try testing.expectEqual(@as(i64, 22), fields.get("temperature").?.integer);
+            try testing.expect(fields.get("target") == null);
+        }
+    }
+}
+
+test "live MQTT graceful shutdown acknowledges retained offline status at QoS2" {
+    const io = testing.io;
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 64) });
+    defer peer.cancel(io);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p", .default_qos = 2 });
+    ctx.io = io;
+    ctx.start();
+    errdefer ctx.deinit();
+    try waitConnected(&ctx, io);
+    ctx.deinit();
+    try testing.expect(waitFor(io, &broker.publishes, 2));
+    try testing.expectEqualStrings("p/moonraker/status", broker.got_topic[0..broker.got_topic_len]);
+    try testing.expectEqualStrings(offline_payload, broker.got_payload[0..broker.got_payload_len]);
+    try testing.expect(broker.got_retain);
+}
+
+test "live MQTT reconnect drains subscription acknowledgements beyond the packet window" {
+    const io = testing.io;
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    const filter_count = 65;
+    var first_peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, filter_count + 1) });
+    defer first_peer.cancel(io);
+    const Observed = struct {
+        connected: std.atomic.Value(u32) = .init(0),
+        fn connection(ctx: *anyopaque, up: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (up) _ = self.connected.fetchAdd(1, .release);
+        }
+    };
+    var observed: Observed = .{};
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p", .enable_moonraker_api = false });
+    ctx.io = io;
+    ctx.on_connection = Observed.connection;
+    ctx.on_connection_ctx = &observed;
+    for (0..filter_count) |index| {
+        var name: [32]u8 = undefined;
+        ctx.subscribeTopicLive(try std.fmt.bufPrint(&name, "sensor/{d}", .{index}), null);
+    }
+    ctx.start();
+    try testing.expect(waitFor(io, &observed.connected, 1));
+    first_peer.await(io);
+    try testing.expectEqual(@as(u32, filter_count), broker.subscribes.load(.acquire));
+    const stream = broker.stream.?;
+    stream.shutdown(io, .both) catch {};
+    stream.close(io);
+    broker.stream = null;
+    var second_peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 256) });
+    defer second_peer.cancel(io);
+    try testing.expect(waitFor(io, &observed.connected, 2));
+    try testing.expectEqual(@as(u32, filter_count * 2), broker.subscribes.load(.acquire));
+}
+
+test "live MQTT cancelled subscribe removes its filter or closes the clean session" {
+    const io = testing.io;
+    var broker = try mqtt_client.TestBroker.bind(io);
+    defer broker.deinit();
+    var peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 64) });
+    defer peer.cancel(io);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = broker.port(), .instance_name = "p", .enable_moonraker_api = false });
+    ctx.io = io;
+    ctx.start();
+    try waitConnected(&ctx, io);
+    const Subscriber = struct {
+        fn run(owner: *MqttCtx) !void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            _ = try handleSubscribe(@ptrCast(owner), try mkParams(a, "{\"topic\":\"cancelled\"}"), a);
+        }
+    };
+    var subscriber = try io.concurrent(Subscriber.run, .{&ctx});
+    defer subscriber.cancel(io) catch {};
+    try testing.expect(waitFor(io, &broker.subscribes, 1));
+    try testing.expectError(error.ServiceUnavailable, subscriber.cancel(io));
+    var cleaned = false;
+    for (0..400) |_| {
+        cleaned = broker.unsubscribes.load(.acquire) != 0 or ctx.reader_done.isSet();
+        if (cleaned) break;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try testing.expect(cleaned);
+    try testing.expectEqual(@as(usize, 0), ctx.waiter_count);
 }
