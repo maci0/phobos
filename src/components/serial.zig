@@ -1,9 +1,10 @@
 //! Minimal serial-port (UART / USB-CDC) driver over `std.Io.File` + termios.
 //!
-//! Used by WLED serial strips and the TD-1 filament sensor. Opens the character
-//! device read/write, configures it for raw 8N1 at the requested baud (termios
-//! best-effort — failures, e.g. on a non-tty, are ignored so the byte path still
-//! works), and exposes blocking write/read.
+//! Used by the TD-1 filament sensor. Opens the character device read/write and
+//! configures it for raw 8N1 at the requested baud (termios best-effort:
+//! failures, e.g. on a non-tty, are ignored so the byte path still works). An
+//! unsupported baud rate is an error. Writes block until complete; a read waits
+//! at most `read_timeout_ds` for the first byte and returns 0 when none arrives.
 //!
 //! Tests cover regular-file bytes and pseudo-terminal baud/raw settings.
 //! Physical UART and USB-CDC timing still requires target hardware.
@@ -12,53 +13,58 @@ const std = @import("std");
 const Dir = std.Io.Dir;
 const Io = std.Io;
 
+/// termios VTIME: deciseconds a read waits for the first byte (VMIN = 0).
+pub const read_timeout_ds: u8 = 10;
+
 pub const Serial = struct {
     io: Io,
     file: std.Io.File,
 
     pub fn open(io: Io, path: []const u8, baud: u32) !Serial {
+        const speed = try baudToSpeed(baud);
         const file = try Dir.cwd().openFile(io, path, .{ .mode = .read_write });
-        configureRaw(file.handle, baud);
+        configureRaw(file.handle, speed);
         return .{ .io = io, .file = file };
     }
 
     /// Best-effort raw 8N1 configuration. Silently returns when the fd is not a
     /// terminal (e.g. a regular file in tests) or termios is unavailable.
-    fn configureRaw(handle: std.posix.fd_t, baud: u32) void {
+    fn configureRaw(handle: std.posix.fd_t, spd: std.posix.speed_t) void {
         var t = std.posix.tcgetattr(handle) catch return;
         t.iflag = .{};
         t.oflag = .{};
         t.lflag = .{};
         t.cflag = .{ .CSIZE = .CS8, .CREAD = true, .CLOCAL = true };
-        const spd = baudToSpeed(baud);
         // Linux tcsetattr reads the baud bits in cflag, including with musl.
         t.cflag = @bitCast(@as(u32, @bitCast(t.cflag)) | @as(u32, @backingInt(spd)));
         t.ispeed = spd;
         t.ospeed = spd;
-        t.cc[@backingInt(std.posix.V.MIN)] = 1;
-        t.cc[@backingInt(std.posix.V.TIME)] = 0;
+        t.cc[@backingInt(std.posix.V.MIN)] = 0;
+        t.cc[@backingInt(std.posix.V.TIME)] = read_timeout_ds;
         std.posix.tcsetattr(handle, .NOW, t) catch {};
     }
 
-    fn baudToSpeed(baud: u32) std.posix.speed_t {
-        return switch (baud) {
-            9600 => .B9600,
-            19200 => .B19200,
-            38400 => .B38400,
-            57600 => .B57600,
-            115200 => .B115200,
-            else => .B115200,
+    /// Map a numeric rate to its termios constant. `B0` (hang up) is excluded.
+    fn baudToSpeed(baud: u32) error{UnsupportedBaud}!std.posix.speed_t {
+        const speeds = comptime std.meta.tags(std.posix.speed_t);
+        const rates = comptime blk: {
+            @setEvalBranchQuota(10_000);
+            var out: [speeds.len]u32 = undefined;
+            for (speeds, &out) |speed, *rate| rate.* = std.fmt.parseInt(u32, @tagName(speed)[1..], 10) catch unreachable;
+            break :blk out;
         };
+        for (speeds, rates) |speed, rate| {
+            if (rate != 0 and baud == rate) return speed;
+        }
+        return error.UnsupportedBaud;
     }
 
     pub fn write(self: *Serial, bytes: []const u8) !void {
-        var buf: [256]u8 = undefined;
-        var w = self.file.writer(self.io, &buf);
-        try w.interface.writeAll(bytes);
-        try w.interface.flush();
+        try self.file.writeStreamingAll(self.io, bytes);
     }
 
-    /// Read up to `buf.len` bytes; returns the count actually read (may be 0).
+    /// Read up to `buf.len` bytes; returns the count actually read, 0 when the
+    /// read timeout expires without data or at end of file.
     pub fn readSome(self: *Serial, buf: []u8) !usize {
         return self.file.readStreaming(self.io, &.{buf}) catch |err| switch (err) {
             error.EndOfStream => 0,
@@ -113,10 +119,33 @@ test "Serial.open: nonexistent device errors (no crash)" {
     try testing.expectError(error.FileNotFound, Serial.open(io, path, 115200));
 }
 
-test "baudToSpeed: known + fallback" {
-    try testing.expectEqual(std.posix.speed_t.B9600, Serial.baudToSpeed(9600));
-    try testing.expectEqual(std.posix.speed_t.B115200, Serial.baudToSpeed(115200));
-    try testing.expectEqual(std.posix.speed_t.B115200, Serial.baudToSpeed(123456));
+test "baudToSpeed: every termios rate maps, others are rejected" {
+    try testing.expectEqual(std.posix.speed_t.B9600, try Serial.baudToSpeed(9600));
+    try testing.expectEqual(std.posix.speed_t.B115200, try Serial.baudToSpeed(115200));
+    try testing.expectEqual(std.posix.speed_t.B230400, try Serial.baudToSpeed(230400));
+    try testing.expectEqual(std.posix.speed_t.B4000000, try Serial.baudToSpeed(4000000));
+    try testing.expectError(error.UnsupportedBaud, Serial.baudToSpeed(123456));
+    try testing.expectError(error.UnsupportedBaud, Serial.baudToSpeed(0));
+}
+
+test "Serial.open: unsupported baud errors before opening" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "serial", .data = "" });
+    const path = try tmp.dir.realPathFileAlloc(io, "serial", testing.allocator);
+    defer testing.allocator.free(path);
+    try testing.expectError(error.UnsupportedBaud, Serial.open(io, path, 123456));
+}
+
+test "fuzz baudToSpeed: a mapped rate round-trips through its tag name" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            const baud = smith.valueWithHash(u32, 0);
+            const speed = Serial.baudToSpeed(baud) catch return;
+            try testing.expectEqual(baud, try std.fmt.parseInt(u32, @tagName(speed)[1..], 10));
+        }
+    }.run, .{});
 }
 
 test "fuzz Serial.open: arbitrary paths never crash" {
@@ -178,8 +207,11 @@ test "Serial.open configures baud and raw 8N1 on a pseudo-terminal" {
     try testing.expectEqual(@as(u32, @backingInt(std.posix.speed_t.B115200)), @as(u32, @bitCast(attrs.cflag)) & baud_mask);
     try testing.expectEqual(.CS8, attrs.cflag.CSIZE);
     try testing.expect(!attrs.cflag.PARENB and !attrs.cflag.CSTOPB and !attrs.cflag.CRTSCTS);
-    try testing.expectEqual(@as(u8, 1), attrs.cc[@backingInt(std.posix.V.MIN)]);
-    try testing.expectEqual(@as(u8, 0), attrs.cc[@backingInt(std.posix.V.TIME)]);
+    try testing.expectEqual(@as(u8, 0), attrs.cc[@backingInt(std.posix.V.MIN)]);
+    try testing.expectEqual(read_timeout_ds, attrs.cc[@backingInt(std.posix.V.TIME)]);
+    // A silent device returns 0 after the read timeout instead of blocking.
+    var bytes: [8]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), try serial.readSome(&bytes));
 }
 
 test "fuzz Serial.readSome preserves bytes across bounded read sizes" {
