@@ -151,10 +151,10 @@ comment — don't invent behavior, and don't skip the endpoint.
 
 ```sh
 # regenerate the baseline after bumping vendor/moonraker:
-PYTHONPATH=tools python3 -m api_scanner baseline --source vendor/moonraker/moonraker
+PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner baseline --source vendor/moonraker/moonraker
 
 # fail-on-drift gate (CI): exit 1 if the surface changed vs the committed baseline
-PYTHONPATH=tools python3 -m api_scanner diff --source vendor/moonraker/moonraker \
+PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner diff --source vendor/moonraker/moonraker \
   --baseline api/api_surface.json
 
 # coverage of phobos vs the baseline (exit 0 == 100%)

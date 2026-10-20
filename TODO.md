@@ -116,8 +116,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - Dump the API phobos actually registers: `zig build && zig-out/bin/phobos --dump-api`
 - **Coverage gate** (the "are we at 100%?" check):
   ```
-  zig build && zig-out/bin/phobos --dump-api > /tmp/d.json
-  PYTHONPATH=tools python3 -m api_scanner coverage --baseline api/api_surface.json --phobos /tmp/d.json
+  mkdir -p .scratch && zig build && zig-out/bin/phobos --dump-api > .scratch/api-dump.json
+  PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/api-dump.json
   ```
   Exit 0 = 100%. Or just `tools/coverage.sh`.
 
