@@ -523,6 +523,7 @@ pub const KlippyCtx = struct {
     }
 
     fn handshakeCompleteLocked(self: *KlippyCtx, io: std.Io) void {
+        _ = self.setState(self.state);
         if (self.on_state) |callback| if (self.event_ctx) |ctx| callback(ctx, io, self.state);
         if (self.state == .ready) self.bus.emitLocked(io, notify.names.klippy_ready, .null) catch {};
     }
@@ -961,19 +962,19 @@ pub const KlippyCtx = struct {
         try self.writeFrame(io, frame);
     }
 
-    /// Set `state` and mirror it into `server.info`, where `klippy_connected`
-    /// means the socket is open (Moonraker `is_connected`). Returns false when
-    /// unchanged.
+    /// Publish ready only after the RPC gate opens; initial subscribers still
+    /// see the internal ready state. `klippy_connected` includes startup and
+    /// shutdown, matching Moonraker's open-socket semantics.
     fn setState(self: *KlippyCtx, new_state: State) bool {
-        if (self.state == new_state) return false;
+        const changed = self.state != new_state;
         self.state = new_state;
         if (self.server_info) |info| {
             if (self.io) |io| info.state_mutex.lockUncancelable(io);
             defer if (self.io) |io| info.state_mutex.unlock(io);
             info.klippy_connected = new_state != .disconnected;
-            info.klippy_state = @tagName(new_state);
+            info.klippy_state = if (new_state == .ready and !self.isConnected()) "startup" else @tagName(new_state);
         }
-        return true;
+        return changed;
     }
 
     // -----------------------------------------------------------------------
@@ -1315,6 +1316,121 @@ test "setState mirrors Moonraker klippy_connected and klippy_state" {
     try std.testing.expectEqualStrings("error", info.klippy_state);
     try std.testing.expect(ctx.setState(.disconnected));
     try std.testing.expect(!info.klippy_connected);
+    try std.testing.expect(ctx.setState(.ready));
+    try std.testing.expectEqual(State.ready, ctx.state);
+    try std.testing.expect(info.klippy_connected);
+    try std.testing.expectEqualStrings("startup", info.klippy_state);
+    ctx.connected.store(true, .release);
+    try std.testing.expect(!ctx.setState(.ready));
+    try std.testing.expectEqualStrings("ready", info.klippy_state);
+}
+
+test "fuzz state publication never exposes ready before the proxy gate opens" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const nb = try NullBus.init(std.testing.allocator);
+            defer nb.deinit(std.testing.allocator);
+            var ctx = try KlippyCtx.init(std.testing.allocator, &nb.bus);
+            defer ctx.deinit();
+            var info: methods.ServerInfo = .{};
+            ctx.server_info = &info;
+            const states = std.enums.values(State);
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            for (bytes) |byte| {
+                ctx.connected.store(byte & 1 != 0, .release);
+                const state = states[byte % states.len];
+                const changed = ctx.state != state;
+                try std.testing.expectEqual(changed, ctx.setState(state));
+                try std.testing.expectEqual(state, ctx.state);
+                try std.testing.expectEqual(state != .disconnected, info.klippy_connected);
+                if (std.mem.eql(u8, info.klippy_state, "ready")) try std.testing.expect(ctx.isConnected());
+                if (state == .ready and !ctx.isConnected()) try std.testing.expectEqualStrings("startup", info.klippy_state);
+            }
+        }
+    }.run, .{});
+}
+
+test "stalled handshake reports startup until HTTP proxy requests are available" {
+    const TestServer = @import("../testutil/server.zig").TestServer;
+    const Peer = struct {
+        listener: net.Server,
+        stalled: std.Io.Event = .unset,
+        resume_handshake: std.Io.Event = .unset,
+        proxy_seen: std.Io.Event = .unset,
+
+        fn run(self: *@This(), io: std.Io) !void {
+            const stream = try self.listener.accept(io);
+            defer stream.close(io);
+            var deadline: SocketDeadline = .{ .base_io = io, .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(10), .clock = .awake }) } };
+            var rbuf: [4096]u8 = undefined;
+            var reader = stream.reader(deadline.io(), &rbuf);
+            var writer = stream.writer(deadline.io(), &.{});
+            var stalled = false;
+            for (0..100) |_| {
+                const payload = try framing.read(std.heap.smp_allocator, &reader.interface);
+                defer std.heap.smp_allocator.free(payload);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.smp_allocator, payload, .{});
+                defer parsed.deinit();
+                const method = parsed.value.object.get("method").?.string;
+                const id = parsed.value.object.get("id").?.string;
+                if (std.mem.eql(u8, method, "gcode/subscribe_output")) {
+                    self.stalled.set(io);
+                    try self.resume_handshake.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+                    stalled = true;
+                }
+                if (stalled and std.mem.eql(u8, method, "objects/query")) self.proxy_seen.set(io);
+                const result: []const u8 = if (std.mem.eql(u8, method, "info"))
+                    "{\"state\":\"ready\"}"
+                else if (std.mem.eql(u8, method, "objects/query"))
+                    "{\"eventtime\":1,\"status\":{\"webhooks\":{\"state\":\"ready\"}}}"
+                else
+                    "{}";
+                var response: [256]u8 = undefined;
+                try framing.write(&writer.interface, try std.fmt.bufPrint(&response, "{{\"id\":\"{s}\",\"result\":{s}}}", .{ id, result }));
+                try writer.interface.flush();
+            }
+            return error.TooManyRequests;
+        }
+    };
+    const server = try TestServer.init(std.testing.allocator);
+    defer server.stop();
+    const io = server.io;
+    var socket_buf: [128]u8 = undefined;
+    const path = try tmpSocketPath(&socket_buf, &server.tmp, "stalled.sock");
+    var peer: Peer = .{ .listener = try (try net.UnixAddress.init(path)).listen(io, .{}) };
+    defer peer.listener.deinit(io);
+    var peer_task = try io.concurrent(Peer.run, .{ &peer, io });
+    defer _ = peer_task.cancel(io) catch {};
+    const ctx = server.app.klippy_ctx;
+    ctx.uds_path = path;
+    try ctx.start();
+    defer ctx.stop(io);
+    try peer.stalled.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const initial = try std.json.parseFromSliceLeaky(std.json.Value, a, try server.get(a, "/server/info"), .{});
+    try std.testing.expectEqual(State.ready, ctx.state);
+    try std.testing.expect(initial.object.get("result").?.object.get("klippy_connected").?.bool);
+    try std.testing.expectEqualStrings("startup", initial.object.get("result").?.object.get("klippy_state").?.string);
+    const unavailable = try std.json.parseFromSliceLeaky(std.json.Value, a, try server.get(a, "/printer/objects/query?webhooks"), .{});
+    try std.testing.expectEqual(@as(i64, 503), unavailable.object.get("error").?.object.get("code").?.integer);
+    peer.resume_handshake.set(io);
+    var ready = false;
+    for (0..200) |_| {
+        const info = try std.json.parseFromSliceLeaky(std.json.Value, a, try server.get(a, "/server/info"), .{});
+        if (std.mem.eql(u8, info.object.get("result").?.object.get("klippy_state").?.string, "ready")) {
+            ready = true;
+            try std.testing.expect(ctx.isConnected());
+            break;
+        }
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try std.testing.expect(ready);
+    const available = try std.json.parseFromSliceLeaky(std.json.Value, a, try server.get(a, "/printer/objects/query?webhooks"), .{});
+    try std.testing.expectEqualStrings("ready", available.object.get("result").?.object.get("status").?.object.get("webhooks").?.object.get("state").?.string);
+    try std.testing.expect(peer.proxy_seen.isSet());
 }
 
 fn statusParams(a: std.mem.Allocator, webhooks_state: []const u8) !std.json.Value {

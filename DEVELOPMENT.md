@@ -106,6 +106,10 @@ These differ from older Zig docs:
 
 ## 4. The concurrency model (read before touching handlers or notifications)
 
+Klippy keeps its internal ready state while seeding initial subscriptions.
+During a ready handshake, `server.info` reports startup until proxy requests are
+available, then publishes ready. Its connected flag includes startup and shutdown.
+
 - Stateful handlers run through the **single Core mutex**. Selected read handlers
   use their own synchronization; blocking network and process work must release
   Core and reacquire it before reading or changing shared component state.

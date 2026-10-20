@@ -595,3 +595,61 @@ startup readiness race was observed and is verified in the next entry. No
 motion, heating, print start, printer restart, firmware restart, power/service
 action, real update or production replacement was performed. Probe stops so
 far preserved boot ID `6213a6c1-a3b6-4b38-b637-5aa9a116a117`.
+
+## 2026-10-21: Klippy readiness and final printer checks
+
+Requested by the user: check the new code on the real printer. A fresh probe
+reported `server.info` ready before the handshake opened the proxy request
+gate, so its first object query returned 503. `KlippyCtx.setState` now publishes
+startup while its internal ready state seeds subscriptions. Handshake completion
+republishes ready after the existing atomic proxy gate opens. State-change return
+values and startup/shutdown connection semantics are retained. The behavior is
+documented in `DEVELOPMENT.md`.
+
+A deterministic Unix-peer regression pauses the gcode-output subscription. It
+failed before the fix because HTTP reported ready during the pause; afterward
+it verifies startup with a gated proxy, then ready with a successful object
+query. Unit assertions cover republishing an unchanged internal state, and a
+bounded fuzz test checks state publication across gate changes. The combined
+USB/readiness source passed the full standalone Debug suite in an isolated
+checkout: 1717 passed, 1 skipped, 0 failed; 325 bounded fuzz harnesses. The skip
+requires the separately gated real-Klippy fixture. Source and build files were
+compared with the integration tree before building its hardware artifact.
+
+Native Debug and static Cortex-A7 ARM ReleaseSmall builds passed. The independent
+and integration ARM artifacts have the same SHA-256:
+`98ee29e4a7f044924e1eb2f3b7a30c633393f896c23c14893029084adb70d67b`.
+The integration artifact ran inside the Forge-X chroot on loopback port 7126,
+using the copied database and owned data described above. A cold-start poll
+observed startup at 1.535 seconds and ready at 2.346 seconds; the first object
+query after ready succeeded without retrying a 503. Times include probe launch
+and polling and are not a performance comparison.
+
+All 11 final hardware check groups passed: readiness/component sets, system
+identity and directory capacity, USB/video/serial/CAN enumeration, 100 concurrent
+reads at concurrency two, four temperature stores, normal/fragmented/raw
+WebSockets, extension-agent RPC/events/cleanup, owned thumbnail/ZIP fixtures,
+error responses, a real G-code download and final readiness. The download again
+matched production's 3376096 bytes and SHA-256. The probe log contained startup
+messages only. An end-of-run process snapshot showed 3436 KiB RSS, 18928 KiB
+virtual size and 12 threads; this is one snapshot, not a memory benchmark.
+
+API 1.5.0, the phobos identity and the non-Python version string remain intentional.
+Missing CAN still returns an empty list. The kernel's missing inotify support is
+an environment limit; its actual configuration selects observer `none`. Optional
+hardware integrations absent from the real 26-component configuration were not
+physically exercised. No vendor Moonraker comparison or update refresh was run.
+API name coverage passed at 123/123 endpoints, 130/130 methods and 27/27
+notifications. Native Debug was restored, formatting and diff checks passed,
+and unavailable Graphify was skipped without changing its generated graph.
+
+The owned probe was stopped, its three live-root symlinks were explicitly
+unlinked before removing its private directory, and the SSH tunnel was closed.
+Port 7126 had no listener. Production PID 6532 remained ready on 7125, with
+26 components, no warnings or failures, last print complete and heater targets
+zero (extruder 30.55 C, bed 29.44 C). Boot ID remained
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117`. The already-running executable and the
+installed executable both report package 0.1.2 but have different hashes; neither
+was changed here and restart behavior was not tested. `/tmp` still had 3.3 MiB
+free. No production replacement, restart, motion, heating, print start, power
+action, real update, live database write, push or tag was performed.
