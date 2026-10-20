@@ -2623,7 +2623,7 @@ test "setConfig [paneldue] keeps checksums on for a malformed enable_checksum" {
     try std.testing.expect(app.paneldue.enable_checksum);
 }
 
-test "setConfig rejects a bad PanelDue baud without retaining freed config" {
+test "setConfig preserves a rejected PanelDue config until teardown" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -2634,9 +2634,10 @@ test "setConfig rejects a bad PanelDue baud without retaining freed config" {
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     try std.testing.expectError(error.UnsupportedBaud, app.setConfig(io, cfg_path));
-    try std.testing.expect(app.cfg == null);
-    try std.testing.expect(app.info.cfg == null);
-    try std.testing.expect(app.info.config_file_path == null);
+    const cfg = app.cfg.?;
+    try std.testing.expect(app.info.cfg.? == cfg);
+    try std.testing.expectEqualStrings("123456", cfg.get("paneldue", "baud").?);
+    try std.testing.expectEqualStrings(cfg_path, app.info.config_file_path.?);
 }
 
 test "setConfig loads an analysis platform and a notifier record" {

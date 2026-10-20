@@ -413,3 +413,67 @@ The before-fix regression failed on the stale published parser. After the fix,
 98 config-focused tests passed with 10 bounded fuzz harnesses. The full Debug
 standalone suite passed: 1474 passed, 1 skipped, 0 failed; 274 bounded fuzz
 harnesses. `zig fmt` and `git diff --check` passed. No printer was contacted.
+
+## 2026-10-21: remaining component and file workflows
+
+Requested by the user: finish the TODO list. The integrated source through
+`a62f570` adds these component behaviors and their regression tests:
+
+- Extension agents register connections, exchange correlated requests and
+  events, and forward dynamically registered Klippy methods. Requests use
+  connection IDs, deadlines and disconnect cleanup. Remote Klippy calls now
+  have 16 active tasks and a separate 16-entry pending queue; shutdown cancels,
+  joins and frees both. WebSocket fragment assembly now accepts bounded
+  fragmented messages, including interleaved control frames. This supersedes
+  the fragmented-message limitation recorded above.
+- MQTT supports 3.1, 3.1.1 and 5, selected Klippy status topics, credential
+  templates and password files, acknowledged QoS publication, unsubscribe on
+  the final waiter, reconnect subscription windows and bounded offline writes.
+  Sensors replace message readings, expose configured parameter/history
+  metadata and sample at 1 Hz. Announcements read local development feeds and
+  schedule notifications after 50 ms. Their workers have explicit ownership.
+- Spoolman tracks extrusion high-water marks and tool changes, validates the
+  active spool on connection and reports bounded pending usage with retries.
+  Pending reports remain memory-only; a lost response can cause a retry after
+  the remote service accepted a report, matching the vendor's limitation.
+- Power options, bounded HTTP templates, GPIO buttons, service binding
+  validation and timer APIs are implemented. WLED queries state before
+  initialization, retries failed initialization and retains serial readers.
+  TD1 performs the errors-file handshake and retains one reader per device,
+  with device reboot handshakes and UTC timestamps. PanelDue has a serial
+  command queue, responses, file listings, macros and status updates.
+- File ZIP creation streams CRC-checked stored or DEFLATE ZIP32 entries into
+  an atomic destination. Native directory observation reports external changes
+  and invalidates metadata. Requested uploads and OctoPrint selections can
+  queue busy jobs, and uploads recheck the loaded-file guard before replacement.
+  ZIP size/entry limits, shallow directory selection and fail-closed observer
+  exhaustion are documented in `docs/FILE_MANAGEMENT.md` and `docs/STDLIB.md`.
+- Web update archives download into private bounded staging, validate paths,
+  types and CRCs, then replace or roll back source directories. Persistent files
+  survive replacement, and dotted updater names have distinct encoded cache
+  keys. Rollback failures complete progress notifications. The two-rename
+  replacement gap is documented; it is not a power-loss transaction.
+- USB names resolve from a bounded, conditional `usb.ids` cache, including
+  Latin-1 input and class names. Cache metadata fingerprints prevent a partial
+  write from authorizing an incorrect 304 response. Downloads start only from
+  daemon startup. Service bindings reject unavailable and self-owned services.
+
+Evidence: commits `74e9c4d` through `a62f570`, the pinned component sources,
+and native HTTP/WebSocket, temporary filesystem/repository, PTY, injected
+service/GPIO and allocation-failure fixtures. The merged suite first exposed
+one stale PanelDue test expecting the earlier configuration ownership rule;
+the assertion now checks that the rejected parser and borrowed values remain
+readable until teardown. Two stale source comments were corrected too.
+
+The corrected full Debug suite passed: 1686 passed, 1 skipped, 0 failed;
+318 bounded fuzz harnesses. Python scanner/client/helper tests passed 88/88;
+measurement helper smoke tests, ShellCheck, helper Ruff and mypy passed.
+`zig fmt --check` and `git diff --check` passed. Each component also passed
+its isolated host suite and static ARM build; final daemon integration and
+the independent clean-checkout gate are recorded separately below.
+
+GPIO exception clarification: the earlier host line-2 request configured
+input with both-edge detection and read its value before closing the handle.
+No output-value write was issued; physical effects were not measured. Later
+GPIO tests use temporary roots or injected events. No printer, external broker,
+real update, board restart, deployment or live printer database was used.

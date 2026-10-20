@@ -302,9 +302,7 @@ pub const DataStoreCtx = struct {
         }
     }
 
-    /// Push a gcode response entry (type="response"). Production does not call
-    /// it yet: klippy_connection.zig emits notify_gcode_response without
-    /// recording it (TODO.md, Known Moonraker gaps).
+    /// Record a Klippy gcode response (type="response") before notification.
     pub fn pushGcodeResponse(self: *DataStoreCtx, message: []const u8, time: f64) !void {
         try self.gcode_ring.push(message, time, .response);
     }

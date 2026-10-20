@@ -27,7 +27,7 @@
 //! JSON-decoded, or as a string when it is not JSON. Invalid UTF-8 is rejected.
 //!
 //! Response shapes (mqtt.py): publish {"topic": t}, subscribe {"topic": t,
-//! "payload": p}. Known gaps are listed in TODO.md ("Known Moonraker gaps").
+//! "payload": p}. Configuration and protocol limits are in docs/MQTT.md.
 
 const std = @import("std");
 const webreq = @import("../json/params.zig");
