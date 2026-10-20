@@ -181,14 +181,17 @@ pub const ProxyEndpoint = struct {
         const self: *ProxyEndpoint = @ptrCast(@alignCast(ctx));
         const k = self.parent.klippy orelse return error.KlippyDisconnected;
         if (!k.isConnected()) return error.KlippyDisconnected;
+        // A subscription belongs to a WebSocket connection, whose transport
+        // handles it. Proxying a bare subscribe would replace phobos's own
+        // Klippy subscription (klippy_connection.py:622-626).
+        if (std.mem.eql(u8, self.endpoint, "objects/subscribe")) return error.NoSubscriptionConnection;
 
-        // objects/query and objects/subscribe take a Klippy `{"objects":{...}}`
-        // map. An HTTP GET arrives as flat query keys (?heater_bed&toolhead=pos),
-        // which queryParams turns into {"heater_bed":"","toolhead":"pos"} — wrong
-        // shape for Klippy. Translate to {"objects":{name: null | [subfields]}}
-        // (Moonraker PrinterObjects behaviour), unless already wrapped.
-        const wraps_objects = std.mem.eql(u8, self.endpoint, "objects/query") or
-            std.mem.eql(u8, self.endpoint, "objects/subscribe");
+        // objects/query takes a Klippy `{"objects":{...}}` map. An HTTP GET
+        // arrives as flat query keys (?heater_bed&toolhead=pos), which
+        // queryParams turns into {"heater_bed":"","toolhead":"pos"}. Translate
+        // to {"objects":{name: null | [subfields]}} (Moonraker PrinterObjects
+        // behaviour), unless already wrapped.
+        const wraps_objects = std.mem.eql(u8, self.endpoint, "objects/query");
         if (wraps_objects and params == .object and params.object.get("objects") == null) {
             var objects = try std.json.ObjectMap.init(alloc, &.{}, &.{});
             var it = params.object.iterator();
@@ -228,9 +231,7 @@ pub const ProxyEndpoint = struct {
         if (std.mem.eql(u8, self.endpoint, "objects/list")) {
             return filterObjectList(alloc, result, self.parent.hidden_objects);
         }
-        if (std.mem.eql(u8, self.endpoint, "objects/query") or std.mem.eql(u8, self.endpoint, "objects/subscribe")) {
-            return filterHiddenQuery(alloc, result, self.parent.hidden_objects);
-        }
+        if (wraps_objects) return filterHiddenQuery(alloc, result, self.parent.hidden_objects);
         return result;
     }
 };
@@ -261,27 +262,11 @@ const proxy_specs = [_]ProxySpec{
 
 /// Sanitize a print filename for embedding in a Klippy `SDCARD_PRINT_FILE
 /// FILENAME="..."` gcode command: strip a single leading '/', then escape any
-/// embedded double-quotes (`"` → `\"`) so the quoted argument stays well-formed.
-/// Returns a slice owned by `alloc`; when no escaping is needed it may alias the
-/// (slash-stripped) input. Pure and total — fuzzed below.
-fn sanitizePrintFilename(alloc: std.mem.Allocator, filename_in: []const u8) ![]const u8 {
-    var filename = filename_in;
-    if (filename.len > 0 and filename[0] == '/') filename = filename[1..];
-    if (std.mem.indexOfScalar(u8, filename, '"') == null) return filename;
-    // Escape embedded double-quotes: " → \"
-    var buf = try alloc.alloc(u8, filename.len + 16);
-    var i: usize = 0;
-    for (filename) |c| {
-        if (c == '"') {
-            if (i + 2 > buf.len) buf = try alloc.realloc(buf, buf.len * 2);
-            buf[i] = '\\';
-            i += 1;
-        }
-        if (i >= buf.len) buf = try alloc.realloc(buf, buf.len * 2);
-        buf[i] = c;
-        i += 1;
-    }
-    return buf[0..i];
+/// embedded double-quotes (`"` → `\"`), as Moonraker's `filename.replace`.
+/// Returns a slice owned by `alloc`.
+fn sanitizePrintFilename(alloc: std.mem.Allocator, filename: []const u8) ![]u8 {
+    const stripped = if (std.mem.startsWith(u8, filename, "/")) filename[1..] else filename;
+    return std.mem.replaceOwned(u8, alloc, stripped, "\"", "\\\"");
 }
 
 /// POST /printer/print/start → printer.print.start
@@ -579,6 +564,24 @@ test "ProxyEndpoint.handle: returns KlippyDisconnected without klippy" {
     // Object params with an injected _method marker.
     const p = try std.json.parseFromSlice(std.json.Value, a, "{\"_method\":\"GET\",\"objects\":{}}", .{});
     try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), p.value, a));
+}
+
+test "ProxyEndpoint.handle: connectionless objects/subscribe is refused, never proxied" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // No io and no stream: a proxied request would fail with KlippyDisconnected.
+    var k = KlippyCtx{ .gpa = testing.allocator, .bus = undefined, .uds_path = "" };
+    k.connected.store(true, .release);
+    var ctx = PrinterCtx{ .klippy = &k };
+    var pe = ProxyEndpoint{ .parent = &ctx, .endpoint = "objects/subscribe" };
+    for ([_][]const u8{ "{\"objects\":{\"toolhead\":null}}", "{\"_method\":\"GET\",\"toolhead\":\"position\"}", "null" }) |raw| {
+        const p = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
+        try testing.expectError(error.NoSubscriptionConnection, ProxyEndpoint.handle(@ptrCast(&pe), p.value, a));
+    }
+    // Other endpoints still proxy.
+    pe = .{ .parent = &ctx, .endpoint = "objects/query", .off_core = true };
+    try testing.expectError(error.KlippyDisconnected, ProxyEndpoint.handle(@ptrCast(&pe), .null, a));
 }
 
 test "fuzz ProxyEndpoint.handle: arbitrary params never crash, always KlippyDisconnected" {

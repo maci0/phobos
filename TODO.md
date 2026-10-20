@@ -437,3 +437,4 @@ Keep the coverage gate at 100% and the full suite green after every step.
 ## Known Moonraker gaps (2026-10-20 audit)
 
 - `printer.objects.subscribe` over WebSocket adds to one aggregate set and returns the unpruned aggregate status; Moonraker replaces the connection's subscription and prunes the response (`klippy_connection.py:619-702`). Needs `transport/ws.zig` to pass the requested objects and connection to `KlippyCtx` (`src/components/klippy_connection.zig` `subscribeAggregate`).
+- Connectionless `printer.objects.subscribe` (HTTP, `/server/jsonrpc`) is refused with `error.NoSubscriptionConnection`, which the transports report as 500 instead of Moonraker's 400 "No connection associated with subscription request" (`src/components/printer.zig` `ProxyEndpoint.handle`).
