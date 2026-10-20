@@ -1245,16 +1245,11 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 
     notifyLine(ctx, alloc, app, proc_id, false, "Rolling Back {s}...", .{app});
     if (src.type == .web or src.type == .zip) {
-        const io = ctx.io orelse return error.IoUnavailable;
-        {
-            try ctx.commands.lock(ctx.clock_io);
-            defer ctx.commands.unlock(ctx.clock_io);
-            if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
-            const target = try net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment());
-            defer target.close(io);
-            try net_update.rollback(alloc, io, target, src);
-        }
-        try restartServices(ctx, alloc, src);
+        rollbackNet(ctx, alloc, src) catch |err| {
+            notifyLine(ctx, alloc, app, proc_id, false, "Error Rolling Back {s}", .{app});
+            notifyLine(ctx, alloc, app, proc_id, true, "{s}", .{@errorName(err)});
+            return err;
+        };
         notifyLine(ctx, alloc, app, proc_id, true, "{s} rollback finished", .{app});
         return .{ .string = "ok" };
     }
@@ -1274,10 +1269,27 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
             notifyLine(ctx, alloc, app, proc_id, true, "GitFailed", .{});
             return error.GitFailed;
         }
-        if (src.repo_path.len > 0) try restartServices(ctx, alloc, src);
+        if (src.repo_path.len > 0) restartServices(ctx, alloc, src) catch |err| {
+            notifyLine(ctx, alloc, app, proc_id, false, "Error Rolling Back {s}", .{app});
+            notifyLine(ctx, alloc, app, proc_id, true, "{s}", .{@errorName(err)});
+            return err;
+        };
     }
     notifyLine(ctx, alloc, app, proc_id, true, "{s} rollback finished", .{app});
     return .{ .string = "ok" };
+}
+
+fn rollbackNet(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    const io = ctx.io orelse return error.IoUnavailable;
+    {
+        try ctx.commands.lock(ctx.clock_io);
+        defer ctx.commands.unlock(ctx.clock_io);
+        if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+        const target = try net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment());
+        defer target.close(io);
+        try net_update.rollback(alloc, io, target, src);
+    }
+    try restartServices(ctx, alloc, src);
 }
 
 // ---------------------------------------------------------------------------
@@ -2354,10 +2366,11 @@ test "update failures send Moonraker's completion lines" {
 
     var repo = try TestRepo.init();
     defer repo.deinit();
-    const sources = [_]Source{
+    var sources = [_]Source{
         .{ .name = "system", .type = .system },
         // origin/missing does not exist, so the reset after the fetch fails.
         .{ .name = "moonraker", .type = .git_repo, .repo_path = repo.path, .branch = "missing", .rollback_ref = "missing" },
+        .{ .name = "client", .type = .zip, .repo_path = repo.path },
     };
     var dummy: u8 = 0;
     var ctx: UpdateCtx = .{ .clock_io = io, .gpa = testing.allocator, .sources = &sources, .bus = &bus, .io = io, .shell = Rec.failShell, .shell_ctx = &dummy };
@@ -2380,6 +2393,24 @@ test "update failures send Moonraker's completion lines" {
     l = try rec.line(a, 0);
     try testing.expectEqualStrings("GitFailed", l[0]);
     try testing.expect(l[1]);
+
+    try testing.expectError(error.GitDirectory, handleRollback(&ctx, try objParams(a, "{\"name\":\"client\"}"), a));
+    l = try rec.line(a, 1);
+    try testing.expectEqualStrings("Error Rolling Back client", l[0]);
+    try testing.expect(!l[1]);
+    l = try rec.line(a, 0);
+    try testing.expectEqualStrings("GitDirectory", l[0]);
+    try testing.expect(l[1]);
+
+    sources[1].rollback_ref = "HEAD";
+    sources[1].managed_services = &.{"klipper"};
+    ctx.restart_service = Rec.failShell;
+    ctx.service_ctx = &dummy;
+    try testing.expectError(error.ShellFailed, handleRollback(&ctx, try objParams(a, "{\"name\":\"moonraker\"}"), a));
+    l = try rec.line(a, 0);
+    try testing.expectEqualStrings("ShellFailed", l[0]);
+    try testing.expect(l[1]);
+    try testing.expect(!ctx.busy.load(.acquire));
 }
 
 test "refresh with a name fetches only that source" {

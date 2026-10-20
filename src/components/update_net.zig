@@ -684,6 +684,11 @@ test "client handlers refresh cached releases install restart and roll back thro
     try testing.expect(!ctx.busy.load(.acquire));
     restart.fail = false;
     _ = try manager.handleRollback(&ctx, params, alloc);
+    restart.fail = true;
+    try testing.expectError(error.MockServiceFailure, manager.handleRollback(&ctx, params, alloc));
+    try testing.expect(!ctx.busy.load(.acquire));
+    restart.fail = false;
+    _ = try manager.handleRollback(&ctx, params, alloc);
     const final = try manager.handleStatus(&ctx, .null, alloc);
     try testing.expectEqualStrings("1.0", final.object.get("version_info").?.object.get("client").?.object.get("version").?.string);
 }
@@ -735,18 +740,25 @@ test "fuzz install refusal and rollback preserve validated directories" {
             const alloc = arena.allocator();
             const target = try Target.open(alloc, testing.io, try temp.dir.realPathFileAlloc(testing.io, "client", alloc), null);
             defer target.close(testing.io);
+            const manager = @import("update_manager.zig");
+            var source = fixture_source;
+            source.repo_path = try temp.dir.realPathFileAlloc(testing.io, "client", alloc);
+            var ctx: manager.UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .io = testing.io, .bus = null, .sources = &.{source} };
+            defer ctx.deinit();
+            const params = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{\"name\":\"client\"}", .{});
             try testing.expectError(error.InvalidRelease, install(alloc, testing.io, target, fixture_source, .{ .version = "2.0", .url = "file:///forbidden" }));
             if (smith.value(bool)) {
                 try target.parent.createDir(testing.io, target.backup, .default_dir);
                 const backup = try target.parent.openDir(testing.io, target.backup, .{});
                 defer backup.close(testing.io);
                 try backup.writeFile(testing.io, .{ .sub_path = "release_info.json", .data = fixture_v2 });
-                try rollback(alloc, testing.io, target, fixture_source);
+                _ = try manager.handleRollback(&ctx, params, alloc);
                 try testing.expectEqualStrings("2.0", (try target.read(alloc, testing.io, fixture_source)).version);
             } else {
-                try testing.expectError(error.FileNotFound, rollback(alloc, testing.io, target, fixture_source));
+                try testing.expectError(error.FileNotFound, manager.handleRollback(&ctx, params, alloc));
                 try testing.expectEqualStrings("1.0", (try target.read(alloc, testing.io, fixture_source)).version);
             }
+            try testing.expect(!ctx.busy.load(.acquire));
         }
     }.run, .{});
 }
