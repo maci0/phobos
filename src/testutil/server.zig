@@ -51,6 +51,10 @@ pub const TestServer = struct {
     /// Datadir and Klippy simulator socket. Deleted by `stop`.
     tmp: std.testing.TmpDir,
 
+    /// Thread-safe allocator for the App, so handler leaks and double frees
+    /// fail the test. `stop` checks it after `App.deinit`.
+    app_gpa: std.heap.DebugAllocator(.{}),
+
     /// Optional Klippy simulator for end-to-end bridge testing.
     klippy_sim: ?*klippy_sim_mod.KlippySim = null,
 
@@ -75,8 +79,15 @@ pub const TestServer = struct {
 
         self.klippy_sim = null;
         self.alloc = alloc;
+        self.app_gpa = .init;
+        // The leak report on this error path is logged by the allocator itself.
+        errdefer _ = self.app_gpa.deinit();
         self.threaded = try alloc.create(std.Io.Threaded);
-        self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+        errdefer alloc.destroy(self.threaded);
+        // Handlers run on the deployed handler stack size, so a stack
+        // regression fails here instead of only on the printer.
+        self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = ioz.Listener.handler_stack_size });
+        errdefer self.threaded.deinit();
         self.io = self.threaded.io();
 
         self.tmp = std.testing.tmpDir(.{});
@@ -86,10 +97,8 @@ pub const TestServer = struct {
 
         self.app = try alloc.create(app_mod.App);
         errdefer alloc.destroy(self.app);
-        // The server runs on other threads. Zig 0.17's testing allocator is
-        // SafeAllocator; sharing it with those threads deadlocks once a
-        // handler notifies a connection while the test thread is allocating.
-        self.app.* = try app_mod.App.init(std.heap.smp_allocator, self.io, data_path);
+        self.app.* = try app_mod.App.init(self.app_gpa.allocator(), self.io, data_path);
+        errdefer self.app.deinit(self.io);
 
         // Prevent tests from accidentally running real systemctl/reboot/shutdown.
         self.app.setMachineRunCmdFn(mockRunCmd, @ptrCast(self));
@@ -125,11 +134,6 @@ pub const TestServer = struct {
         return self.app.info;
     }
 
-    /// Expose the Connections registry so integration tests can inspect state.
-    pub fn connsRef(self: *TestServer) *@import("../server/connections.zig").Connections {
-        return self.app.conns;
-    }
-
     /// Broadcast a notification to every connected client via the app's bus.
     pub fn emit(self: *TestServer, method: []const u8, params: std.json.Value) !void {
         return self.app.bus.emit(self.io, method, params);
@@ -148,11 +152,10 @@ pub const TestServer = struct {
         // Point the Klippy connection context at the simulator's socket.
         self.app.klippy_ctx.uds_path = sim.socket_path;
 
+        // start() listens before returning, so the bridge's connect queues in
+        // the backlog even if the sim thread has not reached accept yet.
         try sim.start();
         errdefer sim.stop();
-
-        // Ensure the sim thread is in accept() before the bridge connects.
-        std.Io.sleep(self.io, .{ .nanoseconds = 50_000_000 }, .real) catch {};
 
         // Start the background Klippy bridge task so it connects to the
         // simulator and runs the handshake.
@@ -191,6 +194,9 @@ pub const TestServer = struct {
         self.app.deinit(self.io);
         self.tmp.cleanup();
         self.threaded.deinit();
+        // The allocator logs each leak with its stack trace; an error log
+        // fails the test.
+        if (self.app_gpa.deinit() == .leak) std.log.err("TestServer: the App leaked memory", .{});
 
         const alloc = self.alloc;
         alloc.destroy(self.srv);
@@ -247,10 +253,9 @@ pub const TestServer = struct {
         return self.postJson(alloc, "/server/files/upload", b.written());
     }
 
-    /// Issue a DELETE request. Body is passed as JSON query params aren't supported
-    /// for DELETE in std.http.Client, so params must be embedded in the path as
-    /// query string (e.g. "?namespace=ns&key=k"), or pass null for bodyless DELETE.
-    pub fn deleteJson(self: *TestServer, alloc: std.mem.Allocator, path: []const u8, _: ?[]const u8) ![]u8 {
+    /// Issue a bodyless DELETE and return the owned response body. Parameters
+    /// go in the query string (e.g. "?namespace=ns&key=k").
+    pub fn delete(self: *TestServer, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
         return self.request(alloc, .DELETE, path, null);
     }
 
@@ -299,6 +304,24 @@ fn trustOnlyLoopback(ts: *TestServer, ips: *const [1]std.Io.net.IpAddress) void 
     ts.app.auth_ctx.trust_unknown_ip = false;
     ts.app.auth_ctx.trusted = .{ .ips = ips };
 }
+
+/// Connection writer that records every notification frame. Frames use
+/// smp_allocator, not the testing allocator: the write runs on a server thread
+/// while the test thread is inside std.http.Client.fetch, which holds the
+/// testing allocator. Sharing it deadlocks on Zig 0.17.
+const RecordWriter = struct {
+    frames: std.ArrayList([]u8) = .empty,
+    fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const dup = try std.heap.smp_allocator.dupe(u8, bytes);
+        errdefer std.heap.smp_allocator.free(dup);
+        try self.frames.append(std.heap.smp_allocator, dup);
+    }
+    fn deinit(self: *@This()) void {
+        for (self.frames.items) |f| std.heap.smp_allocator.free(f);
+        self.frames.deinit(std.heap.smp_allocator);
+    }
+};
 
 test "use_xheaders false ignores X-Real-Ip and X-Forwarded-For on the live server" {
     const alloc = std.testing.allocator;
@@ -356,12 +379,9 @@ test "Klippy task cancellation joins a stalled handshake" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
     defer ts.stop();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const base = try tmp.dir.realPathFileAlloc(ts.io, ".", alloc);
-    defer alloc.free(base);
-    const path = try std.fs.path.join(alloc, &.{ base, "klippy.sock" });
-    defer alloc.free(path);
+    // Relative to the cwd: an absolute checkout path can exceed `sun_path`.
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/stalled.sock", .{ std.testing.TmpDir.parent_dir_path, &ts.tmp.sub_path });
     var listener = try (try std.Io.net.UnixAddress.init(path)).listen(ts.io, .{});
     defer listener.deinit(ts.io);
     try ts.connectRealKlippy(path);
@@ -580,7 +600,7 @@ test "database: DELETE removes item; subsequent GET returns error shape" {
     defer alloc.free(post_body);
 
     // DELETE via query string (Zig HTTP client does not support DELETE + body).
-    const del_body = try ts.deleteJson(alloc, "/server/database/item?namespace=deltest&key=dk", null);
+    const del_body = try ts.delete(alloc, "/server/database/item?namespace=deltest&key=dk");
     defer alloc.free(del_body);
     const del_parsed = try std.json.parseFromSlice(std.json.Value, alloc, del_body, .{});
     defer del_parsed.deinit();
@@ -996,10 +1016,6 @@ test "access: POST /access/api_key regenerates the key" {
 // per-instance temp datadir.
 // ---------------------------------------------------------------------------
 
-fn resultOf(alloc: std.mem.Allocator, body: []const u8) !std.json.Parsed(std.json.Value) {
-    return std.json.parseFromSlice(std.json.Value, alloc, body, .{});
-}
-
 test "files: GET /server/files/roots lists gcodes/config/logs" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);
@@ -1007,7 +1023,7 @@ test "files: GET /server/files/roots lists gcodes/config/logs" {
 
     const body = try ts.get(alloc, "/server/files/roots");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const roots = p.value.object.get("result").?.array;
     try std.testing.expect(roots.items.len >= 3);
@@ -1029,7 +1045,7 @@ test "files: upload → list → metadata → download round-trip" {
     // Upload a gcode file.
     const up = try ts.uploadFile(alloc, "gcodes", null, "round.gcode", "G28\nG1 X1 Y2\n");
     defer alloc.free(up);
-    const up_p = try resultOf(alloc, up);
+    const up_p = try std.json.parseFromSlice(std.json.Value, alloc, up, .{});
     defer up_p.deinit();
     const up_res = up_p.value.object.get("result").?.object;
     const item = up_res.get("item").?.object;
@@ -1045,7 +1061,7 @@ test "files: upload → list → metadata → download round-trip" {
     // Metadata has the record shape.
     const md = try ts.get(alloc, "/server/files/metadata?filename=round.gcode");
     defer alloc.free(md);
-    const md_p = try resultOf(alloc, md);
+    const md_p = try std.json.parseFromSlice(std.json.Value, alloc, md, .{});
     defer md_p.deinit();
     const md_res = md_p.value.object.get("result").?.object;
     try std.testing.expectEqualStrings("round.gcode", md_res.get("filename").?.string);
@@ -1068,29 +1084,29 @@ test "files: encoded names work through metadata download and delete" {
     defer alloc.free(upload);
     const metadata = try ts.get(alloc, "/server/files/metadata?filename=hello+%2B%25%E9%87%8D.gcode");
     defer alloc.free(metadata);
-    const parsed = try resultOf(alloc, metadata);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, metadata, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings(name, parsed.value.object.get("result").?.object.get("filename").?.string);
     const path = "/server/files/gcodes/hello%20+%25%E9%87%8D.gcode";
     const download = try ts.get(alloc, path);
     defer alloc.free(download);
     try std.testing.expectEqualStrings("G1\n", download);
-    const deleted = try ts.deleteJson(alloc, path, null);
+    const deleted = try ts.delete(alloc, path);
     defer alloc.free(deleted);
-    const deletion = try resultOf(alloc, deleted);
+    const deletion = try std.json.parseFromSlice(std.json.Value, alloc, deleted, .{});
     defer deletion.deinit();
     try std.testing.expectEqualStrings("delete_file", deletion.value.object.get("result").?.object.get("action").?.string);
 
     for ([_][]const u8{ "/server/files/metadata?filename=%FF", "/server/files/gcodes/%FF" }) |invalid| {
         const body = try ts.get(alloc, invalid);
         defer alloc.free(body);
-        const failure = try resultOf(alloc, body);
+        const failure = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer failure.deinit();
         try std.testing.expectEqual(@as(i64, 400), failure.value.object.get("error").?.object.get("code").?.integer);
     }
     const traversal = try ts.get(alloc, "/server/files/gcodes/%2E%2E/%2E%2E/etc/passwd");
     defer alloc.free(traversal);
-    const denied = try resultOf(alloc, traversal);
+    const denied = try std.json.parseFromSlice(std.json.Value, alloc, traversal, .{});
     defer denied.deinit();
     try std.testing.expectEqual(@as(i64, 403), denied.value.object.get("error").?.object.get("code").?.integer);
 }
@@ -1104,7 +1120,7 @@ test "files: failed upload preserves an existing complete file" {
     const broken = "--broken\r\nContent-Disposition: form-data; name=\"file\"; filename=\"existing.gcode\"\r\n\r\npartial";
     const rejected = try ts.postJson(alloc, "/server/files/upload", broken);
     defer alloc.free(rejected);
-    const parsed = try resultOf(alloc, rejected);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, rejected, .{});
     defer parsed.deinit();
     try std.testing.expectEqual(@as(i64, 400), parsed.value.object.get("error").?.object.get("code").?.integer);
     const contents = try ts.get(alloc, "/server/files/gcodes/existing.gcode");
@@ -1127,12 +1143,12 @@ test "files: downloads and uploads reject an escaping directory link" {
     try std.Io.Dir.cwd().symLink(ts.io, target, link, .{});
     const download = try ts.get(alloc, "/server/files/gcodes/escape/outside.gcode");
     defer alloc.free(download);
-    const result = try resultOf(alloc, download);
+    const result = try std.json.parseFromSlice(std.json.Value, alloc, download, .{});
     defer result.deinit();
     try std.testing.expectEqual(@as(i64, 403), result.value.object.get("error").?.object.get("code").?.integer);
     const upload = try ts.uploadFile(alloc, "gcodes", "escape", "outside.gcode", "replacement\n");
     defer alloc.free(upload);
-    const failure = try resultOf(alloc, upload);
+    const failure = try std.json.parseFromSlice(std.json.Value, alloc, upload, .{});
     defer failure.deinit();
     try std.testing.expectEqual(@as(i64, 400), failure.value.object.get("error").?.object.get("code").?.integer);
     const contents = try outside.dir.readFileAlloc(ts.io, "outside.gcode", alloc, .limited(32));
@@ -1150,7 +1166,7 @@ test "files: get_directory shows uploaded file with disk_usage and root_info" {
 
     const body = try ts.get(alloc, "/server/files/directory?path=gcodes");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const res = p.value.object.get("result").?.object;
     try std.testing.expect(res.get("files").? == .array);
@@ -1172,14 +1188,14 @@ test "files: mkdir then rmdir via POST/DELETE /server/files/directory" {
         \\{"path":"gcodes/intdir"}
     );
     defer alloc.free(mk);
-    const mk_p = try resultOf(alloc, mk);
+    const mk_p = try std.json.parseFromSlice(std.json.Value, alloc, mk, .{});
     defer mk_p.deinit();
     try std.testing.expectEqualStrings("create_dir", mk_p.value.object.get("result").?.object.get("action").?.string);
 
     // DELETE via query string (Zig client has no DELETE body).
-    const rm = try ts.deleteJson(alloc, "/server/files/directory?path=gcodes/intdir", null);
+    const rm = try ts.delete(alloc, "/server/files/directory?path=gcodes/intdir");
     defer alloc.free(rm);
-    const rm_p = try resultOf(alloc, rm);
+    const rm_p = try std.json.parseFromSlice(std.json.Value, alloc, rm, .{});
     defer rm_p.deinit();
     try std.testing.expectEqualStrings("delete_dir", rm_p.value.object.get("result").?.object.get("action").?.string);
 }
@@ -1197,7 +1213,7 @@ test "files: move then copy then delete a file" {
         \\{"source":"gcodes/mc.gcode","dest":"gcodes/mc2.gcode"}
     );
     defer alloc.free(mv);
-    const mv_p = try resultOf(alloc, mv);
+    const mv_p = try std.json.parseFromSlice(std.json.Value, alloc, mv, .{});
     defer mv_p.deinit();
     try std.testing.expectEqualStrings("move_file", mv_p.value.object.get("result").?.object.get("action").?.string);
 
@@ -1206,14 +1222,14 @@ test "files: move then copy then delete a file" {
         \\{"source":"gcodes/mc2.gcode","dest":"gcodes/mc3.gcode"}
     );
     defer alloc.free(cp);
-    const cp_p = try resultOf(alloc, cp);
+    const cp_p = try std.json.parseFromSlice(std.json.Value, alloc, cp, .{});
     defer cp_p.deinit();
     try std.testing.expectEqualStrings("create_file", cp_p.value.object.get("result").?.object.get("action").?.string);
 
     // Delete (DELETE /server/files/<root>/<path>).
-    const del = try ts.deleteJson(alloc, "/server/files/gcodes/mc3.gcode", null);
+    const del = try ts.delete(alloc, "/server/files/gcodes/mc3.gcode");
     defer alloc.free(del);
-    const del_p = try resultOf(alloc, del);
+    const del_p = try std.json.parseFromSlice(std.json.Value, alloc, del, .{});
     defer del_p.deinit();
     try std.testing.expectEqualStrings("delete_file", del_p.value.object.get("result").?.object.get("action").?.string);
 }
@@ -1241,7 +1257,7 @@ test "machine: GET /machine/system_info returns full system_info shape with real
 
     const body = try ts.get(alloc, "/machine/system_info");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const si = p.value.object.get("result").?.object.get("system_info").?.object;
 
@@ -1268,7 +1284,7 @@ test "machine: GET /machine/proc_stats returns the proc_stats shape" {
 
     const body = try ts.get(alloc, "/machine/proc_stats");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?.object;
     for ([_][]const u8{ "moonraker_stats", "throttled_state", "cpu_temp", "network", "system_cpu_usage", "system_uptime", "system_memory", "websocket_connections" }) |k| {
@@ -1291,7 +1307,7 @@ test "machine: POST /machine/reboot and /machine/shutdown return ok ack" {
     for ([_][]const u8{ "/machine/reboot", "/machine/shutdown" }) |path| {
         const body = try ts.postJson(alloc, path, "{}");
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
     }
@@ -1307,7 +1323,7 @@ test "machine: POST /machine/services/* ack for allowed, error for disallowed" {
         \\{"service":"klipper"}
     );
     defer alloc.free(ok);
-    const okp = try resultOf(alloc, ok);
+    const okp = try std.json.parseFromSlice(std.json.Value, alloc, ok, .{});
     defer okp.deinit();
     try std.testing.expectEqualStrings("ok", okp.value.object.get("result").?.string);
 
@@ -1316,7 +1332,7 @@ test "machine: POST /machine/services/* ack for allowed, error for disallowed" {
         \\{"service":"sshd"}
     );
     defer alloc.free(bad);
-    const badp = try resultOf(alloc, bad);
+    const badp = try std.json.parseFromSlice(std.json.Value, alloc, bad, .{});
     defer badp.deinit();
     try std.testing.expect(badp.value.object.get("error") != null);
 }
@@ -1328,7 +1344,7 @@ test "machine: GET /machine/sudo/info shape" {
 
     const body = try ts.get(alloc, "/machine/sudo/info");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?.object;
     try std.testing.expect(r.get("sudo_access") != null); // null is allowed
@@ -1346,7 +1362,7 @@ test "machine: POST /machine/sudo/password acks success" {
         \\{"password":"hunter2"}
     );
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?.object;
     try std.testing.expectEqual(false, r.get("is_restarting").?.bool);
@@ -1360,19 +1376,19 @@ test "machine: GET /machine/peripherals/* return correct list shapes" {
 
     const usb = try ts.get(alloc, "/machine/peripherals/usb");
     defer alloc.free(usb);
-    const up = try resultOf(alloc, usb);
+    const up = try std.json.parseFromSlice(std.json.Value, alloc, usb, .{});
     defer up.deinit();
     try std.testing.expect(up.value.object.get("result").?.object.get("usb_devices").? == .array);
 
     const ser = try ts.get(alloc, "/machine/peripherals/serial");
     defer alloc.free(ser);
-    const sp = try resultOf(alloc, ser);
+    const sp = try std.json.parseFromSlice(std.json.Value, alloc, ser, .{});
     defer sp.deinit();
     try std.testing.expect(sp.value.object.get("result").?.object.get("serial_devices").? == .array);
 
     const vid = try ts.get(alloc, "/machine/peripherals/video");
     defer alloc.free(vid);
-    const vp = try resultOf(alloc, vid);
+    const vp = try std.json.parseFromSlice(std.json.Value, alloc, vid, .{});
     defer vp.deinit();
     const vres = vp.value.object.get("result").?.object;
     try std.testing.expect(vres.get("v4l2_devices").? == .array);
@@ -1380,7 +1396,7 @@ test "machine: GET /machine/peripherals/* return correct list shapes" {
 
     const can = try ts.get(alloc, "/machine/peripherals/canbus");
     defer alloc.free(can);
-    const cp = try resultOf(alloc, can);
+    const cp = try std.json.parseFromSlice(std.json.Value, alloc, can, .{});
     defer cp.deinit();
     try std.testing.expect(cp.value.object.get("result").?.object.get("can_uuids").? == .array);
 }
@@ -1396,7 +1412,7 @@ test "update: GET /machine/update/status returns version_info with configured so
 
     const body = try ts.get(alloc, "/machine/update/status");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?.object;
 
@@ -1426,24 +1442,9 @@ test "update: POST /machine/update/refresh returns status and emits notify_updat
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    // smp_allocator, not the testing allocator: this write runs on the server
-    // thread while the test thread is inside std.http.Client.fetch, which holds
-    // the testing allocator. Sharing it deadlocks on Zig 0.17.
-    const RecordWriter = struct {
-        frames: std.ArrayList([]u8) = .empty,
-        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            const dup = try std.heap.smp_allocator.dupe(u8, bytes);
-            try self.frames.append(std.heap.smp_allocator, dup);
-        }
-        fn deinit(self: *@This()) void {
-            for (self.frames.items) |f| std.heap.smp_allocator.free(f);
-            self.frames.deinit(std.heap.smp_allocator);
-        }
-    };
     var rec = RecordWriter{};
     defer rec.deinit();
-    const conns = ts.connsRef();
+    const conns = ts.conns;
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
@@ -1451,7 +1452,7 @@ test "update: POST /machine/update/refresh returns status and emits notify_updat
 
     const body = try ts.postJson(alloc, "/machine/update/refresh", "{}");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("result").?.object.get("version_info") != null);
 
@@ -1468,24 +1469,9 @@ test "update: POST /machine/update/upgrade emits notify_update_response and acks
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    // smp_allocator, not the testing allocator: this write runs on the server
-    // thread while the test thread is inside std.http.Client.fetch, which holds
-    // the testing allocator. Sharing it deadlocks on Zig 0.17.
-    const RecordWriter = struct {
-        frames: std.ArrayList([]u8) = .empty,
-        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            const dup = try std.heap.smp_allocator.dupe(u8, bytes);
-            try self.frames.append(std.heap.smp_allocator, dup);
-        }
-        fn deinit(self: *@This()) void {
-            for (self.frames.items) |f| std.heap.smp_allocator.free(f);
-            self.frames.deinit(std.heap.smp_allocator);
-        }
-    };
     var rec = RecordWriter{};
     defer rec.deinit();
-    const conns = ts.connsRef();
+    const conns = ts.conns;
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
@@ -1493,7 +1479,7 @@ test "update: POST /machine/update/upgrade emits notify_update_response and acks
 
     const body = try ts.postJson(alloc, "/machine/update/moonraker", "{}");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
 
@@ -1521,7 +1507,7 @@ test "update: per-target endpoints and full update ack ok" {
     }) |path| {
         const body = try ts.postJson(alloc, path, "{}");
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
     }
@@ -1536,7 +1522,7 @@ test "update: recover (git source) and rollback ack ok; recover non-git errors" 
         \\{"name":"klipper","hard":true}
     );
     defer alloc.free(rec);
-    const rp = try resultOf(alloc, rec);
+    const rp = try std.json.parseFromSlice(std.json.Value, alloc, rec, .{});
     defer rp.deinit();
     try std.testing.expectEqualStrings("ok", rp.value.object.get("result").?.string);
 
@@ -1544,7 +1530,7 @@ test "update: recover (git source) and rollback ack ok; recover non-git errors" 
         \\{"name":"moonraker"}
     );
     defer alloc.free(rb);
-    const rbp = try resultOf(alloc, rb);
+    const rbp = try std.json.parseFromSlice(std.json.Value, alloc, rb, .{});
     defer rbp.deinit();
     try std.testing.expectEqualStrings("ok", rbp.value.object.get("result").?.string);
 
@@ -1567,7 +1553,7 @@ test "power: GET /machine/device_power/devices returns empty list (no configured
 
     const body = try ts.get(alloc, "/machine/device_power/devices");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?;
     const arr = r.object.get("devices").?;
@@ -1582,7 +1568,7 @@ test "power: GET /machine/device_power/device?device=unknown returns error" {
 
     const body = try ts.get(alloc, "/machine/device_power/device?device=unknown");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") != null);
 }
@@ -1594,7 +1580,7 @@ test "power: POST /machine/device_power/on with no args returns error" {
 
     const body = try ts.postJson(alloc, "/machine/device_power/on", "{}");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     // Empty params → InvalidParams error envelope.
     try std.testing.expect(p.value.object.get("error") != null);
@@ -1607,7 +1593,7 @@ test "power: batch status with unknown device returns device_not_found" {
 
     const body = try ts.get(alloc, "/machine/device_power/status?ghost=1");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?;
     try std.testing.expectEqualStrings("device_not_found", r.object.get("ghost").?.string);
@@ -1618,25 +1604,9 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    // Register a recorder to capture notifications.
-    // smp_allocator, not the testing allocator: this write runs on the server
-    // thread while the test thread is inside std.http.Client.fetch, which holds
-    // the testing allocator. Sharing it deadlocks on Zig 0.17.
-    const RecordWriter = struct {
-        frames: std.ArrayList([]u8) = .empty,
-        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            const dup = try std.heap.smp_allocator.dupe(u8, bytes);
-            try self.frames.append(std.heap.smp_allocator, dup);
-        }
-        fn deinit(self: *@This()) void {
-            for (self.frames.items) |f| std.heap.smp_allocator.free(f);
-            self.frames.deinit(std.heap.smp_allocator);
-        }
-    };
     var rec = RecordWriter{};
     defer rec.deinit();
-    const conns = ts.connsRef();
+    const conns = ts.conns;
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
@@ -1650,7 +1620,7 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
         \\{"device":"test_psu","action":"on"}
     );
     defer alloc.free(on_body);
-    const on_p = try resultOf(alloc, on_body);
+    const on_p = try std.json.parseFromSlice(std.json.Value, alloc, on_body, .{});
     defer on_p.deinit();
     const r = on_p.value.object.get("result").?;
     try std.testing.expectEqualStrings("on", r.object.get("test_psu").?.string);
@@ -1671,7 +1641,7 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
         \\{"device":"test_psu","action":"toggle"}
     );
     defer alloc.free(tog_body);
-    const tog_p = try resultOf(alloc, tog_body);
+    const tog_p = try std.json.parseFromSlice(std.json.Value, alloc, tog_body, .{});
     defer tog_p.deinit();
     const tr = tog_p.value.object.get("result").?;
     try std.testing.expectEqualStrings("off", tr.object.get("test_psu").?.string);
@@ -1688,7 +1658,7 @@ test "wled: GET /machine/wled/strips returns empty strips map (no configured str
 
     const body = try ts.get(alloc, "/machine/wled/strips");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?;
     const strips = r.object.get("strips").?;
@@ -1703,7 +1673,7 @@ test "wled: GET /machine/wled/strip?strip=unknown returns error" {
 
     const body = try ts.get(alloc, "/machine/wled/strip?strip=ghost");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") != null);
 }
@@ -1715,7 +1685,7 @@ test "wled: batch status with unknown strip returns strip_not_found" {
 
     const body = try ts.get(alloc, "/machine/wled/status?ghost=1");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?;
     const ghost = r.object.get("ghost").?.object;
@@ -1733,7 +1703,7 @@ test "wled: on/off/toggle batch and single strip endpoints work correctly" {
     // GET strip → initial state "off".
     const get_body = try ts.get(alloc, "/machine/wled/strip?strip=test_strip");
     defer alloc.free(get_body);
-    const gp = try resultOf(alloc, get_body);
+    const gp = try std.json.parseFromSlice(std.json.Value, alloc, get_body, .{});
     defer gp.deinit();
     try std.testing.expectEqualStrings("off", gp.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
 
@@ -1742,7 +1712,7 @@ test "wled: on/off/toggle batch and single strip endpoints work correctly" {
         \\{"strip":"test_strip","action":"on"}
     );
     defer alloc.free(on_body);
-    const op = try resultOf(alloc, on_body);
+    const op = try std.json.parseFromSlice(std.json.Value, alloc, on_body, .{});
     defer op.deinit();
     try std.testing.expectEqualStrings("on", op.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
 
@@ -1751,7 +1721,7 @@ test "wled: on/off/toggle batch and single strip endpoints work correctly" {
         \\{"test_strip":null}
     );
     defer alloc.free(off_body);
-    const offp = try resultOf(alloc, off_body);
+    const offp = try std.json.parseFromSlice(std.json.Value, alloc, off_body, .{});
     defer offp.deinit();
     try std.testing.expectEqualStrings("off", offp.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
 
@@ -1760,7 +1730,7 @@ test "wled: on/off/toggle batch and single strip endpoints work correctly" {
         \\{"test_strip":null}
     );
     defer alloc.free(tog_body);
-    const tp = try resultOf(alloc, tog_body);
+    const tp = try std.json.parseFromSlice(std.json.Value, alloc, tog_body, .{});
     defer tp.deinit();
     try std.testing.expectEqualStrings("on", tp.value.object.get("result").?.object.get("test_strip").?.object.get("status").?.string);
 }
@@ -1776,7 +1746,7 @@ test "td1: GET /machine/td1/data returns status=ok and empty devices (no hardwar
 
     const body = try ts.get(alloc, "/machine/td1/data");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?;
     try std.testing.expectEqualStrings("ok", r.object.get("status").?.string);
@@ -1793,7 +1763,7 @@ test "td1: POST /machine/td1/reboot with serial returns serial_error (no hardwar
         \\{"serial":"SN-0001"}
     );
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const r = p.value.object.get("result").?;
     try std.testing.expectEqualStrings("serial_error", r.object.get("status").?.string);
@@ -1806,7 +1776,7 @@ test "td1: POST /machine/td1/reboot without serial returns error envelope" {
 
     const body = try ts.postJson(alloc, "/machine/td1/reboot", "{}");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") != null);
 }
@@ -1834,7 +1804,7 @@ test "printer: every print/restart endpoint returns Klippy Host not connected" {
     for (paths) |path| {
         const body = try ts.postJson(alloc, path, "{}");
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         const err = p.value.object.get("error").?.object;
         try std.testing.expectEqual(@as(i64, 503), err.get("code").?.integer);
@@ -1851,7 +1821,7 @@ test "printer: JSON-RPC printer.print.start returns code 503 with exact message"
         \\{"jsonrpc":"2.0","method":"printer.print.start","params":{"filename":"a.gcode"},"id":9}
     );
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const err = p.value.object.get("error").?.object;
     try std.testing.expectEqual(@as(i64, 503), err.get("code").?.integer);
@@ -1885,7 +1855,7 @@ test "printer: with Klippy sim, server.info reports klippy_connected" {
 
     const body = try ts.get(alloc, "/server/info");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const result = p.value.object.get("result").?.object;
 
@@ -1906,7 +1876,7 @@ test "printer: with Klippy sim, print.start returns success" {
         \\{"filename":"test.gcode"}
     );
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     // No error — the request was forwarded to Klippy successfully.
     try std.testing.expect(p.value.object.get("error") == null);
@@ -1925,7 +1895,7 @@ test "printer: with Klippy sim, JSON-RPC printer.print.start succeeds" {
         \\{"jsonrpc":"2.0","method":"printer.print.start","params":{"filename":"b.gcode"},"id":1}
     );
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") == null);
     try std.testing.expectEqual(@as(i64, 1), p.value.object.get("id").?.integer);
@@ -1947,7 +1917,7 @@ test "printer: with Klippy sim, pause/resume/cancel all succeed" {
     for (paths) |path| {
         const body = try ts.postJson(alloc, path, "{}");
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expect(p.value.object.get("error") == null);
         try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
@@ -1966,7 +1936,7 @@ test "printer: with Klippy sim, restart and firmware_restart succeed" {
 
         const body = try ts.postJson(alloc, path, "{}");
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expect(p.value.object.get("error") == null);
         try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
@@ -1983,7 +1953,7 @@ test "printer: with Klippy sim, emergency_stop succeeds" {
 
     const body = try ts.postJson(alloc, "/printer/emergency_stop", "{}");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") == null);
     try std.testing.expectEqualStrings("ok", p.value.object.get("result").?.string);
@@ -2011,7 +1981,7 @@ test "printer: real Klippy proxies info/objects.list/objects.query" {
     {
         const body = try ts.get(alloc, "/server/info");
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         const result = p.value.object.get("result").?.object;
         try std.testing.expectEqualStrings("ready", result.get("klippy_state").?.string);
@@ -2024,7 +1994,7 @@ test "printer: real Klippy proxies info/objects.list/objects.query" {
             \\{"jsonrpc":"2.0","method":"printer.info","id":1}
         );
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expect(p.value.object.get("error") == null);
         const result = p.value.object.get("result").?.object;
@@ -2038,7 +2008,7 @@ test "printer: real Klippy proxies info/objects.list/objects.query" {
             \\{"jsonrpc":"2.0","method":"printer.objects.list","id":2}
         );
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expect(p.value.object.get("error") == null);
         const objects = p.value.object.get("result").?.object.get("objects").?.array;
@@ -2056,7 +2026,7 @@ test "printer: real Klippy proxies info/objects.list/objects.query" {
             \\{"jsonrpc":"2.0","method":"printer.objects.query","params":{"objects":{"webhooks":null,"toolhead":null,"gcode_move":null}},"id":3}
         );
         defer alloc.free(body);
-        const p = try resultOf(alloc, body);
+        const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
         defer p.deinit();
         try std.testing.expect(p.value.object.get("error") == null);
         const status = p.value.object.get("result").?.object.get("status").?.object;
@@ -2075,7 +2045,7 @@ test "redirect: no url argument returns 400 'No url argument provided'" {
 
     const body = try ts.get(alloc, "/server/redirect");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const err = p.value.object.get("error").?.object;
     try std.testing.expectEqual(@as(i64, 400), err.get("code").?.integer);
@@ -2089,7 +2059,7 @@ test "redirect: url present is rejected (no CORS configured)" {
 
     const body = try ts.get(alloc, "/server/redirect?url=http://example.com");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const err = p.value.object.get("error").?.object;
     try std.testing.expectEqual(@as(i64, 400), err.get("code").?.integer);
@@ -2107,7 +2077,7 @@ test "octoprint: GET /api/version returns server/api/text (unwrapped)" {
 
     const body = try ts.get(alloc, "/api/version");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     // wrap_result=false → the object is the body directly (no "result" key).
     try std.testing.expect(p.value.object.get("result") == null);
@@ -2122,7 +2092,7 @@ test "octoprint: GET /api/printer reports Offline state flags" {
 
     const body = try ts.get(alloc, "/api/printer");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     const state = p.value.object.get("state").?.object;
     try std.testing.expectEqualStrings("Offline", state.get("text").?.string);
@@ -2137,7 +2107,7 @@ test "octoprint: POST /api/login returns the _api user" {
 
     const body = try ts.postJson(alloc, "/api/login", "{}");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expectEqualStrings("_api", p.value.object.get("name").?.string);
 }
@@ -2153,7 +2123,7 @@ test "zeroconf: GET /server/zeroconf/ssdp returns 404 (device not registered)" {
 
     const body = try ts.get(alloc, "/server/zeroconf/ssdp");
     defer alloc.free(body);
-    const p = try resultOf(alloc, body);
+    const p = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
     defer p.deinit();
     try std.testing.expect(p.value.object.get("error") != null);
     try std.testing.expectEqual(@as(i64, 404), p.value.object.get("error").?.object.get("code").?.integer);
@@ -2164,26 +2134,9 @@ test "files: notify_filelist_changed emitted on upload with correct payload" {
     const ts = try TestServer.init(alloc);
     defer ts.stop();
 
-    // Subscribe a websocket-less recorder via the connection registry. Simplest
-    // path: attach a recording writer to a fresh connection.
-    // smp_allocator, not the testing allocator: this write runs on the server
-    // thread while the test thread is inside std.http.Client.fetch, which holds
-    // the testing allocator. Sharing it deadlocks on Zig 0.17.
-    const RecordWriter = struct {
-        frames: std.ArrayList([]u8) = .empty,
-        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            const dup = try std.heap.smp_allocator.dupe(u8, bytes);
-            try self.frames.append(std.heap.smp_allocator, dup);
-        }
-        fn deinit(self: *@This()) void {
-            for (self.frames.items) |f| std.heap.smp_allocator.free(f);
-            self.frames.deinit(std.heap.smp_allocator);
-        }
-    };
     var rec = RecordWriter{};
     defer rec.deinit();
-    const conns = ts.connsRef();
+    const conns = ts.conns;
     const cid = try conns.add(ts.io);
     conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
     defer conns.remove(ts.io, cid);
