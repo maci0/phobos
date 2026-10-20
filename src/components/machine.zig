@@ -160,6 +160,8 @@ pub const MachineCtx = struct {
     service_mutex: std.Io.Mutex = .init,
     peripheral_mutex: std.Io.Mutex = .init,
     service_poll_enabled: std.atomic.Value(bool) = .init(false),
+    /// Borrowed startup identity, also reported in system_info.instance_ids.
+    unit_name: []const u8 = "moonraker",
     /// Optional reference to the live connection registry for websocket_connections count.
     conns: ?*@import("../server/connections.zig").Connections = null,
     /// Configured system `provider` string (Moonraker's `[machine] provider`),
@@ -172,6 +174,7 @@ pub const MachineCtx = struct {
     /// Empty means the action stays in-memory and no script is spawned.
     script_path: []const u8 = "",
     script_path_owned: bool = false,
+    supervisord_config_path: ?[]u8 = null,
     /// `[machine] script_timeout` seconds: kill bound for each simple-provider script.
     script_timeout_s: f64 = 30,
     /// Set when a sudo password has been supplied. Owned by the ctx allocator.
@@ -257,6 +260,13 @@ pub const MachineCtx = struct {
         self.script_path_owned = true;
     }
 
+    pub fn setSupervisordConfigPath(self: *MachineCtx, path: []const u8) !void {
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidParams;
+        const copy = try self.gpa.dupe(u8, path);
+        if (self.supervisord_config_path) |old| self.gpa.free(old);
+        self.supervisord_config_path = copy;
+    }
+
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
         // Start the periodic proc_stat emission if a bus is wired.
@@ -285,6 +295,19 @@ pub const MachineCtx = struct {
         try performServiceAction(self, name, alloc, action);
     }
 
+    /// Read-only power binding validation, called outside Core.
+    pub fn validateBoundService(self: *MachineCtx, alloc: std.mem.Allocator, name: []const u8) !void {
+        if (!isServiceAllowed(name) or std.mem.eql(u8, name, self.unit_name)) return error.ServiceNotAllowed;
+        if (self.core) |core| core.lock(self.clock_io);
+        defer if (self.core) |core| core.unlock(self.clock_io);
+        self.lockServices();
+        defer self.service_mutex.unlock(self.clock_io);
+        const provider = providerKind(self.provider_name);
+        if (provider == .simple or provider == .none) return error.ServiceNotInstalled;
+        try discoverServices(self, alloc);
+        if (!self.services.contains(name)) return error.ServiceNotInstalled;
+    }
+
     /// Refresh external service changes, emitting one notification per changed service.
     pub fn pollServices(self: *MachineCtx, alloc: std.mem.Allocator) !void {
         if (self.core) |core| core.lock(self.clock_io);
@@ -308,9 +331,17 @@ pub const MachineCtx = struct {
     }
 
     fn runServiceCmd(self: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8, timeout_s: f64) !RunCmdResult {
+        var expanded: ?[][]const u8 = null;
+        defer if (expanded) |args| alloc.free(args);
+        if (self.supervisord_config_path) |path| {
+            if (path.len != 0 and argv.len != 0 and std.mem.eql(u8, argv[0], "supervisorctl")) {
+                const prefix = [_][]const u8{ argv[0], "-c", path };
+                expanded = try std.mem.concat(alloc, []const u8, &.{ &prefix, argv[1..] });
+            }
+        }
         if (self.core) |core| core.unlock(self.clock_io);
         defer if (self.core) |core| core.lock(self.clock_io);
-        return self.runCmd(alloc, argv, timeout_s);
+        return self.runCmd(alloc, expanded orelse argv, timeout_s);
     }
 
     /// The live io when host processes may be spawned directly; null when a
@@ -340,7 +371,8 @@ pub const MachineCtx = struct {
             });
             const succeeded = switch (result.term) {
                 // supervisorctl status exits 3 when any requested program is stopped.
-                .exited => |code| code == 0 or (code == 3 and argv.len >= 2 and std.mem.eql(u8, argv[0], "supervisorctl") and std.mem.eql(u8, argv[1], "status")),
+                .exited => |code| code == 0 or (code == 3 and argv.len >= 2 and std.mem.eql(u8, argv[0], "supervisorctl") and
+                    (std.mem.eql(u8, argv[1], "status") or (argv.len >= 4 and std.mem.eql(u8, argv[1], "-c") and std.mem.eql(u8, argv[3], "status")))),
                 else => false,
             };
             if (!succeeded) {
@@ -366,6 +398,7 @@ pub const MachineCtx = struct {
         if (self.sudo_password) |p| self.gpa.free(p);
         if (self.provider_owned) self.gpa.free(self.provider_name);
         if (self.script_path_owned) self.gpa.free(self.script_path);
+        if (self.supervisord_config_path) |path| self.gpa.free(path);
         self.sudo_password = null;
         for (self.services.keys()) |key| self.gpa.free(key);
         self.services.deinit(self.gpa);
@@ -1253,7 +1286,7 @@ fn buildSystemInfoValue(ctx: *MachineCtx, alloc: std.mem.Allocator) anyerror!std
 
     // instance_ids: Moonraker's unit names. Defaults match a standard install.
     var ids: std.json.ObjectMap = .empty;
-    try ids.put(alloc, "moonraker", .{ .string = "moonraker" });
+    try ids.put(alloc, "moonraker", .{ .string = ctx.unit_name });
     try ids.put(alloc, "klipper", .{ .string = "klipper" });
     try sys.put(alloc, "instance_ids", .{ .object = ids });
 
@@ -3135,11 +3168,20 @@ test "fuzz service polling parses bounded provider replies without host commands
             var ctx = testCtx(a);
             defer ctx.deinit();
             try ctx.setProvider(if (smith.valueWithHash(bool, 1)) "supervisord_cli" else "systemd_cli");
+            if (smith.valueWithHash(bool, 2)) ctx.setSupervisordConfigPath(&bytes) catch |err| switch (err) {
+                error.InvalidParams => {},
+                else => return err,
+            };
             ctx.services_discovered = true;
             try ctx.services.put(a, try a.dupe(u8, "klipper"), .active("unknown", "unknown"));
             ctx.setRunCmdFn(Mock.run, &mock);
             try ctx.pollServices(a);
             try testing.expectEqual(@as(usize, 1), ctx.services.count());
+            try ctx.validateBoundService(a, "klipper");
+            ctx.validateBoundService(a, &bytes) catch |err| switch (err) {
+                error.ServiceNotAllowed, error.ServiceNotInstalled => {},
+                else => return err,
+            };
         }
     }.run, .{});
 }
@@ -3166,6 +3208,71 @@ test "service polling retries discovery after a transient provider failure" {
     try ctx.pollServices(arena.allocator());
     try testing.expect(ctx.services_discovered);
     try testing.expectEqualStrings("running", ctx.services.get("klipper").?.sub_state);
+}
+
+test "supervisord config path reaches discovery, actions and polling as one argument" {
+    const Mock = struct {
+        calls: usize = 0,
+        running: bool = true,
+        fn run(raw: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) !MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expect(argv.len >= 4);
+            try testing.expectEqualStrings("supervisorctl", argv[0]);
+            try testing.expectEqualStrings("-c", argv[1]);
+            try testing.expectEqualStrings("config with spaces; literal.conf", argv[2]);
+            self.calls += 1;
+            if (std.mem.eql(u8, argv[3], "stop")) self.running = false;
+            return .{ .stdout = try alloc.dupe(u8, if (std.mem.eql(u8, argv[3], "status"))
+                (if (self.running) "klipper RUNNING pid 1\n" else "klipper STOPPED Not started\n")
+            else
+                ""), .stderr = &.{} };
+        }
+    };
+    var mock: Mock = .{};
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try ctx.setProvider("supervisord_cli");
+    try ctx.setSupervisordConfigPath("replaced.conf");
+    try ctx.setSupervisordConfigPath("config with spaces; literal.conf");
+    ctx.setRunCmdFn(Mock.run, &mock);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try ctx.serviceAction(arena.allocator(), .stop, "klipper");
+    try ctx.pollServices(arena.allocator());
+    try testing.expectEqual(@as(usize, 4), mock.calls);
+    try testing.expectEqualStrings("stopped", ctx.services.get("klipper").?.sub_state);
+    try testing.expectError(error.InvalidParams, ctx.setSupervisordConfigPath("bad\x00path"));
+}
+
+test "power binding validation permits only available services and never acts on them" {
+    const Mock = struct {
+        calls: usize = 0,
+        fn run(raw: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) !MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expectEqualStrings("systemctl", argv[0]);
+            try testing.expectEqualStrings("list-units", argv[1]);
+            self.calls += 1;
+            return .{ .stdout = try alloc.dupe(u8, "klipper.service loaded active running\nmoonraker-2.service loaded active running\nsshd.service loaded active running\n"), .stderr = &.{} };
+        }
+    };
+    var mock: Mock = .{};
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    ctx.unit_name = "moonraker-2";
+    ctx.setRunCmdFn(Mock.run, &mock);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try ctx.validateBoundService(a, "klipper");
+    try testing.expectError(error.ServiceNotAllowed, ctx.validateBoundService(a, "moonraker-2"));
+    try testing.expectError(error.ServiceNotAllowed, ctx.validateBoundService(a, "sshd"));
+    try testing.expectError(error.ServiceNotInstalled, ctx.validateBoundService(a, "webcamd"));
+    try testing.expectEqualStrings("unknown", ctx.services.get("klipper").?.active_state);
+    try ctx.setProvider("simple");
+    try testing.expectError(error.ServiceNotInstalled, ctx.validateBoundService(a, "klipper"));
+    try ctx.setProvider("none");
+    try testing.expectError(error.ServiceNotInstalled, ctx.validateBoundService(a, "klipper"));
+    try testing.expectEqual(@as(usize, 1), mock.calls);
 }
 
 test "provider abstraction: service action dispatches to the right manager" {

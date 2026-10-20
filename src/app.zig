@@ -861,6 +861,7 @@ pub const App = struct {
                 std.debug.print("phobos: warning: failed to set machine provider '{s}': {}\n", .{ p, err });
             };
         }
+        if (cfg.get("machine", "supervisord_config_path")) |path| try self.machine_ctx.setSupervisordConfigPath(path);
         // Forge-X `[machine] script_path` is the directory SimpleProvider runs.
         // reboot and shutdown stay no-ops; this path is only a service script.
         if (cfg.get("machine", "script_path")) |p| {
@@ -2235,6 +2236,7 @@ test "setConfig [machine] provider simple restarts through script_path and does 
     const body =
         \\[machine]
         \\provider: simple
+        \\supervisord_config_path: provider config.conf
         \\script_path: /no/such/scripts
         \\script_timeout: 12
         \\validate_service: false
@@ -2247,6 +2249,7 @@ test "setConfig [machine] provider simple restarts through script_path and does 
     defer app.deinit(io);
     try app.setConfig(io, cfg_path);
     try std.testing.expectEqualStrings("simple", app.machine_ctx.provider_name);
+    try std.testing.expectEqualStrings("provider config.conf", app.machine_ctx.supervisord_config_path.?);
     try std.testing.expectEqualStrings("/no/such/scripts", app.machine_ctx.script_path);
     try std.testing.expectEqual(@as(f64, 12), app.machine_ctx.script_timeout_s);
 

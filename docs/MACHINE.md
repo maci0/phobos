@@ -16,9 +16,18 @@ actions and polls; acquiring it also releases Core so another action can finish.
 Both APIs accept the typed `ServiceAction` enum and enforce the same service
 validation as the HTTP endpoints.
 
+`validateBoundService` is the read-only startup validator for power bindings.
+It takes Core internally, discovers allowed services, and rejects missing
+services or the machine's own `unit_name`. Simple and none providers advertise
+no available services and reject bindings. Validation never runs an action or
+emits a state notification. A custom startup unit name must remain alive for
+the machine context's lifetime and is reported in `system_info.instance_ids`.
+
 The supervisord provider preserves lowercased sub-state names. `running` is
 active, `stopping` is deactivating, and other reported states are inactive.
 `supervisorctl status` exit code 3 is accepted for stopped programs.
+`[machine] supervisord_config_path` supplies `supervisorctl -c <path>` for
+discovery, actions, and polling. The path is one argv entry, never shell text.
 
 Video devices enumerate formats and discrete resolutions with typed
 `VIDIOC_ENUM_FMT` and `VIDIOC_ENUM_FRAMESIZES` structures through
