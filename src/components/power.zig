@@ -38,6 +38,7 @@ const notify = @import("../server/notify.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const Core = @import("../server/core.zig").Core;
 const gpio_sysfs = @import("gpio_sysfs.zig");
+const http_get = @import("http_get.zig");
 
 const Registry = registry.Registry;
 
@@ -64,21 +65,15 @@ pub fn deviceRequest(
     defer client.deinit();
     var writer: std.Io.Writer = .fixed(body);
     const json_header = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+    const headers: []const std.http.Header = if (payload != null) &json_header else &.{};
     const Outcome = union(enum) {
-        fetched: std.http.Client.FetchError!std.http.Client.FetchResult,
+        fetched: @typeInfo(@TypeOf(http_get.requestToWriter)).@"fn".return_type.?,
         expired: std.Io.Cancelable!void,
     };
     var outcomes: [2]Outcome = undefined;
     var select: std.Io.Select(Outcome) = .init(io, &outcomes);
     defer select.cancelDiscard();
-    try select.concurrent(.fetched, std.http.Client.fetch, .{ &client, .{
-        .location = .{ .url = url },
-        .method = method,
-        .payload = payload,
-        .response_writer = &writer,
-        .keep_alive = false,
-        .extra_headers = if (payload != null) &json_header else &.{},
-    } });
+    try select.concurrent(.fetched, http_get.requestToWriter, .{ &client, method, url, payload, headers, &writer });
     try select.concurrent(.expired, std.Io.sleep, .{ io, timeout, .awake });
     switch (try select.await()) {
         .expired => |result| {
@@ -86,7 +81,7 @@ pub fn deviceRequest(
             return error.Timeout;
         },
         .fetched => |result| {
-            if ((try result).status.class() != .success) return error.HttpStatus;
+            if ((try result).class() != .success) return error.HttpStatus;
             return writer.buffered();
         },
     }
@@ -594,6 +589,7 @@ pub const DeviceDouble = struct {
     io: std.Io,
     server: std.Io.net.Server,
     reply: ?[]const u8,
+    stall_after_reply: bool = false,
     core: ?*Core = null,
     request_line: [128]u8 = undefined,
     request_len: usize = 0,
@@ -630,6 +626,7 @@ pub const DeviceDouble = struct {
         var w = stream.writer(self.io, &wbuf);
         w.interface.writeAll(reply) catch return;
         w.interface.flush() catch return;
+        if (self.stall_after_reply) _ = r.interface.takeDelimiterInclusive('\n') catch {};
     }
 };
 
@@ -659,6 +656,22 @@ test "deviceRequest: 2xx body, non-2xx and an expired deadline" {
         defer serving.cancel(io);
         try testing.expectError(error.Timeout, deviceRequest(testing.allocator, io, .GET, try device.url(&url_buf, "/"), null, .fromMilliseconds(100), &body));
     }
+}
+
+test "deviceRequest cancels a partial Content-Length body without panicking" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var device = try DeviceDouble.bind(aio, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx");
+    defer device.server.deinit(aio);
+    device.stall_after_reply = true;
+    var serving = try aio.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(aio);
+    var url: [96]u8 = undefined;
+    var body: [16]u8 = undefined;
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    try testing.expectError(error.Timeout, deviceRequest(std.heap.smp_allocator, aio, .GET, try device.url(&url, "/"), null, .fromMilliseconds(20), &body));
+    try testing.expect(start.untilNow(aio).raw.toMilliseconds() < 5000);
 }
 
 test "fuzz deviceRequest: malformed URLs fail without a request" {

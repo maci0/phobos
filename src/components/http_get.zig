@@ -6,6 +6,8 @@
 //! Requests ask for `identity` encoding: `Response.reader` returns encoded
 //! bytes as-is, so an encoded reply fails with `HttpContentEncodingUnsupported`
 //! instead of handing compressed data to a parser.
+//! `requestToWriter` also streams plain or JSON request responses into a
+//! caller-owned writer; callers own deadlines and cancellation.
 
 const std = @import("std");
 const http = std.http;
@@ -20,6 +22,35 @@ pub const identity_only = blk: {
     accepted[@backingInt(http.ContentEncoding.identity)] = true;
     break :blk accepted;
 };
+
+/// Send one request and stream its identity-encoded response to `writer`.
+/// All arguments borrow for the call; the caller keeps the client alive until
+/// any concurrent invocation has joined.
+pub fn requestToWriter(client: *http.Client, method: http.Method, url: []const u8, payload: ?[]const u8, headers: []const http.Header, writer: *Io.Writer) !http.Status {
+    var req = try client.request(method, try std.Uri.parse(url), .{
+        .headers = identity_headers,
+        .extra_headers = headers,
+        .keep_alive = false,
+        .redirect_behavior = if (payload == null) @fromBackingInt(3) else .unhandled,
+    });
+    defer req.deinit();
+    req.accept_encoding = identity_only;
+    if (payload) |data| {
+        req.transfer_encoding = .{ .content_length = data.len };
+        var body = try req.sendBodyUnflushed(&.{});
+        try body.writer.writeAll(data);
+        try body.end();
+        try req.connection.?.flush();
+    } else try req.sendBodiless();
+    var redirect_buf: [8192]u8 = undefined;
+    var response = try req.receiveHead(if (payload == null) &redirect_buf else &.{});
+    var transfer_buf: [1024]u8 = undefined;
+    _ = response.reader(&transfer_buf).streamRemaining(writer) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
+        else => return err,
+    };
+    return response.head.status;
+}
 
 pub const Result = struct {
     status: u16,
@@ -154,6 +185,7 @@ test "getConditional: 200 returns body + ETag; conditional re-fetch returns 304"
 
     // First fetch: no validator → 200 with body + ETag.
     var f1 = io.async(EtagServer.serveOne, .{&srv});
+    defer f1.cancel(io);
     var r1 = try getConditional(testing.allocator, io, url, null);
     f1.await(io);
     defer r1.deinit(testing.allocator);
@@ -164,6 +196,7 @@ test "getConditional: 200 returns body + ETag; conditional re-fetch returns 304"
 
     // Second fetch with the ETag → 304 Not Modified, empty body.
     var f2 = io.async(EtagServer.serveOne, .{&srv});
+    defer f2.cancel(io);
     var r2 = try getConditional(testing.allocator, io, url, r1.etag.?);
     f2.await(io);
     defer r2.deinit(testing.allocator);
@@ -205,6 +238,7 @@ test "getConditional asks for identity and rejects a gzip body" {
     var accept: [64]u8 = undefined;
     var accept_len: usize = 0;
     var server_task = io.async(Gzip.serve, .{ &srv, &accept, &accept_len });
+    defer server_task.cancel(io);
     const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/feed", .{srv.port()});
     defer testing.allocator.free(url);
     try testing.expectError(error.HttpContentEncodingUnsupported, getConditional(testing.allocator, io, url, null));
@@ -225,7 +259,52 @@ test "fuzz getConditional url parsing: never crashes on arbitrary urls" {
             @memcpy(buf[0..prefix.len], prefix);
             smith.bytesWithHash(buf[prefix.len..], 0);
             // Bad/unreachable URLs must return an error, never crash.
-            _ = getConditional(testing.allocator, io, &buf, null) catch return;
+            var result = getConditional(testing.allocator, io, &buf, null) catch return;
+            defer result.deinit(testing.allocator);
+        }
+    }.run, .{});
+}
+
+test "requestToWriter streams a bounded response through the native request API" {
+    const Task = struct {
+        fn run(client: *http.Client, url: []const u8, writer: *Io.Writer, done: *Io.Event) !http.Status {
+            defer done.set(client.io);
+            return requestToWriter(client, .GET, url, null, &.{}, writer);
+        }
+    };
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var server = try EtagServer.bind(aio);
+    defer server.deinit();
+    var serving = try aio.concurrent(EtagServer.serveOne, .{&server});
+    defer serving.cancel(aio);
+    var url_buf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.port()});
+    var buffer: [16]u8 = undefined;
+    var writer = Io.Writer.fixed(&buffer);
+    var client: http.Client = .{ .allocator = std.heap.smp_allocator, .io = aio };
+    defer client.deinit();
+    var done: Io.Event = .unset;
+    var fetching = try aio.concurrent(Task.run, .{ &client, url, &writer, &done });
+    defer _ = fetching.cancel(aio) catch {};
+    try done.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    try testing.expectEqual(http.Status.ok, try fetching.await(aio));
+    try testing.expectEqualStrings("hello", writer.buffered());
+}
+
+test "fuzz requestToWriter validates unsupported URLs without network access" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const prefix = "unsupported://127.0.0.1/";
+            var url: [prefix.len + 32]u8 = undefined;
+            @memcpy(url[0..prefix.len], prefix);
+            smith.bytesWithHash(url[prefix.len..], 0);
+            var client: http.Client = .{ .allocator = testing.allocator, .io = testing.io };
+            defer client.deinit();
+            var body: [64]u8 = undefined;
+            var writer = Io.Writer.fixed(&body);
+            _ = requestToWriter(&client, .GET, &url, null, &.{}, &writer) catch return;
         }
     }.run, .{});
 }

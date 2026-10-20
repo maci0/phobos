@@ -47,6 +47,13 @@ Service actions require a discovered unit for systemd and supervisord. Simple
 and none providers accept only fixed allowed names; requests cannot add arbitrary
 service names or script paths.
 
+Device and snapshot HTTP requests use `Client.request`, native body writers and
+response readers. `Client.fetch` assumes a failed body reader always has a
+specific `bodyErr`, which can be null after cancellation. The shared
+`http_get.requestToWriter` helper preserves a generic read failure in that case.
+Requests negotiate identity encoding and reject encoded responses; their owning
+future joins before the client, buffers or request storage are released.
+
 ## Platform adapters
 
 These operations have no equivalent higher-level API in the installed library.

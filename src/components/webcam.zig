@@ -45,6 +45,7 @@ const jv = @import("../json/value.zig");
 const registry = @import("../server/registry.zig");
 const sleep = @import("../util/sleep.zig");
 const webreq = @import("../json/params.zig");
+const http_get = @import("http_get.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 
@@ -686,12 +687,8 @@ fn probeSnapshot(io: std.Io, gpa: std.mem.Allocator, url: []const u8, timeout: s
             defer client.deinit();
             var sink: [4096]u8 = undefined;
             var disc: std.Io.Writer.Discarding = .init(&sink);
-            const result = client.fetch(.{
-                .location = .{ .url = u },
-                .method = .GET,
-                .response_writer = &disc.writer,
-            }) catch return false;
-            return result.status.class() == .success;
+            const status = http_get.requestToWriter(&client, .GET, u, null, &.{}, &disc.writer) catch return false;
+            return status.class() == .success;
         }
     };
     var done: std.Io.Event = .unset;
@@ -1496,4 +1493,20 @@ test "probeSnapshot: a stalled server is cancelled after the timeout" {
     const start = std.Io.Clock.Timestamp.now(io, .awake);
     try testing.expect(!probeSnapshot(io, testing.allocator, url, .fromMilliseconds(200)));
     try testing.expect(start.untilNow(io).raw.toMilliseconds() < 5000);
+}
+
+test "probeSnapshot cancels a partial Content-Length body without panicking" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    const DeviceDouble = @import("power.zig").DeviceDouble;
+    var device = try DeviceDouble.bind(aio, "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nx");
+    defer device.server.deinit(aio);
+    device.stall_after_reply = true;
+    var serving = try aio.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(aio);
+    var url: [96]u8 = undefined;
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    try testing.expect(!probeSnapshot(aio, std.heap.smp_allocator, try device.url(&url, "/"), .fromMilliseconds(20)));
+    try testing.expect(start.untilNow(aio).raw.toMilliseconds() < 5000);
 }
