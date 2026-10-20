@@ -112,6 +112,10 @@ These differ from older Zig docs — use these forms:
   must remain available to receive subscription responses. Shutdown wakes subscribers
   before joining workers and permits at most one second for offline publication.
   An unanswered PINGREQ closes the connection after one keepalive interval.
+  The dispatcher removes `mqtt_timestamp` and checks duplicates after method
+  validation for each request, including batch entries. The last 20 timestamps
+  use 640 bytes of SHA-256 fingerprints, preserving numeric equality and object
+  key-order independence without retaining request arenas.
 
 ## 5. Adding (or completing) a component — the standard pattern
 

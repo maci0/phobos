@@ -50,13 +50,13 @@ const max_backoff_ms: i64 = 30_000;
 const max_timestamp_history = 20;
 /// Concurrent `server.mqtt.subscribe` waits; more return 503.
 const max_subscribe_waiters = 16;
-/// JSON-RPC error code for a repeated `mqtt_timestamp` (mqtt.py DUP_API_REQ_CODE).
-const duplicate_request_code: i64 = -10000;
 /// Longest honoured subscribe `timeout`, keeping deadlines representable on 32-bit.
 const max_timeout_s: f64 = std.time.s_per_day;
 /// Best-effort offline publication must not delay shutdown behind broker I/O.
 const shutdown_timeout: Io.Duration = .fromSeconds(1);
 const local_transports = [_]registry.TransportType{ .HTTP, .WEBSOCKET, .INTERNAL };
+const scientific_min: f64 = 1e-4;
+const scientific_max: f64 = 1e16;
 
 const online_payload = "{\"server\":\"online\"}";
 const offline_payload = "{\"server\":\"offline\"}";
@@ -134,10 +134,11 @@ pub const MqttCtx = struct {
     waiters_closed: bool = false,
     waiters_mutex: Io.Mutex = .init,
     waiters_idle: Io.Condition = .init,
-    /// Recent `mqtt_timestamp` values; touched only by the reader thread.
-    api_timestamps: [max_timestamp_history]f64 = undefined,
+    /// Fixed-size fingerprints avoid retaining arbitrary request-owned JSON.
+    api_timestamps: [max_timestamp_history][32]u8 = undefined,
     api_timestamp_len: usize = 0,
     api_timestamp_next: usize = 0,
+    api_timestamp_mutex: Io.Mutex = .init,
     /// Inbound-message hook (reader thread). The app routes it to MQTT sensors
     /// under the Core lock.
     on_message: ?*const fn (ctx: *anyopaque, topic: []const u8, payload: []const u8) void = null,
@@ -364,41 +365,33 @@ pub const MqttCtx = struct {
         if (self.on_message) |cb| cb(self.on_message_ctx.?, topic, payload);
     }
 
-    /// Moonraker `_process_api_request` with `screen_rpc_request`: pop
-    /// `params.mqtt_timestamp`, reject a repeated one with -10000, dispatch the
-    /// rest. Returns the response bytes in `alloc`, or null when there is none
-    /// (notification or no dispatcher).
+    /// Dispatch parsed MQTT requests. The dispatcher screens each validated
+    /// request, including batch entries. Returns response bytes in `alloc`.
     fn apiResponse(self: *MqttCtx, payload: []const u8, alloc: std.mem.Allocator) !?[]const u8 {
         const dispatch = self.api_dispatch orelse return null;
-        var root = std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{}) catch
+        const root = std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{}) catch
             return try jv.errorResponse(alloc, .null, -32700, "Parse error");
         if (jv.exceedsDepth(root, jv.max_value_depth)) return try jv.errorResponse(alloc, .null, -32600, "Invalid Request");
-        if (root == .object) {
-            if (root.object.getPtr("params")) |params| if (params.* == .object) {
-                if (params.object.fetchOrderedRemove("mqtt_timestamp")) |entry| {
-                    const ts: ?f64 = switch (entry.value) {
-                        .integer => |i| @floatFromInt(i),
-                        .float => |f| f,
-                        else => null,
-                    };
-                    if (ts) |t| if (self.isDuplicateTimestamp(t)) {
-                        const id = root.object.get("id") orelse return null;
-                        return try jv.errorResponse(alloc, id, duplicate_request_code, "Duplicate MQTT Request");
-                    };
-                }
-            };
-        }
         const response = try dispatch(self.api_dispatch_ctx.?, root, alloc);
         return if (response.len == 0) null else response;
     }
 
-    /// True when `ts` is among the last 20 timestamps; otherwise records it.
-    fn isDuplicateTimestamp(self: *MqttCtx, ts: f64) bool {
-        if (std.mem.indexOfScalar(f64, self.api_timestamps[0..self.api_timestamp_len], ts) != null) return true;
-        self.api_timestamps[self.api_timestamp_next] = ts;
+    /// Called after method lookup so invalid requests do not consume timestamps.
+    pub fn screenRequest(ctx: *anyopaque, params: *std.json.Value, _: std.mem.Allocator) !void {
+        const self: *MqttCtx = @ptrCast(@alignCast(ctx));
+        const entry = params.object.fetchOrderedRemove("mqtt_timestamp") orelse return;
+        if (entry.value == .null) return;
+        if (jv.exceedsDepth(entry.value, jv.max_value_depth)) return error.InvalidParams;
+        const digest = timestampDigest(entry.value);
+        const io = self.io orelse return error.ServiceUnavailable;
+        self.api_timestamp_mutex.lockUncancelable(io);
+        defer self.api_timestamp_mutex.unlock(io);
+        for (self.api_timestamps[0..self.api_timestamp_len]) |previous| {
+            if (std.mem.eql(u8, &previous, &digest)) return error.DuplicateMqttRequest;
+        }
+        self.api_timestamps[self.api_timestamp_next] = digest;
         self.api_timestamp_next = (self.api_timestamp_next + 1) % max_timestamp_history;
         self.api_timestamp_len = @min(self.api_timestamp_len + 1, max_timestamp_history);
-        return false;
     }
 
     /// Send `bytes` on the live connection. 503 when disconnected.
@@ -473,6 +466,72 @@ pub const MqttCtx = struct {
     }
 };
 
+/// Python equality treats object order as irrelevant and bools as numbers.
+/// SHA-256 bounds the 20-entry history to 640 bytes regardless of JSON size.
+fn timestampDigest(value: std.json.Value) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    switch (value) {
+        .null => hash.update("null"),
+        .string => |s| {
+            hash.update("string");
+            hash.update(s);
+        },
+        .bool => |b| return timestampDigest(.{ .integer = @intFromBool(b) }),
+        .integer => |n| {
+            var buf: [21]u8 = undefined;
+            hash.update("number");
+            hash.update(std.fmt.bufPrint(&buf, "{d}", .{n}) catch unreachable);
+        },
+        .number_string => |s| {
+            if (!std.json.isNumberFormattedLikeAnInteger(s)) return timestampDigest(.{ .float = std.fmt.parseFloat(f64, s) catch unreachable });
+            hash.update("number");
+            hash.update(s);
+        },
+        .float => |f| {
+            if (std.math.isFinite(f) and @trunc(f) == f) {
+                const limb_count = comptime std.math.big.int.calcLimbLen(std.math.floatMax(f64));
+                var limbs: [limb_count]std.math.big.Limb = undefined;
+                var n = std.math.big.int.Mutable.init(&limbs, 0);
+                std.debug.assert(n.setFloat(f, .trunc) == .exact);
+                var workspace: [std.math.big.int.calcToStringLimbsBufferLen(limb_count, 10)]std.math.big.Limb = undefined;
+                var buf: [std.fmt.float.bufferSize(.decimal, f64)]u8 = undefined;
+                const len = n.toConst().toString(&buf, 10, .lower, &workspace);
+                hash.update("number");
+                hash.update(buf[0..len]);
+            } else {
+                var bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &bytes, @bitCast(f), .big);
+                hash.update("float");
+                hash.update(&bytes);
+            }
+        },
+        .array => |array| {
+            hash.update("array");
+            for (array.items) |item| hash.update(&timestampDigest(item));
+        },
+        .object => |obj| {
+            var combined: [32]u8 = @splat(0);
+            var entries = obj.iterator();
+            while (entries.next()) |entry| {
+                var item_hash = std.crypto.hash.sha2.Sha256.init(.{});
+                var key_len: [8]u8 = undefined;
+                std.mem.writeInt(u64, &key_len, entry.key_ptr.len, .big);
+                item_hash.update(&key_len);
+                item_hash.update(entry.key_ptr.*);
+                item_hash.update(&timestampDigest(entry.value_ptr.*));
+                const digest = item_hash.finalResult();
+                for (&combined, digest) |*byte, other| byte.* ^= other;
+            }
+            var count: [8]u8 = undefined;
+            std.mem.writeInt(u64, &count, obj.count(), .big);
+            hash.update("object");
+            hash.update(&count);
+            hash.update(&combined);
+        },
+    }
+    return hash.finalResult();
+}
+
 // ---------------------------------------------------------------------------
 // Parameter helpers
 // ---------------------------------------------------------------------------
@@ -496,13 +555,32 @@ fn encodePayload(w: *std.Io.Writer, payload: std.json.Value) !void {
         .null => {},
         .bool => |b| try w.writeAll(if (b) "true" else "false"),
         .integer => |i| try w.print("{d}", .{i}),
-        .float => |f| try w.print("{d}", .{f}),
+        .float => |f| try encodeFloat(w, f),
         .string, .number_string => |s| try w.writeAll(s),
         .object, .array => {
             if (jv.exceedsDepth(payload, jv.max_value_depth)) return error.InvalidParams;
             var jw: std.json.Stringify = .{ .writer = w };
             try jw.write(payload);
         },
+    }
+}
+
+/// paho uses Python's shortest float spelling, including `.0` and signed exponents.
+fn encodeFloat(w: *std.Io.Writer, value: f64) std.Io.Writer.Error!void {
+    var buf: [std.fmt.float.min_buffer_size]u8 = undefined;
+    if (!std.math.isFinite(value)) return w.writeAll(std.fmt.float.render(&buf, value, .{}) catch unreachable);
+    const absolute = @abs(value);
+    if (absolute >= scientific_max or (absolute != 0 and absolute < scientific_min)) {
+        const text = std.fmt.float.render(&buf, value, .{}) catch unreachable;
+        const e = std.mem.indexOfScalar(u8, text, 'e').?;
+        const exponent = std.fmt.parseInt(i16, text[e + 1 ..], 10) catch unreachable;
+        try w.writeAll(text[0 .. e + 1]);
+        try w.writeByte(if (exponent < 0) '-' else '+');
+        try w.print("{d:0>2}", .{@abs(exponent)});
+    } else {
+        const text = std.fmt.float.render(&buf, value, .{ .mode = .decimal }) catch unreachable;
+        try w.writeAll(text);
+        if (std.mem.indexOfScalar(u8, text, '.') == null) try w.writeAll(".0");
     }
 }
 
@@ -699,6 +777,13 @@ test "encodePayload follows paho: raw strings, JSON containers, empty null" {
         .{ .in = "false", .out = "false" },
         .{ .in = "42", .out = "42" },
         .{ .in = "1.5", .out = "1.5" },
+        .{ .in = "1.0", .out = "1.0" },
+        .{ .in = "-0.0", .out = "-0.0" },
+        .{ .in = "1e20", .out = "1e+20" },
+        .{ .in = "1e-5", .out = "1e-05" },
+        .{ .in = "1e-4", .out = "0.0001" },
+        .{ .in = "1e15", .out = "1000000000000000.0" },
+        .{ .in = "1e16", .out = "1e+16" },
         .{ .in = "{\"a\":[1,2]}", .out = "{\"a\":[1,2]}" },
     };
     for (cases) |case| {
@@ -720,6 +805,25 @@ test "fuzz encodePayload: any JSON value encodes without error" {
             var aw: std.Io.Writer.Allocating = .init(testing.allocator);
             defer aw.deinit();
             try encodePayload(&aw.writer, value);
+        }
+    }.run, .{});
+}
+
+test "fuzz encodeFloat preserves every finite f64 value and signed zero" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [8]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const value: f64 = @bitCast(std.mem.readInt(u64, &bytes, .little));
+            var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer writer.deinit();
+            try encodeFloat(&writer.writer, value);
+            const parsed = try std.fmt.parseFloat(f64, writer.written());
+            if (std.math.isNan(value)) {
+                try testing.expect(std.math.isNan(parsed));
+            } else {
+                try testing.expectEqual(@as(u64, @bitCast(value)), @as(u64, @bitCast(parsed)));
+            }
         }
     }.run, .{});
 }
@@ -816,12 +920,19 @@ test "subscribe waiters are bounded and released by shutdown" {
 }
 
 const TestDispatch = struct {
+    mqtt: *MqttCtx,
+    dispatcher: @import("../jsonrpc.zig").Dispatcher,
     saw_timestamp: bool = false,
+    calls: usize = 0,
     fn cb(ctx: *anyopaque, request: std.json.Value, alloc: std.mem.Allocator) anyerror![]u8 {
         const self: *TestDispatch = @ptrCast(@alignCast(ctx));
-        if (request.object.get("params")) |p| self.saw_timestamp = p.object.contains("mqtt_timestamp");
-        if (request.object.get("id") == null) return alloc.dupe(u8, "");
-        return alloc.dupe(u8, "{\"jsonrpc\":\"2.0\",\"result\":\"ok\",\"id\":1}");
+        return self.dispatcher.handleParsedRoot(.{ .transport = .MQTT, .screen = .{ .ctx = self.mqtt, .run = MqttCtx.screenRequest } }, request, alloc);
+    }
+    fn handler(ctx: *anyopaque, params: std.json.Value, _: std.mem.Allocator) !std.json.Value {
+        const self: *TestDispatch = @ptrCast(@alignCast(ctx));
+        self.saw_timestamp = self.saw_timestamp or params.object.contains("mqtt_timestamp");
+        self.calls += 1;
+        return .{ .string = "ok" };
     }
 };
 
@@ -831,7 +942,11 @@ test "apiResponse strips mqtt_timestamp, rejects duplicates with -10000 and skip
     const a = arena.allocator();
     var ctx = MqttCtx.init(testing.allocator);
     defer ctx.deinit();
-    var dispatch: TestDispatch = .{};
+    ctx.io = testing.io;
+    var dispatch: TestDispatch = .{ .mqtt = &ctx, .dispatcher = .init(testing.allocator) };
+    defer dispatch.dispatcher.deinit();
+    try dispatch.dispatcher.register("server.info", &dispatch, TestDispatch.handler);
+    try dispatch.dispatcher.register("m", &dispatch, TestDispatch.handler);
     ctx.api_dispatch = TestDispatch.cb;
     ctx.api_dispatch_ctx = &dispatch;
 
@@ -851,12 +966,110 @@ test "apiResponse strips mqtt_timestamp, rejects duplicates with -10000 and skip
     );
 }
 
-test "isDuplicateTimestamp keeps only the last 20 values" {
+test "screenRequest keeps only the last 20 values" {
     var ctx = MqttCtx.init(testing.allocator);
     defer ctx.deinit();
-    for (0..max_timestamp_history + 1) |i| try testing.expect(!ctx.isDuplicateTimestamp(@floatFromInt(i)));
-    try testing.expect(!ctx.isDuplicateTimestamp(0));
-    try testing.expect(ctx.isDuplicateTimestamp(max_timestamp_history));
+    ctx.io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (0..max_timestamp_history + 1) |i| {
+        var params = try mkParams(a, try std.fmt.allocPrint(a, "{{\"mqtt_timestamp\":{d}}}", .{i}));
+        try MqttCtx.screenRequest(&ctx, &params, a);
+    }
+    var old = try mkParams(a, "{\"mqtt_timestamp\":0}");
+    try MqttCtx.screenRequest(&ctx, &old, a);
+    var recent = try mkParams(a, "{\"mqtt_timestamp\":20}");
+    try testing.expectError(error.DuplicateMqttRequest, MqttCtx.screenRequest(&ctx, &recent, a));
+}
+
+test "apiResponse screens string timestamps in batches after method lookup" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = MqttCtx.init(testing.allocator);
+    defer ctx.deinit();
+    ctx.io = testing.io;
+    var dispatch: TestDispatch = .{ .mqtt = &ctx, .dispatcher = .init(testing.allocator) };
+    defer dispatch.dispatcher.deinit();
+    try dispatch.dispatcher.register("known", &dispatch, TestDispatch.handler);
+    ctx.api_dispatch = TestDispatch.cb;
+    ctx.api_dispatch_ctx = &dispatch;
+    const response = (try ctx.apiResponse(
+        "[" ++
+            "{\"jsonrpc\":\"2.0\",\"method\":\"unknown\",\"params\":{\"mqtt_timestamp\":\"retry\"},\"id\":1}," ++
+            "{\"jsonrpc\":\"2.0\",\"method\":\"known\",\"params\":{\"mqtt_timestamp\":\"retry\"},\"id\":2}," ++
+            "{\"jsonrpc\":\"2.0\",\"method\":\"known\",\"params\":{\"mqtt_timestamp\":\"retry\"},\"id\":3}," ++
+            "{\"jsonrpc\":\"2.0\",\"method\":\"known\",\"params\":{\"mqtt_timestamp\":null},\"id\":4}," ++
+            "{\"jsonrpc\":\"2.0\",\"method\":\"known\",\"params\":{\"mqtt_timestamp\":null},\"id\":5}" ++
+            "]",
+        a,
+    )).?;
+    const items = (try mkParams(a, response)).array.items;
+    try testing.expectEqual(@as(i64, -32601), items[0].object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqualStrings("ok", items[1].object.get("result").?.string);
+    try testing.expectEqual(@as(i64, -10000), items[2].object.get("error").?.object.get("code").?.integer);
+    try testing.expectEqual(@as(usize, 3), dispatch.calls);
+    try testing.expect(!dispatch.saw_timestamp);
+}
+
+test "timestampDigest preserves Python numeric and container equality" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pairs = [_]struct { lhs: []const u8, rhs: []const u8, equal: bool }{
+        .{ .lhs = "true", .rhs = "1", .equal = true },
+        .{ .lhs = "1", .rhs = "1.0", .equal = true },
+        .{ .lhs = "false", .rhs = "-0.0", .equal = true },
+        .{ .lhs = "9007199254740993", .rhs = "9007199254740992", .equal = false },
+        .{ .lhs = "9007199254740993", .rhs = "9007199254740992.0", .equal = false },
+        .{ .lhs = "9223372036854775808", .rhs = "9223372036854775808.0", .equal = true },
+        .{ .lhs = "1e500", .rhs = "2e500", .equal = true },
+        .{ .lhs = "[1,2]", .rhs = "[2,1]", .equal = false },
+        .{ .lhs = "[true,2]", .rhs = "[1.0,2.0]", .equal = true },
+        .{ .lhs = "{\"a\":1,\"b\":[true]}", .rhs = "{\"b\":[1],\"a\":1.0}", .equal = true },
+        .{ .lhs = "{\"a\":1,\"b\":2}", .rhs = "{\"a\":2,\"b\":1}", .equal = false },
+        .{ .lhs = "\"1\"", .rhs = "1", .equal = false },
+    };
+    for (pairs) |pair| {
+        const lhs = timestampDigest(try mkParams(a, pair.lhs));
+        const rhs = timestampDigest(try mkParams(a, pair.rhs));
+        try testing.expectEqual(pair.equal, std.mem.eql(u8, &lhs, &rhs));
+    }
+    _ = timestampDigest(.{ .float = std.math.floatMax(f64) });
+}
+
+test "fuzz timestampDigest and screening retain no request-owned memory" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const f: f64 = @bitCast(std.mem.readInt(u64, bytes[0..8], .little));
+            _ = timestampDigest(.{ .float = f });
+            var ctx = MqttCtx.init(testing.allocator);
+            defer ctx.deinit();
+            ctx.io = testing.io;
+            var value: std.json.Value = undefined;
+            {
+                var arena = std.heap.ArenaAllocator.init(testing.allocator);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const text = try std.fmt.allocPrint(a, "{{\"mqtt_timestamp\":{d}}}", .{std.mem.readInt(i64, bytes[0..8], .little)});
+                value = try mkParams(a, text);
+                try MqttCtx.screenRequest(&ctx, &value, a);
+                try testing.expect(!value.object.contains("mqtt_timestamp"));
+                if (std.json.parseFromSliceLeaky(std.json.Value, a, bytes[8..], .{})) |parsed| {
+                    const digest = timestampDigest(parsed);
+                    try testing.expectEqualSlices(u8, &digest, &timestampDigest(parsed));
+                } else |_| {}
+            }
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            value = try mkParams(a, try std.fmt.allocPrint(a, "{{\"mqtt_timestamp\":{d}}}", .{std.mem.readInt(i64, bytes[0..8], .little)}));
+            try testing.expectError(error.DuplicateMqttRequest, MqttCtx.screenRequest(&ctx, &value, a));
+        }
+    }.run, .{});
 }
 
 test "fuzz apiResponse: arbitrary payloads never crash the bridge" {
@@ -868,7 +1081,7 @@ test "fuzz apiResponse: arbitrary payloads never crash the bridge" {
             defer arena.deinit();
             var ctx = MqttCtx.init(testing.allocator);
             defer ctx.deinit();
-            var dispatch: TestDispatch = .{};
+            var dispatch: u8 = 0;
             ctx.api_dispatch = struct {
                 fn cb(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror![]u8 {
                     return alloc.dupe(u8, "{}");
@@ -1131,12 +1344,39 @@ test "stop cancels a broker stalled before CONNACK" {
 }
 
 test "refused connects retry and free each attempt" {
-    var ctx = MqttCtx.init(testing.allocator);
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try (try Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    var attempts: std.atomic.Value(u32) = .init(0);
+    const Peer = struct {
+        fn run(s: *Io.net.Server, aio: Io, counter: *std.atomic.Value(u32)) void {
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(std.heap.smp_allocator);
+            for ([_]u8{ 5, 0 }) |code| {
+                const stream = s.accept(aio) catch return;
+                defer stream.close(aio);
+                var buf: [512]u8 = undefined;
+                var reader = stream.reader(aio, &buf);
+                _ = mqtt_proto.readPacket(&reader.interface, std.heap.smp_allocator, &body, 512) catch return;
+                var writer = stream.writer(aio, &.{});
+                writer.interface.writeAll(&.{ 0x20, 0x02, 0x00, code }) catch return;
+                writer.interface.flush() catch return;
+                _ = counter.fetchAdd(1, .release);
+                if (code == 0) {
+                    while (true) _ = reader.interface.takeByte() catch break;
+                }
+            }
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &server, io, &attempts });
+    defer peer.cancel(io);
+    var ctx = MqttCtx.init(std.heap.smp_allocator);
     defer ctx.deinit();
-    try ctx.setConfig(test_options);
-    ctx.config.?.port = 1; // refused
-    ctx.io = testing.io;
+    try ctx.setConfig(.{ .address = "127.0.0.1", .port = server.socket.address.getPort(), .instance_name = "phobos" });
+    ctx.io = io;
     ctx.start();
-    testing.io.sleep(.fromMilliseconds(50), .awake) catch {};
-    try testing.expect(ctx.client == null);
+    try waitConnected(&ctx, io);
+    try testing.expectEqual(@as(u32, 2), attempts.load(.acquire));
 }

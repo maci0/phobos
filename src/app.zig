@@ -1696,7 +1696,10 @@ fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerro
 fn mqttApiDispatch(ctx: *anyopaque, request: std.json.Value, alloc: std.mem.Allocator) anyerror![]u8 {
     const app: *App = @ptrCast(@alignCast(ctx));
     // MQTT requests are not authenticated (Moonraker MQTTClient.screen_rpc_request).
-    return app.dispatcher.handleParsedRoot(.{ .transport = .MQTT }, request, alloc);
+    return app.dispatcher.handleParsedRoot(.{
+        .transport = .MQTT,
+        .screen = .{ .ctx = app.mqtt_ctx, .run = MqttCtx.screenRequest },
+    }, request, alloc);
 }
 
 /// Spoolman WS spool-deletion hook: clear the active spool (if it was the

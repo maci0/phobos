@@ -559,18 +559,14 @@ test "fuzz encodePublish/ack: round-trip topic, payload and packet id" {
             const split = @max(1, @as(usize, buf[0]) % buf.len);
             const qos: u2 = @intCast(buf[0] % 3);
             const id = std.mem.readInt(u16, buf[1..3], .big);
-            const pkt = encodePublish(testing.allocator, buf[1..split], buf[split..], qos, buf[0] & 1 == 1, id) catch |err| switch (err) {
-                error.InvalidTopic => {
-                    try testing.expectError(error.InvalidTopic, validateTopicName(buf[1..split]));
-                    return;
-                },
-                else => return err,
-            };
+            const hex = std.fmt.bytesToHex(&buf, .lower);
+            const topic = hex[0 .. split * 2];
+            const pkt = try encodePublish(testing.allocator, topic, buf[split..], qos, buf[0] & 1 == 1, id);
             defer testing.allocator.free(pkt);
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(testing.allocator);
             const view = try parsePublish(try decodeAll(pkt, &body));
-            try testing.expectEqualSlices(u8, buf[1..split], view.topic);
+            try testing.expectEqualSlices(u8, topic, view.topic);
             try testing.expectEqualSlices(u8, buf[split..], view.payload);
             try testing.expectEqual(if (qos > 0) id else 0, view.packet_id);
             const reply = ack(.pubrec, id);
@@ -584,18 +580,13 @@ test "fuzz encodeSubscribe: filter round-trips" {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             var buf: [40]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            const pkt = encodeSubscribe(testing.allocator, 1, buf[1..], @intCast(buf[0] % 3)) catch |err| switch (err) {
-                error.InvalidTopic => {
-                    try testing.expectError(error.InvalidTopic, validateTopicFilter(buf[1..]));
-                    return;
-                },
-                else => return err,
-            };
+            const topic = std.fmt.bytesToHex(&buf, .lower);
+            const pkt = try encodeSubscribe(testing.allocator, 1, &topic, @intCast(buf[0] % 3));
             defer testing.allocator.free(pkt);
             var body: std.ArrayList(u8) = .empty;
             defer body.deinit(testing.allocator);
             const dec = try decodeAll(pkt, &body);
-            try testing.expectEqualSlices(u8, buf[1..], (try readStr(dec.body, 2)).s);
+            try testing.expectEqualSlices(u8, &topic, (try readStr(dec.body, 2)).s);
         }
     }.run, .{});
 }
