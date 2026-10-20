@@ -1248,6 +1248,7 @@ pub const App = struct {
         self.spoolman_ctx.deinit();
         // Stop the TD-1 discovery/poll thread (uses io + core) before teardown.
         self.td1_ctx.stopPolling();
+        self.wled_ctx.stopInitialization();
         // Stop the machine proc_stat timer thread before tearing down
         // connections (the timer thread may access conns within emitProcStatUpdate).
         self.machine_ctx.deinit();
@@ -1672,8 +1673,9 @@ pub const App = struct {
         self.button_ctx.io = io;
         self.button_ctx.core = self.core;
         self.wled_ctx.setIo(io);
-        self.wled_ctx.applyInitialStates();
         self.wled_ctx.core = self.core;
+        self.wled_ctx.startInitialization() catch |err|
+            std.debug.print("phobos: warning: WLED initialization disabled: {}\n", .{err});
         self.sensor_ctx.setIo(io);
         // Wire io into the job queue so it can emit notify_job_queue_changed.
         self.job_queue_ctx.setIo(io);

@@ -11,15 +11,15 @@
 //!   GET  /machine/wled/strip   → machine.wled.get_strip (single)
 //!   POST /machine/wled/strip   → machine.wled.post_strip (single)
 //!
-//! plus `set_wled_state` and `set_wled` as client JSON-RPC methods. Moonraker
-//! registers those two as Klippy remote methods; phobos does not (TODO.md).
+//! plus `set_wled_state` and `set_wled` as client and Klippy remote methods.
 //!
 //! `type: http` strips POST WLED JSON state to `{protocol}://{address}:{port}/json`
 //! within the strip `timeout`; `type: serial` strips write the same JSON to the
-//! `serial` device at `baud`. A strip added without a transport keeps its state
+//! `serial` device at `baud`, retaining one port and a joined reply reader. A strip added without a transport keeps its state
 //! in memory only. The state rules (wled_on, wled_off, wled_control, set_wled,
 //! _set_initial_state) follow wled.py. A failed send sets `error` and fails the
-//! request.
+//! request. An owned startup worker queries state and retries failed strips for
+//! 120 seconds; each HTTP command makes up to three attempts.
 //!
 //! CORE LOCK. Handlers run under Core; a send releases it for the device I/O and
 //! re-resolves the strip by name afterwards.
@@ -35,6 +35,8 @@ const registry = @import("../server/registry.zig");
 const Core = @import("../server/core.zig").Core;
 const power = @import("power.zig");
 const serial_mod = @import("serial.zig");
+const sleep = @import("../util/sleep.zig");
+const jsonrpc = @import("../jsonrpc.zig");
 
 const Registry = registry.Registry;
 
@@ -42,8 +44,108 @@ const Registry = registry.Registry;
 pub const default_timeout: std.Io.Duration = .fromSeconds(2);
 /// Moonraker StripSerial default `baud` (wled.py `from_config(config, 115200)`).
 pub const default_baud: u32 = 115200;
-/// WLED answers a state POST with `{"success":true}`; a longer reply is an error.
-const max_reply_bytes = 256;
+/// Bound a verbose WLED state reply without retaining it after validation.
+const max_reply_bytes = 16 * 1024;
+const http_attempts = 3;
+const http_retry_pause: std.Io.Duration = .fromMilliseconds(100);
+const init_retry_pause: std.Io.Duration = .fromSeconds(2);
+const init_retry_time: std.Io.Duration = .fromSeconds(120);
+const serial_idle_pause: std.Io.Duration = .fromMilliseconds(10);
+
+/// A stable, pinned serial port. Core protects strip state; this mutex protects
+/// a command and its reply while Core is released.
+const SerialLink = struct {
+    gpa: std.mem.Allocator,
+    refs: std.atomic.Value(u32) = .init(1),
+    mutex: std.Io.Mutex = .init,
+    port: ?serial_mod.Serial = null,
+    reader: ?std.Thread = null,
+    stop: std.Io.Event = .unset,
+    reply_ready: std.Io.Event = .unset,
+    waiting: std.atomic.Value(bool) = .init(false),
+    failed: std.atomic.Value(bool) = .init(false),
+
+    fn create(gpa: std.mem.Allocator) !*SerialLink {
+        const self = try gpa.create(SerialLink);
+        self.* = .{ .gpa = gpa };
+        return self;
+    }
+
+    fn retain(self: *SerialLink) void {
+        _ = self.refs.fetchAdd(1, .monotonic);
+    }
+
+    fn release(self: *SerialLink) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        self.closePort();
+        self.gpa.destroy(self);
+    }
+
+    fn closePort(self: *SerialLink) void {
+        const port = if (self.port) |*port| port else return;
+        self.stop.set(port.io);
+        if (self.reader) |reader| reader.join();
+        self.reader = null;
+        port.close();
+        self.port = null;
+    }
+
+    fn readReplies(self: *SerialLink) void {
+        const port = &self.port.?;
+        var reply: [max_reply_bytes]u8 = undefined;
+        var len: usize = 0;
+        var dropping = false;
+        while (!self.stop.isSet()) {
+            const n = port.readSome(reply[len..]) catch {
+                self.failed.store(true, .release);
+                self.reply_ready.set(port.io);
+                return;
+            };
+            if (n == 0 and sleep.untilStopped(port.io, serial_idle_pause, &self.stop)) return;
+            len += n;
+            while (std.mem.indexOfScalar(u8, reply[0..len], '\n')) |end| {
+                const line = std.mem.trim(u8, reply[0..end], " \r\t");
+                if (!dropping and self.waiting.load(.acquire)) {
+                    var scratch: [4096]u8 = undefined;
+                    var fixed = std.heap.FixedBufferAllocator.init(&scratch);
+                    if (std.json.validate(fixed.allocator(), line) catch false) self.reply_ready.set(port.io);
+                }
+                dropping = false;
+                std.mem.copyForwards(u8, &reply, reply[end + 1 .. len]);
+                len -= end + 1;
+            }
+            if (len == reply.len) {
+                len = 0;
+                dropping = true;
+            }
+        }
+    }
+
+    fn send(self: *SerialLink, io: std.Io, path: []const u8, baud: u32, timeout: std.Io.Duration, body: []const u8, query: bool) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        if (self.failed.load(.acquire)) self.closePort();
+        if (self.port == null) {
+            self.port = try serial_mod.Serial.open(io, path, baud);
+            self.stop.reset();
+            self.failed.store(false, .release);
+            self.reader = std.Thread.spawn(.{ .stack_size = 1 << 20 }, readReplies, .{self}) catch |err| {
+                self.closePort();
+                return err;
+            };
+        }
+        const port = &self.port.?;
+        errdefer self.closePort();
+        const deadline = (std.Io.Timeout{ .duration = .{ .raw = timeout, .clock = .awake } }).toDeadline(io);
+        self.reply_ready.reset();
+        self.waiting.store(query, .release);
+        defer self.waiting.store(false, .release);
+        try port.writeTimeout(body, deadline);
+        if (!query) return;
+        try self.reply_ready.waitTimeout(io, deadline);
+        if (self.failed.load(.acquire)) return error.SerialDisconnected;
+    }
+};
 
 pub const Error = error{ NotFound, OutOfMemory, DeviceRequestFailed };
 
@@ -89,11 +191,14 @@ pub const Strip = struct {
     send_full_chain_data: bool = true,
     transport: Transport,
     timeout: std.Io.Duration,
+    serial_link: ?*SerialLink = null,
+    initialized: bool = false,
 
     fn deinit(self: *Strip, alloc: std.mem.Allocator) void {
         alloc.free(self.name);
         alloc.free(self.chain_data);
         if (self.error_state) |value| alloc.free(value);
+        if (self.serial_link) |link| link.release();
         switch (self.transport) {
             .none => {},
             .http => |url| alloc.free(url),
@@ -163,17 +268,26 @@ fn setWledBody(alloc: std.mem.Allocator, strip: *Strip, index: ?usize) std.Io.Wr
 }
 
 /// Send `body` over `transport`.
-fn transmit(gpa: std.mem.Allocator, io: std.Io, transport: Transport, timeout: std.Io.Duration, body: []const u8) !void {
+fn transmit(gpa: std.mem.Allocator, io: std.Io, transport: Transport, link: ?*SerialLink, timeout: std.Io.Duration, body: []const u8, query: bool) !void {
     switch (transport) {
         .none => {},
         .http => |url| {
             var reply: [max_reply_bytes]u8 = undefined;
-            _ = try power.deviceRequest(gpa, io, .POST, url, body, timeout, &reply);
+            var last_error: anyerror = error.DeviceRequestFailed;
+            for (0..http_attempts) |attempt| {
+                if (attempt != 0) try std.Io.sleep(io, http_retry_pause, .awake);
+                const result = power.deviceRequest(gpa, io, .POST, url, body, timeout, &reply) catch |err| {
+                    if (err == error.Canceled) return err;
+                    last_error = err;
+                    continue;
+                };
+                if (query and !try std.json.validate(gpa, result)) return error.InvalidJson;
+                return;
+            }
+            return last_error;
         },
         .serial => |s| {
-            var port = try serial_mod.Serial.open(io, s.path, s.baud);
-            defer port.close();
-            try port.write(body);
+            try link.?.send(io, s.path, s.baud, timeout, body, query);
         },
     }
 }
@@ -188,6 +302,8 @@ pub const WledCtx = struct {
     io: ?std.Io = null,
     /// Held by the caller of every handler once wired; released for device I/O.
     core: ?*Core = null,
+    init_thread: ?std.Thread = null,
+    init_stop: std.Io.Event = .unset,
 
     pub fn init(alloc: std.mem.Allocator) WledCtx {
         return .{
@@ -197,6 +313,7 @@ pub const WledCtx = struct {
     }
 
     pub fn deinit(self: *WledCtx) void {
+        self.stopInitialization();
         var it = self.strips.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -240,6 +357,7 @@ pub const WledCtx = struct {
             .serial => |s| .{ .serial = .{ .path = try self.gpa.dupe(u8, s.path), .baud = s.baud } },
         };
         strip.transport = transport;
+        if (transport == .serial) strip.serial_link = try SerialLink.create(self.gpa);
         if (try self.strips.fetchPut(k, strip)) |prior| {
             self.gpa.free(k); // Replacements retain the map's existing key.
             var old = prior.value;
@@ -247,24 +365,62 @@ pub const WledCtx = struct {
         }
     }
 
-    /// Bring every strip to its configured initial state (Moonraker
-    /// `component_init` → `_set_initial_state`). Runs before `core` is wired.
-    /// A failed strip keeps its `error`.
+    /// One initialization pass. Core must be held when wired. Failed strips
+    /// retain their error and are retried by the startup worker.
     pub fn applyInitialStates(self: *WledCtx) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
         var names: std.ArrayList([]const u8) = .empty;
         var it = self.strips.keyIterator();
-        while (it.next()) |k| names.append(a, k.*) catch return;
-        for (names.items) |name| self.setInitialState(a, name) catch |err|
-            std.debug.print("phobos: warning: wled strip '{s}' failed init: {}\n", .{ name, err });
+        while (it.next()) |k| names.append(a, a.dupe(u8, k.*) catch return) catch return;
+        for (names.items) |name| {
+            if (self.init_stop.isSet()) return;
+            const strip = self.findStrip(name) orelse continue;
+            if (strip.initialized) continue;
+            _ = self.commandQuery(a, name, "{\"v\":true}", true) catch continue;
+            self.setInitialState(a, name) catch continue;
+            if (self.findStrip(name)) |fresh| fresh.initialized = true;
+        }
+    }
+
+    pub fn startInitialization(self: *WledCtx) !void {
+        if (self.init_thread != null or self.io == null or self.core == null or self.strips.count() == 0) return;
+        self.init_stop.reset();
+        self.init_thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, initializationLoop, .{self});
+    }
+
+    pub fn stopInitialization(self: *WledCtx) void {
+        if (self.io) |io| self.init_stop.set(io);
+        if (self.init_thread) |thread| thread.join();
+        self.init_thread = null;
+    }
+
+    fn initializationLoop(self: *WledCtx) void {
+        const io = self.io.?;
+        const core = self.core.?;
+        const start = std.Io.Clock.Timestamp.now(io, .awake);
+        while (!self.init_stop.isSet() and start.untilNow(io).raw.nanoseconds < init_retry_time.nanoseconds) {
+            core.run(io, applyInitialStates, .{self});
+            const complete = core.run(io, initializationComplete, .{self});
+            if (complete or sleep.untilStopped(io, init_retry_pause, &self.init_stop)) return;
+        }
+    }
+
+    fn initializationComplete(self: *WledCtx) bool {
+        var it = self.strips.valueIterator();
+        while (it.next()) |strip| if (!strip.initialized) return false;
+        return true;
     }
 
     /// Send `body` to strip `name` with Core released, record the outcome in
     /// `error` (Moonraker `_send_wled_command`) and return the re-resolved
     /// strip. `name` must not borrow from a strip. Without io nothing is sent.
     fn command(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8, body: []const u8) Error!*Strip {
+        return self.commandQuery(alloc, name, body, false);
+    }
+
+    fn commandQuery(self: *WledCtx, alloc: std.mem.Allocator, name: []const u8, body: []const u8, query: bool) Error!*Strip {
         const strip = self.findStrip(name) orelse return error.NotFound;
         const io = self.io orelse return strip;
         const transport: Transport = switch (strip.transport) {
@@ -273,10 +429,13 @@ pub const WledCtx = struct {
             .serial => |s| .{ .serial = .{ .path = try alloc.dupe(u8, s.path), .baud = s.baud } },
         };
         const timeout = strip.timeout;
+        const link = strip.serial_link;
+        if (link) |pinned| pinned.retain();
+        defer if (link) |pinned| pinned.release();
         const result = blk: {
             if (self.core) |core| core.unlock(io);
             defer if (self.core) |core| core.lock(io);
-            break :blk transmit(self.gpa, io, transport, timeout, body);
+            break :blk transmit(self.gpa, io, transport, link, timeout, body, query);
         };
         const fresh = self.findStrip(name) orelse return error.NotFound;
         if (fresh.error_state) |e| self.gpa.free(e);
@@ -286,6 +445,14 @@ pub const WledCtx = struct {
             return error.DeviceRequestFailed;
         };
         return fresh;
+    }
+
+    fn requestError(self: *WledCtx, alloc: std.mem.Allocator, params: std.json.Value, name: []const u8, err: anyerror) anyerror {
+        if (err != error.DeviceRequestFailed or params != .object or !params.object.contains("_method")) return err;
+        const strip = self.findStrip(name) orelse return err;
+        const message = strip.error_state orelse return err;
+        jsonrpc.setErrorReply(alloc, params, .bad_request, message) catch |failure| return failure;
+        return error.UpstreamRequestFailed;
     }
 
     /// Moonraker wled_on(preset): a negative preset restores the initial state.
@@ -409,7 +576,7 @@ pub const WledCtx = struct {
 ///   { strip, status, chain_count, preset, brightness, intensity, speed, error }
 pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
-    try obj.put(alloc, "strip", .{ .string = s.name });
+    try obj.put(alloc, "strip", .{ .string = try alloc.dupe(u8, s.name) });
     try obj.put(alloc, "status", .{ .string = if (s.on) "on" else "off" });
     // chain_data holds chain_count * 4 bytes, so the count fits in i64.
     try obj.put(alloc, "chain_count", .{ .integer = @intCast(s.chain_count) });
@@ -417,7 +584,7 @@ pub fn buildStripInfo(alloc: std.mem.Allocator, s: *const Strip) !std.json.Value
     try obj.put(alloc, "brightness", .{ .integer = s.brightness });
     try obj.put(alloc, "intensity", .{ .integer = s.intensity });
     try obj.put(alloc, "speed", .{ .integer = s.speed });
-    try obj.put(alloc, "error", if (s.error_state) |e| .{ .string = e } else .null);
+    try obj.put(alloc, "error", if (s.error_state) |e| .{ .string = try alloc.dupe(u8, e) } else .null);
     return .{ .object = obj };
 }
 
@@ -492,7 +659,7 @@ pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
         {
             return error.InvalidParams;
         }
-        try processRequest(
+        processRequest(
             ctx,
             alloc,
             strip_name,
@@ -501,7 +668,7 @@ pub fn handleSingleStrip(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std
             ((try webreq.optional(i64, params, "brightness")) orelse -1),
             ((try webreq.optional(i64, params, "intensity")) orelse -1),
             ((try webreq.optional(i64, params, "speed")) orelse -1),
-        );
+        ) catch |err| return ctx.requestError(alloc, params, strip_name, err);
     }
     const strip = ctx.findStrip(strip_name) orelse return error.NotFound;
     var out: std.json.ObjectMap = .empty;
@@ -524,7 +691,8 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
                 // HTTP injects `_method` into every route. It is not a strip.
                 if (std.mem.startsWith(u8, name, "_")) continue;
                 if (ctx.findStrip(name) != null) {
-                    try processRequest(ctx, alloc, name, action, -1, -1, -1, -1);
+                    processRequest(ctx, alloc, name, action, -1, -1, -1, -1) catch |err|
+                        return ctx.requestError(alloc, params, name, err);
                     const strip = ctx.findStrip(name) orelse return error.NotFound;
                     try out.put(alloc, name, try buildStripInfo(alloc, strip));
                 } else {
@@ -592,10 +760,10 @@ pub fn handleSetWledState(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     }
     const s = status orelse "";
     // All other arguments are ignored when turning off.
-    if (std.mem.eql(u8, s, "off")) try ctx.wledOff(alloc, strip_name);
+    if (std.mem.eql(u8, s, "off")) ctx.wledOff(alloc, strip_name) catch |err| return ctx.requestError(alloc, params, strip_name, err);
     // Turn on if status is "on" or a preset is specified.
-    if (std.mem.eql(u8, s, "on") or preset != -1) try ctx.wledOn(alloc, strip_name, preset);
-    if (brightness != -1 or intensity != -1 or speed != -1) try ctx.wledControl(alloc, strip_name, brightness, intensity, speed);
+    if (std.mem.eql(u8, s, "on") or preset != -1) ctx.wledOn(alloc, strip_name, preset) catch |err| return ctx.requestError(alloc, params, strip_name, err);
+    if (brightness != -1 or intensity != -1 or speed != -1) ctx.wledControl(alloc, strip_name, brightness, intensity, speed) catch |err| return ctx.requestError(alloc, params, strip_name, err);
     return .{ .object = out };
 }
 
@@ -617,7 +785,8 @@ pub fn handleSetWled(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
         ((try webreq.optional(f64, params, "blue")) orelse 0),
         ((try webreq.optional(f64, params, "white")) orelse 0),
     };
-    try ctx.setWled(alloc, strip_name, color, index, ((try webreq.optional(i64, params, "transmit")) orelse 1) == 1);
+    ctx.setWled(alloc, strip_name, color, index, ((try webreq.optional(i64, params, "transmit")) orelse 1) == 1) catch |err|
+        return ctx.requestError(alloc, params, strip_name, err);
 
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "status", .{ .string = "ok" });
@@ -661,6 +830,7 @@ fn objParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
 const Capture = struct {
     tmp: testing.TmpDir,
     path: [:0]u8,
+    offset: u64 = 0,
 
     fn init() !Capture {
         var tmp = testing.tmpDir(.{});
@@ -675,9 +845,14 @@ const Capture = struct {
     }
 
     fn take(self: *Capture, buf: []u8) ![]const u8 {
-        const data = try self.tmp.dir.readFile(testing.io, "wled", buf);
-        try self.tmp.dir.writeFile(testing.io, .{ .sub_path = "wled", .data = "" });
-        return data;
+        const file = try self.tmp.dir.openFile(testing.io, "wled", .{});
+        defer file.close(testing.io);
+        const n = try file.readPositional(testing.io, &.{buf}, self.offset);
+        self.offset += n;
+        const data = buf[0..n];
+        // Tests below inspect the last command; the PTY test counts every send.
+        const start = if (std.mem.lastIndexOf(u8, data, "}{")) |at| at + 1 else 0;
+        return data[start..];
     }
 
     fn strip(self: *const Capture, name: []const u8, chain_count: usize, initial_preset: i64) Config {
@@ -866,8 +1041,12 @@ test "a failed send sets error and fails the request" {
     defer ctx.deinit();
     ctx.setIo(testing.io);
     try ctx.addStrip(.{ .name = "s", .transport = .{ .serial = .{ .path = missing, .baud = default_baud } } });
-    try testing.expectError(error.DeviceRequestFailed, handleSingleStrip(@ptrCast(&ctx), try objParams(a, "{\"strip\":\"s\",\"action\":\"off\",\"_method\":\"POST\"}"), a));
+    const params = try objParams(a, "{\"strip\":\"s\",\"action\":\"off\",\"_method\":\"POST\"}");
+    try testing.expectError(error.UpstreamRequestFailed, handleSingleStrip(@ptrCast(&ctx), params, a));
     try testing.expectEqualStrings("WLED: Error FileNotFound", ctx.findStrip("s").?.error_state.?);
+    const reply = try jsonrpc.errorReply(error.UpstreamRequestFailed, params, a);
+    try testing.expectEqual(std.http.Status.bad_request, reply.status);
+    try testing.expectEqualStrings("WLED: Error FileNotFound", reply.message);
 }
 
 test "http strip: POSTs JSON with Core released" {
@@ -894,14 +1073,16 @@ test "http strip: POSTs JSON with Core released" {
     try testing.expect(ctx.findStrip("s").?.error_state == null);
 }
 
-test "applyInitialStates: initial preset or colours, strip lit" {
+test "setInitialState: initial preset or colours, strip lit" {
     var cap = try Capture.init();
     defer cap.deinit();
     var ctx = WledCtx.init(testing.allocator);
     defer ctx.deinit();
     ctx.setIo(testing.io);
     try ctx.addStrip(cap.strip("s", 1, 6));
-    ctx.applyInitialStates();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try ctx.setInitialState(arena.allocator(), "s");
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings("{\"on\":true,\"ps\":6}", try cap.take(&buf));
     const strip = ctx.findStrip("s").?;
@@ -910,8 +1091,238 @@ test "applyInitialStates: initial preset or colours, strip lit" {
     try testing.expectEqualSlices(u8, &.{ 128, 128, 128, 128 }, strip.chain_data);
 }
 
+test "serial initialization queries state and retains the same connection for later commands" {
+    const Pty = @import("../testutil/pty.zig").Pty;
+    const Peer = struct {
+        pty: *Pty,
+        commands: [3][256]u8 = undefined,
+        lengths: [3]usize = @splat(0),
+        done: std.Io.Event = .unset,
+        initial_received: std.Io.Event = .unset,
+
+        fn run(self: *@This()) !void {
+            defer self.done.set(self.pty.master.io);
+            const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+            for (&self.commands, &self.lengths, 0..) |*buf, *len, index| {
+                const deadline = timeout.toDeadline(self.pty.master.io);
+                while (len.* < buf.len) {
+                    len.* += try self.pty.master.readSomeTimeout(buf[len.*..], deadline);
+                    if (try std.json.validate(std.heap.smp_allocator, buf[0..len.*])) break;
+                }
+                if (index == 0) try self.pty.master.writeTimeout("booting\n{\"on\":false}\n", deadline);
+                if (index == 1) {
+                    const ack = "{\"success\":true}\n";
+                    var replies: [ack.len * 2048]u8 = undefined;
+                    for (0..2048) |i| @memcpy(replies[i * ack.len ..][0..ack.len], ack);
+                    try self.pty.master.writeTimeout(&replies, deadline);
+                    self.initial_received.set(self.pty.master.io);
+                }
+            }
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var pty = try Pty.init(aio);
+    defer pty.deinit();
+    var keepalive = try serial_mod.Serial.open(aio, pty.path(), default_baud);
+    defer keepalive.close();
+    var peer: Peer = .{ .pty = &pty };
+    var serving = try aio.concurrent(Peer.run, .{&peer});
+    defer _ = serving.cancel(aio) catch {};
+    var ctx = WledCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    ctx.setIo(aio);
+    try ctx.addStrip(.{ .name = "serial", .initial_preset = 6, .transport = .{ .serial = .{ .path = pty.path(), .baud = default_baud } } });
+    ctx.applyInitialStates();
+    try testing.expect(ctx.findStrip("serial").?.initialized);
+    try peer.initial_received.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const handle = ctx.findStrip("serial").?.serial_link.?.port.?.file.handle;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try ctx.wledOff(arena.allocator(), "serial");
+    try testing.expectEqual(handle, ctx.findStrip("serial").?.serial_link.?.port.?.file.handle);
+    try peer.done.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    try serving.await(aio);
+    try testing.expectEqualStrings("{\"v\":true}", peer.commands[0][0..peer.lengths[0]]);
+    try testing.expectEqualStrings("{\"on\":true,\"ps\":6}", peer.commands[1][0..peer.lengths[1]]);
+    try testing.expectEqualStrings("{\"on\":false}", peer.commands[2][0..peer.lengths[2]]);
+}
+
+test "HTTP initialization retries twice then queries before the initial command" {
+    const Peer = struct {
+        device: power.DeviceDouble,
+        count: usize = 0,
+        bodies: [4][128]u8 = undefined,
+        lengths: [4]usize = @splat(0),
+        done: std.Io.Event = .unset,
+
+        fn run(self: *@This()) !void {
+            defer self.done.set(self.device.io);
+            for (0..4) |index| {
+                const stream = try self.device.server.accept(self.device.io);
+                defer stream.close(self.device.io);
+                var rbuf: [1024]u8 = undefined;
+                var reader = stream.reader(self.device.io, &rbuf);
+                _ = try reader.interface.takeDelimiterInclusive('\n');
+                var len: usize = 0;
+                while (true) {
+                    const line = try reader.interface.takeDelimiterInclusive('\n');
+                    if (line.len <= 2) break;
+                    if (std.ascii.startsWithIgnoreCase(line, "Content-Length:"))
+                        len = try std.fmt.parseInt(usize, std.mem.trim(u8, line["Content-Length:".len..], " \r\n"), 10);
+                }
+                if (len > self.bodies[index].len) return error.BodyTooLong;
+                try reader.interface.readSliceAll(self.bodies[index][0..len]);
+                self.lengths[index] = len;
+                var wbuf: [256]u8 = undefined;
+                var writer = stream.writer(self.device.io, &wbuf);
+                try writer.interface.writeAll(if (index < 2)
+                    "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                else
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+                try writer.interface.flush();
+                self.count += 1;
+            }
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var peer: Peer = .{ .device = try power.DeviceDouble.bind(aio, null) };
+    defer peer.device.server.deinit(aio);
+    var serving = try aio.concurrent(Peer.run, .{&peer});
+    defer _ = serving.cancel(aio) catch {};
+    var ctx = WledCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    ctx.setIo(aio);
+    var url: [96]u8 = undefined;
+    try ctx.addStrip(.{ .name = "http", .initial_preset = 4, .transport = .{ .http = try peer.device.url(&url, "/json") } });
+    ctx.applyInitialStates();
+    try peer.done.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    try serving.await(aio);
+    try testing.expectEqual(@as(usize, 4), peer.count);
+    for (0..3) |index| try testing.expectEqualStrings("{\"v\":true}", peer.bodies[index][0..peer.lengths[index]]);
+    try testing.expectEqualStrings("{\"on\":true,\"ps\":4}", peer.bodies[3][0..peer.lengths[3]]);
+    try testing.expect(ctx.findStrip("http").?.initialized);
+}
+
+test "failed startup strips remain pending and successful strips are not reset" {
+    var ctx = WledCtx.init(testing.allocator);
+    defer ctx.deinit();
+    ctx.setIo(testing.io);
+    try ctx.addStrip(.{ .name = "bad", .transport = .{ .serial = .{ .path = "", .baud = default_baud } } });
+    try ctx.addStrip(.{ .name = "good" });
+    ctx.applyInitialStates();
+    try testing.expect(!ctx.initializationComplete());
+    try testing.expect(!ctx.findStrip("bad").?.initialized);
+    try testing.expect(ctx.findStrip("bad").?.error_state != null);
+    ctx.findStrip("good").?.on = false;
+    try ctx.addStrip(.{ .name = "bad" });
+    ctx.applyInitialStates();
+    try testing.expect(ctx.initializationComplete());
+    try testing.expect(!ctx.findStrip("good").?.on);
+    ctx.stopInitialization();
+    ctx.applyInitialStates();
+}
+
+test "startup retries pending strips every two seconds for 120 seconds" {
+    const Fake = struct {
+        elapsed: i96 = 0,
+        attempts: usize = 0,
+        fn now(raw: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            return .{ .nanoseconds = self.elapsed };
+        }
+        fn wait(raw: ?*anyopaque, _: *const u32, _: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.elapsed = timeout.deadline.raw.nanoseconds;
+        }
+        fn open(raw: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.attempts += 1;
+            return error.FileNotFound;
+        }
+    };
+    var fake: Fake = .{};
+    var vtable = std.Io.failing.vtable.*;
+    vtable.now = Fake.now;
+    vtable.futexWait = Fake.wait;
+    vtable.dirOpenFile = Fake.open;
+    const aio: std.Io = .{ .userdata = &fake, .vtable = &vtable };
+    var core = Core.init();
+    var ctx = WledCtx.init(testing.allocator);
+    defer ctx.deinit();
+    ctx.io = aio;
+    ctx.core = &core;
+    try ctx.addStrip(.{ .name = "pending", .transport = .{ .serial = .{ .path = "mock", .baud = default_baud } } });
+    ctx.initializationLoop();
+    try testing.expectEqual(@as(usize, 60), fake.attempts);
+    try testing.expectEqual(init_retry_time.nanoseconds, fake.elapsed);
+    ctx.init_stop.set(aio);
+    ctx.initializationLoop();
+    try testing.expectEqual(@as(usize, 60), fake.attempts);
+}
+
+test "startup worker applies initial states and joins before context teardown" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var core = Core.init();
+    var ctx = WledCtx.init(std.heap.smp_allocator);
+    defer ctx.deinit();
+    ctx.io = aio;
+    ctx.core = &core;
+    try ctx.addStrip(.{ .name = "startup", .initial_preset = 7 });
+    try ctx.startInitialization();
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    while (!core.run(aio, WledCtx.initializationComplete, .{&ctx})) {
+        if (start.untilNow(aio).raw.nanoseconds >= std.time.ns_per_s) return error.Timeout;
+        try std.Io.sleep(aio, .fromMilliseconds(1), .awake);
+    }
+    ctx.stopInitialization();
+    try testing.expect(ctx.init_thread == null);
+    const strip = ctx.findStrip("startup").?;
+    try testing.expectEqual(@as(i64, 7), strip.preset);
+    try testing.expect(strip.on);
+}
+
+test "fuzz serial query discards arbitrary startup lines before a JSON reply" {
+    const Pty = @import("../testutil/pty.zig").Pty;
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const Peer = struct {
+                pty: *Pty,
+                bytes: []const u8,
+                fn run(self: *@This()) !void {
+                    const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } };
+                    var query: [32]u8 = undefined;
+                    _ = try self.pty.master.readSomeTimeout(&query, timeout);
+                    try self.pty.master.writeTimeout(self.bytes, timeout);
+                    try self.pty.master.writeTimeout("\n{}\n", timeout);
+                }
+            };
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const aio = threaded.io();
+            var pty = try Pty.init(aio);
+            defer pty.deinit();
+            var serial = try serial_mod.Serial.open(aio, pty.path(), default_baud);
+            defer serial.close();
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var peer: Peer = .{ .pty = &pty, .bytes = &bytes };
+            var serving = try aio.concurrent(Peer.run, .{&peer});
+            defer _ = serving.cancel(aio) catch {};
+            const link = try SerialLink.create(testing.allocator);
+            defer link.release();
+            try link.send(aio, pty.path(), default_baud, .fromSeconds(2), "{\"v\":true}", true);
+            try serving.await(aio);
+        }
+    }.run, .{});
+}
+
 test "registerWled: wires expected routes and JSON-RPC methods" {
-    const jsonrpc = @import("../jsonrpc.zig");
     var d = jsonrpc.Dispatcher.init(testing.allocator);
     defer d.deinit();
     var reg = Registry.init(testing.allocator, &d);

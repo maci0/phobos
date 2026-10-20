@@ -160,6 +160,16 @@ Serial deadline reads and writes use `std.Io.Select` and join canceled operation
 before returning their borrowed buffers. Pseudo-terminal tests cover silent reads
 and a write that fills the peer's queue. Physical UART timing remains unverified.
 
+WLED startup queries `{"v":true}` before its configured initial state. An owned
+worker retries only pending strips every two seconds for 120 seconds; it stops
+before context teardown. HTTP commands make at most three attempts, with a 100 ms
+pause between failed attempts. Each serial strip owns a persistent port and joined
+reader that drains replies, validates bounded JSON lines, and wakes a pending state
+query. Commands serialize through the strip's mutex while Core is released; pinned
+connections survive concurrent strip replacement. Klippy registers `set_wled` and
+`set_wled_state` through App's existing remote queue. Protocol tests use loopback
+HTTP and pseudo-terminals, not physical strips.
+
 TD-1 scans use `std.Io.Clock` to share one serial-timeout budget across reads;
 their final in-flight read can add at most one further serial timeout. Polling
 checks its stop event before opening each device.
