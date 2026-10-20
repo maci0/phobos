@@ -49,6 +49,8 @@ const paneldue_component = @import("components/paneldue.zig");
 const feather_updates_component = @import("components/feather_updates.zig");
 const ds = @import("store/datastore.zig");
 const config_helper = @import("config/confighelper.zig");
+const json_value = @import("json/value.zig");
+const clock = @import("util/clock.zig");
 
 const feather_component_name = [_][]const u8{"feather_updates"};
 
@@ -159,6 +161,7 @@ const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]c
     "spoolman_set_active_spool",
     "publish_mqtt_topic",
     "notify",
+    "paneldue_beep",
 };
 
 /// Klippy `RemoteHandler`, run on the Klippy reader under Core. Queues the
@@ -175,8 +178,14 @@ fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []con
     }
 }
 
-fn onKlippyState(ctx: *anyopaque, _: std.Io, state: klippy_connection_component.State) void {
+fn onKlippyState(ctx: *anyopaque, aio: std.Io, state: klippy_connection_component.State) void {
     const app: *App = @ptrCast(@alignCast(ctx));
+    app.mqtt_ctx.klippyState(state != .disconnected) catch |err|
+        std.debug.print("phobos: warning: MQTT Klippy state: {}\n", .{err});
+    app.spoolman_ctx.onKlippyStateLocked(state == .ready and app.spoolman_ctx.api_url != null);
+    app.analysis_ctx.klippy_ready = state == .ready;
+    app.paneldue.onState(state);
+    app.power_ctx.onKlippyState(@tagName(state), clock.monotonicSeconds(aio));
     switch (state) {
         .ready => app.job_queue_ctx.onKlippyReady(),
         .shutdown, .disconnected, .@"error" => app.job_queue_ctx.onKlippyShutdown(),
@@ -184,23 +193,87 @@ fn onKlippyState(ctx: *anyopaque, _: std.Io, state: klippy_connection_component.
     }
 }
 
+fn onKlippyStatus(ctx: *anyopaque, _: std.Io, status: std.json.Value, eventtime: std.json.Value) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    // The initial subscription snapshot precedes the completed-handshake event.
+    app.mqtt_ctx.klippyState(app.klippy_ctx.state != .disconnected) catch |err|
+        std.debug.print("phobos: warning: MQTT Klippy state: {}\n", .{err});
+    app.mqtt_ctx.klippyStatus(status, eventtime) catch |err|
+        std.debug.print("phobos: warning: MQTT Klippy status: {}\n", .{err});
+    app.spoolman_ctx.onKlippyStateLocked(app.klippy_ctx.state == .ready and app.spoolman_ctx.api_url != null);
+    app.spoolman_ctx.onKlippyStatusLocked(status, eventtime) catch |err|
+        std.debug.print("phobos: warning: Spoolman Klippy status: {}\n", .{err});
+    app.paneldue.statusUpdate(status);
+}
+
+fn onKlippyGcode(ctx: *anyopaque, _: std.Io, params: std.json.Value) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const response = switch (params) {
+        .object => params.object.get("response") orelse return,
+        else => params,
+    };
+    switch (response) {
+        .string => app.paneldue.handleGcodeResponse(response.string),
+        .array => |values| for (values.items) |value| {
+            if (value == .string) app.paneldue.handleGcodeResponse(value.string);
+        },
+        else => {},
+    }
+}
+
+fn onJobQueued(ctx: *anyopaque) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    app.power_ctx.onJobQueued();
+}
+
+fn powerServiceAction(ctx: *anyopaque, alloc: std.mem.Allocator, action: []const u8, name: []const u8) !void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const kind = std.meta.stringToEnum(machine_component.ServiceAction, action) orelse return error.InvalidParams;
+    try app.machine_ctx.serviceActionLocked(alloc, kind, name);
+}
+
+fn powerServiceValidate(ctx: *anyopaque, alloc: std.mem.Allocator, name: []const u8) !void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    try app.machine_ctx.validateBoundService(alloc, name);
+}
+
+fn powerFirmwareRestart(ctx: *anyopaque, alloc: std.mem.Allocator) !void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    _ = try printer_component.handleFirmwareRestart(app.printer_ctx, .null, alloc);
+}
+
+/// Button templates already hold Core; invoke the registered handler directly.
+/// Params and the result are copied into the caller's rendering arena.
+fn buttonCallMethod(ctx: *anyopaque, method: []const u8, args: std.json.Value, alloc: std.mem.Allocator) !std.json.Value {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const entry = app.dispatcher.methods.get(method) orelse return error.NotFound;
+    if (std.mem.indexOfScalar(registry.TransportType, entry.transports, .INTERNAL) == null) return error.NotFound;
+    if (args != .object or json_value.exceedsDepth(args, json_value.max_value_depth)) return error.InvalidParams;
+    const copied = try json_value.deepCopy(alloc, args);
+    const params = try jsonrpc.requestParams(alloc, copied.object, entry.verb, .{}, std.mem.startsWith(u8, method, "access."));
+    if (entry.off_core) app.core.unlock(app.button_ctx.io.?);
+    defer if (entry.off_core) app.core.lock(app.button_ctx.io.?);
+    const result = try entry.handler(entry.ctx, params, alloc);
+    if (json_value.exceedsDepth(result, json_value.max_value_depth)) return error.InvalidParams;
+    return json_value.deepCopy(alloc, result);
+}
+
+fn paneldueBeep(ctx: *anyopaque, params: std.json.Value, _: std.mem.Allocator) !std.json.Value {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    try app.paneldue.beep(params);
+    return .null;
+}
+
 /// The JSON-RPC request for Klipper remote method `method`, gpa-owned, or
 /// null for an unknown method or a `set_device_power` state Moonraker ignores.
-/// `set_device_power` maps to `machine.device_power.post_device` and
-/// `publish_mqtt_topic` to `server.mqtt.publish_mqtt_topic`; the others,
-/// Feather's included, keep their names and kwargs. `force` is not supported.
+/// `publish_mqtt_topic` maps to `server.mqtt.publish_mqtt_topic`; the others,
+/// Feather's included, keep their names and kwargs.
 fn remoteMethodRequest(alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) error{OutOfMemory}!?[]u8 {
     const kwargs: std.json.Value = if (params == .object) params else .{ .object = .empty };
     if (std.mem.eql(u8, method, "set_device_power")) {
-        const action = devicePowerAction(kwargs.object.get("state") orelse .null) orelse return null;
+        _ = devicePowerAction(kwargs.object.get("state") orelse .null) orelse return null;
         const device = kwargs.object.get("device") orelse return null;
         if (device != .string) return null;
-        return try std.json.Stringify.valueAlloc(alloc, .{
-            .jsonrpc = "2.0",
-            .method = "machine.device_power.post_device",
-            .params = .{ .device = device.string, .action = action },
-            .id = 0,
-        }, .{});
     }
     const target: []const u8 = if (std.mem.eql(u8, method, "publish_mqtt_topic"))
         "server.mqtt.publish_mqtt_topic"
@@ -1255,9 +1328,10 @@ pub const App = struct {
 
     /// Stop and join workers before freeing their dependencies.
     pub fn deinit(self: *App, io: std.Io) void {
+        // Stop the callback producer while every consumer is still alive.
+        self.klippy_ctx.stop(io);
         self.power_ctx.stopTimerWorker();
         self.button_ctx.stop();
-        self.paneldue.deinit();
         self.file_ctx.stopObserver();
         self.remote_calls.close(io);
         if (self.remote_worker) |*w| {
@@ -1265,13 +1339,15 @@ pub const App = struct {
             w.cancel(io);
         }
         while (self.remote_calls.getOneUncancelable(io)) |req| self.alloc.free(req) else |_| {}
-        self.update_ctx.deinit();
         self.data_store_ctx.stopSampler();
-        self.sensor_ctx.stopSampler();
-        self.klippy_ctx.stop(io);
         self.job_queue_ctx.cancelDelayTimer();
-        self.announcements_ctx.deinit();
+        // MQTT dispatch and sensor delivery borrow components torn down below.
         self.mqtt_ctx.deinit();
+        self.paneldue.deinit();
+        self.update_ctx.deinit();
+        self.analysis_ctx.deinit(self.alloc);
+        self.announcements_ctx.deinit();
+        self.sensor_ctx.stopSampler();
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
         // Stop Spoolman's socket and reporting workers before io/conns teardown.
         self.spoolman_ctx.deinit();
@@ -1314,11 +1390,9 @@ pub const App = struct {
         self.octoprint_ctx.deinit(self.alloc);
         self.alloc.destroy(self.octoprint_ctx);
         self.alloc.destroy(self.zeroconf_ctx);
-        self.analysis_ctx.deinit(self.alloc);
         self.alloc.destroy(self.analysis_ctx);
         self.alloc.destroy(self.mqtt_ctx);
         self.alloc.destroy(self.spoolman_ctx);
-        self.db_store.deinit(self.alloc);
         // Best-effort: shutdown continues if the temp tree cannot be removed.
         if (self.temp_datadir) std.Io.Dir.cwd().deleteTree(io, self.datadir) catch {};
         self.alloc.free(self.datadir);
@@ -1341,6 +1415,7 @@ pub const App = struct {
         self.alloc.destroy(self.job_state_ctx);
         self.history_ctx.deinit();
         self.alloc.destroy(self.history_ctx);
+        self.db_store.deinit(self.alloc);
         self.alloc.destroy(self.bus);
         self.alloc.destroy(self.conns);
         self.alloc.destroy(self.info);
@@ -1459,7 +1534,7 @@ pub const App = struct {
         // installed on the heap KlippyCtx here. httpServer/setConfig rebind
         // the handler pointer once App is at its final address.
         self.klippy_ctx.remote_methods = &klippy_remote_methods;
-        self.bindFeather();
+        try self.dispatcher.registerEntry("paneldue_beep", .{ .ctx = self.info, .handler = wsStubHandler, .transports = &.{.INTERNAL} });
     }
 
     /// Read or create `<datadir>/.moonraker.uuid` and point webcam config uids
@@ -1499,7 +1574,7 @@ pub const App = struct {
         w.interface.flush() catch return;
     }
 
-    /// Point Klippy's remote-method hook at this App's Feather adapter.
+    /// Bind App pointers only after init returned it to its final address.
     fn bindFeather(self: *App) void {
         self.feather.updates = self.update_ctx;
         self.feather.idle = featherPrinterIdle;
@@ -1512,6 +1587,18 @@ pub const App = struct {
         self.klippy_ctx.remote_handler_ctx = self;
         self.klippy_ctx.event_ctx = self;
         self.klippy_ctx.on_state = onKlippyState;
+        self.klippy_ctx.on_status = onKlippyStatus;
+        self.klippy_ctx.on_gcode = onKlippyGcode;
+        self.power_ctx.action_ctx = self;
+        self.power_ctx.service_action = powerServiceAction;
+        self.power_ctx.service_validate = powerServiceValidate;
+        self.power_ctx.firmware_restart = powerFirmwareRestart;
+        self.job_queue_ctx.on_queued = onJobQueued;
+        self.job_queue_ctx.on_queued_ctx = self;
+        self.button_ctx.method_ctx = self;
+        self.button_ctx.call_method = buttonCallMethod;
+        self.dispatcher.methods.getPtr("paneldue_beep").?.ctx = self;
+        self.dispatcher.methods.getPtr("paneldue_beep").?.handler = paneldueBeep;
     }
 
     /// Moonraker registers `config_examples` and `docs` only after Klippy
@@ -1727,7 +1814,6 @@ pub const App = struct {
         self.update_ctx.setIo(io);
         // Wire io into the power component so it can emit notify_power_changed.
         self.power_ctx.setIo(io);
-        self.power_ctx.applyInitialStates();
         // Handlers hold Core from here on; device HTTP releases it.
         self.power_ctx.core = self.core;
         self.button_ctx.io = io;
@@ -1766,6 +1852,14 @@ pub const App = struct {
         self.mqtt_ctx.on_connection = SensorMqttBridge.onConnection;
         self.mqtt_ctx.on_connection_ctx = &self.sensor_mqtt_bridge;
         self.mqtt_ctx.start();
+        var subscription_arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer subscription_arena.deinit();
+        const selectors = self.mqtt_ctx.statusSubscription(subscription_arena.allocator()) catch |err| blk: {
+            std.debug.print("phobos: warning: MQTT Klippy subscription: {}\n", .{err});
+            break :blk std.json.Value{ .object = .empty };
+        };
+        for (selectors.object.keys()) |name| self.klippy_ctx.addSubscriptionObject(name) catch |err|
+            std.debug.print("phobos: warning: MQTT Klippy subscription '{s}': {}\n", .{ name, err });
         // Wire connections and io into ServerInfo so server.info reports live
         // websocket_count.
         self.info.conns = self.conns;
@@ -3222,6 +3316,7 @@ test "App.init: dispatcher has exactly the expected methods" {
         "machine.device_power.get_device",
         "machine.device_power.post_device",
         "set_device_power",
+        "paneldue_beep",
         // WLED (machine.wled.*)
         "machine.wled.strips",
         "machine.wled.status",
@@ -3372,7 +3467,7 @@ test "Klipper remote methods map to Moonraker's JSON-RPC requests" {
     const power = (try remoteMethodRequest(alloc, "set_device_power", .{ .object = params })).?;
     defer alloc.free(power);
     try std.testing.expectEqualStrings(
-        \\{"jsonrpc":"2.0","method":"machine.device_power.post_device","params":{"device":"psu","action":"on"},"id":0}
+        \\{"jsonrpc":"2.0","method":"set_device_power","params":{"device":"psu","state":"TRUE"},"id":0}
     , power);
     // power.py ignores unknown states; unknown methods are dropped.
     try params.put(alloc, "state", .{ .string = "blink" });
@@ -3746,4 +3841,329 @@ test "USB ID cache setup never starts a network worker in HTTP test servers" {
     try std.testing.expect(instance.machine_ctx.usb_ids != null);
     try std.testing.expect(instance.machine_ctx.usb_ids.?.worker == null);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(aio, "misc/usb.ids", .{}));
+}
+
+test "daemon component callbacks bind after App reaches its final address" {
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instance = try testApp(std.testing.allocator, aio, &tmp);
+    defer instance.deinit(aio);
+    instance.machine_ctx.no_proc_stat_timer = true;
+    try instance.power_ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .initial_state = "on" });
+    _ = instance.httpServer(aio);
+    try std.testing.expect(instance.klippy_ctx.on_status != null);
+    try std.testing.expect(instance.klippy_ctx.on_gcode != null);
+    try std.testing.expect(instance.power_ctx.action_ctx == @as(*anyopaque, &instance));
+    try std.testing.expect(instance.power_ctx.service_action != null);
+    try std.testing.expect(instance.power_ctx.service_validate != null);
+    try std.testing.expect(instance.power_ctx.firmware_restart != null);
+    try std.testing.expect(instance.button_ctx.method_ctx == @as(*anyopaque, &instance));
+    try std.testing.expect(instance.button_ctx.call_method != null);
+    try std.testing.expectEqualStrings("off", instance.power_ctx.findDevice("psu").?.state);
+    try std.testing.expect(instance.power_ctx.timer_worker == null);
+    try std.testing.expect(instance.button_ctx.worker == null);
+    try std.testing.expect(instance.sensor_ctx.sampler_thread == null);
+    try std.testing.expect(instance.announcements_ctx.refresh_thread == null);
+    try std.testing.expect(instance.announcements_ctx.notification_thread == null);
+}
+
+test "Klippy frame entry point fans out owned component state and repeated extrusion" {
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instance = try testApp(std.testing.allocator, aio, &tmp);
+    defer instance.deinit(aio);
+    instance.bindFeather();
+    instance.klippy_ctx.setIo(aio);
+    instance.paneldue.bind(aio, instance.alloc, instance.core, instance.klippy_ctx, instance.file_ctx);
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    try instance.mqtt_ctx.setConfig(.{ .address = "127.0.0.1", .instance_name = "p", .clock_io = aio, .status_objects = try mqtt_component.parseStatusObjects(a, "extruder=temperature") });
+    instance.mqtt_ctx.status.?.setBrokerConnected(true);
+    try instance.spoolman_ctx.setServerUrl("127.0.0.1:1");
+    try instance.spoolman_ctx.setSpoolId(1);
+    try instance.power_ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "on", .off_when_shutdown = true });
+    instance.klippy_ctx.connected.store(true, .release);
+    try instance.klippy_ctx.dispatchFrame(aio,
+        \\{"method":"process_status_update","params":{"eventtime":1,"status":{"webhooks":{"state":"ready"},"toolhead":{"position":[0,0,0,0]},"extruder":{"temperature":22},"print_stats":{"filename":"sample.gcode"}}}}
+    );
+    try std.testing.expect(instance.analysis_ctx.klippy_ready);
+    try std.testing.expect(instance.mqtt_ctx.klippy_connected);
+    try std.testing.expectEqual(@as(usize, 2), instance.mqtt_ctx.status.?.pending.len);
+    try std.testing.expect(instance.spoolman_ctx.extrusion_initialized);
+    try std.testing.expectEqualStrings("sample.gcode", instance.paneldue.filename.bytes[0..instance.paneldue.filename.len]);
+    try instance.klippy_ctx.dispatchFrame(aio,
+        \\{"method":"process_status_update","params":{"eventtime":2,"status":{"toolhead":{"position":[0,0,0,5]}}}}
+    );
+    try std.testing.expectEqual(@as(f64, 5), instance.spoolman_ctx.pending_reports.get(1).?.used);
+    try instance.klippy_ctx.dispatchFrame(aio,
+        \\{"method":"process_gcode_response","params":{"response":["!! first",17,"!! second",null]}}
+    );
+    try std.testing.expectEqualStrings("!! second", instance.paneldue.last_response.bytes[0..instance.paneldue.last_response.len]);
+    try instance.klippy_ctx.dispatchFrame(aio,
+        \\{"method":"process_gcode_response","params":[false,"!! third",{},"!! fourth"]}
+    );
+    try std.testing.expectEqualStrings("!! fourth", instance.paneldue.last_response.bytes[0..instance.paneldue.last_response.len]);
+    try instance.klippy_ctx.dispatchFrame(aio,
+        \\{"method":"process_status_update","params":{"status":{"webhooks":{"state":"shutdown"}}}}
+    );
+    try std.testing.expect(!instance.analysis_ctx.klippy_ready);
+    try std.testing.expect(!instance.spoolman_ctx.klippy_ready);
+    try std.testing.expect(instance.power_ctx.klippy_shutdown);
+    try std.testing.expect(instance.mqtt_ctx.klippy_connected);
+    instance.core.run(aio, onKlippyState, .{ @as(*anyopaque, &instance), aio, .disconnected });
+    try std.testing.expect(!instance.mqtt_ctx.klippy_connected);
+    try std.testing.expect(!instance.spoolman_ctx.extrusion_initialized);
+}
+
+test "queued files reach power and remote power preserves force through the dispatcher" {
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instance = try testApp(std.testing.allocator, aio, &tmp);
+    defer instance.deinit(aio);
+    instance.bindFeather();
+    instance.dispatcher.setRuntime(instance.core, aio);
+    instance.power_ctx.setIo(aio);
+    instance.power_ctx.core = instance.core;
+    try instance.power_ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .on_when_job_queued = true, .locked_while_printing = true });
+    instance.job_queue_ctx.file_check = null;
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    _ = try instance.dispatcher.handle(
+        \\{"jsonrpc":"2.0","method":"server.job_queue.post_job","params":{"filenames":["sample.gcode"]},"id":1}
+    , a);
+    try std.testing.expect(instance.power_ctx.findDevice("psu").?.queued_on);
+    instance.job_state_ctx.active.store(true, .release);
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"device\":\"psu\",\"state\":true,\"force\":true}", .{});
+    const request = (try remoteMethodRequest(instance.alloc, "set_device_power", params)).?;
+    runRemoteCall(&instance, aio, request);
+    try std.testing.expectEqualStrings("on", instance.power_ctx.findDevice("psu").?.state);
+    const blocked_root = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"jsonrpc":"2.0","method":"set_device_power","params":{"device":"psu","state":false,"force":true},"id":2}
+    , .{});
+    const blocked = try instance.dispatcher.handleParsedRoot(.{ .transport = .WEBSOCKET }, blocked_root, a);
+    try std.testing.expect(std.mem.indexOf(u8, blocked, "Method not found for transport") != null);
+    try std.testing.expectEqualStrings("on", instance.power_ctx.findDevice("psu").?.state);
+}
+
+test "button templates invoke internal handlers once with copied transport params" {
+    const Calls = struct {
+        core: *Core,
+        count: usize = 0,
+        fn run(raw: *anyopaque, params: std.json.Value, _: std.mem.Allocator) !std.json.Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(!self.core.mutex.tryLock());
+            try std.testing.expectEqualStrings("POST", params.object.get("_method").?.string);
+            try std.testing.expect(params.object.get("_connection_id") == null);
+            try std.testing.expectEqualStrings("psu", params.object.get("device").?.string);
+            self.count += 1;
+            return .null;
+        }
+        fn offCore(raw: *anyopaque, _: std.json.Value, _: std.mem.Allocator) !std.json.Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(self.core.mutex.tryLock());
+            self.core.mutex.unlock(std.testing.io);
+            self.count += 1;
+            return .null;
+        }
+    };
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instance = try testApp(std.testing.allocator, aio, &tmp);
+    defer instance.deinit(aio);
+    var cfg = config_helper.ConfigParser.init(std.testing.allocator);
+    defer cfg.deinit();
+    try cfg.parseString("[button test]\npin: gpiochip0/gpio23\non_press: {% do call_method('test.action', device='psu', _method='DELETE', _connection_id=19) %}\n", "button-test");
+    try instance.button_ctx.configure(&cfg);
+    instance.button_ctx.io = aio;
+    instance.bindFeather();
+    var calls: Calls = .{ .core = instance.core };
+    try instance.dispatcher.registerEntry("test.action", .{ .ctx = &calls, .handler = Calls.run });
+    try instance.dispatcher.registerEntry("test.off_core", .{ .ctx = &calls, .handler = Calls.offCore, .off_core = true });
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    instance.button_ctx.initialize(instance.button_ctx.buttons.get("test").?, false, 1);
+    try instance.core.run(aio, ButtonCtx.edge, .{ instance.button_ctx, "test", true, 2 });
+    try instance.core.run(aio, ButtonCtx.tick, .{ instance.button_ctx, 3, a });
+    try std.testing.expectEqual(@as(usize, 1), calls.count);
+    _ = try instance.core.run(aio, buttonCallMethod, .{ @as(*anyopaque, &instance), "test.off_core", std.json.Value{ .object = .empty }, a });
+    try std.testing.expectEqual(@as(usize, 2), calls.count);
+    try std.testing.expectError(error.NotFound, instance.core.run(aio, buttonCallMethod, .{ @as(*anyopaque, &instance), ws.identify_method, std.json.Value{ .object = .empty }, a }));
+}
+
+test "HTTP runtime merges MQTT selectors before Klippy starts and maps publish timeout" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const aio = std.testing.io;
+    const cfg_path = try tmp.dir.realPathFileAlloc(aio, ".", std.testing.allocator);
+    defer std.testing.allocator.free(cfg_path);
+    const config_path = try std.fs.path.join(std.testing.allocator, &.{ cfg_path, "moonraker.conf" });
+    defer std.testing.allocator.free(config_path);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "moonraker.conf", .data = "[mqtt]\naddress: 127.0.0.1\nport: 1\nstatus_objects:\n temperature_sensor chamber = temperature\n" });
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const server = try TestServer.initWithConfig(std.testing.allocator, config_path);
+    defer server.stop();
+    const Check = struct {
+        fn selectors(app: *App) bool {
+            return app.klippy_ctx.extra_sub_objects.contains("temperature_sensor chamber") and app.klippy_ctx.task == null;
+        }
+    };
+    try std.testing.expect(server.app.core.run(server.io, Check.selectors, .{server.app}));
+    const response = try server.postJson(std.testing.allocator, "/server/mqtt/publish", "{\"topic\":\"test\",\"timeout\":0}");
+    defer std.testing.allocator.free(response);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 504), parsed.value.object.get("error").?.object.get("code").?.integer);
+    try std.testing.expectEqualStrings("MQTT Publish Timed Out", parsed.value.object.get("error").?.object.get("message").?.string);
+}
+
+test "internal PanelDue beep and power restart use registered daemon targets" {
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const server = try TestServer.init(std.testing.allocator);
+    defer server.stop();
+    try server.startKlippyBridge();
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"frequency\":440,\"duration\":0.25}", .{});
+    const req = (try remoteMethodRequest(server.app.alloc, "paneldue_beep", params)).?;
+    runRemoteCall(server.app, server.io, req);
+    var queued: [1][]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try server.app.paneldue.output.get(server.io, &queued, 0));
+    const beep = queued[0];
+    defer server.app.alloc.free(beep);
+    const response = try std.json.parseFromSliceLeaky(std.json.Value, a, beep, .{});
+    try std.testing.expectEqual(@as(i64, 440), response.object.get("beep_freq").?.integer);
+    try std.testing.expectEqual(@as(i64, 250), response.object.get("beep_length").?.integer);
+    try server.app.core.run(server.io, powerFirmwareRestart, .{ @as(*anyopaque, server.app), a });
+}
+
+test "daemon power initial states validate services off Core and execute actions under Core" {
+    const Commands = struct {
+        app: *App,
+        listed: bool = false,
+        started: bool = false,
+        fn run(raw: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) !MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(self.app.core.mutex.tryLock());
+            self.app.core.unlock(std.testing.io);
+            if (argv.len >= 2 and std.mem.eql(u8, argv[1], "list-units")) {
+                self.listed = true;
+                return .{ .stdout = try alloc.dupe(u8, "klipper.service loaded active running\n"), .stderr = &.{} };
+            }
+            if (argv.len >= 2 and std.mem.eql(u8, argv[1], "show")) return .{ .stdout = try alloc.dupe(u8, "active\nrunning\n"), .stderr = &.{} };
+            if (argv.len >= 3 and std.mem.eql(u8, argv[1], "start") and std.mem.eql(u8, argv[argv.len - 1], "klipper")) self.started = true;
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instance = try testApp(std.testing.allocator, aio, &tmp);
+    defer instance.deinit(aio);
+    instance.bindFeather();
+    instance.machine_ctx.no_proc_stat_timer = true;
+    instance.machine_ctx.core = instance.core;
+    instance.machine_ctx.setIo(aio);
+    instance.power_ctx.core = instance.core;
+    instance.power_ctx.setIo(aio);
+    var commands: Commands = .{ .app = &instance };
+    instance.setMachineRunCmdFn(Commands.run, &commands);
+    try instance.power_ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .initial_state = "on", .bound_services = "klipper" });
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    try instance.power_ctx.validateBoundServices(req_arena.allocator());
+    try std.testing.expect(commands.listed);
+    instance.core.run(aio, PowerCtx.applyInitialStates, .{instance.power_ctx});
+    try std.testing.expectEqualStrings("on", instance.power_ctx.findDevice("psu").?.state);
+    try std.testing.expect(commands.started);
+    try std.testing.expectError(error.KlippyDisconnected, instance.core.run(aio, powerFirmwareRestart, .{ @as(*anyopaque, &instance), req_arena.allocator() }));
+}
+
+test "App teardown cancels remote calls while PanelDue queues are still alive" {
+    const Pending = struct {
+        app: *App,
+        io: std.Io,
+        entered: std.Io.Event = .unset,
+        never: std.Io.Event = .unset,
+        cancelled: bool = false,
+        output_open: bool = false,
+        fn run(raw: *anyopaque, params: std.json.Value, _: std.mem.Allocator) !std.json.Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.entered.set(self.io);
+            self.never.wait(self.io) catch |err| {
+                self.cancelled = true;
+                const protection = self.io.swapCancelProtection(.blocked);
+                defer _ = self.io.swapCancelProtection(protection);
+                self.app.paneldue.beep(params) catch return err;
+                self.output_open = true;
+                return err;
+            };
+            return .null;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var owned: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(owned.deinit() == .ok);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var instance = try testApp(owned.allocator(), aio, &tmp);
+    var alive = true;
+    defer if (alive) instance.deinit(aio);
+    instance.machine_ctx.no_proc_stat_timer = true;
+    _ = instance.httpServer(aio);
+    var pending: Pending = .{ .app = &instance, .io = aio };
+    try instance.dispatcher.registerEntry("test.pending", .{ .ctx = &pending, .handler = Pending.run, .off_core = true });
+    const req = try instance.alloc.dupe(u8,
+        \\{"jsonrpc":"2.0","method":"test.pending","params":{"frequency":440,"duration":0.1},"id":1}
+    );
+    try instance.remote_calls.putAll(aio, &.{req});
+    try std.testing.expect(@import("util/sleep.zig").untilStopped(aio, .fromSeconds(2), &pending.entered));
+    instance.deinit(aio);
+    alive = false;
+    try std.testing.expect(pending.cancelled);
+    try std.testing.expect(pending.output_open);
+}
+
+test "fuzz daemon Klippy fanout and internal method validation remain bounded" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const aio = std.testing.io;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var instance = try testApp(std.testing.allocator, aio, &tmp);
+            defer instance.deinit(aio);
+            instance.bindFeather();
+            instance.button_ctx.io = aio;
+            var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer req_arena.deinit();
+            const a = req_arena.allocator();
+            var data: [128]u8 = undefined;
+            smith.bytesWithHash(&data, 0);
+            var values: std.json.Array = .init(a);
+            try values.append(.{ .string = &data });
+            try values.append(.{ .integer = data[0] });
+            const states = std.enums.values(klippy_connection_component.State);
+            const state = states[data[1] % states.len];
+            try instance.power_ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .on_when_job_queued = data[2] & 1 != 0 });
+            instance.core.run(aio, onKlippyState, .{ @as(*anyopaque, &instance), aio, state });
+            instance.core.run(aio, onJobQueued, .{@as(*anyopaque, &instance)});
+            instance.core.run(aio, onKlippyGcode, .{ @as(*anyopaque, &instance), aio, std.json.Value{ .array = values } });
+            instance.core.run(aio, onKlippyStatus, .{ @as(*anyopaque, &instance), aio, std.json.Value.null, std.json.Value.null });
+            _ = instance.core.run(aio, buttonCallMethod, .{ @as(*anyopaque, &instance), data[0..16], std.json.Value{ .object = .empty }, a }) catch |err| switch (err) {
+                error.NotFound => {},
+                else => return err,
+            };
+            try std.testing.expectEqual(state == .ready, instance.analysis_ctx.klippy_ready);
+            try std.testing.expectEqual(data[2] & 1 != 0, instance.power_ctx.findDevice("psu").?.queued_on);
+        }
+    }.run, .{});
 }

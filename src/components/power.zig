@@ -430,8 +430,8 @@ pub const PowerCtx = struct {
     }
 
     /// Drive every device configured with an `initial_state` to that state at
-    /// startup (Moonraker `_set_initial_state`). Runs before `core` is wired, so
-    /// device I/O does not release a lock. A failed device is left in "error".
+    /// startup (Moonraker `_set_initial_state`). Runtime callers hold Core after
+    /// validating bound services. A failed device is left in "error".
     /// Does not emit a change notification (this is the boot baseline).
     pub fn applyInitialStates(self: *PowerCtx) void {
         var arena = std.heap.ArenaAllocator.init(self.gpa);

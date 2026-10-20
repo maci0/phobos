@@ -109,6 +109,9 @@ pub const JobQueueCtx = struct {
     /// active the queue won't dispatch the next job (Moonraker _check_can_print).
     printing_check: ?*const fn (*anyopaque) bool = null,
     printing_ctx: ?*anyopaque = null,
+    /// Enqueue completed, jobs mutex released; caller still holds Core.
+    on_queued: ?*const fn (*anyopaque) void = null,
+    on_queued_ctx: ?*anyopaque = null,
 
     fn fileExists(self: *const JobQueueCtx, filename: []const u8) bool {
         const f = self.file_check orelse return true; // no checker → don't block
@@ -601,6 +604,7 @@ pub fn handlePostJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     // Persist
     c.saveToStore(alloc);
     emitQueueChanged(c, alloc, "jobs_added", true);
+    if (files.len != 0) if (c.on_queued) |callback| callback(c.on_queued_ctx.?);
     if (set_ready) c.setQueueState("ready");
     return buildResponse(c, alloc);
 }
@@ -1017,6 +1021,41 @@ test "handlePostJob: enqueues filenames" {
     try testing.expectEqual(@as(usize, 2), jobs.items.len);
     try testing.expectEqualStrings("a.gcode", jobs.items[0].object.get("filename").?.string);
     try testing.expectEqualStrings("b.gcode", jobs.items[1].object.get("filename").?.string);
+}
+
+test "enqueue hook sees committed jobs without holding the jobs mutex" {
+    const Hook = struct {
+        ctx: *JobQueueCtx,
+        calls: usize = 0,
+        unlocked: bool = false,
+        fn queued(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.unlocked = self.ctx.mutex.tryLock();
+            if (self.unlocked) self.ctx.mutex.unlock(self.ctx.clock_io);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var core = NullCore.init();
+    var conns = NullConns.init(a, &core);
+    defer conns.deinit(testing.io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try JobQueueCtx.init(testing.allocator, testing.io, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    var hook: Hook = .{ .ctx = &ctx };
+    ctx.on_queued = Hook.queued;
+    ctx.on_queued_ctx = &hook;
+    _ = try handlePostJob(&ctx, try mkParams(a, "{\"filenames\":[\"one.gcode\"]}"), a);
+    try testing.expectEqual(@as(usize, 1), hook.calls);
+    try testing.expect(hook.unlocked);
+    try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
+    try testing.expectError(error.InvalidParams, handlePostJob(&ctx, try mkParams(a, "{\"filenames\":[42]}"), a));
+    _ = try handlePostJob(&ctx, try mkParams(a, "{\"filenames\":[]}"), a);
+    try testing.expectEqual(@as(usize, 1), hook.calls);
 }
 
 test "handlePostJob: reset=true clears existing queue" {

@@ -115,6 +115,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.KlippyDisconnected => .{ .service_unavailable, "Klippy Host not connected" },
         error.MqttNotConfigured => .{ .service_unavailable, "MQTT not configured" },
         error.MqttTimeout => .{ .gateway_timeout, "MQTT Subscribe Timed Out" },
+        error.MqttPublishTimeout => .{ .gateway_timeout, "MQTT Publish Timed Out" },
         error.DuplicateMqttRequest => .{ .bad_request, "Duplicate MQTT Request" },
         error.ServiceUnavailable, error.NotReady => .{ .service_unavailable, "Service Unavailable" },
         error.UpdateRefusedPrinting => .{ .service_unavailable, "Update Refused: Klippy is printing" },
@@ -182,6 +183,13 @@ pub fn setErrorReply(alloc: std.mem.Allocator, params: std.json.Value, status: s
     try fields.put(alloc, "status", .{ .integer = @backingInt(status) });
     try fields.put(alloc, "message", .{ .string = try alloc.dupe(u8, message) });
     slot.* = .{ .object = fields };
+}
+
+test "MQTT publish timeout preserves its gateway status and message" {
+    const reply = try errorReply(error.MqttPublishTimeout, .null, std.testing.allocator);
+    try std.testing.expectEqual(std.http.Status.gateway_timeout, reply.status);
+    try std.testing.expectEqual(@as(i64, 504), reply.rpc_code);
+    try std.testing.expectEqualStrings("MQTT Publish Timed Out", reply.message);
 }
 
 /// The string at `key` in `params`, or "" when absent or not a string.

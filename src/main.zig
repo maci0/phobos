@@ -148,9 +148,12 @@ fn renderSchema(alloc: std.mem.Allocator, filter: []const u8) ![]u8 {
 /// Write to stdout with a small bounded buffer. Used for --help/--version so
 /// requested output lands on stdout (parseable), not the stderr debug channel.
 fn writeStdout(aio: std.Io, bytes: []const u8) !void {
-    const stdout = std.Io.File.stdout();
+    try writeOutput(std.Io.File.stdout(), aio, bytes);
+}
+
+fn writeOutput(file: std.Io.File, aio: std.Io, bytes: []const u8) !void {
     var wbuf: [512]u8 = undefined;
-    var sw = stdout.writer(aio, &wbuf);
+    var sw = file.writerStreaming(aio, &wbuf);
     try sw.interface.writeAll(bytes);
     try sw.interface.flush();
 }
@@ -267,7 +270,7 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
-    if (dump_api) return dumpApi(alloc, aio);
+    if (dump_api) return dumpApi(alloc, aio, data_path);
 
     var startup = try StartupConfig.load(alloc, aio, config_path, data_path);
     defer startup.deinit();
@@ -279,14 +282,22 @@ fn run(init: std.process.Init) !void {
     try server_app.update_ctx.setGitEnvironment(init.environ_map);
 
     var srv = server_app.httpServer(aio);
+    // Validate bindings before any initial power state can start a service.
+    try server_app.power_ctx.validateBoundServices(alloc);
+    server_app.core.run(aio, @import("components/power.zig").PowerCtx.applyInitialStates, .{server_app.power_ctx});
+    try server_app.power_ctx.startTimerWorker();
+    try server_app.button_ctx.start(aio);
     server_app.machine_ctx.startServicePolling();
+    try server_app.machine_ctx.startUsbIdsUpdate(false);
 
     // Start the background Klippy Unix-socket bridge. Only the real daemon
     // path calls start(); tests go through App.init/httpServer which only
     // calls setIo() so no background task is spawned during testing.
     try server_app.klippy_ctx.start();
     try server_app.data_store_ctx.startSampler();
+    try server_app.sensor_ctx.startSampler();
     try server_app.file_ctx.startObserver();
+    try server_app.announcements_ctx.startWorkers();
     server_app.update_ctx.startAutoRefresh();
     // Moonraker fetches announcements at startup; the refresh worker first
     // waits its interval. Fetch in the background so the listener starts now.
@@ -392,18 +403,50 @@ pub fn extractBindAddr(cfg: *const config.ConfigParser, default_host: []const u8
 ///   { "endpoints": [...], "jsonrpc_methods": [...], "notifications": [...],
 ///     "router_routes": [...] }
 ///
-/// All arrays are sorted. Does NOT bind any sockets. The roots live in a
-/// temp datadir that is deleted on return; the database is in memory.
-pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io) !void {
-    const out = try buildDumpApiJson(alloc, aio, null);
+/// All arrays are sorted. Does not bind sockets; the database is in memory.
+/// An explicit datadir persists; the default temporary datadir is removed.
+pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8) !void {
+    const out = try buildDumpApiJson(alloc, aio, data_path);
     defer alloc.free(out);
+    try writeStdout(aio, out);
+    try writeStdout(aio, "\n");
+}
 
-    const stdout = std.Io.File.stdout();
-    var wbuf: [4096]u8 = undefined;
-    var sw = stdout.writer(aio, &wbuf);
-    try sw.interface.writeAll(out);
-    try sw.interface.writeByte('\n');
-    try sw.interface.flush();
+test "CLI output chunks append to redirected regular files" {
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(aio, "stdout", .{});
+    defer file.close(aio);
+    try writeOutput(file, aio, "{\"version\":\"");
+    try writeOutput(file, aio, build_options.phobos_version);
+    try writeOutput(file, aio, "\"}\n");
+    const text = try tmp.dir.readFileAlloc(aio, "stdout", std.testing.allocator, .limited(1024));
+    defer std.testing.allocator.free(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(build_options.phobos_version, parsed.value.object.get("version").?.string);
+    try std.testing.expectEqual(@as(u8, '\n'), text[text.len - 1]);
+}
+
+test "fuzz CLI output chunks preserve their full regular file bytes" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const aio = std.testing.io;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var data: [1024]u8 = undefined;
+            smith.bytesWithHash(&data, 0);
+            const split = smith.valueRangeAtMostWithHash(u16, 0, data.len, 1);
+            const file = try tmp.dir.createFile(aio, "stdout", .{});
+            defer file.close(aio);
+            try writeOutput(file, aio, data[0..split]);
+            try writeOutput(file, aio, data[split..]);
+            const actual = try tmp.dir.readFileAlloc(aio, "stdout", std.testing.allocator, .limited(data.len + 1));
+            defer std.testing.allocator.free(actual);
+            try std.testing.expectEqualSlices(u8, &data, actual);
+        }
+    }.run, .{});
 }
 
 /// Build the --dump-api JSON without touching stdout (testable). `data_path`
