@@ -148,6 +148,9 @@ pub const MqttCtx = struct {
     /// app uses it to subscribe sensor topics.
     on_connected: ?*const fn (ctx: *anyopaque) void = null,
     on_connected_ctx: ?*anyopaque = null,
+    /// Connection transitions run outside Core; the app serializes consumers.
+    on_connection: ?*const fn (ctx: *anyopaque, connected: bool) void = null,
+    on_connection_ctx: ?*anyopaque = null,
     /// JSON-RPC dispatch for API requests. Returns the response bytes (empty
     /// for a notification) allocated in `alloc`.
     api_dispatch: ?*const fn (ctx: *anyopaque, request: std.json.Value, alloc: std.mem.Allocator) anyerror![]u8 = null,
