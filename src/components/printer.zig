@@ -258,9 +258,6 @@ fn sanitizePrintFilename(alloc: std.mem.Allocator, filename: []const u8) ![]u8 {
 pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
-    if (!k.isConnected()) return error.KlippyDisconnected;
-
-    // Extract and sanitize filename (Moonraker: strip leading /, escape ").
     const filename: []const u8 = if (params == .object)
         if (params.object.get("filename")) |v|
             if (v == .string) v.string else ""
@@ -268,6 +265,13 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
             ""
     else
         "";
+    return startPrint(k, filename, alloc);
+}
+
+/// klippy_apis.start_print: `SDCARD_PRINT_FILE` for `filename` with a
+/// leading `/` stripped and quotes escaped. Core held.
+pub fn startPrint(k: *KlippyCtx, filename: []const u8, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    if (!k.isConnected()) return error.KlippyDisconnected;
     if (filename.len == 0) return error.InvalidParams;
     const escaped = try sanitizePrintFilename(alloc, filename);
 

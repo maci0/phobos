@@ -106,6 +106,11 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.UnknownApplication => .{ .bad_request, try std.fmt.allocPrint(alloc, "Unknown application {s}", .{paramStr(params, "application")}) },
         // system_deploy.py without a package provider.
         error.NoPackageProvider => .{ .bad_request, "Cannot upgrade packages, no provider set" },
+        // octoprint_compat.py _select_file.
+        error.UnsupportedCommand => .{ .bad_request, try std.fmt.allocPrint(alloc, "Unsupported Command: {s}", .{paramStr(params, "command")}) },
+        error.SelectNotGcodes => .{ .bad_request, "File must be located in the 'gcodes' root" },
+        error.FileDoesNotExist => .{ .bad_request, "File does not exist" },
+        error.Conflict => .{ .conflict, "Conflict" },
         error.AgentNotConnected => .{ .bad_request, "Agent not connected" },
         error.ReservedEvent => .{ .bad_request, "Reserved event name" },
         error.EstimatorNotAvailable => .{ .bad_request, "Estimator not available" },

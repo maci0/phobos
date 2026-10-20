@@ -2257,3 +2257,33 @@ test "Klipper remote methods run on the worker, not the Klippy reader" {
         std.Io.sleep(ts.io, .{ .nanoseconds = 10_000_000 }, .real) catch {};
     }
 }
+
+test "octoprint: /api/files/moonraker/<path> reaches _select_file" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+
+    // A plain select is Moonraker's None result: 204 with no body.
+    const selected = try ts.postJson(alloc, "/api/files/moonraker/gcodes/a.gcode", "{\"command\":\"select\"}");
+    defer alloc.free(selected);
+    try std.testing.expectEqualStrings("", selected);
+
+    const missing = try ts.postJson(alloc, "/api/files/moonraker/gcodes/a.gcode", "{\"command\":\"select\",\"print\":true}");
+    defer alloc.free(missing);
+    const err = try std.json.parseFromSlice(std.json.Value, alloc, missing, .{});
+    defer err.deinit();
+    const e = err.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 400), e.get("code").?.integer);
+    try std.testing.expectEqualStrings("File does not exist", e.get("message").?.string);
+
+    // Klippy is not connected, so the print cannot start: 409 Conflict.
+    const root = ts.app.file_ctx.findRoot("gcodes").?;
+    var dir = try std.Io.Dir.cwd().openDir(ts.io, root.path, .{});
+    defer dir.close(ts.io);
+    try dir.writeFile(ts.io, .{ .sub_path = "a.gcode", .data = "G28\n" });
+    const busy = try ts.postJson(alloc, "/api/files/moonraker/gcodes/a.gcode", "{\"command\":\"select\",\"print\":true}");
+    defer alloc.free(busy);
+    const conflict = try std.json.parseFromSlice(std.json.Value, alloc, busy, .{});
+    defer conflict.deinit();
+    try std.testing.expectEqual(@as(i64, 409), conflict.value.object.get("error").?.object.get("code").?.integer);
+}

@@ -258,6 +258,25 @@ pub const Registry = struct {
         }
     }
 
+    /// A route whose path ends in one Moonraker regex group `(?P<name>.+)`,
+    /// with the group name and the captured, non-empty path tail.
+    pub const PatternMatch = struct { route: *const Route, name: []const u8, value: []const u8 };
+
+    /// Match `path` against routes ending in `(?P<name>.+)` by prefix. Only
+    /// called after `lookup` misses; scans the route list.
+    pub fn lookupPattern(self: *Registry, method: RequestType, path: []const u8) ?PatternMatch {
+        const open_tag = "(?P<";
+        const close_tag = ">.+)";
+        for (self.routes.items) |*r| {
+            if (r.method != method or !std.mem.endsWith(u8, r.path, close_tag)) continue;
+            const open = std.mem.indexOf(u8, r.path, open_tag) orelse continue;
+            const prefix = r.path[0..open];
+            if (path.len <= prefix.len or !std.mem.startsWith(u8, path, prefix)) continue;
+            return .{ .route = r, .name = r.path[open + open_tag.len .. r.path.len - close_tag.len], .value = path[prefix.len..] };
+        }
+        return null;
+    }
+
     /// Look up a route by (verb, path). Returns null when no match. O(1) via the
     /// path index.
     pub fn lookup(self: *Registry, method: RequestType, path: []const u8) ?*const Route {
@@ -475,4 +494,26 @@ test "fuzz_registry: registerEndpoint then lookup is consistent" {
             }
         }
     }.run, .{});
+}
+
+test "lookupPattern captures the tail of a (?P<name>.+) route" {
+    const jsonrpc_mod = @import("../jsonrpc.zig");
+    var d = jsonrpc_mod.Dispatcher.init(std.testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(std.testing.allocator, &d);
+    defer reg.deinit();
+    var dummy: u8 = 0;
+    const H = struct {
+        fn h(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+            return .null;
+        }
+    };
+    try reg.registerEndpoint(.{ .path = "/api/files/moonraker/(?P<relative_path>.+)", .methods = &.{.POST}, .transports = &.{.HTTP} }, &dummy, H.h);
+    const m = reg.lookupPattern(.POST, "/api/files/moonraker/gcodes/a b.gcode").?;
+    try std.testing.expectEqualStrings("relative_path", m.name);
+    try std.testing.expectEqualStrings("gcodes/a b.gcode", m.value);
+    // `.+` needs at least one character, and the verb must match.
+    try std.testing.expect(reg.lookupPattern(.POST, "/api/files/moonraker/") == null);
+    try std.testing.expect(reg.lookupPattern(.GET, "/api/files/moonraker/gcodes/a.gcode") == null);
+    try std.testing.expect(reg.lookupPattern(.POST, "/api/files/other/a") == null);
 }

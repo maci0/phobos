@@ -27,6 +27,7 @@
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
+const printer_component = @import("printer.zig");
 
 const Registry = registry.Registry;
 
@@ -38,8 +39,10 @@ const software_version = "1.5.0";
 pub const OctoPrintCtx = struct {
     server_info: ?*@import("../core/methods.zig").ServerInfo = null,
     temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
-    /// Runs `/api/printer/command` gcode. Borrowed; set by the App.
+    /// Runs `/api/printer/command` gcode and select-to-print. Borrowed; set by the App.
     klippy: ?*@import("klippy_connection.zig").KlippyCtx = null,
+    /// Checks select-to-print files. Borrowed; set by the App.
+    files: ?*const @import("file_manager.zig").FileCtx = null,
     /// Latest print_stats state from Klippy. Updated by statusUpdate()
     /// called from klippy_connection's status processing.
     print_state: PrintState = .standby,
@@ -310,12 +313,46 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
     return .{ .object = o };
 }
 
-/// POST /api/files/moonraker/(relative_path) → `_select_file`. Registered for
-/// API coverage only: the HTTP router matches the pattern literally, so a
-/// request for a real path never reaches this handler, and `print=true` does
-/// not start or queue a print (TODO.md). Returns {} like a plain select.
-pub fn handleSelectFile(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
-    return .{ .object = .empty };
+/// POST /api/files/moonraker/(relative_path) → `_select_file`. A plain select
+/// is a no-op (204). `print=true` starts the gcodes file unless Klippy is
+/// printing, paused or unavailable; phobos has no `queue_gcode_uploads`, so
+/// that case is 409 Conflict like Moonraker without the upload queue.
+pub fn handleSelectFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
+    const command = try getParamStr(params, "command");
+    const rel_path = std.mem.trim(u8, try getParamStr(params, "relative_path"), "/");
+    const slash = std.mem.indexOfScalar(u8, rel_path, '/') orelse return error.InvalidParams;
+    const root = rel_path[0..slash];
+    const filename = rel_path[slash + 1 ..];
+    if (!std.mem.eql(u8, command, "select")) return error.UnsupportedCommand;
+    if (!paramBool(params, "print")) return .null;
+    if (!std.mem.eql(u8, root, "gcodes")) return error.SelectNotGcodes;
+    const files = ctx.files orelse return error.FileDoesNotExist;
+    if (!files.fileExists("gcodes", filename)) return error.FileDoesNotExist;
+    const available = ctx.connectionState() != .offline and ctx.print_state != .printing and ctx.print_state != .paused;
+    if (!available) return error.Conflict;
+    const k = ctx.klippy orelse return error.Conflict;
+    _ = printer_component.startPrint(k, filename, alloc) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.Conflict,
+    };
+    return .null;
+}
+
+fn getParamStr(params: std.json.Value, key: []const u8) error{InvalidParams}![]const u8 {
+    if (params != .object) return error.InvalidParams;
+    const v = params.object.get(key) orelse return error.InvalidParams;
+    return if (v == .string) v.string else error.InvalidParams;
+}
+
+/// WebRequest.get_boolean: a JSON bool or a "true"/"false" query string.
+fn paramBool(params: std.json.Value, key: []const u8) bool {
+    if (params != .object) return false;
+    return switch (params.object.get(key) orelse return false) {
+        .bool => |b| b,
+        .string => |s| std.ascii.eqlIgnoreCase(s, "true"),
+        else => false,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -551,15 +588,37 @@ test "handlePrinterProfiles returns _default profile with axes" {
     try testing.expectEqual(@as(f64, 300.0), axes.get("e").?.object.get("speed").?.float);
 }
 
-test "handleCommand and handleSelectFile return empty objects" {
+test "handleCommand without Klippy returns an empty object" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = OctoPrintCtx{};
     const cmd = try handleCommand(@ptrCast(&ctx), .null, a);
     try testing.expectEqual(@as(usize, 0), cmd.object.count());
-    const sel = try handleSelectFile(@ptrCast(&ctx), .null, a);
-    try testing.expectEqual(@as(usize, 0), sel.object.count());
+}
+
+test "handleSelectFile follows _select_file" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = OctoPrintCtx{};
+    const Case = struct { body: []const u8, err: ?anyerror };
+    for ([_]Case{
+        .{ .body = "null", .err = error.InvalidParams },
+        .{ .body = "{\"command\":\"select\",\"relative_path\":\"gcodes/a.gcode\"}", .err = null },
+        .{ .body = "{\"command\":\"select\",\"relative_path\":\"gcodes/a.gcode\",\"print\":\"false\"}", .err = null },
+        .{ .body = "{\"command\":\"upload\",\"relative_path\":\"gcodes/a.gcode\"}", .err = error.UnsupportedCommand },
+        .{ .body = "{\"command\":\"select\",\"relative_path\":\"nofolder\"}", .err = error.InvalidParams },
+        .{ .body = "{\"command\":\"select\",\"relative_path\":\"/config/a.cfg\",\"print\":true}", .err = error.SelectNotGcodes },
+        .{ .body = "{\"command\":\"select\",\"relative_path\":\"gcodes/a.gcode\",\"print\":\"true\"}", .err = error.FileDoesNotExist },
+    }) |c| {
+        const params = try std.json.parseFromSliceLeaky(std.json.Value, a, c.body, .{});
+        if (c.err) |e| {
+            try testing.expectError(e, handleSelectFile(@ptrCast(&ctx), params, a));
+        } else {
+            try testing.expect(try handleSelectFile(@ptrCast(&ctx), params, a) == .null);
+        }
+    }
 }
 
 test "printerState: maps states correctly" {

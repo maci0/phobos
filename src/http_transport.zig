@@ -273,7 +273,10 @@ pub fn handleParsed(
     // Unsupported HTTP verb -> 404 (no route can match).
     const verb = method orelse return errorResponse(alloc, .not_found, "Not Found");
 
-    const route = srv.reg.lookup(verb, path) orelse {
+    // A regex route such as `/api/files/moonraker/(?P<relative_path>.+)`
+    // passes its captured tail as a param.
+    const pattern = if (srv.reg.lookup(verb, path) == null) srv.reg.lookupPattern(verb, path) else null;
+    const route = srv.reg.lookup(verb, path) orelse if (pattern) |m| m.route else {
         // Distinguish wrong-verb (405) from genuinely-unknown path (404).
         inline for (.{ RequestType.GET, RequestType.POST, RequestType.DELETE }) |other_verb| {
             if (srv.reg.lookup(other_verb, path)) |other_route| {
@@ -308,7 +311,8 @@ pub fn handleParsed(
         if (qp == .object) src = qp.object;
     }
     // `_method` for every route; the caller's user and address for access.*.
-    const params = try jsonrpc.requestParams(alloc, src, verb, caller, std.mem.startsWith(u8, path, "/access/"));
+    var params = try jsonrpc.requestParams(alloc, src, verb, caller, std.mem.startsWith(u8, path, "/access/"));
+    if (pattern) |m| try params.object.put(alloc, m.name, .{ .string = m.value });
 
     // Run the handler under the serialized core. `Core.run` needs a
     // comptime-known function, so dispatch the runtime handler pointer through a
@@ -322,6 +326,8 @@ pub fn handleParsed(
         return errorResponse(alloc, reply.status, reply.message);
     };
 
+    // Moonraker answers an unwrapped None result with 204 No Content.
+    if (!route.wrap_result and result == .null) return .{ .status = .no_content, .body = "" };
     const out = if (route.wrap_result)
         try wrapResult(alloc, result)
     else
