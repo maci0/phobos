@@ -1181,8 +1181,8 @@ fn stableUuid(alloc: std.mem.Allocator, seed: []const u8) ![]const u8 {
 // ---------------------------------------------------------------------------
 // POST /server/files/metascan → server.files.metascan
 // ---------------------------------------------------------------------------
-// Force a metadata rescan. With no deep parser this returns the same shape as
-// metadata (after validating the file exists and is a gcode file).
+// Rebuild the metadata record from the file without consulting the cache
+// (after validating the file exists and is a gcode file).
 
 pub fn handleMetascan(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *FileCtx = @ptrCast(@alignCast(ctx_ptr));
