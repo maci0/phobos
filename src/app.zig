@@ -620,10 +620,10 @@ pub const App = struct {
         extensions_ctx.* = .{ .alloc = alloc, .io = aio, .bus = bus };
         errdefer extensions_ctx.deinit();
 
-        // --- Analysis context (klipper_estimator stubs) ---
+        // --- Analysis context (execution requires an injected runner) ---
         const analysis_ctx = try alloc.create(AnalysisCtx);
         errdefer alloc.destroy(analysis_ctx);
-        analysis_ctx.* = .{};
+        analysis_ctx.* = .{ .data_path = datadir, .io = aio };
 
         // --- File manager context (server.files.*) ---
         const root_specs = [_]struct { name: []const u8, full: bool }{
@@ -889,10 +889,9 @@ pub const App = struct {
             try self.paneldue.configure(cfg);
         }
 
-        // [analysis] points at klipper_estimator under the datadir. The binary
-        // is neither downloaded nor run; status reports the paths.
+        // Analysis never downloads an executable or installs a process runner.
         self.analysis_ctx.io = aio;
-        if (cfg.hasSection("analysis")) self.applyAnalysisConfig(cfg);
+        if (cfg.hasSection("analysis")) try self.applyAnalysisConfig(cfg);
 
         // [spoolman] requires a server and a positive reporting interval.
         if (cfg.hasSection("spoolman")) {
@@ -1633,39 +1632,41 @@ pub const App = struct {
         });
     }
 
-    fn applyAnalysisConfig(self: *App, cfg: *const config_helper.ConfigParser) void {
+    /// Inject before requests are served. The embedding owns backend authentication.
+    pub fn setAnalysisRunner(self: *App, runner: ?analysis_component.Runner) void {
+        self.analysis_ctx.setRunner(runner);
+    }
+
+    fn applyAnalysisConfig(self: *App, cfg: *const config_helper.ConfigParser) !void {
         const configured = cfg.get("analysis", "platform") orelse "auto";
+        if (!std.mem.eql(u8, configured, "auto") and !std.mem.eql(u8, configured, "linux") and !std.mem.eql(u8, configured, "rpi") and !std.mem.eql(u8, configured, "osx")) return error.InvalidValue;
         const plat: []const u8 = if (std.mem.eql(u8, configured, "linux") or std.mem.eql(u8, configured, "rpi") or std.mem.eql(u8, configured, "osx"))
             configured
         else if (@import("builtin").cpu.arch == .arm or @import("builtin").cpu.arch == .aarch64)
             "rpi"
         else
             "linux";
-        const bin = std.fmt.allocPrint(self.alloc, "{s}/tools/klipper_estimator/klipper_estimator_{s}", .{ self.datadir, plat }) catch return;
-        var cfg_path = std.fmt.allocPrint(self.alloc, "{s}/tools/klipper_estimator/default_estimator_cfg.json", .{self.datadir}) catch {
-            self.alloc.free(bin);
-            return;
+        const seconds = cfg.getInt("analysis", "estimator_timeout") catch |err| switch (err) {
+            error.NoOption => 600,
+            else => return err,
         };
+        if (seconds <= 0) return error.InvalidValue;
+        const bin = try std.fmt.allocPrint(self.alloc, "{s}/tools/klipper_estimator/klipper_estimator_{s}", .{ self.datadir, plat });
+        errdefer self.alloc.free(bin);
+        var cfg_path = try std.fmt.allocPrint(self.alloc, "{s}/tools/klipper_estimator/default_estimator_cfg.json", .{self.datadir});
+        errdefer self.alloc.free(cfg_path);
         if (cfg.get("analysis", "estimator_config")) |rel| {
             const trimmed = std.mem.trim(u8, rel, " \t/");
-            if (trimmed.len > 0 and std.mem.indexOf(u8, trimmed, "..") == null) {
-                if (std.fs.path.join(self.alloc, &.{ self.datadir, "config", trimmed })) |custom| {
-                    var use_custom = false;
-                    if (self.analysis_ctx.io) |io| {
-                        if (std.Io.Dir.cwd().openFile(io, custom, .{})) |f| {
-                            f.close(io);
-                            use_custom = true;
-                        } else |_| {}
-                    }
-                    if (use_custom) {
-                        self.alloc.free(cfg_path);
-                        cfg_path = custom;
-                    } else {
-                        self.alloc.free(custom);
-                        std.debug.print("phobos: warning: estimator_config '{s}' is not in the config root\n", .{trimmed});
-                    }
-                } else |_| {}
-            }
+            var segments = std.mem.splitScalar(u8, trimmed, '/');
+            while (segments.next()) |segment| if (std.mem.eql(u8, segment, "..")) return error.InvalidValue;
+            var local = std.heap.ArenaAllocator.init(self.alloc);
+            defer local.deinit();
+            const path = try file_manager_component.resolveRequestPath(self.file_ctx, local.allocator(), try std.fmt.allocPrint(local.allocator(), "config/{s}", .{trimmed}));
+            const file = try path.openFile(self.analysis_ctx.io.?, local.allocator());
+            file.close(self.analysis_ctx.io.?);
+            const custom = try self.alloc.dupe(u8, path.abs);
+            self.alloc.free(cfg_path);
+            cfg_path = custom;
         }
         if (self.analysis_ctx.paths_owned) {
             self.alloc.free(self.analysis_ctx.estimator_path);
@@ -1674,6 +1675,7 @@ pub const App = struct {
         self.analysis_ctx.estimator_path = bin;
         self.analysis_ctx.estimator_config = cfg_path;
         self.analysis_ctx.paths_owned = true;
+        self.analysis_ctx.timeout = .fromSeconds(seconds);
     }
 
     /// Returns the HTTP transport Server configured with this App's components.
@@ -1714,6 +1716,7 @@ pub const App = struct {
         // Wire io into the file manager so it can emit notify_filelist_changed.
         self.file_ctx.setIo(io);
         self.analysis_ctx.io = io;
+        self.analysis_ctx.core = self.core;
         self.klippy_ctx.on_klipper_path = onKlipperPath;
         self.klippy_ctx.on_klipper_path_ctx = self;
         // Wire io into the machine component for /proc & /sys reads.
@@ -2694,6 +2697,61 @@ test "setConfig loads an analysis platform and a notifier record" {
     var params: std.json.ObjectMap = .empty;
     try params.put(a, "name", .{ .string = "desk" });
     try std.testing.expectError(error.AppriseNotAvailable, notifier_component.handleNotifierTest(@ptrCast(app.notifier_ctx), .{ .object = params }, a));
+}
+
+test "analysis config validates timeout platform and checked custom paths" {
+    const alloc = std.testing.allocator;
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(alloc, aio, &tmp);
+    defer app.deinit(aio);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "config/my..settings.json", .data = "{}" });
+    for ([_][]const u8{
+        "[analysis]\nplatform: unsupported\n",
+        "[analysis]\nestimator_timeout: 0\n",
+        "[analysis]\nestimator_timeout: -1\n",
+        "[analysis]\nestimator_timeout: invalid\n",
+        "[analysis]\nestimator_config: ../outside.json\n",
+    }) |text| {
+        var cfg = config_helper.ConfigParser.init(alloc);
+        defer cfg.deinit();
+        try cfg.parseString(text, "analysis.cfg");
+        try std.testing.expectError(error.InvalidValue, app.applyAnalysisConfig(&cfg));
+    }
+    var cfg = config_helper.ConfigParser.init(alloc);
+    defer cfg.deinit();
+    try cfg.parseString("[analysis]\nestimator_timeout: 7\nestimator_config: my..settings.json\n", "analysis.cfg");
+    try app.applyAnalysisConfig(&cfg);
+    try std.testing.expectEqual(@as(i64, 7), app.analysis_ctx.timeout.toSeconds());
+    try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_config, "/config/my..settings.json"));
+    try std.testing.expect(app.analysis_ctx.core == null);
+    try std.testing.expect(app.analysis_ctx.runner == null);
+}
+
+test "fuzz analysis config accepts positive estimator timeouts without changing runner ownership" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var app = try testApp(std.testing.allocator, std.testing.io, &tmp);
+            defer app.deinit(std.testing.io);
+            const seconds = smith.valueRangeAtMostWithHash(i64, -2, 30, 0);
+            var body: [128]u8 = undefined;
+            var cfg = config_helper.ConfigParser.init(std.testing.allocator);
+            defer cfg.deinit();
+            try cfg.parseString(try std.fmt.bufPrint(&body, "[analysis]\nestimator_timeout: {d}\nplatform: rpi\n", .{seconds}), "analysis.cfg");
+            if (seconds <= 0) {
+                try std.testing.expectError(error.InvalidValue, app.applyAnalysisConfig(&cfg));
+            } else {
+                try app.applyAnalysisConfig(&cfg);
+                try std.testing.expectEqual(seconds, app.analysis_ctx.timeout.toSeconds());
+                try std.testing.expect(std.mem.endsWith(u8, app.analysis_ctx.estimator_path, "klipper_estimator_rpi"));
+            }
+            try std.testing.expect(app.analysis_ctx.runner == null);
+            try std.testing.expect(app.analysis_ctx.core == null);
+        }
+    }.run, .{});
 }
 
 test "setConfig reads Moonraker's [mqtt] address and defaults" {

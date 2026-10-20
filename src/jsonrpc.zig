@@ -150,6 +150,12 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.AgentRequestTimedOut => .{ .internal_server_error, "Agent request timed out" },
         error.AgentCapacity => .{ .service_unavailable, "Too many pending agent requests" },
         error.EstimatorNotAvailable => .{ .bad_request, "Estimator not available" },
+        error.EstimatorConfigNotFound => .{ .bad_request, "Estimator config file does not exist" },
+        error.EstimatorKlippyNotReady => .{ .gateway_timeout, "Klipper Estimator cannot dump configuration, Klippy not ready" },
+        error.EstimatorTimedOut => .{ .internal_server_error, "Klipper Estimator timed out" },
+        error.EstimatorCommandFailed => .{ .internal_server_error, "Klipper Estimator command failed" },
+        error.EstimatorInvalidOutput => .{ .internal_server_error, "Invalid Klipper Estimator output" },
+        error.EstimatorFileChanged => .{ .conflict, "GCode file changed during analysis" },
         // Klippy rejected the command (bad gcode, unknown mcu command): a
         // client error, as in Moonraker.
         error.KlippyRequestFailed => .{ .bad_request, "Klippy request failed" },
