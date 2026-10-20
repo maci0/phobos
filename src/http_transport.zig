@@ -493,10 +493,9 @@ fn serveUpgrade(
     }.f;
     if (!originAllowed(srv.cors_domains, creds.origin, creds.host)) return refuse(req, alloc, headers, .forbidden, "Cross origin websockets not allowed");
     const conns = srv.conns orelse return refuse(req, alloc, headers, .bad_request, "WebSocket unsupported");
-    if (conns.count(srv.io) >= srv.max_websocket_connections) return refuse(req, alloc, headers, .service_unavailable, "Maximum Number of Websocket Connections Reached");
-    const outcome = authenticate(srv, .HTTP, creds, alloc, true);
-
     if (std.mem.eql(u8, path, "/klippysocket")) {
+        if (conns.count(srv.io) >= srv.max_websocket_connections) return refuse(req, alloc, headers, .service_unavailable, "Maximum Number of Websocket Connections Reached");
+        const outcome = authenticate(srv, .HTTP, creds, alloc, true);
         if (outcome == .unauthorized) return refuse(req, alloc, headers, .unauthorized, "Unauthorized");
         const kc = srv.klippy_ctx orelse return refuse(req, alloc, headers, .service_unavailable, "Failed to open connection to Klippy");
         var bridge = req.respondWebSocket(.{ .key = key }) catch return;
@@ -507,6 +506,8 @@ fn serveUpgrade(
         return;
     }
 
+    const conn = prepareWebSocket(srv, conns, creds, alloc) catch |err| return refuse(req, alloc, headers, if (err == error.TooManyConnections) .service_unavailable else .internal_server_error, if (err == error.TooManyConnections) "Maximum Number of Websocket Connections Reached" else "Internal Server Error");
+    defer conns.remove(srv.io, conn);
     var web_socket = req.respondWebSocket(.{ .key = key }) catch return;
     web_socket.flush() catch return;
     var out = ws.DeadlineWriter.init(srv.io, stream, out_buf);
@@ -518,14 +519,75 @@ fn serveUpgrade(
         .klippy = srv.klippy_ctx,
         .auth = srv.auth,
     };
-    ws.serveWebSocket(&ws_srv, &web_socket, .{
-        .user = switch (outcome) {
-            .user => |u| u,
-            .anonymous, .unauthorized => null,
-        },
-        .need_auth = outcome == .unauthorized,
-        .remote_ip = creds.remote_ip,
-    });
+    ws.serveWebSocket(&ws_srv, &web_socket, conn);
+}
+
+/// Keep authentication and registry insertion ordered with logout handlers.
+fn prepareWebSocket(srv: *Server, conns: *connections.Connections, creds: HttpCreds, alloc: std.mem.Allocator) !*connections.Connection {
+    srv.core.lock(srv.io);
+    defer srv.core.unlock(srv.io);
+    if (conns.count(srv.io) >= srv.max_websocket_connections) return error.TooManyConnections;
+    const outcome = authenticate(srv, .HTTP, creds, alloc, true);
+    const conn = try conns.addLocked(srv.io, outcome == .unauthorized);
+    errdefer conns.remove(srv.io, conn);
+    conn.remote_ip = creds.remote_ip;
+    if (outcome == .user) try conns.setUser(srv.io, conn, outcome.user);
+    return conn;
+}
+
+test "WebSocket preparation enforces capacity before publishing a connection" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    var core = Core.init();
+    var dispatcher = jsonrpc.Dispatcher.init(alloc);
+    defer dispatcher.deinit();
+    var reg = Registry.init(alloc, &dispatcher);
+    defer reg.deinit();
+    var conns = connections.Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    var srv: Server = .{ .io = io, .core = &core, .reg = &reg, .dispatcher = &dispatcher, .max_websocket_connections = 1 };
+    const conn = try prepareWebSocket(&srv, &conns, .{ .remote_ip = "127.0.0.1" }, alloc);
+    const original_id = conn.id;
+    try std.testing.expectEqual(@as(usize, 1), conns.count(io));
+    try std.testing.expectError(error.TooManyConnections, prepareWebSocket(&srv, &conns, .{}, alloc));
+    conns.remove(io, conn);
+    const replacement = try prepareWebSocket(&srv, &conns, .{}, alloc);
+    try std.testing.expect(replacement.id > original_id);
+}
+
+test "fuzz WebSocket preparation respects capacity across removals" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const io = std.testing.io;
+            const alloc = std.testing.allocator;
+            var core = Core.init();
+            var dispatcher = jsonrpc.Dispatcher.init(alloc);
+            defer dispatcher.deinit();
+            var reg = Registry.init(alloc, &dispatcher);
+            defer reg.deinit();
+            var conns = connections.Connections.init(alloc, &core);
+            defer conns.deinit(io);
+            const limit = smith.valueRangeAtMostWithHash(u8, 0, 3, 0);
+            var srv: Server = .{ .io = io, .core = &core, .reg = &reg, .dispatcher = &dispatcher, .max_websocket_connections = limit };
+            var live: [4]?*connections.Connection = @splat(null);
+            for (0..16) |i| {
+                const slot = smith.valueRangeAtMostWithHash(u8, 0, live.len - 1, @intCast(i + 1));
+                if (live[slot]) |conn| {
+                    conns.remove(io, conn);
+                    live[slot] = null;
+                } else {
+                    live[slot] = prepareWebSocket(&srv, &conns, .{}, alloc) catch |err| switch (err) {
+                        error.TooManyConnections => blk: {
+                            try std.testing.expectEqual(@as(usize, limit), conns.count(io));
+                            break :blk null;
+                        },
+                        else => return err,
+                    };
+                }
+                try std.testing.expect(conns.count(io) <= limit);
+            }
+        }
+    }.run, .{});
 }
 
 /// Tornado `WebSocketHandler.check_origin` with Moonraker's CORS fallback: no

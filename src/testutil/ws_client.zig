@@ -376,6 +376,45 @@ test "WS: two connections get distinct monotonic ids via identify" {
     try std.testing.expect(id2 > id1);
 }
 
+test "WS: logout and deletion revoke method access and notifications" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const created = try ts.postJson(a, "/access/user", "{\"username\":\"alice\",\"password\":\"pw\"}");
+    const tokens = try std.json.parseFromSliceLeaky(std.json.Value, a, created, .{});
+    const token = tokens.object.get("result").?.object.get("token").?.string;
+    const client = try connect(ts, alloc);
+    defer client.close();
+    const identify = try std.json.Stringify.valueAlloc(a, .{ .access_token = token, .client_name = "client", .version = "1", .type = "web", .url = "http://localhost" }, .{});
+    const identity = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "server.connection.identify", identify), .{});
+    try std.testing.expect(identity.object.contains("result"));
+    const logout = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "access.logout", null), .{});
+    try std.testing.expectEqualStrings("user_logged_out", logout.object.get("result").?.object.get("action").?.string);
+    const denied = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "server.info", null), .{});
+    try std.testing.expectEqual(@as(i64, -32602), denied.object.get("error").?.object.get("code").?.integer);
+    try ts.app.bus.emit(ts.io, notify.names.gcode_response, .null);
+    client.read_deadline = .fromNow(ts.io, .{ .raw = .fromMilliseconds(20), .clock = .awake });
+    try std.testing.expectError(error.ReadFailed, client.readFrame());
+    client.read_deadline = null;
+    const key_body = try ts.get(a, "/access/api_key");
+    const key = (try std.json.parseFromSliceLeaky(std.json.Value, a, key_body, .{})).object.get("result").?.string;
+    const api_identity = try std.json.Stringify.valueAlloc(a, .{ .api_key = key }, .{});
+    const reauthenticated = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "server.connection.identify", api_identity), .{});
+    try std.testing.expect(reauthenticated.object.contains("result"));
+    const logged = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "access.login", "{\"username\":\"alice\",\"password\":\"pw\"}"), .{});
+    const next = logged.object.get("result").?.object.get("token").?.string;
+    const next_identity = try std.json.Stringify.valueAlloc(a, .{ .access_token = next }, .{});
+    const user_again = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "server.connection.identify", next_identity), .{});
+    try std.testing.expect(user_again.object.contains("result"));
+    const deleted = try std.json.parseFromSliceLeaky(std.json.Value, a, try ts.delete(a, "/access/user?username=alice"), .{});
+    try std.testing.expectEqualStrings("user_deleted", deleted.object.get("result").?.object.get("action").?.string);
+    const deleted_session = try std.json.parseFromSliceLeaky(std.json.Value, a, try client.call(a, "server.info", null), .{});
+    try std.testing.expectEqual(@as(i64, -32602), deleted_session.object.get("error").?.object.get("code").?.integer);
+}
+
 test "WS: server.info matches HTTP result payload (transport convergence)" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

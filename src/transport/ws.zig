@@ -60,7 +60,8 @@ fn idResult(alloc: std.mem.Allocator, key: []const u8, id: u64) !std.json.Value 
 
 /// The dispatcher's view of a connection's sender.
 fn callerOf(conn: *const Connection) jsonrpc.Caller {
-    return .{ .transport = .WEBSOCKET, .user = conn.user, .remote_ip = conn.remote_ip, .need_auth = conn.need_auth.load(.acquire) };
+    const need_auth = conn.need_auth.load(.acquire);
+    return .{ .transport = .WEBSOCKET, .user = if (need_auth) null else conn.user, .remote_ip = conn.remote_ip, .need_auth = need_auth };
 }
 
 /// Core WS request handling, independent of sockets so it is unit- and
@@ -150,16 +151,19 @@ fn handleObjectsSubscribe(srv: *WsServer, conn: *Connection, params: std.json.Va
 /// `access_token` must be a valid JWT, else an `api_key` (when no user is set
 /// yet) must match; a connection still needing auth without either fails.
 fn handleIdentify(srv: *WsServer, conn: *Connection, params: std.json.Value, alloc: std.mem.Allocator) !std.json.Value {
+    // Logout cannot run between credential validation and identity publication.
+    srv.conns.core.lock(srv.io);
+    defer srv.conns.core.unlock(srv.io);
     if (srv.auth) |auth| {
         const token = params.object.get("access_token");
         const api_key = params.object.get("api_key");
         if (token) |t| {
             if (t != .string) return error.Unauthorized;
             const user = authz.validateJwt(auth, alloc, t.string) orelse return error.Unauthorized;
-            try srv.conns.setUser(conn, user);
-        } else if (api_key != null and conn.user == null) {
+            try srv.conns.setUser(srv.io, conn, user);
+        } else if (api_key != null and (conn.user == null or conn.need_auth.load(.acquire))) {
             if (api_key.? != .string or !authz.validateApiKey(auth, api_key.?.string)) return error.Unauthorized;
-            try srv.conns.setUser(conn, authz.api_user);
+            try srv.conns.setUser(srv.io, conn, authz.api_user);
         } else if (conn.need_auth.load(.acquire)) return error.Unauthorized;
     }
     try srv.conns.identify(srv.io, conn, .{
@@ -184,28 +188,13 @@ pub const WsServer = struct {
     auth: ?*authz.AuthCtx = null,
 };
 
-/// Authentication state of the upgrade request.
-pub const UpgradeAuth = struct {
-    /// Authenticated user; copied into the connection.
-    user: ?[]const u8 = null,
-    need_auth: bool = false,
-    /// Client address; must outlive the session.
-    remote_ip: ?[]const u8 = null,
-};
-
-/// Serve a single upgraded WebSocket connection to completion: register the
-/// connection, loop reading text frames and replying with JSON-RPC responses,
-/// and on close/error remove the connection from the registry.
+/// Serve an upgraded connection prepared by the HTTP transport. The caller
+/// owns the registry entry and removes it after this function returns.
 ///
 /// `ws` is an already-handshaked `std.http.Server.WebSocket`. Its input buffer
 /// (the HTTP reader buffer) bounds the largest message accepted; oversize
 /// frames terminate the connection.
-pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket, upgrade: UpgradeAuth) void {
-    const conn = srv.conns.add(srv.io, upgrade.need_auth) catch return;
-    defer srv.conns.remove(srv.io, conn);
-    conn.remote_ip = upgrade.remote_ip;
-    if (upgrade.user) |u| srv.conns.setUser(conn, u) catch return;
-
+pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) void {
     // Bind the live socket as the connection's frame writer so the notification
     // bus can push notifications to it (under the per-connection write mutex)
     // while this loop is blocked in readSmallMessage. Detach on exit.
@@ -412,6 +401,19 @@ test "WS batches retain connection-bound methods and notification semantics" {
     try std.testing.expectEqual(conn.id, @as(u64, @intCast(result.array.items[1].object.get("result").?.object.get("websocket_id").?.integer)));
     try std.testing.expectEqual(@as(i64, -32600), result.array.items[2].object.get("error").?.object.get("code").?.integer);
     try std.testing.expect(result.array.items[3].object.get("result") != null);
+}
+
+test "revoked callers expose no authenticated user to auth-free handlers" {
+    const alloc = std.testing.allocator;
+    var f: Fixture = undefined;
+    try initFixture(&f, alloc);
+    defer deinitFixture(&f);
+    const conn = try f.conns.add(f.io(), false);
+    try f.conns.setUser(f.io(), conn, "alice");
+    try std.testing.expectEqualStrings("alice", callerOf(conn).user.?);
+    f.conns.invalidateUser(f.io(), "alice");
+    try std.testing.expect(callerOf(conn).need_auth);
+    try std.testing.expect(callerOf(conn).user == null);
 }
 
 fn deinitFixture(f: *Fixture) void {

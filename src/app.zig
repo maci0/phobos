@@ -1596,6 +1596,8 @@ pub const App = struct {
     pub fn httpServer(self: *App, io: std.Io) http_transport.Server {
         // Rebind after App is at its final address (init returned it by value).
         self.bindFeather();
+        self.auth_ctx.on_user_logout = onUserLogout;
+        self.auth_ctx.on_user_logout_ctx = self;
         if (self.remote_worker == null) {
             self.remote_calls = .init(&self.remote_call_buf);
             self.remote_worker = io.concurrent(remoteWorker, .{ self, io }) catch |err| blk: {
@@ -1686,6 +1688,11 @@ pub const App = struct {
         };
     }
 };
+
+fn onUserLogout(ctx: *anyopaque, user: []const u8) void {
+    const instance: *App = @ptrCast(@alignCast(ctx));
+    instance.conns.invalidateUser(instance.auth_ctx.io, user);
+}
 
 /// Placeholder handler for WS-only methods registered in the dispatcher for
 /// reflection purposes. The real implementations in `transport/ws.zig`

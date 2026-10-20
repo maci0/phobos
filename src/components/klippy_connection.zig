@@ -158,6 +158,7 @@ fn serializeParams(alloc: std.mem.Allocator, params: std.json.Value) ![]const u8
 fn parseKlippyResult(alloc: std.mem.Allocator, payload: []const u8) !std.json.Value {
     const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .allocate = .alloc_always });
     if (root != .object) return error.KlippyRequestFailed;
+    if (jv.exceedsDepth(root, jv.max_value_depth)) return error.InvalidFrame;
     if (root.object.get("error")) |_| return error.KlippyRequestFailed;
     return root.object.get("result") orelse .null;
 }
@@ -609,6 +610,7 @@ pub const KlippyCtx = struct {
         if (frame != .object) return error.InvalidFrame;
         if (frame.object.get("method")) |method| {
             if (method != .string) return error.InvalidFrame;
+            if (jv.exceedsDepth(frame, jv.max_value_depth)) return error.InvalidFrame;
             return self.bus.core.run(io, dispatchRemoteMethod, .{ self, io, method.string, frame });
         }
         const id = frame.object.get("id") orelse return;
@@ -1161,6 +1163,19 @@ test "parseKlippyResult copies strings (no use-after-free on the freed payload)"
     @memset(payload, 'X'); // would corrupt an aliasing result
     try std.testing.expectEqualStrings("hello world", result.object.get("msg").?.string);
     try std.testing.expectEqualStrings("ready", result.object.get("state").?.string);
+}
+
+test "Klippy frames reject values deeper than the serialization bound" {
+    const depth = jv.max_value_depth + 1;
+    const nested = @as([depth]u8, @splat('[')) ++ "0" ++ @as([depth]u8, @splat(']'));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidFrame, parseKlippyResult(arena.allocator(), "{\"result\":" ++ nested ++ "}"));
+    const nb = try NullBus.init(std.testing.allocator);
+    defer nb.deinit(std.testing.allocator);
+    var ctx = try KlippyCtx.init(std.testing.allocator, &nb.bus);
+    defer ctx.deinit();
+    try std.testing.expectError(error.InvalidFrame, ctx.dispatchFrame(std.testing.io, "{\"method\":\"process_gcode_response\",\"params\":" ++ nested ++ "}"));
 }
 
 test "serializeParams rejects pathologically deep params (guards the Stringify nesting stack)" {

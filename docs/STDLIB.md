@@ -218,3 +218,11 @@ are pruned to it. Klippy's aggregate is rebuilt from active connections and
 internal heater objects. Subscription requests serialize separately from Core
 and use a twenty-second deadline. Handshake ids are read with the JSON parser,
 so whitespace and nested unrelated `id` fields cannot change response matching.
+
+Successful persisted logout and deletion revoke matching WebSocket sessions.
+User strings remain owned by the serve loop; registry comparison and replacement
+hold its mutex, while the authentication gate is atomic. Revoked callers expose
+no authenticated user. Upgrade authentication, registry insertion and identify
+run under Core, ordered with credential changes; network writes happen afterward.
+Klippy method frames and parsed results pass the JSON depth bound before they
+can reach handlers or serializers.

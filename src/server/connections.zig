@@ -7,7 +7,7 @@
 //! it provides add / remove / count / iterate plus the id allocator.
 //!
 //! Thread-safety: all mutating and reading operations take the registry's own
-//! `Io.Mutex`. `nextId` delegates to `Core.nextSeq` under the Core lock so ids
+//! `Io.Mutex`. Connection ids use `Core.nextSeq` under the Core lock so ids
 //! share the one global monotonic sequence with the rest of the server.
 
 const std = @import("std");
@@ -47,7 +47,8 @@ pub const Connection = struct {
     /// Identify metadata; the slices are owned by `Connections.alloc`.
     client: ClientData = .{},
     /// Authenticated user (Moonraker `user_info`), owned by `Connections.alloc`.
-    /// Read and written only by the connection's own serve loop.
+    /// The serve loop replaces this under the registry mutex; revocation reads
+    /// it under that mutex and retains the string until the serve loop frees it.
     user: ?[]const u8 = null,
     /// The upgrade request failed authentication: `auth_required` methods are
     /// refused until identify supplies credentials. Broadcast reads atomically.
@@ -251,19 +252,19 @@ pub const Connections = struct {
         }
     }
 
-    /// Allocate the next monotonic connection id under the Core lock so it
-    /// shares the one global sequence. Safe to call concurrently.
-    pub fn nextId(self: *Connections, io: Io) u64 {
+    /// Create a connection while acquiring Core for its globally ordered id.
+    pub fn add(self: *Connections, io: Io, need_auth: bool) !*Connection {
         self.core.lock(io);
         defer self.core.unlock(io);
-        return self.core.nextSeq();
+        return self.addLocked(io, need_auth);
     }
 
-    /// Create and register a fresh connection with id from `nextId`. Returns a
+    /// Create and register a fresh connection with a globally ordered id. Returns a
     /// pointer-stable `*Connection` the caller (and handlers) can retain until
     /// `remove`. Thread-safe.
-    pub fn add(self: *Connections, io: Io, need_auth: bool) !*Connection {
-        const id = self.nextId(io);
+    /// Caller holds Core, including authentication and identity setup.
+    pub fn addLocked(self: *Connections, io: Io, need_auth: bool) !*Connection {
+        const id = self.core.nextSeq();
         const c = try self.alloc.create(Connection);
         errdefer self.alloc.destroy(c);
         c.* = .{ .id = id, .need_auth = .init(need_auth) };
@@ -307,11 +308,23 @@ pub const Connections = struct {
 
     /// Record the authenticated user (copied) and clear `need_auth`. Called
     /// only from the connection's own serve loop.
-    pub fn setUser(self: *Connections, conn: *Connection, user: []const u8) !void {
+    pub fn setUser(self: *Connections, io: Io, conn: *Connection, user: []const u8) !void {
         const owned = try self.alloc.dupe(u8, user);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         if (conn.user) |old| self.alloc.free(old);
         conn.user = owned;
         conn.need_auth.store(false, .release);
+    }
+
+    /// Revoke existing sessions after a durable logout or deletion. The serve
+    /// loop retains ownership of its user string until reauthentication or close.
+    pub fn invalidateUser(self: *Connections, io: Io, user: []const u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.list.items) |conn| {
+            if (conn.user) |name| if (std.mem.eql(u8, name, user)) conn.need_auth.store(true, .release);
+        }
     }
 
     /// Store identify metadata on a connection, replacing any prior values.
@@ -361,7 +374,7 @@ pub fn filterStatus(alloc: std.mem.Allocator, subscriptions: std.json.ObjectMap,
 
 // --- tests ---------------------------------------------------------------
 
-test "nextId is monotonic and distinct" {
+test "connection ids are monotonic and distinct" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -370,9 +383,9 @@ test "nextId is monotonic and distinct" {
     var conns = Connections.init(std.testing.allocator, &core);
     defer conns.deinit(io);
 
-    const a = conns.nextId(io);
-    const b = conns.nextId(io);
-    const c = conns.nextId(io);
+    const a = (try conns.add(io, false)).id;
+    const b = (try conns.add(io, false)).id;
+    const c = (try conns.add(io, false)).id;
     try std.testing.expect(b > a);
     try std.testing.expect(c > b);
 }
@@ -428,11 +441,11 @@ test "setUser copies the user, replaces the old one and clears need_auth" {
     const c = try conns.add(io, false);
     c.need_auth.store(true, .release);
     var name = "alice".*;
-    try conns.setUser(c, &name);
+    try conns.setUser(io, c, &name);
     name[0] = 'X';
     try std.testing.expectEqualStrings("alice", c.user.?);
     try std.testing.expect(!c.need_auth.load(.acquire));
-    try conns.setUser(c, "bob");
+    try conns.setUser(io, c, "bob");
     try std.testing.expectEqualStrings("bob", c.user.?);
 }
 
@@ -451,10 +464,52 @@ test "broadcast skips unauthenticated connections until identify authenticates" 
     defer arena.deinit();
     conns.broadcast(io, arena.allocator(), "private output", null, null);
     try std.testing.expectEqual(@as(usize, 0), writer.frames.items.len);
-    try conns.setUser(conn, "authenticated");
+    try conns.setUser(io, conn, "authenticated");
     conns.broadcast(io, arena.allocator(), "private output", null, null);
     try std.testing.expectEqual(@as(usize, 1), writer.frames.items.len);
     try std.testing.expectEqualStrings("private output", writer.frames.items[0]);
+}
+
+test "revocation retains user ownership and blocks only matching sessions" {
+    const io = std.testing.io;
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+    const alice = try conns.add(io, false);
+    const bob = try conns.add(io, false);
+    try conns.setUser(io, alice, "alice");
+    try conns.setUser(io, bob, "bob");
+    const original = alice.user.?.ptr;
+    conns.invalidateUser(io, "alice");
+    try std.testing.expect(alice.need_auth.load(.acquire));
+    try std.testing.expect(!bob.need_auth.load(.acquire));
+    try std.testing.expect(alice.user.?.ptr == original);
+    try std.testing.expectEqualStrings("alice", alice.user.?);
+    try conns.setUser(io, alice, "new identity");
+    conns.invalidateUser(io, "alice");
+    try std.testing.expect(!alice.need_auth.load(.acquire));
+    try std.testing.expectEqualStrings("new identity", alice.user.?);
+}
+
+test "fuzz session revocation matches complete owned user names" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const io = std.testing.io;
+            var core = Core.init();
+            var conns = Connections.init(std.testing.allocator, &core);
+            defer conns.deinit(io);
+            const conn = try conns.add(io, false);
+            var name: [32]u8 = undefined;
+            const len = smith.valueRangeAtMostWithHash(u8, 0, name.len, 0);
+            smith.bytesWithHash(name[0..len], 1);
+            try conns.setUser(io, conn, name[0..len]);
+            conns.invalidateUser(io, name[0..len]);
+            try std.testing.expect(conn.need_auth.load(.acquire));
+            try conns.setUser(io, conn, "another");
+            conns.invalidateUser(io, name[0..len]);
+            try std.testing.expectEqual(std.mem.eql(u8, name[0..len], "another"), conn.need_auth.load(.acquire));
+        }
+    }.run, .{});
 }
 
 test "fuzz setUser owns every user it stores" {
@@ -471,7 +526,7 @@ test "fuzz setUser owns every user it stores" {
             for (0..smith.valueRangeAtMostWithHash(u8, 0, 4, 0)) |i| {
                 const n = smith.valueRangeAtMostWithHash(u8, 0, buf.len, @intCast(i + 1));
                 smith.bytesWithHash(buf[0..n], @intCast(i + 10));
-                try conns.setUser(c, buf[0..n]);
+                try conns.setUser(io, c, buf[0..n]);
                 try std.testing.expectEqualSlices(u8, buf[0..n], c.user.?);
             }
         }
