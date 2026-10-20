@@ -153,6 +153,11 @@ refreshes; the printing flag blocks refresh and mutations. Status requests
 suppress requested refreshes while busy or printing and throttle them to one per
 minute. Notifications take Core only after releasing the command mutex.
 
+The daemon copies its startup environment once for Git commands, excluding every
+`GIT_*` override while retaining HOME, proxy and SSH-agent settings. Fixture Git
+commands use an explicit empty environment. Inherited `GIT_DIR`, `GIT_WORK_TREE`
+and index/config overrides cannot redirect a fixture command into another checkout.
+
 Base32, UUID layout and CIDR prefix matching remain small local codecs. The
 standard library has no matching complete API. Address comparison for trusted
 clients intentionally ignores ports; `IpAddress.eql` also compares the port.

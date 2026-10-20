@@ -274,6 +274,9 @@ pub const UpdateCtx = struct {
     last_status_refresh: ?std.Io.Clock.Timestamp = null,
     /// Tracks whether an update or recovery is currently in progress.
     busy: std.atomic.Value(bool) = .init(false),
+    /// Startup environment without inherited Git repository/config overrides.
+    /// Owned by this context and immutable once request workers start.
+    git_environment: ?std.process.Environ.Map = null,
     /// Optional printing-state check. When it returns true, mutating update
     /// operations are refused (Moonraker: 503 "Update Refused: Klippy is
     /// printing"). Must read an atomic flag without taking Core.
@@ -354,6 +357,26 @@ pub const UpdateCtx = struct {
         self.io = io;
     }
 
+    pub fn setGitEnvironment(self: *UpdateCtx, environment: *const std.process.Environ.Map) !void {
+        var copy = std.process.Environ.Map.init(self.gpa);
+        errdefer copy.deinit();
+        for (environment.keys(), environment.values()) |key, value| {
+            if (!std.mem.startsWith(u8, key, "GIT_")) try copy.put(key, value);
+        }
+        if (self.git_environment) |*previous| previous.deinit();
+        self.git_environment = copy;
+    }
+
+    pub fn gitEnvironment(self: *const UpdateCtx) ?*const std.process.Environ.Map {
+        return if (self.git_environment) |*environment| environment else null;
+    }
+
+    pub fn deinit(self: *UpdateCtx) void {
+        self.stopAutoRefresh();
+        if (self.git_environment) |*environment| environment.deinit();
+        self.git_environment = null;
+    }
+
     pub fn beginMutation(self: *UpdateCtx) !void {
         if (self.isPrinting()) return error.UpdateRefusedPrinting;
         if (self.busy.swap(true, .acq_rel)) return error.UpdateBusy;
@@ -408,11 +431,13 @@ const git_output_limit = 512 * 1024;
 /// Run `git -C <repo_path> <args...>` killed after `timeout_s` seconds, with
 /// stdout and stderr capped at `git_output_limit` (error.StreamTooLong).
 /// Caller owns the result's stdout and stderr.
-pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64) !std.process.RunResult {
+pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64, environment: ?*const std.process.Environ.Map) !std.process.RunResult {
     const args = try std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv });
     defer alloc.free(args);
+    const empty_environment = std.process.Environ.Map.init(alloc);
     return process.run(alloc, io, .{
         .argv = args,
+        .environ_map = environment orelse &empty_environment,
         .stdout_limit = .limited(git_output_limit),
         .stderr_limit = .limited(git_output_limit),
         .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(timeout_s), .clock = .awake }) },
@@ -422,10 +447,10 @@ pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv:
 /// Run `git -C <repo_path> <args...>` and return stdout (trimmed, caller owns).
 /// Returns null on any error (spawn failure, timeout, oversized output,
 /// non-zero exit, empty stdout).
-fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) ?[]const u8 {
+fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, environment: ?*const std.process.Environ.Map) ?[]const u8 {
     if (repo_path.len == 0) return null;
 
-    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s) catch return null;
+    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s, environment) catch return null;
     defer alloc.free(result.stderr);
 
     if (result.term != .exited or result.term.exited != 0) {
@@ -454,9 +479,9 @@ fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: 
 }
 
 /// Run `git -C <repo_path> <args...>` and return true on exit 0, false otherwise.
-fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) bool {
+fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, environment: ?*const std.process.Environ.Map) bool {
     if (repo_path.len == 0) return false;
-    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s) catch return false;
+    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s, environment) catch return false;
     return exitedZero(alloc, result);
 }
 
@@ -471,18 +496,18 @@ fn exitedZero(alloc: std.mem.Allocator, result: std.process.RunResult) bool {
 /// killed after `git_fetch_timeout_s`. Fetch never modifies the working tree or
 /// local branches. Returns true on success, false when a repo_path is empty,
 /// io is unavailable, or fetch fails (non-zero exit, spawn failure, timeout).
-fn gitFetch(io: ?std.Io, alloc: std.mem.Allocator, repo_path: []const u8) bool {
+fn gitFetch(io: ?std.Io, alloc: std.mem.Allocator, repo_path: []const u8, environment: ?*const std.process.Environ.Map) bool {
     const live_io = io orelse return false;
     if (repo_path.len == 0) return false;
-    const result = gitRun(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" }, git_fetch_timeout_s) catch return false;
+    const result = gitRun(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" }, git_fetch_timeout_s, environment) catch return false;
     return exitedZero(alloc, result);
 }
 
 /// Run `git reset --hard <ref>` in a repo. Destructive: overwrites local
 /// changes. Returns true on success, false on failure.
-fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []const u8) bool {
+fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []const u8, environment: ?*const std.process.Environ.Map) bool {
     if (repo_path.len == 0) return false;
-    return gitCheck(io, alloc, repo_path, &.{ "reset", "--hard", ref });
+    return gitCheck(io, alloc, repo_path, &.{ "reset", "--hard", ref }, environment);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,7 +519,7 @@ fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []
 /// io is available and src.repo_path is non-empty, runs real git commands to
 /// populate version, hash, branch, and dirty/detached state. Falls back to
 /// honest "?" defaults when the repo is absent (unit tests, dev workstation).
-fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.Value {
+fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environment: ?*const std.process.Environ.Map) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
 
     // --- AppDeploy.get_update_status base keys ---
@@ -532,12 +557,12 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
     if (io) |live_io| {
         if (src.repo_path.len > 0) {
             // branch: git rev-parse --abbrev-ref HEAD
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "--abbrev-ref", "HEAD" })) |b| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "--abbrev-ref", "HEAD" }, environment)) |b| {
                 if (!std.mem.eql(u8, b, "HEAD")) branch = b;
             }
 
             // version: git describe --tags --always --long --dirty
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", "--always", "--long", "--dirty" })) |v| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", "--always", "--long", "--dirty" }, environment)) |v| {
                 version = v;
             }
 
@@ -547,23 +572,23 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
 
             // remote_version: git describe --tags origin/<branch> --always
             const remote_ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{branch});
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", remote_ref, "--always" })) |rv| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", remote_ref, "--always" }, environment)) |rv| {
                 remote_version = rv;
             }
 
             // current_hash: git rev-parse HEAD
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" })) |ch| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, environment)) |ch| {
                 current_hash = ch;
             }
 
             // remote_hash: git rev-parse origin/<branch>
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", remote_ref })) |rh| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", remote_ref }, environment)) |rh| {
                 remote_hash = rh;
             }
 
             // is_dirty: git status --porcelain has any output. Output past
             // the cap is output too, so a large change set stays dirty.
-            if (gitRun(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" }, git_local_timeout_s)) |porcelain| {
+            if (gitRun(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" }, git_local_timeout_s, environment)) |porcelain| {
                 defer alloc.free(porcelain.stdout);
                 defer alloc.free(porcelain.stderr);
                 is_dirty = porcelain.term == .exited and porcelain.term.exited == 0 and porcelain.stdout.len > 0;
@@ -572,14 +597,14 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
             }
 
             // detached: git symbolic-ref -q HEAD fails
-            detached = !gitCheck(live_io, alloc, src.repo_path, &.{ "symbolic-ref", "-q", "HEAD" });
+            detached = !gitCheck(live_io, alloc, src.repo_path, &.{ "symbolic-ref", "-q", "HEAD" }, environment);
 
             // commits_behind: git log HEAD..origin/<branch> with Moonraker's
             // format (unit separator \x1D between fields, record separator
             // \x1E between commits). Max 100 entries to match Moonraker.
             const behind_range = try std.fmt.allocPrint(alloc, "HEAD..{s}", .{remote_ref});
             const log_fmt_arg = try std.fmt.allocPrint(alloc, "--format=sha:%H\x1Dauthor:%an\x1Ddate:%ct\x1Dsubject:%s\x1Dmessage:%b\x1E", .{});
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "log", behind_range, log_fmt_arg, "--max-count=100" })) |behind| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "log", behind_range, log_fmt_arg, "--max-count=100" }, environment)) |behind| {
                 if (behind.len > 0) {
                     var records = std.mem.splitSequence(u8, behind, "\x1E");
                     while (records.next()) |record| {
@@ -676,9 +701,9 @@ fn buildWebStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
     return .{ .object = obj };
 }
 
-fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.Value {
+fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environment: ?*const std.process.Environ.Map) !std.json.Value {
     return switch (src.type) {
-        .git_repo => buildGitStatus(io, alloc, src),
+        .git_repo => buildGitStatus(io, alloc, src, environment),
         .system => buildSystemStatus(alloc, src),
         .web, .zip => buildWebStatus(alloc, src),
     };
@@ -696,7 +721,7 @@ fn shortGitVersion(version: []const u8) []const u8 {
 
 /// Restore Moonraker's update_manager namespace without contacting remotes.
 fn buildCachedStatus(alloc: std.mem.Allocator, src: Source, cache: std.json.Value) !std.json.Value {
-    var result = try buildSourceStatus(null, alloc, src);
+    var result = try buildSourceStatus(null, alloc, src, null);
     if (cache != .object) return result;
     const fields = if (src.type == .git_repo) &[_][2][]const u8{
         .{ "is_valid", "is_valid" },                   .{ "owner", "git_owner" },
@@ -750,7 +775,7 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
         else if (ctx.store != null and src.type == .git_repo and src.repo_path.len == 0)
             std.json.Value{ .object = .empty }
         else
-            try buildSourceStatus(ctx.io, alloc, src);
+            try buildSourceStatus(ctx.io, alloc, src, ctx.gitEnvironment());
         try version_info.put(alloc, src.name, status);
     }
 
@@ -841,7 +866,7 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
         if (refresh) {
             for (ctx.sources) |src| {
                 if (src.type == .git_repo and src.repo_path.len > 0) {
-                    _ = gitFetch(ctx.io, alloc, src.repo_path);
+                    _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
                 }
             }
             ctx.last_status_refresh = .now(ctx.clock_io, .awake);
@@ -875,7 +900,7 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
         if (ctx.busy.load(.acquire) or ctx.isPrinting()) return error.UpdateBusy;
         for (ctx.sources) |src| {
             if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
-            if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path);
+            if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
         }
         ctx.last_status_refresh = .now(ctx.clock_io, .awake);
         break :blk try buildStatusPayload(ctx, alloc);
@@ -925,10 +950,10 @@ fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     if (src.type == .git_repo and src.repo_path.len > 0) {
         if (ctx.io) |io| {
-            if (!gitFetch(io, alloc, src.repo_path)) return error.GitFailed;
+            if (!gitFetch(io, alloc, src.repo_path, ctx.gitEnvironment())) return error.GitFailed;
             const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
             defer alloc.free(ref);
-            if (!gitReset(io, alloc, src.repo_path, ref)) return error.GitFailed;
+            if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
         }
     }
     try updatePackages(ctx, alloc, src);
@@ -1063,13 +1088,13 @@ fn recoverRepo(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source, hard: boo
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const io = ctx.io orelse return;
     if (hard) {
-        if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" })) return error.GitFailed;
-        if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" })) return error.GitFailed;
+        if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" }, ctx.gitEnvironment())) return error.GitFailed;
+        if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" }, ctx.gitEnvironment())) return error.GitFailed;
     } else {
         const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
         defer alloc.free(ref);
-        if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch })) return error.GitFailed;
-        if (!gitReset(io, alloc, src.repo_path, ref)) return error.GitFailed;
+        if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch }, ctx.gitEnvironment())) return error.GitFailed;
+        if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
     }
 }
 
@@ -1102,7 +1127,7 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
             try ctx.commands.lock(ctx.clock_io);
             defer ctx.commands.unlock(ctx.clock_io);
             if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
-            break :blk src.repo_path.len == 0 or gitReset(io, alloc, src.repo_path, src.rollback_ref);
+            break :blk src.repo_path.len == 0 or gitReset(io, alloc, src.repo_path, src.rollback_ref, ctx.gitEnvironment());
         };
         if (!reset) {
             notifyLine(ctx, alloc, app, proc_id, false, "Error Rolling Back {s}", .{app});
@@ -1287,7 +1312,7 @@ test "buildGitStatus: full git_repo key set present" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const v = try buildGitStatus(null, a, default_sources[1]); // moonraker
+    const v = try buildGitStatus(null, a, default_sources[1], null); // moonraker
     const o = v.object;
     for ([_][]const u8{
         "channel",         "debug_enabled",        "channel_invalid", "is_valid",
@@ -1558,7 +1583,7 @@ test "buildGitStatus: empty repo_path with null io returns defaults" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const v = try buildGitStatus(null, a, default_sources[1]); // moonraker, no repo_path
+    const v = try buildGitStatus(null, a, default_sources[1], null); // moonraker, no repo_path
     const o = v.object;
     try testing.expectEqualStrings("?", o.get("version").?.string);
     try testing.expectEqualStrings("?", o.get("current_hash").?.string);
@@ -1581,7 +1606,7 @@ test "buildGitStatus: empty repo_path with non-null io still returns defaults" {
         .branch = "main",
         .repo_path = "",
     };
-    const v = try buildGitStatus(null, a, src_no_path);
+    const v = try buildGitStatus(null, a, src_no_path, null);
     const o = v.object;
     try testing.expectEqualStrings("?", o.get("version").?.string);
     try testing.expectEqualStrings("?", o.get("current_hash").?.string);
@@ -1602,7 +1627,7 @@ test "buildGitStatus: with repo_path set honors defaults when io is null" {
         .repo_path = "/nonexistent",
     };
     // io is null, so git commands are never run; "?" defaults are used.
-    const v = try buildGitStatus(null, a, src_with_path);
+    const v = try buildGitStatus(null, a, src_with_path, null);
     const o = v.object;
     try testing.expectEqualStrings("?", o.get("version").?.string);
     try testing.expectEqualStrings("?", o.get("current_hash").?.string);
@@ -1613,18 +1638,18 @@ test "buildGitStatus: with repo_path set honors defaults when io is null" {
 // ---- gitFetch ----
 
 test "gitFetch: returns false with empty repo_path" {
-    try testing.expect(!gitFetch(null, testing.allocator, ""));
-    try testing.expect(!gitFetch(@as(?std.Io, undefined), testing.allocator, ""));
+    try testing.expect(!gitFetch(null, testing.allocator, "", null));
+    try testing.expect(!gitFetch(@as(?std.Io, undefined), testing.allocator, "", null));
 }
 
 test "gitFetch: returns false when io is null" {
-    try testing.expect(!gitFetch(null, testing.allocator, "/some/repo"));
+    try testing.expect(!gitFetch(null, testing.allocator, "/some/repo", null));
 }
 
 test "gitFetch: returns false for nonexistent repo" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
-    try testing.expect(!gitFetch(threaded.io(), std.heap.smp_allocator, "/nonexistent/path"));
+    try testing.expect(!gitFetch(threaded.io(), std.heap.smp_allocator, "/nonexistent/path", null));
 }
 
 const TestRepo = struct {
@@ -1636,9 +1661,9 @@ const TestRepo = struct {
         errdefer tmp.cleanup();
         const path = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
         errdefer testing.allocator.free(path);
-        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "init", "--initial-branch=main" }));
-        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial" }));
-        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "remote", "add", "origin", path }));
+        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "init", "--initial-branch=main" }, null));
+        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "initial" }, null));
+        try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{ "remote", "add", "origin", path }, null));
         return .{ .tmp = tmp, .path = path };
     }
 
@@ -1654,12 +1679,79 @@ test "gitFetch: fetches only the local fixture origin" {
     const io = threaded.io();
     var repo = try TestRepo.init();
     defer repo.deinit();
-    try testing.expect(gitFetch(io, testing.allocator, repo.path));
-    const head = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "HEAD" }).?;
+    try testing.expect(gitFetch(io, testing.allocator, repo.path, null));
+    const head = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "HEAD" }, null).?;
     defer testing.allocator.free(head);
-    const remote = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "origin/main" }).?;
+    const remote = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "origin/main" }, null).?;
     defer testing.allocator.free(remote);
     try testing.expectEqualStrings(head, remote);
+}
+
+test "Git ignores inherited repository overrides and preserves connection environment" {
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    var other = try TestRepo.init();
+    defer other.deinit();
+    var environment = std.process.Environ.Map.init(testing.allocator);
+    defer environment.deinit();
+    const other_git = try std.fs.path.join(testing.allocator, &.{ other.path, ".git" });
+    defer testing.allocator.free(other_git);
+    try environment.put("GIT_DIR", other_git);
+    try environment.put("GIT_WORK_TREE", other.path);
+    try environment.put("GIT_INDEX_FILE", "unused-index");
+    try environment.put("HOME", repo.path);
+    try environment.put("HTTPS_PROXY", "http://proxy.invalid:8080");
+    try environment.put("SSH_AUTH_SOCK", "/nonexistent/fixture-agent");
+    const block = try environment.createPosixBlock(testing.allocator, .{});
+    defer block.deinit(testing.allocator);
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .environ = .{ .block = block } });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const output = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "--show-toplevel" }, null) orelse return error.MissingGitOutput;
+    defer testing.allocator.free(output);
+    try testing.expectEqualStrings(repo.path, output);
+
+    var ctx = testCtx();
+    defer ctx.deinit();
+    try ctx.setGitEnvironment(&environment);
+    const sanitized = ctx.gitEnvironment().?;
+    try testing.expectEqualStrings(repo.path, sanitized.get("HOME").?);
+    try testing.expectEqualStrings("http://proxy.invalid:8080", sanitized.get("HTTPS_PROXY").?);
+    try testing.expectEqualStrings("/nonexistent/fixture-agent", sanitized.get("SSH_AUTH_SOCK").?);
+    for (sanitized.keys()) |key| try testing.expect(!std.mem.startsWith(u8, key, "GIT_"));
+    const configured_output = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "--show-toplevel" }, sanitized) orelse return error.MissingGitOutput;
+    defer testing.allocator.free(configured_output);
+    try testing.expectEqualStrings(repo.path, configured_output);
+
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn check(alloc: std.mem.Allocator, original: *const std.process.Environ.Map) !void {
+            var updates: UpdateCtx = .{ .clock_io = testing.io, .gpa = alloc, .sources = &.{}, .bus = null };
+            defer updates.deinit();
+            try updates.setGitEnvironment(original);
+            try updates.setGitEnvironment(original);
+            try testing.expectEqualStrings(original.get("HOME").?, updates.gitEnvironment().?.get("HOME").?);
+        }
+    }.check, .{&environment});
+}
+
+test "fuzz Git environment filtering preserves owned ordinary entries" {
+    try testing.fuzz({}, struct {
+        fn check(_: void, smith: *testing.Smith) !void {
+            var bytes: [48]u8 = undefined;
+            smith.bytes(&bytes);
+            var original = std.process.Environ.Map.init(testing.allocator);
+            defer original.deinit();
+            try original.put("HOME", &bytes);
+            try original.put("GIT_DIR", &bytes);
+            var updates = testCtx();
+            defer updates.deinit();
+            try updates.setGitEnvironment(&original);
+            original.clearRetainingCapacity();
+            const copy = updates.gitEnvironment().?;
+            try testing.expectEqualStrings(&bytes, copy.get("HOME").?);
+            try testing.expect(copy.get("GIT_DIR") == null);
+        }
+    }.check, .{});
 }
 
 test "fuzz git command arguments: long read-only lists retain every argument" {
@@ -1670,8 +1762,8 @@ test "fuzz git command arguments: long read-only lists retain every argument" {
             var args: [32][]const u8 = @splat("--is-inside-work-tree");
             args[0] = "rev-parse";
             const count = 2 + @as(usize, smith.value(u8) % 31);
-            try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, args[0..count]));
-            const output = gitOutput(testing.io, testing.allocator, repo.path, args[0..count]) orelse return error.MissingGitOutput;
+            try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, args[0..count], null));
+            const output = gitOutput(testing.io, testing.allocator, repo.path, args[0..count], null) orelse return error.MissingGitOutput;
             defer testing.allocator.free(output);
             try testing.expectEqual(count - 1, std.mem.count(u8, output, "true"));
         }
@@ -1695,7 +1787,7 @@ test "handleRefresh: fetches sources from a local repository" {
     const v = try handleRefresh(@ptrCast(&ctx), .null, a);
     try testing.expect(v.object.get("version_info") != null);
     try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
-    try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
 }
 
 test "handleStatus: refresh=true fetches before building payload" {
@@ -1715,7 +1807,7 @@ test "handleStatus: refresh=true fetches before building payload" {
     const v = try handleStatus(@ptrCast(&ctx), try objParams(a, "{\"refresh\":true}"), a);
     try testing.expect(v.object.get("version_info") != null);
     try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
-    try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
 }
 
 test "refresh refuses busy and printing states and status refresh is throttled" {
@@ -1751,11 +1843,11 @@ test "refresh refuses busy and printing states and status refresh is throttled" 
     ctx.busy.store(false, .release);
     _ = try handleStatus(&ctx, refresh, alloc);
     try testing.expect(ctx.last_status_refresh != null);
-    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "update-ref", "-d", "refs/remotes/origin/main" }));
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "update-ref", "-d", "refs/remotes/origin/main" }, null));
     _ = try handleStatus(&ctx, refresh, alloc);
-    try testing.expect(!gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    try testing.expect(!gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
     _ = try handleRefresh(&ctx, .null, alloc);
-    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
 }
 
 test "update dispatcher runs commands outside Core and serializes the operation" {
@@ -1801,8 +1893,8 @@ test "full update applies the Git source in a local fixture" {
     var repo = try TestRepo.init();
     defer repo.deinit();
     try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "original" });
-    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "add", "tracked" }));
-    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "tracked" }));
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "add", "tracked" }, null));
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "tracked" }, null));
     try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "modified" });
     const sources = [_]Source{.{ .name = "fixture", .type = .git_repo, .repo_path = repo.path, .branch = "main" }};
     var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &sources, .bus = null, .io = testing.io };
@@ -1928,7 +2020,7 @@ test "fuzz_buildGitStatus: arbitrary source fields never crash" {
                 .repo_path = rpath[0..rpath_len],
             };
             // io is always null → never runs real git; must not crash.
-            _ = try buildGitStatus(null, a, src);
+            _ = try buildGitStatus(null, a, src, null);
         }
     }.run, .{});
 }
@@ -1937,7 +2029,7 @@ test "gitOutput: returns null for empty repo_path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const result = gitOutput(io, testing.allocator, "", &.{});
+    const result = gitOutput(io, testing.allocator, "", &.{}, null);
     try testing.expect(result == null);
 }
 
@@ -1945,7 +2037,7 @@ test "gitOutput: returns null for nonexistent path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    const result = gitOutput(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" });
+    const result = gitOutput(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" }, null);
     try testing.expect(result == null);
 }
 
@@ -1953,14 +2045,14 @@ test "gitCheck: returns false for empty repo_path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expectEqual(false, gitCheck(io, testing.allocator, "", &.{ "rev-parse", "HEAD" }));
+    try testing.expectEqual(false, gitCheck(io, testing.allocator, "", &.{ "rev-parse", "HEAD" }, null));
 }
 
 test "gitCheck: returns false for nonexistent path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expectEqual(false, gitCheck(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" }));
+    try testing.expectEqual(false, gitCheck(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" }, null));
 }
 
 test "git helpers pass a repo path with shell metacharacters as one argument" {
@@ -1970,13 +2062,13 @@ test "git helpers pass a repo path with shell metacharacters as one argument" {
     try tmp.dir.createDirPath(testing.io, name);
     const path = try tmp.dir.realPathFileAlloc(testing.io, name, testing.allocator);
     defer testing.allocator.free(path);
-    try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{"init"}));
-    const inside = gitOutput(testing.io, testing.allocator, path, &.{ "rev-parse", "--is-inside-work-tree" }) orelse return error.MissingGitOutput;
+    try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{"init"}, null));
+    const inside = gitOutput(testing.io, testing.allocator, path, &.{ "rev-parse", "--is-inside-work-tree" }, null) orelse return error.MissingGitOutput;
     defer testing.allocator.free(inside);
     try testing.expectEqualStrings("true", inside);
     // A NUL byte cannot reach argv: the spawn fails instead.
-    try testing.expect(gitOutput(testing.io, testing.allocator, "/p\x00ath/null", &.{"status"}) == null);
-    try testing.expect(!gitCheck(testing.io, testing.allocator, "/p\x00ath/null", &.{"status"}));
+    try testing.expect(gitOutput(testing.io, testing.allocator, "/p\x00ath/null", &.{"status"}, null) == null);
+    try testing.expect(!gitCheck(testing.io, testing.allocator, "/p\x00ath/null", &.{"status"}, null));
 }
 
 test "update failures send Moonraker's completion lines" {
@@ -2062,8 +2154,8 @@ test "refresh with a name fetches only that source" {
     defer arena.deinit();
     const a = arena.allocator();
     _ = try handleRefresh(&ctx, try objParams(a, "{\"name\":\"second\"}"), a);
-    try testing.expect(gitCheck(io, testing.allocator, second.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
-    try testing.expect(!gitCheck(io, testing.allocator, first.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    try testing.expect(gitCheck(io, testing.allocator, second.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
+    try testing.expect(!gitCheck(io, testing.allocator, first.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
 }
 
 test "is_dirty: oversized status output still reads as dirty" {
@@ -2082,7 +2174,7 @@ test "is_dirty: oversized status output still reads as dirty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const src: Source = .{ .name = "moonraker", .type = .git_repo, .repo_path = repo.path, .branch = "main" };
-    const status = try buildGitStatus(io, arena.allocator(), src);
+    const status = try buildGitStatus(io, arena.allocator(), src, null);
     try testing.expect(status.object.get("is_dirty").?.bool);
 }
 
@@ -2090,14 +2182,14 @@ test "gitReset: returns false for empty repo_path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expect(!gitReset(io, testing.allocator, "", "origin/master"));
+    try testing.expect(!gitReset(io, testing.allocator, "", "origin/master", null));
 }
 
 test "gitReset: returns false for nonexistent path" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    try testing.expect(!gitReset(io, testing.allocator, "/nonexistent/repo", "origin/master"));
+    try testing.expect(!gitReset(io, testing.allocator, "/nonexistent/repo", "origin/master", null));
 }
 
 test "fuzz_gitReset: arbitrary ref strings never crash" {
@@ -2112,7 +2204,7 @@ test "fuzz_gitReset: arbitrary ref strings never crash" {
             const n = @min(buf.len, @as(usize, @intCast(smith.valueRangeAtMostWithHash(u8, 0, 64, 1))));
             const ref = buf[0..n];
 
-            _ = gitReset(io, std.heap.smp_allocator, "/nonexistent/repo", ref);
+            _ = gitReset(io, std.heap.smp_allocator, "/nonexistent/repo", ref, null);
         }
     }.run, .{});
 }
@@ -2192,7 +2284,7 @@ test "fuzz buildSourceStatus: dispatches correctly by source type" {
             };
 
             // io is null → git just returns "?" defaults safely
-            const result = try buildSourceStatus(null, a, s);
+            const result = try buildSourceStatus(null, a, s, null);
             try testing.expect(result.object.get("name") != null);
         }
     }.run, .{});

@@ -293,6 +293,7 @@ fn run(init: std.process.Init) !void {
     if (data_path) |dp| std.debug.print("phobos: data path = {s}\n", .{dp});
     var server_app = try app.App.initWithStore(alloc, db_backend, aio, db_path, data_path);
     defer server_app.deinit(aio);
+    try server_app.update_ctx.setGitEnvironment(init.environ_map);
 
     if (config_path) |path| {
         try server_app.setConfig(aio, path);
