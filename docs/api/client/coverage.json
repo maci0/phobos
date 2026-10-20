@@ -22,7 +22,7 @@
     }
   },
   "moonraker_count": 130,
-  "phobos_count": 145,
+  "phobos_count": 147,
   "client_gaps": [
     "machine.timelapse.get_settings",
     "machine.timelapse.lastframeinfo",
@@ -667,6 +667,16 @@
     },
     {
       "method": "notify",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
+      "mainsail": false
+    },
+    {
+      "method": "paneldue_beep",
       "moonraker": false,
       "phobos": true,
       "fluidd": false,
@@ -1528,6 +1538,16 @@
     {
       "method": "server.websocket.id",
       "moonraker": true,
+      "phobos": true,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
+      "mainsail": false
+    },
+    {
+      "method": "set_device_power",
+      "moonraker": false,
       "phobos": true,
       "fluidd": false,
       "guppyscreen": false,

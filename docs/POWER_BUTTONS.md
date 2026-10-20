@@ -5,7 +5,7 @@
 `restart_delay`, `restrict_action_processing`, and `timer`. The deprecated
 `bound_service` and `on_when_upload_queued` options are accepted. Bound service
 names lose a trailing `.service` and duplicate names run once per transition.
-Startup validates bindings before starting device workers.
+Startup validates bindings before applying initial power states.
 GPIO timers turn an enabled device off; Shelly and Tasmota timers delay an off
 command using their device protocols. A repeated request for the current state
 does not reset its timer or repeat its service actions.

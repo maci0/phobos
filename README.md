@@ -22,13 +22,15 @@ with bounded buffers, sized for a Cortex-A7.
 The coverage gate checks registered endpoint paths, JSON-RPC method names and
 notification names against Moonraker `900848584374`. It does not prove behavioral
 parity. The [per-call API table](docs/api/API_COVERAGE.md) records implemented,
-partial and missing behavior; [TODO.md](TODO.md) lists the remaining gaps.
+partial and missing behavior; [TODO.md](TODO.md) records completed work and
+remaining limits.
 
 The live paths include the Klippy bridge, SQLite persistence, HTTP and WebSocket
-transports, an MQTT 3.1.1 client, a Spoolman proxy, RSS feeds, and selected power,
-WLED and TD-1 drivers. Git update commands can change configured checkouts.
-Reboot, shutdown, apt and pip are deliberate no-ops. Full Jinja2, LDAP and Apprise
-are out of scope.
+transports, MQTT 3.1/3.1.1/5, Spoolman accounting, RSS feeds, GPIO buttons,
+PanelDue, extension agents, and selected power, WLED and TD-1 drivers. Git and
+Web/ZIP updates can replace configured installations. Host reboot and shutdown
+remain no-ops; package execution requires an injected runner. Full Jinja2, LDAP
+and Apprise are out of scope.
 
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
 identify their measurement conditions and limits. They do not describe the
@@ -85,7 +87,7 @@ the pinned SQLite amalgamation from `vendor/sqlite/`.
 zig build test --summary all
 
 # Print the API surface phobos registers
-zig build && zig-out/bin/phobos --dump-api | less
+zig build && zig-out/bin/phobos --data-path "$PWD/.scratch/api-dump-data" --dump-api | less
 zig-out/bin/phobos schema
 
 # API coverage against the Moonraker baseline (exit 0 means 100%)
@@ -114,7 +116,7 @@ PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python \
 
 Change and verification history: [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 
-- [`TODO.md`](TODO.md): status and prioritized remaining work.
+- [`TODO.md`](TODO.md): implemented work and remaining behavior limits.
 - [`DEVELOPMENT.md`](DEVELOPMENT.md): building, testing, adding a component.
 - [`docs/api/API_SURFACE.md`](docs/api/API_SURFACE.md): the Moonraker API phobos must match.
 - [`docs/api/COVERAGE_HEATMAP.md`](docs/api/COVERAGE_HEATMAP.md): coverage method and verification limits.
@@ -122,7 +124,10 @@ Change and verification history: [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 - [`docs/STDLIB.md`](docs/STDLIB.md): Zig 0.17 std APIs in use and where local code remains.
 - [`docs/FILE_MANAGEMENT.md`](docs/FILE_MANAGEMENT.md): file and thumbnail contracts.
 - [`docs/MACHINE.md`](docs/MACHINE.md): service providers and peripheral queries.
-- [`docs/UPDATES.md`](docs/UPDATES.md): managed services and update behavior.
+- [`docs/UPDATES.md`](docs/UPDATES.md): managed services, release installation and rollback.
+- [`docs/MQTT.md`](docs/MQTT.md): protocols, credentials, QoS and Klippy status topics.
+- [`docs/POWER_BUTTONS.md`](docs/POWER_BUTTONS.md): power hooks, HTTP templates and GPIO buttons.
+- [`docs/ANALYSIS.md`](docs/ANALYSIS.md): injected estimator execution, ownership and file safety.
 - [`docs/TEST_RUN_FINDINGS.md`](docs/TEST_RUN_FINDINGS.md): why Moonraker's own test suite cannot be the parity oracle.
 
 ## License

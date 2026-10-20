@@ -22,7 +22,7 @@ echo "==> Building phobos..."
 
 echo "==> Running phobos --dump-api..."
 mkdir -p "${REPO_ROOT}/.scratch"
-"${PHOBOS_BIN}" --dump-api > "${DUMP}"
+"${PHOBOS_BIN}" --data-path "${REPO_ROOT}/.scratch/api-dump-data" --dump-api > "${DUMP}"
 
 echo "==> Computing API coverage..."
 PYTHONPATH="${REPO_ROOT}/tools" uv run --with tree-sitter --with tree-sitter-python \

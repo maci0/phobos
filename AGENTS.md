@@ -225,7 +225,7 @@ primitives are gone, so use `std.Io.Mutex`.
   pipe. `--dump-api` stdout is the API document. `--version` prints the
   Moonraker compatibility string; `-o json --version` prints the package version.
 - Coverage gate (must stay 100%):
-  `mkdir -p .scratch && zig build && zig-out/bin/phobos --dump-api > .scratch/api-dump.json &&
+  `mkdir -p .scratch && zig build && zig-out/bin/phobos --data-path "$PWD/.scratch/api-dump-data" --dump-api > .scratch/api-dump.json &&
    PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/api-dump.json`
 - Release (LTO, stripped): add `-Doptimize=ReleaseSmall`.
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`

@@ -45,7 +45,7 @@ ts python tools/client_api_scanner/scan.py <guppyscreen>/src  --ui guppyscreen  
 ts python tools/client_api_scanner/scan.py <helixscreen>/src  --ui helixscreen   --version vX -o docs/api/client/helixscreen.json
 
 # refresh the phobos and Moonraker method sets
-zig build && ./zig-out/bin/phobos --dump-api | jq '{jsonrpc_methods:(.jsonrpc_methods|sort)}' > docs/api/client/phobos_methods.json
+zig build && ./zig-out/bin/phobos --data-path "$PWD/.scratch/api-dump-data" --dump-api | jq '{jsonrpc_methods:(.jsonrpc_methods|sort)}' > docs/api/client/phobos_methods.json
 PYTHONPATH=tools ts python -m api_scanner scan --source vendor/moonraker/moonraker | jq '{jsonrpc_methods:([.jsonrpc_methods[].method]|sort)}' > docs/api/client/moonraker_methods.json
 
 # rebuild the matrix (exit 1 if any client calls a method phobos lacks)

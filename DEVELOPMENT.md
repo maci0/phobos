@@ -232,10 +232,14 @@ installed threaded backend. File-backed namespace replacement writes with
 `Dir.createFileAtomic`, syncs the complete temporary file, then replaces the
 previous namespace. It makes no directory-fsync guarantee against power loss.
 
-Startup rejects an unreadable or malformed config and an unknown database
-backend before opening the datastore. `App.setConfig` applies one successfully
-parsed config; it rejects a second load. A persisted queue that cannot be read
-fails initialization rather than replacing it with a partial or empty queue.
+Startup parses configuration once and resolves bind and datastore settings
+before opening the datastore. File-read errors, parse errors and unknown
+backends fail before database creation. `App.setConfig` is the file-loading
+entry point; `App.setParsedConfig` consumes an existing parser, including on
+error. A component-configuration error requires App teardown because published
+configuration strings remain borrowed until then. A second load is rejected.
+A persisted queue that cannot be read fails initialization rather than replacing
+it with a partial or empty queue.
 Enqueue allocates every new job before changing the existing queue. Deleting a
 migrated history job commits its table row and KV shadow in one transaction.
 History totals and auxiliary fields propagate allocation and store failures;

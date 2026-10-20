@@ -29,11 +29,21 @@ active, `stopping` is deactivating, and other reported states are inactive.
 `[machine] supervisord_config_path` supplies `supervisorctl -c <path>` for
 discovery, actions, and polling. The path is one argv entry, never shell text.
 
+USB lookups stream `<data_path>/misc/usb.ids` without retaining the table.
+The daemon starts an owned task that downloads a missing cache; setup and test
+servers do not start downloads. A forced update uses conditional request metadata
+bound to the existing content digest. Downloads have a 20-second deadline and an
+8 MiB limit, validate the complete table, and replace the cache atomically.
+Lookup results include vendor, product, class, subclass and protocol names when
+the database supplies them. Missing files use
+the built-in OpenMoko/Klipper entries; unknown class fields remain null.
+
 Video devices enumerate formats and discrete resolutions with typed
 `VIDIOC_ENUM_FMT` and `VIDIOC_ENUM_FRAMESIZES` structures through
 `std.Io.operate(.device_io_control)`. Each list is capped at Moonraker's 128
 entries. Modes with no discrete resolutions are omitted. Descriptions must be
 UTF-8; the fourcc decoder drops non-ASCII bytes like Moonraker.
+`libcamera_devices` remains empty.
 
 CAN discovery sends Klipper's unassigned-node query (admin ID `0x3f0`, command
 `0x00`) and collects replies for two seconds. It returns UUIDs and Klipper,

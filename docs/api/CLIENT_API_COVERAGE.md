@@ -2,7 +2,7 @@
 
 Every JSON-RPC method registered by upstream Moonraker or phobos, or called by a reference client (web UIs and touchscreens). Regenerate with `tools/client_api_scanner/` after bumping any source; the diff is the changelog.
 
-- Moonraker: **130** · phobos: **145**
+- Moonraker: **130** · phobos: **147**
 - fluidd (v1.37.1): **98** calls
 - guppyscreen (git): **24** calls
 - helixscreen (git): **53** calls
@@ -91,6 +91,7 @@ These method names are absent from the checked-in phobos method set. The matrix 
 | `machine.wled.strips` | ✅ | ✅ | · | · | · | · | · |
 | `machine.wled.toggle` | ✅ | ✅ | · | · | · | · | · |
 | `notify` | · | ✅ | · | · | · | · | · |
+| `paneldue_beep` | · | ✅ | · | · | · | · | · |
 | `pause_job_queue` | · | ✅ | · | · | · | · | · |
 | `printer.emergency_stop` | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `printer.firmware_restart` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -177,6 +178,7 @@ These method names are absent from the checked-in phobos method set. The matrix 
 | `server.webcams.post_item` | ✅ | ✅ | ✅ | · | · | · | ✅ |
 | `server.webcams.test` | ✅ | ✅ | · | · | · | · | · |
 | `server.websocket.id` | ✅ | ✅ | · | · | · | · | · |
+| `set_device_power` | · | ✅ | · | · | · | · | · |
 | `set_wled` | · | ✅ | · | · | · | · | · |
 | `set_wled_state` | · | ✅ | · | · | · | · | · |
 | `spoolman_set_active_spool` | · | ✅ | · | · | · | · | · |

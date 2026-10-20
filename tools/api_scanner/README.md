@@ -65,17 +65,19 @@ Defaults: `--source vendor/moonraker/moonraker`, `--baseline api/api_surface.jso
   baseline and reports the counts and anything phobos is missing. Exit 0 when
   phobos covers the whole baseline, 1 otherwise.
   ```sh
-  mkdir -p .scratch && zig-out/bin/phobos --dump-api > .scratch/api-dump.json
+  mkdir -p .scratch && zig-out/bin/phobos --data-path "$PWD/.scratch/api-dump-data" --dump-api > .scratch/api-dump.json
   api_scanner coverage --phobos .scratch/api-dump.json
   ```
 - **`table`** writes `docs/api/API_COVERAGE.md`: a Markdown table of every
   endpoint, JSON-RPC method, notification, and remote method with phobos's status
-  (✅ full / ⚠️ partial / 🚫 no-op / ❌ missing) and its behavioural difference from
-  Moonraker, plus a section listing phobos calls beyond the static baseline
-  (classified as Klipper remote method, is_remote-proxied, or phobos shim).
-  Per-call notes come from the curated `DELTAS` map in `table.py`. `--output`
-  picks another path; `--check` exits 1 when the file is stale instead of
-  rewriting it.
+  (✅ no recorded delta / ⚠️ known differences / 🚫 no-op / ❌ missing) and its
+  recorded behavioural difference from Moonraker, plus a section listing phobos
+  calls beyond the static baseline (classified as Klipper remote method,
+  is_remote-proxied, or phobos shim).
+  Per-call notes come from the curated `DELTAS` map in `table.py`. An unlisted
+  implemented call defaults to no recorded delta; that is not a conformance
+  test. `--output` picks another path; `--check` exits 1 when the file is stale
+  instead of rewriting it.
   ```sh
   api_scanner table --phobos .scratch/api-dump.json
   api_scanner table --phobos .scratch/api-dump.json --check

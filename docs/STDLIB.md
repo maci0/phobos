@@ -74,7 +74,8 @@ API becomes available and passes both host and ARM checks.
 | --- | --- |
 | Serial configuration in `serial.zig` | `std.Io` has no termios configuration operation. Use `std.posix.tcgetattr` and `tcsetattr`, including Linux baud bits. |
 | System identity in `machine.zig` | No higher-level uname or effective-UID operation. `process.getUserInfo` resolves names to IDs, not IDs to names. |
-| Video capability layout in `machine.zig` | No V4L2 declaration. Use a local `extern struct`, `std.os.linux.IOCTL.IOR` and `io.operate(.device_io_control)`. |
+| V4L2 layouts in `machine.zig` and `video_modes.zig` | No standard V4L2 declarations. Typed local structures cover capabilities, formats and frame sizes; device control uses `std.Io.operate(.device_io_control)`. |
+| SocketCAN setup in `canbus.zig` | No CAN address variant or socket constructor in `std.Io.net`. Typed libc socket/bind calls create the handle; transfers, deadlines and close use `std.Io`. |
 | GPIO input layout in `gpio_input.zig` | No GPIO declaration. Local Linux ABI v1 structs and `std.os.linux.IOCTL.IOWR` provide edge requests and initial values through `io.operate(.device_io_control)`; event reads and cancellation use `std.Io.File`. |
 | Disk capacity in `disk_usage.c` | No `std.Io` filesystem-capacity operation. ARM C translation produces an opaque `statvfs` type because its platform header has a bitfield. The C header owns its ABI. |
 | Local refresh hours and PanelDue file timestamps in `local_time.c` | `std.Tz` parses TZif tables but does not evaluate POSIX footers or expose local-time conversion. `localtime_r` applies host timezone and future DST rules; C owns `struct tm` and `time_t`. PanelDue uses English ctime date fields. |
@@ -250,6 +251,12 @@ Webcam UUID5 hashing streams the namespace, prefix and name through
 `std.Uri.Component.formatEscaped`, and URL constructors free partial results
 when a later allocation fails.
 
+Webcam URL rewriting uses `std.Uri` to preserve encoded credentials, queries and
+fragments. Native UDP connect selects the routed source address through
+`socket.address` without sending a datagram. DNS runs with a joined deadline
+outside Core. Linux TCP listener snapshots use bounded streaming file reads
+because the installed library has no listener-enumeration API.
+
 Owned JSON snapshots still require a recursive copy and matching cleanup.
 `std.json.Value.jsonParseFromValue` returns its source unchanged, so it cannot
 detach a snapshot from a request arena. Inputs must pass the existing depth
@@ -271,7 +278,11 @@ Klippy requests release Core before writing as well as waiting for a reply.
 Socket writes use a native stream writer with one absolute five-second deadline
 for the complete ETX frame. Each bridge shuts down the client socket when its
 Klippy connection ends, without waiting for the client's close response.
-Remote-method queues close and drain even when their worker could not start.
+Remote calls use a native `Io.Group` with a semaphore limiting active tasks to
+16, independently of the 16-request queue. Each task owns its request until it
+finishes. Shutdown cancels and joins the group before component teardown, then
+drains pending requests with `getOneUncancelable`, including under cancellation
+and queue-mutex contention. Queues also drain when the worker could not start.
 
 WebSocket batches dispatch connection-bound methods per item. Status subscriptions
 replace the connection's previous object/field map; initial responses and pushes
