@@ -51,6 +51,8 @@ pub const ConfigParser = struct {
     alloc: std.mem.Allocator,
     section_order: std.ArrayList([]const u8),
     sections_map: std.StringHashMap(Section),
+    /// Moonraker config strips inline comments; secrets INI preserves them.
+    inline_comments: bool = true,
 
     pub fn init(alloc: std.mem.Allocator) ConfigParser {
         return .{
@@ -182,7 +184,7 @@ pub const ConfigParser = struct {
             else
                 null;
             defer if (icom_heap) |h| self.alloc.free(h);
-            const processed = stripInlineComment(line_exp, icom_heap orelse &icom_stack);
+            const processed = if (self.inline_comments) stripInlineComment(line_exp, icom_heap orelse &icom_stack) else line_exp;
 
             const line_indent = countLeadingSpaces(processed);
 
@@ -1213,4 +1215,13 @@ test "fuzz dupeLines: lines are trimmed, non-empty and newline-free" {
             }
         }
     }.run, .{});
+}
+
+test "INI without inline comments preserves literal comment and escape characters" {
+    var parser = ConfigParser.init(std.testing.allocator);
+    defer parser.deinit();
+    parser.inline_comments = false;
+    try parser.parseString("[mqtt]\npassword: a # b ; c\nliteral: d \\# e\n  f ; g\n", "secrets");
+    try std.testing.expectEqualStrings("a # b ; c", parser.get("mqtt", "password").?);
+    try std.testing.expectEqualStrings("d \\# e\nf ; g", parser.get("mqtt", "literal").?);
 }
