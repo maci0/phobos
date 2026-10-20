@@ -47,7 +47,6 @@ pub const JobEvent = enum(u3) {
 
 pub const JobStateCtx = struct {
     gpa: std.mem.Allocator,
-    bus: *const @import("../server/notify.zig").NotifyBus,
 
     /// Owned snapshot, valid until the next update or deinit.
     last_print_stats: std.json.ObjectMap,
@@ -56,18 +55,13 @@ pub const JobStateCtx = struct {
     active: std.atomic.Value(bool) = .init(false),
     last_event: JobEvent,
 
-    /// Callback for job_state:layer_changed events (cur_layer, total_layer).
-    /// Set by components that need layer progress tracking.
-    layer_changed: ?*const fn (i64, i64) void = null,
-
     /// Cross-component pointers — set by App after init.
     history: ?*@import("history.zig").HistoryCtx = null,
     job_queue: ?*@import("job_queue.zig").JobQueueCtx = null,
 
-    pub fn init(alloc: std.mem.Allocator, bus: *const @import("../server/notify.zig").NotifyBus) !JobStateCtx {
+    pub fn init(alloc: std.mem.Allocator) JobStateCtx {
         return JobStateCtx{
             .gpa = alloc,
-            .bus = bus,
             .last_print_stats = .empty,
             .stats_arenas = .{ .init(alloc), .init(alloc) },
             .last_event = .standby,
@@ -149,54 +143,17 @@ pub const JobStateCtx = struct {
         self.active_arena = next_arena;
         self.active.store(std.mem.eql(u8, new_state_str, "printing") or std.mem.eql(u8, new_state_str, "paused"), .release);
 
-        var effective_event: JobEvent = .standby;
-
+        // Mirrors job_state.py _status_update, including standby events.
         if (emit_events and !std.mem.eql(u8, new_state_str, old_state_str)) {
-            if (checkIdle(old_state_str)) {
-                if (std.mem.eql(u8, new_state_str, "printing")) {
-                    effective_event = .started;
-                } else if (!std.mem.eql(u8, new_state_str, "standby")) {
-                    // Send a started event prior to the detected event.
+            const event: JobEvent = if (std.mem.eql(u8, new_state_str, "printing"))
+                if (checkResumed(prev_ps, new_ps)) .resumed else .started
+            else blk: {
+                // Send a started event prior to the detected event.
+                if (checkIdle(old_state_str) and !std.mem.eql(u8, new_state_str, "standby"))
                     self.sendJobEvent(.started, prev_ps, new_ps);
-                    effective_event = fromString(new_state_str);
-                }
-            } else if (std.mem.eql(u8, new_state_str, "printing")) {
-                if (checkResumed(prev_ps, new_ps)) {
-                    effective_event = .resumed;
-                } else {
-                    effective_event = .started;
-                }
-            } else {
-                effective_event = fromString(new_state_str);
-            }
-
-            if (effective_event != .standby) {
-                self.sendJobEvent(effective_event, prev_ps, new_ps);
-            }
-        }
-
-        // Emit job_state:layer_changed when print_stats.info.current_layer
-        // is present (mirrors Moonraker job_state._status_update).
-        if (if (emit_events) ps.get("info") else null) |info_val| {
-            if (info_val == .object) {
-                if (info_val.object.get("current_layer")) |cl_val| {
-                    const cur_layer: i64 = switch (cl_val) {
-                        .integer => |i| i,
-                        .float => |f| jv.floatToInt(f) orelse -1,
-                        else => -1,
-                    };
-                    if (cur_layer >= 0) {
-                        const total_layer: i64 = if (info_val.object.get("total_layer")) |tl| switch (tl) {
-                            .integer => |i| i,
-                            .float => |f| jv.floatToInt(f) orelse 0,
-                            else => 0,
-                        } else 0;
-                        if (self.layer_changed) |cb| {
-                            cb(cur_layer, total_layer);
-                        }
-                    }
-                }
-            }
+                break :blk JobEvent.fromString(new_state_str);
+            };
+            self.sendJobEvent(event, prev_ps, new_ps);
         }
     }
 
@@ -257,10 +214,6 @@ fn checkIdle(state: []const u8) bool {
         std.mem.eql(u8, state, "complete") or
         std.mem.eql(u8, state, "cancelled") or
         std.mem.eql(u8, state, "error");
-}
-
-fn fromString(s: []const u8) JobEvent {
-    return JobEvent.fromString(s);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,16 +326,14 @@ test "checkResumed shorter duration" {
 }
 
 test "JobStateCtx init/deinit" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
     try testing.expectEqual(JobEvent.standby, js.last_event);
     try testing.expect(js.last_print_stats.count() == 0);
 }
 
 test "statusUpdate idle to printing emits started" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     // Initial state: standby (default).
@@ -406,8 +357,7 @@ test "statusUpdate idle to printing emits started" {
 }
 
 test "isActive: true for printing/paused, false otherwise" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     try testing.expect(!js.isActive()); // no state yet
@@ -433,8 +383,7 @@ test "isActive: true for printing/paused, false otherwise" {
 test "fuzz isActive: arbitrary state string never crashes" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            const bus: @import("../server/notify.zig").NotifyBus = undefined;
-            var js = try JobStateCtx.init(testing.allocator, &bus);
+            var js = JobStateCtx.init(testing.allocator);
             defer js.deinit();
             var sbuf: [16]u8 = undefined;
             smith.bytesWithHash(&sbuf, 0);
@@ -450,8 +399,7 @@ test "fuzz isActive: arbitrary state string never crashes" {
 }
 
 test "statusUpdate printing to complete" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -479,8 +427,7 @@ test "statusUpdate printing to complete" {
 }
 
 test "statusUpdate printing to paused" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -507,9 +454,28 @@ test "statusUpdate printing to paused" {
     try testing.expectEqual(JobEvent.paused, js.last_event);
 }
 
+test "statusUpdate sends standby events like Moonraker" {
+    var js = JobStateCtx.init(testing.allocator);
+    defer js.deinit();
+    for ([_]struct { state: []const u8, event: JobEvent }{
+        .{ .state = "printing", .event = .started },
+        .{ .state = "standby", .event = .standby },
+        .{ .state = "complete", .event = .complete },
+        .{ .state = "printing", .event = .started },
+        .{ .state = "complete", .event = .complete },
+        .{ .state = "standby", .event = .standby },
+    }) |step| {
+        js.last_event = .paused;
+        var ps: std.json.ObjectMap = .empty;
+        defer ps.deinit(testing.allocator);
+        try ps.put(testing.allocator, "state", .{ .string = step.state });
+        js.statusUpdate(.{ .object = ps });
+        try testing.expectEqual(step.event, js.last_event);
+    }
+}
+
 test "statusUpdate paused to printing resumed" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -544,8 +510,7 @@ test "statusUpdate paused to printing resumed" {
 }
 
 test "statusUpdate no state change" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -567,8 +532,7 @@ test "statusUpdate no state change" {
 }
 
 test "statusUpdate no print_stats" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     js.statusUpdate(.{ .object = .empty }); // no "state" key
@@ -576,8 +540,7 @@ test "statusUpdate no print_stats" {
 }
 
 test "getLastStats getLastEvent" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -594,8 +557,7 @@ test "getLastStats getLastEvent" {
 }
 
 test "handleDisconnect: printing to error" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -618,8 +580,7 @@ test "handleDisconnect: printing to error" {
 }
 
 test "handleDisconnect: paused to error" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -641,8 +602,7 @@ test "handleDisconnect: paused to error" {
 }
 
 test "handleDisconnect: standby no-op" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -659,8 +619,7 @@ test "handleDisconnect: standby no-op" {
 }
 
 test "handleDisconnect: complete no-op" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     {
@@ -677,8 +636,7 @@ test "handleDisconnect: complete no-op" {
 }
 
 test "handleDisconnect: no state field no-op" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     js.handleDisconnect(); // no state in last_print_stats
@@ -690,102 +648,8 @@ test "handleDisconnect: no state field no-op" {
 // Fuzz tests
 // ---------------------------------------------------------------------------
 
-// Shared test state for layer_changed callback capture.
-var test_layer_changed_cur: i64 = -1;
-var test_layer_changed_total: i64 = -1;
-fn testLayerChangedCb(cur: i64, total: i64) void {
-    test_layer_changed_cur = cur;
-    test_layer_changed_total = total;
-}
-
-test "statusUpdate emits layer_changed when info.current_layer present" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
-    defer js.deinit();
-
-    test_layer_changed_cur = -1;
-    test_layer_changed_total = -1;
-    js.layer_changed = testLayerChangedCb;
-
-    {
-        var initial: std.json.ObjectMap = .empty;
-        defer initial.deinit(testing.allocator);
-        try initial.put(testing.allocator, "state", .{ .string = "printing" });
-        js.statusUpdate(.{ .object = initial });
-    }
-
-    var info_obj: std.json.ObjectMap = .empty;
-    defer info_obj.deinit(std.heap.smp_allocator);
-    try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = 42 });
-    try info_obj.put(std.heap.smp_allocator, "total_layer", .{ .integer = 200 });
-
-    var ps_map: std.json.ObjectMap = .empty;
-    defer ps_map.deinit(std.heap.smp_allocator);
-    try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
-    try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
-    const ps_val = std.json.Value{ .object = ps_map };
-
-    js.statusUpdate(ps_val);
-
-    try testing.expectEqual(@as(i64, 42), test_layer_changed_cur);
-    try testing.expectEqual(@as(i64, 200), test_layer_changed_total);
-}
-
-test "statusUpdate layer_changed: no callback set, no crash" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
-    defer js.deinit();
-
-    {
-        var initial: std.json.ObjectMap = .empty;
-        defer initial.deinit(testing.allocator);
-        try initial.put(testing.allocator, "state", .{ .string = "printing" });
-        js.statusUpdate(.{ .object = initial });
-    }
-
-    var info_obj: std.json.ObjectMap = .empty;
-    defer info_obj.deinit(std.heap.smp_allocator);
-    try info_obj.put(std.heap.smp_allocator, "current_layer", .{ .integer = 10 });
-
-    var ps_map: std.json.ObjectMap = .empty;
-    defer ps_map.deinit(std.heap.smp_allocator);
-    try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
-    try ps_map.put(std.heap.smp_allocator, "info", .{ .object = info_obj });
-    const ps_val = std.json.Value{ .object = ps_map };
-
-    js.statusUpdate(ps_val); // must not crash with null callback
-}
-
-test "statusUpdate layer_changed: no info key, no callback" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
-    defer js.deinit();
-
-    test_layer_changed_cur = -1;
-    js.layer_changed = testLayerChangedCb;
-
-    {
-        var initial: std.json.ObjectMap = .empty;
-        defer initial.deinit(testing.allocator);
-        try initial.put(testing.allocator, "state", .{ .string = "standby" });
-        js.statusUpdate(.{ .object = initial });
-    }
-
-    var ps_map: std.json.ObjectMap = .empty;
-    defer ps_map.deinit(std.heap.smp_allocator);
-    try ps_map.put(std.heap.smp_allocator, "state", .{ .string = "printing" });
-    try ps_map.put(std.heap.smp_allocator, "filename", .{ .string = "test.gcode" });
-    try ps_map.put(std.heap.smp_allocator, "total_duration", .{ .float = 1.0 });
-    const ps_val = std.json.Value{ .object = ps_map };
-
-    js.statusUpdate(ps_val);
-
-    try testing.expectEqual(@as(i64, -1), test_layer_changed_cur); // not called
-}
-
 test "fuzz job_state statusUpdate" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     // Test all valid state transitions without crashing.
@@ -875,8 +739,7 @@ test "fuzz JobEvent methods" {
 }
 
 test "fuzz handleDisconnect" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     const states = [_][]const u8{ "standby", "printing", "paused", "complete", "error", "cancelled", "unknown" };
@@ -892,8 +755,7 @@ test "fuzz handleDisconnect" {
 }
 
 test "fuzz getLastStats/getLastEvent" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
 
     const events = [_]JobEvent{ .standby, .started, .paused, .resumed, .complete, .@"error", .cancelled };
@@ -905,8 +767,7 @@ test "fuzz getLastStats/getLastEvent" {
 }
 
 test "print stats own partial updates after source is freed" {
-    const bus: @import("../server/notify.zig").NotifyBus = undefined;
-    var js = try JobStateCtx.init(testing.allocator, &bus);
+    var js = JobStateCtx.init(testing.allocator);
     defer js.deinit();
     {
         const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
@@ -933,8 +794,7 @@ test "print stats own partial updates after source is freed" {
 test "fuzz print stats copy bounded arbitrary strings" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) !void {
-            const bus: @import("../server/notify.zig").NotifyBus = undefined;
-            var js = try JobStateCtx.init(testing.allocator, &bus);
+            var js = JobStateCtx.init(testing.allocator);
             defer js.deinit();
             var raw: [32]u8 = undefined;
             smith.bytesWithHash(&raw, 0);

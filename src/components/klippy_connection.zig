@@ -2193,7 +2193,7 @@ test "dispatchFrame rejects non-object roots and non-string methods" {
 
 test "subscription snapshots seed owned print state and keep heater subscriptions additive" {
     var bus: notify.NotifyBus = undefined;
-    var js = try @import("job_state.zig").JobStateCtx.init(std.testing.allocator, &bus);
+    var js = @import("job_state.zig").JobStateCtx.init(std.testing.allocator);
     defer js.deinit();
     var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
     defer ctx.deinit();

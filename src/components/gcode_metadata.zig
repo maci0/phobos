@@ -74,7 +74,21 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) GcodeMetadata {
     m.nozzle_diameter = findNozzleDiameter(text);
     m.thumbnails = parseThumbnails(alloc, text) catch &.{};
 
+    dropNonFinite(&m);
     return m;
+}
+
+/// `parseFloat` accepts `inf` and `nan`, which `std.json.Stringify` writes as
+/// bare tokens that no JSON parser accepts. Treat them as absent.
+fn dropNonFinite(m: *GcodeMetadata) void {
+    const info = @typeInfo(GcodeMetadata).@"struct";
+    inline for (info.field_names, info.field_types) |name, T| {
+        if (T == ?f64) {
+            if (@field(m, name)) |v| {
+                if (!std.math.isFinite(v)) @field(m, name) = null;
+            }
+        }
+    }
 }
 
 /// Parse using both the file header AND footer. PrusaSlicer / OrcaSlicer /
@@ -109,6 +123,7 @@ pub fn parseFull(alloc: std.mem.Allocator, header: []const u8, footer: []const u
     if (findObjectHeight(footer)) |fz| {
         if (m.object_height == null or fz > m.object_height.?) m.object_height = fz;
     }
+    dropNonFinite(&m);
     return m;
 }
 
@@ -643,7 +658,7 @@ fn parseThumbnails(alloc: std.mem.Allocator, text: []const u8) ![]Thumbnail {
             continue;
         }
         const max_data = end_idx - header_end;
-        const cap: usize = @min(@as(usize, @intCast(size)), max_data);
+        const cap: usize = @min(std.math.cast(usize, size) orelse max_data, max_data);
 
         // Extract base64 data between begin and end (strip "; " prefix and newlines).
         var data = try std.Io.Writer.Allocating.initCapacity(alloc, cap);
@@ -857,6 +872,28 @@ test "parseThumbnails: single thumbnail" {
     try testing.expectEqual(@as(i64, 32), thumbs[0].height);
     try testing.expectEqual(@as(i64, 8), thumbs[0].size);
     try testing.expectEqualStrings("YQAB", thumbs[0].data);
+}
+
+test "parseThumbnails: header size beyond usize is capped by the block" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const text = "; thumbnail begin 1x1 5000000000\n; YQAB\n; thumbnail end\n";
+    const thumbs = try parseThumbnails(arena.allocator(), text);
+    try testing.expectEqual(@as(usize, 1), thumbs.len);
+    try testing.expectEqualStrings("YQAB", thumbs[0].data);
+}
+
+test "parse drops non-finite values so metadata serializes as JSON" {
+    const text = "; layer_height = inf\n; first_layer_temperature = nan\n; TIME:-inf\n; filament used [mm] = 1e309\n";
+    const m = parse(testing.allocator, text);
+    try testing.expectEqual(@as(?f64, null), m.layer_height);
+    try testing.expectEqual(@as(?f64, null), m.first_layer_extr_temp);
+    try testing.expectEqual(@as(?f64, null), m.estimated_time);
+    try testing.expectEqual(@as(?f64, null), m.filament_total);
+    const json = try std.json.Stringify.valueAlloc(testing.allocator, m, .{});
+    defer testing.allocator.free(json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    parsed.deinit();
 }
 
 test "thumbnail data owns exact storage and cleans up on allocation failure" {

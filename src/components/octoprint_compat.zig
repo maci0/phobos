@@ -38,14 +38,9 @@ const software_version = "1.5.0";
 pub const OctoPrintCtx = struct {
     server_info: ?*@import("../core/methods.zig").ServerInfo = null,
     temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
-    /// Latest print_stats state field from Klippy. Updated by statusUpdate()
+    /// Latest print_stats state from Klippy. Updated by statusUpdate()
     /// called from klippy_connection's status processing.
-    last_state: []const u8 = "standby",
-
-    /// True once Klippy has completed the identify handshake (startup_complete).
-    klippy_started: bool = false,
-    /// True once Klippy is fully connected and ready.
-    klippy_ready: bool = false,
+    print_state: PrintState = .standby,
     /// `[octoprint_compat]` options. Defaults match Moonraker.
     enable_ufp: bool = true,
     flip_h: bool = false,
@@ -56,47 +51,34 @@ pub const OctoPrintCtx = struct {
     /// True when `stream_url` was duped from config and must be freed.
     stream_url_owned: bool = false,
 
-    pub fn init() OctoPrintCtx {
-        return .{};
-    }
-
     pub fn deinit(self: *OctoPrintCtx, alloc: std.mem.Allocator) void {
         if (self.stream_url_owned) alloc.free(self.stream_url);
     }
 
     /// Called by klippy_connection when a status update contains print_stats.
     /// Extracts the state field for printer_state() queries.
+    /// The status frame is freed after dispatch, so only the parsed state is kept.
     pub fn statusUpdate(self: *OctoPrintCtx, print_stats: std.json.Value) void {
         if (print_stats != .object) return;
         if (print_stats.object.get("state")) |s| {
-            if (s == .string) self.last_state = s.string;
+            if (s == .string) self.print_state = std.meta.stringToEnum(PrintState, s.string) orelse .other;
         }
-    }
-
-    /// Called by klippy_connection when the Klippy ready event fires.
-    pub fn setKlippyReady(self: *OctoPrintCtx) void {
-        self.klippy_started = true;
-        self.klippy_ready = true;
     }
 
     /// Called by klippy_connection when Klippy disconnects or shuts down.
     pub fn setKlippyDisconnected(self: *OctoPrintCtx) void {
-        self.klippy_started = false;
-        self.klippy_ready = false;
-        self.last_state = "standby";
+        self.print_state = .standby;
     }
 
     /// Maps Klippy + print_stats state to OctoPrint printer state string.
-    /// Matches octoprint_compat.py printer_state().
+    /// Matches octoprint_compat.py printer_state(). No `server_info` means no
+    /// Klippy connection.
     fn connectionState(self: *const OctoPrintCtx) enum { offline, failed, ready } {
-        if (self.server_info) |info| {
-            if (info.io) |io| info.state_mutex.lockUncancelable(io);
-            defer if (info.io) |io| info.state_mutex.unlock(io);
-            if (!info.klippy_connected) return .offline;
-            return if (std.mem.eql(u8, info.klippy_state, "ready")) .ready else .failed;
-        }
-        if (!self.klippy_started) return .offline;
-        return if (self.klippy_ready) .ready else .failed;
+        const info = self.server_info orelse return .offline;
+        if (info.io) |io| info.state_mutex.lockUncancelable(io);
+        defer if (info.io) |io| info.state_mutex.unlock(io);
+        if (!info.klippy_connected) return .offline;
+        return if (std.mem.eql(u8, info.klippy_state, "ready")) .ready else .failed;
     }
 
     fn printerState(self: *const OctoPrintCtx) []const u8 {
@@ -105,27 +87,17 @@ pub const OctoPrintCtx = struct {
             .failed => return "Error",
             .ready => {},
         }
-        return switch (std.meta.stringToEnum(enum {
-            standby,
-            printing,
-            paused,
-            complete,
-        }, self.last_state) orelse return "Error") {
+        return switch (self.print_state) {
             .standby, .complete => "Operational",
             .printing => "Printing",
             .paused => "Paused",
+            .other => "Error",
         };
     }
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn obj(alloc: std.mem.Allocator) std.json.ObjectMap {
-    _ = alloc;
-    return .empty;
-}
+/// print_stats states with an OctoPrint mapping; anything else is `other`.
+const PrintState = enum { standby, printing, paused, complete, other };
 
 // ---------------------------------------------------------------------------
 // Handlers (wrap_result = false: raw object is the body)
@@ -133,7 +105,7 @@ fn obj(alloc: std.mem.Allocator) std.json.ObjectMap {
 
 /// GET /api/version → {server, api, text}
 pub fn handleVersion(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
     try o.put(alloc, "server", .{ .string = octo_version });
     try o.put(alloc, "api", .{ .string = "0.1" });
     try o.put(alloc, "text", .{ .string = "OctoPrint (Moonraker " ++ software_version ++ ")" });
@@ -144,7 +116,7 @@ pub fn handleVersion(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
 /// Klippy READY → safemode null; otherwise → safemode "settings".
 pub fn handleServer(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
     try o.put(alloc, "server", .{ .string = octo_version });
     try o.put(alloc, "safemode", if (ctx.connectionState() == .ready) std.json.Value.null else .{ .string = "settings" });
     return .{ .object = o };
@@ -152,7 +124,7 @@ pub fn handleServer(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Alloc
 
 /// POST /api/login and GET /api/currentuser → the hardcoded `_api` user.
 pub fn handleLoginUser(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
     try o.put(alloc, "_is_external_client", .{ .bool = false });
     try o.put(alloc, "_login_mechanism", .{ .string = "apikey" });
     try o.put(alloc, "name", .{ .string = "_api" });
@@ -171,11 +143,11 @@ pub fn handleLoginUser(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
 /// GET /api/settings → capabilities from `[octoprint_compat]`.
 pub fn handleSettings(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
 
-    var plugins = obj(alloc);
+    var plugins: std.json.ObjectMap = .empty;
     if (ctx.enable_ufp) {
-        var ufp = obj(alloc);
+        var ufp: std.json.ObjectMap = .empty;
         try ufp.put(alloc, "align_inline_thumbnail", .{ .bool = false });
         try ufp.put(alloc, "inline_thumbnail", .{ .bool = false });
         try ufp.put(alloc, "inline_thumbnail_align_value", .{ .string = "left" });
@@ -188,12 +160,12 @@ pub fn handleSettings(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.All
     }
     try o.put(alloc, "plugins", .{ .object = plugins });
 
-    var feature = obj(alloc);
+    var feature: std.json.ObjectMap = .empty;
     try feature.put(alloc, "sdSupport", .{ .bool = false });
     try feature.put(alloc, "temperatureGraph", .{ .bool = false });
     try o.put(alloc, "feature", .{ .object = feature });
 
-    var webcam = obj(alloc);
+    var webcam: std.json.ObjectMap = .empty;
     try webcam.put(alloc, "flipH", .{ .bool = ctx.flip_h });
     try webcam.put(alloc, "flipV", .{ .bool = ctx.flip_v });
     try webcam.put(alloc, "rotate90", .{ .bool = ctx.rotate_90 });
@@ -207,20 +179,20 @@ pub fn handleSettings(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.All
 /// GET /api/job → empty job with the current printer state.
 pub fn handleJob(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
 
-    var file = obj(alloc);
+    var file: std.json.ObjectMap = .empty;
     try file.put(alloc, "name", .null);
-    var job = obj(alloc);
+    var job: std.json.ObjectMap = .empty;
     try job.put(alloc, "file", .{ .object = file });
     try job.put(alloc, "estimatedPrintTime", .null);
-    var filament = obj(alloc);
+    var filament: std.json.ObjectMap = .empty;
     try filament.put(alloc, "length", .null);
     try job.put(alloc, "filament", .{ .object = filament });
     try job.put(alloc, "user", .null);
     try o.put(alloc, "job", .{ .object = job });
 
-    var progress = obj(alloc);
+    var progress: std.json.ObjectMap = .empty;
     try progress.put(alloc, "completion", .null);
     try progress.put(alloc, "filepos", .null);
     try progress.put(alloc, "printTime", .null);
@@ -235,7 +207,7 @@ pub fn handleJob(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocato
 /// GET /api/printer → temperature + state flags for the live printer state.
 pub fn handlePrinter(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
     var temperatures: std.json.ObjectMap = .empty;
     if (ctx.temp_store) |store| {
         if (store.io) |io| {
@@ -260,7 +232,7 @@ pub fn handlePrinter(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 
     const state_str = ctx.printerState();
 
-    var flags = obj(alloc);
+    var flags: std.json.ObjectMap = .empty;
     try flags.put(alloc, "operational", .{ .bool = !std.mem.eql(u8, state_str, "Error") and !std.mem.eql(u8, state_str, "Offline") });
     try flags.put(alloc, "paused", .{ .bool = std.mem.eql(u8, state_str, "Paused") });
     try flags.put(alloc, "printing", .{ .bool = std.mem.eql(u8, state_str, "Printing") });
@@ -270,7 +242,7 @@ pub fn handlePrinter(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
     try flags.put(alloc, "ready", .{ .bool = std.mem.eql(u8, state_str, "Operational") });
     try flags.put(alloc, "closedOrError", .{ .bool = std.mem.eql(u8, state_str, "Error") or std.mem.eql(u8, state_str, "Offline") });
 
-    var state = obj(alloc);
+    var state: std.json.ObjectMap = .empty;
     try state.put(alloc, "text", .{ .string = state_str });
     try state.put(alloc, "flags", .{ .object = flags });
     try o.put(alloc, "state", .{ .object = state });
@@ -279,15 +251,15 @@ pub fn handlePrinter(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 
 /// POST /api/printer/command → run gcode. Without Klippy the commands cannot be
 /// executed; Moonraker swallows the per-command error and still returns {}.
-pub fn handleCommand(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    return .{ .object = obj(alloc) };
+pub fn handleCommand(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+    return .{ .object = .empty };
 }
 
 /// GET /api/printerprofiles → the single _default profile.
 pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const makeAxis = struct {
         fn f(a: std.mem.Allocator, speed: f64) !std.json.Value {
-            var ax = obj(a);
+            var ax: std.json.ObjectMap = .empty;
             try ax.put(a, "speed", .{ .float = speed });
             try ax.put(a, "inverted", .{ .bool = false });
             return .{ .object = ax };
@@ -296,13 +268,13 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
 
     // Moonraker reports 6000 for x/y/z and 300 for the extruder axis
     // (octoprint_compat.py _default profile).
-    var axes = obj(alloc);
+    var axes: std.json.ObjectMap = .empty;
     try axes.put(alloc, "x", try makeAxis(alloc, 6000.0));
     try axes.put(alloc, "y", try makeAxis(alloc, 6000.0));
     try axes.put(alloc, "z", try makeAxis(alloc, 6000.0));
     try axes.put(alloc, "e", try makeAxis(alloc, 300.0));
 
-    var def = obj(alloc);
+    var def: std.json.ObjectMap = .empty;
     try def.put(alloc, "id", .{ .string = "_default" });
     try def.put(alloc, "name", .{ .string = "Default" });
     try def.put(alloc, "color", .{ .string = "default" });
@@ -313,9 +285,9 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
     try def.put(alloc, "heatedChamber", .{ .bool = false });
     try def.put(alloc, "axes", .{ .object = axes });
 
-    var profiles = obj(alloc);
+    var profiles: std.json.ObjectMap = .empty;
     try profiles.put(alloc, "_default", .{ .object = def });
-    var o = obj(alloc);
+    var o: std.json.ObjectMap = .empty;
     try o.put(alloc, "profiles", .{ .object = profiles });
     return .{ .object = o };
 }
@@ -325,8 +297,8 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
 /// no-op returning null, and any command we cannot satisfy surfaces the
 /// disconnected error (matching the start_print path failing). We return an
 /// empty object (null body) for the common no-op select case.
-pub fn handleSelectFile(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    return .{ .object = obj(alloc) };
+pub fn handleSelectFile(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+    return .{ .object = .empty };
 }
 
 // ---------------------------------------------------------------------------
@@ -396,8 +368,8 @@ test "handleServer: klippy not ready → safemode settings" {
 test "handleServer: klippy ready → safemode null" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var ctx = OctoPrintCtx{};
-    ctx.setKlippyReady();
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "ready" };
+    var ctx = OctoPrintCtx{ .server_info = &info };
     const r = try handleServer(@ptrCast(&ctx), .null, arena.allocator());
     try testing.expect(r.object.get("safemode").? == .null);
 }
@@ -488,9 +460,9 @@ test "handleJob and handlePrinter: operational state (klippy ready, print_stats 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = OctoPrintCtx{};
-    ctx.setKlippyReady();
-    // default last_state is "standby" → "Operational"
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "ready" };
+    var ctx = OctoPrintCtx{ .server_info = &info };
+    // default print_state is standby → "Operational"
     const job = try handleJob(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("Operational", job.object.get("state").?.string);
     const pr = try handlePrinter(@ptrCast(&ctx), .null, a);
@@ -506,9 +478,8 @@ test "handleJob and handlePrinter: printing state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = OctoPrintCtx{};
-    ctx.setKlippyReady();
-    ctx.last_state = "printing";
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "ready" };
+    var ctx = OctoPrintCtx{ .server_info = &info, .print_state = .printing };
     const job = try handleJob(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("Printing", job.object.get("state").?.string);
     const pr = try handlePrinter(@ptrCast(&ctx), .null, a);
@@ -523,9 +494,8 @@ test "handleJob and handlePrinter: paused state" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = OctoPrintCtx{};
-    ctx.setKlippyReady();
-    ctx.last_state = "paused";
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "ready" };
+    var ctx = OctoPrintCtx{ .server_info = &info, .print_state = .paused };
     const pr = try handlePrinter(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("Paused", pr.object.get("state").?.object.get("text").?.string);
     const flags = pr.object.get("state").?.object.get("flags").?.object;
@@ -537,9 +507,8 @@ test "handleJob and handlePrinter: error state (klippy started but not ready)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var ctx = OctoPrintCtx{};
-    ctx.klippy_started = true;
-    // klippy_ready is false → "Error"
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "startup" };
+    var ctx = OctoPrintCtx{ .server_info = &info };
     const job = try handleJob(@ptrCast(&ctx), .null, a);
     try testing.expectEqualStrings("Error", job.object.get("state").?.string);
     const pr = try handlePrinter(@ptrCast(&ctx), .null, a);
@@ -582,23 +551,24 @@ test "printerState: maps states correctly" {
     // No klippy → Offline
     try testing.expectEqualStrings("Offline", ctx.printerState());
 
-    // Klippy started but not ready → Error
-    ctx.klippy_started = true;
+    // Klippy connected but not ready → Error
+    var info = @import("../core/methods.zig").ServerInfo{ .klippy_connected = true, .klippy_state = "startup" };
+    ctx.server_info = &info;
     try testing.expectEqualStrings("Error", ctx.printerState());
 
-    // Klippy ready, default state "standby" → Operational
-    ctx.klippy_ready = true;
+    // Klippy ready, default state standby → Operational
+    info.klippy_state = "ready";
     try testing.expectEqualStrings("Operational", ctx.printerState());
 
     // Various print_stats states
-    ctx.last_state = "printing";
+    ctx.print_state = .printing;
     try testing.expectEqualStrings("Printing", ctx.printerState());
-    ctx.last_state = "paused";
+    ctx.print_state = .paused;
     try testing.expectEqualStrings("Paused", ctx.printerState());
-    ctx.last_state = "complete";
+    ctx.print_state = .complete;
     try testing.expectEqualStrings("Operational", ctx.printerState());
     // Unknown state → Error
-    ctx.last_state = "cancelled";
+    ctx.print_state = .other;
     try testing.expectEqualStrings("Error", ctx.printerState());
 }
 
@@ -608,17 +578,17 @@ test "statusUpdate: extracts state from print_stats JSON" {
     const a = arena.allocator();
 
     var ctx = OctoPrintCtx{};
-    ctx.klippy_ready = true;
 
-    // Build an ObjectMap through the arena
+    // The frame that carried the state is freed before the next query.
     {
+        const state = try a.dupe(u8, "printing");
         var map = try std.json.ObjectMap.init(a, &.{}, &.{});
-        try map.put(a, "state", .{ .string = "printing" });
+        try map.put(a, "state", .{ .string = state });
         try map.put(a, "filename", .{ .string = "foo.gcode" });
-        const ps = std.json.Value{ .object = map };
-        ctx.statusUpdate(ps);
+        ctx.statusUpdate(.{ .object = map });
+        @memset(state, 'x');
     }
-    try testing.expectEqualStrings("printing", ctx.last_state);
+    try testing.expectEqual(.printing, ctx.print_state);
 
     // No "state" key → no change
     {
@@ -627,27 +597,25 @@ test "statusUpdate: extracts state from print_stats JSON" {
         const ps = std.json.Value{ .object = map };
         ctx.statusUpdate(ps);
     }
-    try testing.expectEqualStrings("printing", ctx.last_state);
+    try testing.expectEqual(.printing, ctx.print_state);
 
     // Non-object → no change
     ctx.statusUpdate(.null);
-    try testing.expectEqualStrings("printing", ctx.last_state);
+    try testing.expectEqual(.printing, ctx.print_state);
+
+    // Unmapped state → other
+    {
+        var map = try std.json.ObjectMap.init(a, &.{}, &.{});
+        try map.put(a, "state", .{ .string = "cancelled" });
+        ctx.statusUpdate(.{ .object = map });
+    }
+    try testing.expectEqual(.other, ctx.print_state);
 }
 
-test "setKlippyReady / setKlippyDisconnected" {
-    var ctx = OctoPrintCtx{};
-
-    try testing.expectEqual(false, ctx.klippy_started);
-    try testing.expectEqual(false, ctx.klippy_ready);
-
-    ctx.setKlippyReady();
-    try testing.expectEqual(true, ctx.klippy_started);
-    try testing.expectEqual(true, ctx.klippy_ready);
-
+test "setKlippyDisconnected resets the print state" {
+    var ctx = OctoPrintCtx{ .print_state = .paused };
     ctx.setKlippyDisconnected();
-    try testing.expectEqual(false, ctx.klippy_started);
-    try testing.expectEqual(false, ctx.klippy_ready);
-    try testing.expectEqualStrings("standby", ctx.last_state);
+    try testing.expectEqual(.standby, ctx.print_state);
 }
 
 test "registerOctoPrint wires HTTP-only routes with no JSON-RPC methods" {

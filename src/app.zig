@@ -393,7 +393,7 @@ pub const App = struct {
         // --- Job state context ---
         const job_state_ctx = try alloc.create(JobStateCtx);
         errdefer alloc.destroy(job_state_ctx);
-        job_state_ctx.* = try JobStateCtx.init(alloc, bus);
+        job_state_ctx.* = JobStateCtx.init(alloc);
         errdefer job_state_ctx.deinit();
         // Cross-wire: JobState → History + JobQueue for state-change events.
         job_state_ctx.history = history_ctx;
@@ -602,7 +602,7 @@ pub const App = struct {
         // --- OctoPrint compatibility context (/api/*) ---
         const octoprint_ctx = try alloc.create(OctoPrintCtx);
         errdefer alloc.destroy(octoprint_ctx);
-        octoprint_ctx.* = OctoPrintCtx.init();
+        octoprint_ctx.* = .{};
         octoprint_ctx.server_info = info;
         octoprint_ctx.temp_store = data_store_ctx;
         klippy_ctx.octoprint = octoprint_ctx;
