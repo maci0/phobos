@@ -19,8 +19,8 @@
 //! runs the transition gcode, enters "starting", sends SDCARD_PRINT_FILE,
 //! removes the loaded job, emits "job_loaded" and settles on "ready"
 //! (more jobs, automatic transition) or "paused". Any failure pauses the
-//! queue. `load_on_startup` and pausing on Klippy shutdown need Klippy event
-//! hooks phobos lacks (TODO.md, Known Moonraker gaps).
+//! queue. `load_on_startup` loads a queued job one second after Klippy is ready;
+//! shutdown pauses the queue without changing an explicit pause request.
 //!
 //! Queued job shape (matches job_queue.py QueuedJob.as_dict):
 //!   filename, job_id, time_added, time_in_queue
@@ -52,6 +52,8 @@ const NotifyBus = notify.NotifyBus;
 /// Function signature for dispatching a gcode request to Klippy.
 /// Set by app.zig after both JobQueueCtx and KlippyCtx are created.
 pub const DispatchFn = *const fn (ctx: *anyopaque, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value;
+const DispatchReason = enum { immediate, transition, startup };
+const startup_delay: std.Io.Duration = .fromSeconds(1);
 
 pub const JobQueueCtx = struct {
     clock_io: std.Io,
@@ -87,6 +89,7 @@ pub const JobQueueCtx = struct {
     /// When false (Moonraker default), the queue does NOT auto-advance to the
     /// next job after one completes (config: automatic_transition).
     automatic: bool = false,
+    load_on_startup: bool = false,
     /// Set by pause, cleared by start: jobs queued during a print do not make
     /// a paused queue "ready" (job_queue.py `pause_requested`).
     pause_requested: bool = false,
@@ -166,6 +169,22 @@ pub const JobQueueCtx = struct {
         self.automatic = automatic;
     }
 
+    pub fn onKlippyReady(self: *JobQueueCtx) void {
+        {
+            self.lockJobs();
+            defer self.unlockJobs();
+            if (!self.load_on_startup or self.jobs.items.len == 0 or !self.canDispatch()) return;
+            if (!std.mem.eql(u8, self.queue_state, "ready") and !std.mem.eql(u8, self.queue_state, "paused")) return;
+        }
+        self.setQueueState("loading");
+        _ = self.scheduleNextJobDispatch(.startup);
+    }
+
+    pub fn onKlippyShutdown(self: *JobQueueCtx) void {
+        self.setQueueState("paused");
+        self.cancelDelayTimer();
+    }
+
     /// Returns true when Klippy is wired and connected.
     pub fn canDispatch(self: *const JobQueueCtx) bool {
         return self.klippy != null and self.dispatchFn != null;
@@ -213,7 +232,7 @@ pub const JobQueueCtx = struct {
                 }
                 self.setQueueState("loading");
                 // Outside the lock: scheduling joins the prior worker thread.
-                _ = self.scheduleNextJobDispatch(true);
+                _ = self.scheduleNextJobDispatch(.transition);
             },
             .@"error", .cancelled => {
                 const has_jobs = blk: {
@@ -237,10 +256,10 @@ pub const JobQueueCtx = struct {
     /// job-state events under Core) may not block on it. Cancelled by
     /// cancelDelayTimer (pause/abort/deinit). The caller sets "loading" first;
     /// a failure to start the worker pauses the queue and returns false.
-    fn scheduleNextJobDispatch(self: *JobQueueCtx, after_job: bool) bool {
+    fn scheduleNextJobDispatch(self: *JobQueueCtx, reason: DispatchReason) bool {
         self.cancelDelayTimer(); // join + clear any previous timer
         self.delay_cancel.reset();
-        self.delay_thread = self.clock_io.concurrent(transitionDelayCallback, .{ self, after_job }) catch |err| {
+        self.delay_thread = self.clock_io.concurrent(transitionDelayCallback, .{ self, reason }) catch |err| {
             self.delay_thread = null;
             std.debug.print("phobos: warning: job queue paused, dispatch worker not started: {}\n", .{err});
             self.setQueueState("paused");
@@ -398,18 +417,18 @@ pub const JobQueueCtx = struct {
 /// NOTE: never null `delay_thread` from here — only the joiner
 /// (cancelDelayTimer/deinit) clears it after the join, else a concurrent
 /// joiner could read null, skip the join, and leak/UAF the running thread.
-fn transitionDelayCallback(self: *JobQueueCtx, after_job: bool) void {
-    if (after_job) {
-        if (self.io) |io| {
-            const ns = std.math.lossyCast(i96, self.transition_delay * std.time.ns_per_s);
-            if (sleep.untilStopped(io, .fromNanoseconds(ns), &self.delay_cancel)) return;
-        }
-    }
+fn transitionDelayCallback(self: *JobQueueCtx, reason: DispatchReason) void {
+    const delay: std.Io.Duration = switch (reason) {
+        .immediate => .zero,
+        .startup => startup_delay,
+        .transition => .fromNanoseconds(std.math.lossyCast(i64, self.transition_delay * std.time.ns_per_s)),
+    };
+    if (sleep.untilStopped(self.clock_io, delay, &self.delay_cancel)) return;
     // Bail if cancelled or torn down. deinit nulls dispatchFn, so that check
     // alone detects teardown; io may be null in tests with a non-Klippy capture
     // dispatch (only the sleep needs io).
     if (self.delay_cancel.isSet() or self.dispatchFn == null) return;
-    self.dispatchNextJob(after_job);
+    self.dispatchNextJob(reason == .transition);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +706,7 @@ pub fn handleStart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
         c.setQueueState(s);
         response.object.getPtr("queue_state").?.* = .{ .string = s };
         // Outside the lock: scheduling joins the prior worker thread.
-        if (std.mem.eql(u8, s, "loading") and !c.scheduleNextJobDispatch(false)) {
+        if (std.mem.eql(u8, s, "loading") and !c.scheduleNextJobDispatch(.immediate)) {
             response.object.getPtr("queue_state").?.* = .{ .string = "paused" };
         }
     }
@@ -777,6 +796,63 @@ pub fn registerJobQueue(reg: *Registry, ctx: *JobQueueCtx) !void {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "Klippy ready loads a persisted job after the startup delay" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(std.heap.smp_allocator, aio, NoopStore.store(), &bus);
+    defer ctx.deinit();
+    var cap = TestDispatchCapture{ .gate_io = aio };
+    defer cap.release.set(aio);
+    ctx.setKlippyDispatch(&cap, TestDispatchCapture.handler);
+    try ctx.jobs.append(ctx.gpa, .{
+        .filename = try ctx.gpa.dupe(u8, "startup.gcode"),
+        .job_id = try ctx.gpa.dupe(u8, "STARTUP"),
+        .time_added = 0,
+    });
+    ctx.onKlippyReady();
+    try testing.expect(ctx.delay_thread == null);
+    ctx.load_on_startup = true;
+    const start = std.Io.Clock.Timestamp.now(aio, .awake);
+    ctx.onKlippyReady();
+    try testing.expect(ctx.queueStateEql("loading"));
+    try testing.expect(sleep.untilStopped(aio, .fromSeconds(3), &cap.entered));
+    try testing.expect(start.untilNow(aio).raw.toMilliseconds() >= 900);
+    cap.release.set(aio);
+    if (ctx.delay_thread) |*worker| worker.await(aio);
+    ctx.delay_thread = null;
+    try testing.expect(cap.called);
+    try testing.expectEqual(@as(usize, 0), ctx.jobs.items.len);
+}
+
+test "Klippy shutdown cancels startup without changing a requested pause" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(std.heap.smp_allocator, aio, NoopStore.store(), &bus);
+    defer ctx.deinit();
+    var cap = TestDispatchCapture{};
+    ctx.setKlippyDispatch(&cap, TestDispatchCapture.handler);
+    ctx.load_on_startup = true;
+    try ctx.jobs.append(ctx.gpa, .{
+        .filename = try ctx.gpa.dupe(u8, "startup.gcode"),
+        .job_id = try ctx.gpa.dupe(u8, "STARTUP"),
+        .time_added = 0,
+    });
+    for ([_]bool{ false, true }) |requested| {
+        ctx.pause_requested = requested;
+        ctx.onKlippyReady();
+        ctx.onKlippyShutdown();
+        try testing.expect(ctx.queueStateEql("paused"));
+        try testing.expectEqual(requested, ctx.pause_requested);
+        try testing.expect(ctx.delay_thread == null);
+        try testing.expect(!cap.called);
+        try testing.expectEqual(@as(usize, 1), ctx.jobs.items.len);
+    }
+}
 
 // ---- In-memory store for tests ----
 
@@ -1469,7 +1545,7 @@ test "scheduleNextJobDispatch: zero-delay dispatches immediately via capture" {
     }) catch unreachable;
 
     ctx.queue_state = "loading";
-    _ = ctx.scheduleNextJobDispatch(false);
+    _ = ctx.scheduleNextJobDispatch(.immediate);
     // Dispatch now runs on a worker thread (always-async); join it before asserting.
     if (ctx.delay_thread) |*th| {
         th.await(ctx.clock_io);
@@ -1753,7 +1829,7 @@ test "transition_delay: timer completes and dispatches" {
 
     // Spawn the delay timer thread.
     ctx.queue_state = "loading";
-    _ = ctx.scheduleNextJobDispatch(true);
+    _ = ctx.scheduleNextJobDispatch(.transition);
 
     // Wait for the timer thread to complete.
     if (ctx.delay_thread) |*th| {
@@ -1788,7 +1864,7 @@ test "deinit: cancels delay timer gracefully" {
             .time_added = 100.0,
         });
         ctx.queue_state = "loading";
-        _ = ctx.scheduleNextJobDispatch(true);
+        _ = ctx.scheduleNextJobDispatch(.transition);
     }
     try testing.expect(!cap.called);
 }

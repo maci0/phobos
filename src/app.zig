@@ -167,6 +167,15 @@ fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []con
     }
 }
 
+fn onKlippyState(ctx: *anyopaque, _: std.Io, state: klippy_connection_component.State) void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    switch (state) {
+        .ready => app.job_queue_ctx.onKlippyReady(),
+        .shutdown, .disconnected, .@"error" => app.job_queue_ctx.onKlippyShutdown(),
+        .startup => {},
+    }
+}
+
 /// The JSON-RPC request for Klipper remote method `method`, gpa-owned, or
 /// null for an unknown method or a `set_device_power` state Moonraker ignores.
 /// `set_device_power` maps to `machine.device_power.post_device` and
@@ -1000,8 +1009,10 @@ pub const App = struct {
             // Moonraker defaults: both false.
             const automatic = cfg.getBoolean("job_queue", "automatic_transition") catch false;
             self.job_queue_ctx.setAutomaticTransition(automatic);
-            if (cfg.getBoolean("job_queue", "load_on_startup") catch false)
-                std.debug.print("phobos: warning: [job_queue] load_on_startup is not supported; start the queue manually\n", .{});
+            self.job_queue_ctx.load_on_startup = if (cfg.get("job_queue", "load_on_startup") != null)
+                try cfg.getBoolean("job_queue", "load_on_startup")
+            else
+                false;
         }
 
         // [mqtt] (mqtt.py MQTTClient). Moonraker fails the component on a bad
@@ -1453,6 +1464,8 @@ pub const App = struct {
         self.feather.klippy_send_ctx = self;
         self.klippy_ctx.remote_handler = onKlippyRemoteMethod;
         self.klippy_ctx.remote_handler_ctx = self;
+        self.klippy_ctx.event_ctx = self;
+        self.klippy_ctx.on_state = onKlippyState;
     }
 
     /// Moonraker registers `config_examples` and `docs` only after Klippy

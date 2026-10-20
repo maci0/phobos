@@ -126,6 +126,9 @@ primitives are gone, so use `std.Io.Mutex`.
       notification fan-out; background tasks run outside it. Inbound work on a
       background thread (the MQTT reader, for one) that mutates shared state or
       emits must run under `core.run(io, fn, args)` to serialize with handlers.
+    - Klippy component callbacks (`on_state`, `on_status`, `on_gcode`) run under
+      Core on the reader. Copy borrowed values or enqueue work; never perform a
+      round trip there. Internal subscription refresh runs off Core.
     - fan-out over a list whose connections can be removed concurrently: do not
       hold the registry lock across blocking socket writes, which stalls every
       add and remove. Pin under the lock (refcount++), release, write, re-lock,

@@ -280,3 +280,28 @@ harnesses. The skip requires a real Klippy socket. This ran without a runtime
 test filter. Fuzz harness registration and deterministic execution are not a
 sustained fuzzing campaign. No source changed after this gate; the final commit
 only appends this verification record.
+
+## 2026-10-20: queue startup and shared Klippy events
+
+Requested by the user: finish the remaining TODOs. `JobQueueCtx.onKlippyReady`
+loads a queued job after the vendor's one-second startup delay when
+`load_on_startup` is enabled. `onKlippyShutdown` pauses and joins dispatch without
+changing `pause_requested`. App configuration now reads and validates the flag.
+Evidence: Moonraker `900848584374`, `job_queue.py:_handle_ready` and
+`_handle_shutdown`; `src/components/job_queue.zig` and `src/app.zig:onKlippyState`.
+
+`KlippyCtx` now exposes borrowed state, status and gcode callbacks under Core.
+Initial subscribed snapshots also reach the status callback. Component callbacks
+must queue blocking work. `refreshSubscriptions` refreshes the aggregate after
+internal objects are added, outside Core and under the subscription mutex.
+The App currently connects the queue lifecycle; subsequent component changes
+will add their own consumers.
+
+Verification: new feature tests first failed to compile because the lifecycle
+API and event fields were absent. After implementation, the complete standalone
+Debug suite passed: 1431 passed, 1 skipped, 0 failed; 262 bounded fuzz harnesses.
+Tests cover delayed startup dispatch, shutdown cancellation with both pause
+states, seeded/pushed status and gcode callbacks, and a real local third
+subscription refresh retaining the client's current objects. `zig fmt` and
+`git diff --check` passed. The skipped test requires real Klippy. ARM and physical
+runtime verification were not performed for this slice; no printer was contacted.

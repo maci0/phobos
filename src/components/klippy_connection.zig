@@ -284,6 +284,11 @@ pub const KlippyCtx = struct {
     /// The slice is borrowed; the handler must copy it before returning.
     on_klipper_path: ?*const fn (*anyopaque, []const u8) void = null,
     on_klipper_path_ctx: ?*anyopaque = null,
+    /// Borrowed callbacks run under Core. They copy or queue work; no round trips.
+    event_ctx: ?*anyopaque = null,
+    on_state: ?*const fn (*anyopaque, std.Io, State) void = null,
+    on_status: ?*const fn (*anyopaque, std.Io, std.json.Value, std.json.Value) void = null,
+    on_gcode: ?*const fn (*anyopaque, std.Io, std.json.Value) void = null,
     /// Registered with Klippy once it is ready.
     remote_methods: []const []const u8 = &.{},
 
@@ -480,7 +485,12 @@ pub const KlippyCtx = struct {
             defer self.pending_mutex.unlock(io);
             self.connected.store(true, .release);
         }
-        if (self.state == .ready) self.bus.emit(io, notify.names.klippy_ready, .null) catch {};
+        self.bus.core.run(io, handshakeCompleteLocked, .{ self, io });
+    }
+
+    fn handshakeCompleteLocked(self: *KlippyCtx, io: std.Io) void {
+        if (self.on_state) |callback| if (self.event_ctx) |ctx| callback(ctx, io, self.state);
+        if (self.state == .ready) self.bus.emitLocked(io, notify.names.klippy_ready, .null) catch {};
     }
 
     /// Send `info` until Klippy leaves `startup`. The first successful
@@ -588,6 +598,8 @@ pub const KlippyCtx = struct {
             if (self.job_state) |js| js.initialize(ps);
             if (self.octoprint) |oc| oc.statusUpdate(ps);
         }
+        if (self.on_status) |callback| if (self.event_ctx) |ctx|
+            callback(ctx, io, status, result.object.get("eventtime") orelse .{ .float = 0 });
         const ts = self.temp_store orelse return;
         var it = status.object.iterator();
         while (it.next()) |entry| {
@@ -679,11 +691,17 @@ pub const KlippyCtx = struct {
             if (st == .string) {
                 if (klippy_state_map.get(st.string)) |new_state| {
                     // Moonraker defers a shutdown seen during the handshake.
-                    if (new_state == .shutdown and self.state != .shutdown and self.isConnected()) self.shutdownLocked(io);
-                    _ = self.setState(new_state);
+                    const changed = self.setState(new_state);
+                    if (changed and self.isConnected()) {
+                        if (new_state == .shutdown) {
+                            self.shutdownLocked(io);
+                        } else if (self.on_state) |callback| if (self.event_ctx) |ctx| callback(ctx, io, new_state);
+                    }
                 }
             }
         }
+
+        if (self.on_status) |callback| if (self.event_ctx) |ctx| callback(ctx, io, status_dict, eventtime);
 
         // Reuse one map + array across objects: emit copies params into its
         // own frame, so the scaffolding can be recycled.
@@ -723,6 +741,7 @@ pub const KlippyCtx = struct {
     /// so clients get `[response]`. String responses also enter the gcode
     /// store (data_store.py `_update_gcode_store`).
     fn emitGcodeResponse(self: *KlippyCtx, io: std.Io, params: std.json.Value) !void {
+        if (self.on_gcode) |callback| if (self.event_ctx) |ctx| callback(ctx, io, params);
         const resp: std.json.Value = switch (params) {
             .array => return self.bus.emitLocked(io, notify.names.gcode_response, params),
             .object => params.object.get("response") orelse return,
@@ -857,6 +876,17 @@ pub const KlippyCtx = struct {
         return result;
     }
 
+    /// Resubscribe after an internal component adds objects. Caller is off Core.
+    pub fn refreshSubscriptions(self: *KlippyCtx, alloc: std.mem.Allocator) !void {
+        const io = self.io orelse return error.KlippyDisconnected;
+        try self.subscribe_mutex.lock(io);
+        defer self.subscribe_mutex.unlock(io);
+        const params = try self.buildSubscribeParams(io, alloc);
+        defer alloc.free(params);
+        const result = try self.call("objects/subscribe", params, null, .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } }, alloc);
+        self.bus.core.run(io, seedSubscribedStatusLocked, .{ self, io, result });
+    }
+
     /// Send a request without waiting for its response. Used for Feather
     /// replies from inside the reader, where waiting would deadlock.
     pub fn postMethod(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) !void {
@@ -890,6 +920,7 @@ pub const KlippyCtx = struct {
     /// `server:klippy_disconnect`: notify clients, mark the active job errored
     /// and finish it as `klippy_disconnect`.
     fn disconnectedLocked(self: *KlippyCtx, io: std.Io) void {
+        if (self.on_state) |callback| if (self.event_ctx) |ctx| callback(ctx, io, .disconnected);
         self.bus.emitLocked(io, notify.names.klippy_disconnected, .null) catch {};
         if (self.job_state) |js| {
             js.handleDisconnect();
@@ -901,6 +932,7 @@ pub const KlippyCtx = struct {
     /// `server:klippy_shutdown`: notify clients and finish the active job as
     /// `klippy_shutdown`.
     fn shutdownLocked(self: *KlippyCtx, io: std.Io) void {
+        if (self.on_state) |callback| if (self.event_ctx) |ctx| callback(ctx, io, .shutdown);
         self.bus.emitLocked(io, notify.names.klippy_shutdown, .null) catch {};
         if (self.history) |h| {
             if (self.job_state) |js| h.handleKlippyShutdown(js.getLastStats());
@@ -1258,6 +1290,54 @@ test "processStatusUpdate: live shutdown sets state and emits once" {
     try std.testing.expectEqual(State.ready, ctx.state);
 }
 
+test "Klippy component hooks see initial status, pushes, state and gcode" {
+    const Capture = struct {
+        status_count: usize = 0,
+        shutdown_count: usize = 0,
+        disconnected_count: usize = 0,
+        gcode_count: usize = 0,
+        fn state(raw: *anyopaque, _: std.Io, value: State) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (value == .shutdown) self.shutdown_count += 1;
+            if (value == .disconnected) self.disconnected_count += 1;
+        }
+        fn status(raw: *anyopaque, _: std.Io, value: std.json.Value, time: std.json.Value) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(value == .object and time == .float);
+            self.status_count += 1;
+        }
+        fn gcode(raw: *anyopaque, _: std.Io, value: std.json.Value) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(value == .object);
+            self.gcode_count += 1;
+        }
+    };
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+    var capture = Capture{};
+    ctx.event_ctx = &capture;
+    ctx.on_state = Capture.state;
+    ctx.on_status = Capture.status;
+    ctx.on_gcode = Capture.gcode;
+    ctx.seedSubscribedStatus(std.testing.io, "{\"result\":{\"status\":{\"toolhead\":{\"position\":[0,0,0,2]}},\"eventtime\":1.5}}");
+    _ = ctx.setState(.ready);
+    ctx.connected.store(true, .release);
+    const params = try statusParams(a, "shutdown");
+    try ctx.processStatusUpdate(std.testing.io, params);
+    try ctx.processStatusUpdate(std.testing.io, params);
+    try ctx.dispatchRemoteMethod(std.testing.io, "process_gcode_response", try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"params\":{\"response\":\"ok\"}}", .{}));
+    ctx.disconnectedLocked(std.testing.io);
+    try std.testing.expectEqual(@as(usize, 3), capture.status_count);
+    try std.testing.expectEqual(@as(usize, 1), capture.shutdown_count);
+    try std.testing.expectEqual(@as(usize, 1), capture.disconnected_count);
+    try std.testing.expectEqual(@as(usize, 1), capture.gcode_count);
+}
+
 test "gcode scripts and responses enter the gcode store like data_store.py" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1524,7 +1604,7 @@ test "subscribe returns requested fields and replaces the aggregate client set" 
             var buffer: [4096]u8 = undefined;
             var reader = stream.reader(deadline.io(), &buffer);
             var writer = stream.writer(deadline.io(), &.{});
-            for (0..2) |iteration| {
+            for (0..3) |iteration| {
                 var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
                 defer arena.deinit();
                 const a = arena.allocator();
@@ -1532,7 +1612,8 @@ test "subscribe returns requested fields and replaces the aggregate client set" 
                 const request = try std.json.parseFromSliceLeaky(std.json.Value, a, frame, .{});
                 const objects = request.object.get("params").?.object.get("objects").?.object;
                 try std.testing.expectEqual(iteration == 0, objects.contains("extruder"));
-                try std.testing.expectEqual(iteration == 1, objects.contains("gcode_move"));
+                try std.testing.expectEqual(iteration >= 1, objects.contains("gcode_move"));
+                try std.testing.expectEqual(iteration == 2, objects.contains("motion_report"));
                 try std.testing.expect(objects.contains("webhooks"));
                 const response = try std.fmt.allocPrint(
                     a,
@@ -1561,6 +1642,8 @@ test "subscribe returns requested fields and replaces the aggregate client set" 
     try std.testing.expectEqual(@as(usize, 1), second.object.get("status").?.object.count());
     try std.testing.expect(second.object.get("status").?.object.contains("gcode_move"));
     try std.testing.expectEqual(@as(usize, 0), ctx.extra_sub_objects.count());
+    try ctx.addSubscriptionObject("motion_report");
+    try ctx.refreshSubscriptions(a);
     try peer_task.await(io);
 }
 
