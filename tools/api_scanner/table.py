@@ -34,6 +34,11 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     # --- Thumbnails ---------------------------------------------------------
     "server.files.thumbnails": (S_PARTIAL, "Returns base64 `data` from the gcode header; no `.thumbs/*.png` files, so `relative_path`/`thumbnail_path` are missing (TODO.md)."),
     "path:/server/files/thumbnails": (S_PARTIAL, "See server.files.thumbnails."),
+    "server.files.zip": (S_PARTIAL, "Validates the destination and returns the response fields, but creates no archive (TODO.md)."),
+    # --- Announcement refresh and notification timing ----------------------
+    "server.announcements.update": (S_PARTIAL, "Fetches RSS with conditional requests. Development mode skips fetching instead of reading local development feed files (TODO.md)."),
+    "notify:notify_announcement_update": (S_PARTIAL, "Emitted during the handler, before the response; Moonraker schedules it after a short delay (TODO.md)."),
+    "notify:notify_announcement_dismissed": (S_PARTIAL, "Emitted during the handler, before the response; Moonraker schedules it after a short delay (TODO.md)."),
     # --- PanelDue -----------------------------------------------------------
     "component:paneldue": (S_PARTIAL, "No serial device or panel responses; only the line parser and its checksum exist (TODO.md)."),
     "remote:paneldue_beep": (S_MISSING, "No PanelDue serial device, so the beep is never sent (TODO.md)."),
@@ -41,16 +46,18 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     "machine.reboot": (S_NOOP, "Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box)."),
     "machine.shutdown": (S_NOOP, "Deliberate no-op: returns ok but never shuts the host down."),
     "machine.update.system": (S_PARTIAL, "Builds apt-get commands for an injected shell. The daemon installs none, so the update is refused with NoPackageProvider before it starts."),
-    "machine.update.full": (S_PARTIAL, "Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented."),
+    "machine.update.full": (S_PARTIAL, "Runs the same Git and package steps as single-source updates. Package commands require an injected shell; the daemon installs none and refuses configured package steps before starting. Web/zip installation and service restarts are unimplemented."),
     # --- External-tool integrations (stubbed; no binary/service in-tree) ----
-    "component:analysis": (S_PARTIAL, "Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence."),
+    "component:analysis": (S_PARTIAL, "Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided."),
     "component:notifier": (S_PARTIAL, "List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked."),
     # --- Auth ---------------------------------------------------------------
     "component:authorization": (S_FULL, "JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity."),
+    "access.post_user": (S_PARTIAL, "Creates users with non-empty, dot-free names. Dotted usernames return 400 because dots denote nested DataStore keys; Moonraker can store those names. Names are not rewritten."),
     # --- Spoolman -----------------------------------------------------------
-    "server.spoolman.proxy": (S_FULL, "Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted."),
+    "server.spoolman.proxy": (S_FULL, "Per-request HTTP forwarder with a ten-second deadline. V1 preserves upstream status and reason text; v2 uses the JSON message field. External text and JSON depth are validated. A live WebSocket tracks connection state and spool deletion."),
+    "server.spoolman.status": (S_PARTIAL, "Reports connection state and active spool, but pending_reports stays empty because filament-use reporting is not implemented (TODO.md)."),
     # --- Machine services / init providers ---------------------------------
-    "machine.services.start": (S_PARTIAL, "Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), `<script_path>/<service>` (simple), or in-memory (none). A name outside Moonraker's allow-list returns 403 \"Forbidden\" (Moonraker: 400 \"Service '<name>' not allowed\"); an allowed but undiscovered service is not refused as \"not installed\"."),
+    "machine.services.start": (S_PARTIAL, "Dispatches to systemctl, supervisorctl, `<script_path>/<service>` or in-memory state by provider. Systemd/supervisord require discovered allowed units; simple/none accept fixed names. Provider state mapping and periodic service polling still differ (TODO.md)."),
     "machine.services.stop": (S_PARTIAL, "See machine.services.start."),
     "machine.services.restart": (S_PARTIAL, "See machine.services.start."),
     "machine.peripherals.usb": (S_PARTIAL, "No usb.ids database: class, subclass and protocol are null, and names come only from Moonraker's built-in 1d50 (Klipper, Katapult) entries."),
@@ -65,7 +72,9 @@ DELTAS: Dict[str, Tuple[str, str]] = {
     # --- TD-1 ---------------------------------------------------------------
     "component:td1": (S_PARTIAL, "Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md)."),
     # --- Sensors ------------------------------------------------------------
-    "component:sensor": (S_FULL, "MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance)."),
+    "component:sensor": (S_PARTIAL, "MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md)."),
+    "component:mqtt": (S_PARTIAL, "MQTT 3.1.1 with TLS, reconnect and API-topic dispatch. Publish replies after the write rather than PUBACK/PUBCOMP; subscribe retains its broker subscription. Klippy status publishing is not implemented (TODO.md)."),
+    "server.webcams.test": (S_PARTIAL, "Probes stream/snapshot URLs with bounded HTTP requests. Relative URLs resolve against loopback; Moonraker uses the public machine address and convert_local rewriting (TODO.md)."),
     # --- Klippy-proxied printer.* ------------------------------------------
     "component:printer": (S_FULL, "Proxied to Klippy when connected (is_remote endpoints); returns the Klippy-disconnected error shape otherwise."),
 }

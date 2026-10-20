@@ -87,3 +87,67 @@ No real load run, privileged profiler, printer or live database was used. The
 historical performance and memory numbers were not remeasured. Black could not
 run because it was absent from the offline package cache; Ruff formatting was
 checked without fetching packages.
+
+## 2026-10-20: shared request conversion and source-backed status
+
+Requested by the user: finish the codebase review and use Zig's standard
+facilities where they fit. Commit `69cf20c` replaces duplicated handler getters
+with `src/json/params.zig`, using `std.fmt` numeric parsers, `std.ascii` and
+`std.mem`. The vendor references are Moonraker `900848584374`
+`common.py:WebRequest._get_converted_arg` and `_parse_list`. Defaults apply to
+absent keys, while a present invalid typed value returns a 400 handler error.
+
+The observable input changes are:
+
+| Handler families and arguments | Before | Current conversion |
+| --- | --- | --- |
+| Boolean flags: file `extended`/`force`, history `all`, queue `reset`/`all`, webcam flags, update `refresh`/`hard`, MQTT `retain`/`use_prefix`, temperature `include_monitors`, announcements `include_dismissed`, Spoolman `use_v2_response`, server-info `raw` | Several getters accepted integer truthiness or `"1"`, treated other strings as false, or used the default for null. | JSON booleans and case-insensitive `"true"`/`"false"` only, as vendor `get_boolean`; invalid present values fail. |
+| Numeric arguments: history pagination/timestamps, gcode count, announcement wake time, webcam FPS/rotation, WLED controls/colors, MQTT QoS/timeout, HTTP spool ID | Invalid strings and null could silently become defaults, zero, or a cleared spool; conversions varied by component. | Decimal conversion with standard parsers; booleans become 0/1 and floats truncate for integer arguments. Signed strings allow surrounding ASCII whitespace and underscores between digits. Invalid values and integers outside i64 fail. Handler bounds still apply; MQTT rejects invalid/non-finite timeouts before I/O. |
+| Text arguments: auth credentials/source, database namespace/key, file paths, device/sensor/strip names, update source and proxy/webcam strings | Optional getters sometimes treated wrong types or null as absent; required getters usually rejected them. | Present text arguments must be strings, including optional arguments. phobos deliberately does not reproduce Python `str()` representations such as `None`, `True`, lists or objects. |
+| Queue `filenames`/`job_ids` and announcement `subscriptions` | Queue arguments were array-only; missing filenames could act as an empty request and mixed array items were ignored. | Arrays must contain strings. Comma-separated strings are split, trimmed and stripped of empty items; array strings stay unchanged, as vendor `get_list`. Queue `filenames` is required. |
+| Raw database `value` and optional read `key` | Null carried data or selected the namespace. | Raw readers preserve that behavior. A stored null is valid; a null read key still selects the namespace. |
+| Active spool HTTP and Klipper remote method | Invalid HTTP values could clear the active spool; malformed remote values could do the same. | HTTP POST with no `spool_id` clears it; explicit null or malformed typed input returns 400 without changing it. The remote method explicitly accepts integer/null and rejects other types. HTTP boolean/numeric conversion follows vendor `get_int`; the remote method does not use that conversion. |
+
+Source checks: `core/methods.zig:serverInfoHandler`, the affected component
+handlers, `spoolman.zig:handleSpoolId` and `handleSetActiveSpool`, plus the old
+getter implementations at `69cf20c^`. The standalone parameter module passed
+18 tests with 4 fuzz tests. Integrated handler verification is recorded in the
+final gate entry rather than inferred from the helper tests.
+
+User creation also has an explicit storage limit:
+`authorization.zig:validateUsername` rejects an empty or dotted username.
+`POST /access/user` therefore returns 400 for a dotted name that Moonraker's
+SQL user table can store. DataStore dots denote nested paths; names are neither
+rewritten nor accepted as nested user records. Loading an invalid persisted
+user fails rather than silently omitting it.
+
+The status documentation was checked against integrated source `8d32c78` and
+the completed revocation change `84a5609`. Fixed subscription replacement,
+Spoolman proxy errors/deadlines and update locking are no longer listed as open
+gaps. Full updates execute Git work; web/zip installation and service restarts
+remain absent. Analysis reports configured paths but has no executable runner.
+Persisted logout/deletion invalidates matching named WebSocket sessions through
+`App.onUserLogout` and `Connections.invalidateUser`; protected methods and
+notifications remain blocked until reauthentication.
+
+Only reviewed rows in the API generator changed: user creation, zip creation,
+announcement refresh/timing, analysis, service actions, full updates, sensor
+sampling, MQTT acknowledgments, webcam URL resolution and Spoolman reports and
+proxy behavior. Remaining missing features are documented as partial behavior;
+they are not claimed as implemented or as new regressions. API registration
+coverage remains a separate name check. Printer behavior and historical
+performance measurements were not rechecked for this documentation entry.
+
+Documentation verification: native Debug built from `8d32c78`; its API dump
+passed the registration gate (123/123 endpoints, 130/130 methods, 27/27
+notification names). The per-call table was regenerated after reviewing the
+changed deltas, and `api_scanner table --check` passed. The fresh dump also
+includes the registered `notify` remote method; both the per-call table and
+client method-set artifacts now record it. The Moonraker client-matrix input was
+also stale: it used collapsed multi-verb names such as `access.user` and
+`server.database.item`. It now uses the pinned baseline's 130 derived method
+names, including `get_`/`post_`/`delete_` variants. The client matrix still reports its
+9 known unregistered plugin/client methods and exits 1 as designed. The two
+scanner suites and measurement helper tests passed together: 88 tests.
+No unchanged full Zig suite was repeated for this documentation-only change;
+the integrated source gate is recorded separately.

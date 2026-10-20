@@ -31,8 +31,14 @@ socket is absent. Test totals belong with the verified commit in
 - The Python-version fields remain a stub; phobos does not claim to run CPython.
 - CAN discovery returns an empty list when unavailable rather than copying a
   printer-specific missing-device 500 error.
-- Full Jinja2, LDAP and Apprise are outside the project scope. The estimator
-  requires an injected shell; the daemon neither downloads nor runs it.
+- Full Jinja2, LDAP and Apprise are outside the project scope. Analysis does not
+  download or run the estimator; execution would require an injected runner.
+- The API version remains 1.5.0 from the vendored Moonraker pin, and the default
+  software version is `phobos`. These identify the implementation rather than
+  imitating Forge-X's older API 1.4.0 and unknown software version.
+- User creation requires a non-empty username without dots. `POST /access/user`
+  returns 400 for a dotted name that Moonraker can store; phobos's generic store
+  reserves dots for nested key paths. No username is silently renamed.
 - Optional component implementations stay available when registered, even when
   a particular Forge-X configuration does not load them.
 
@@ -43,7 +49,6 @@ in [MEMORY.md](docs/MEMORY.md) and [PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Known Moonraker gaps (2026-10-20 audit)
 
-- `printer.objects.subscribe` over WebSocket adds to one aggregate set and returns the unpruned aggregate status; Moonraker replaces the connection's subscription and prunes the response (`klippy_connection.py:619-702`). Needs `transport/ws.zig` to pass the requested objects and connection to `KlippyCtx` (`src/components/klippy_connection.zig` `subscribeAggregate`).
 - `[announcements] dev_mode` skips fetching; Moonraker reads `<data_path>/development/announcements/<feed>.xml` (`src/components/announcements.zig` `refreshFeeds`).
 - Announcement handlers emit `notify_announcement_update` and `notify_announcement_dismissed` before the response; Moonraker sends them 50 ms later (`announcements.py` `delay_callback(.05, ...)`, `src/components/announcements.zig`).
 - `[sensor]` `parameter_*` and `history_field_*` options are not read, so `extended` info has no `parameter_info`/`history_fields` (`src/components/sensor.zig` `getSensorInfo`).
@@ -53,12 +58,9 @@ in [MEMORY.md](docs/MEMORY.md) and [PERFORMANCE.md](docs/PERFORMANCE.md).
 - MQTT speaks 3.1.1 only; `mqtt_protocol: v3.1` or `v5` logs a warning and connects with 3.1.1. `username`/`password` are used verbatim (no Jinja rendering) and `password_file` is not read (`src/app.zig` `applyMqttConfig`).
 - `server.mqtt.publish` replies after the socket write, not after PUBACK/PUBCOMP, so `timeout` has no effect; `server.mqtt.subscribe` does not UNSUBSCRIBE when it returns (`src/components/mqtt.zig`).
 - Spoolman filament-use reporting (`sync_rate`, `report_extrusion`, `pending_reports`) and the active-spool existence check on connect are not implemented; `pending_reports` is always `[]` (`src/components/spoolman.zig`).
-- `server.spoolman.proxy` without `use_v2_response` answers every Spoolman HTTP error with 503 instead of Moonraker's `raise_for_status` code, and has no request timeout (std.http.Client has none; the handler runs off Core) (`src/components/spoolman.zig`).
-- Single updates and Feather update calls run `git fetch` and `git reset` under Core, bounded at 60 s; Feather calls run on the remote-method worker, not the Klippy reader. Status and refresh fetch off Core (`src/components/update_manager.zig` `runUpdate`, `src/app.zig` `runRemoteCall`).
-- Service actions do not refuse an allowed but undiscovered service with "Service '<name>' not installed" (`src/components/machine.zig` `doServiceAction`).
 - The supervisord provider maps `supervisorctl status` to fixed pairs (STOPPED is inactive/dead); Moonraker reports the lowercased state as `sub_state` with `_get_active_state`. No provider polls service state, so `notify_service_state_changed` follows API actions only (`src/components/machine.zig` `supervisorState`, `refreshServiceStates`).
 - `[update_manager] refresh_window` hours are UTC; Moonraker uses local time. phobos reads no time zone (`/etc/localtime` through `std.Tz` would be needed) (`src/components/update_manager.zig` `autoRefreshThread`).
-- `machine.update.full` runs only package steps and no git; no update restarts the updated service (`src/components/update_manager.zig` `runFullUpdate`).
+- Updates do not restart the updated service, and web/zip installation remains unimplemented. Full updates run the same Git and package steps as single-source updates; package steps require an injected shell (`src/components/update_manager.zig` `runFullUpdate`, `updateSource`).
 - `usb.ids` is neither downloaded nor parsed, so USB class fields are null and names cover only Moonraker's built-in 1d50 entries; V4L2 `modes` are not enumerated (VIDIOC_ENUM_FMT); `machine.peripherals.canbus` returns no UUIDs (`src/components/machine.zig` `buildUsbDevice`, `enumVideo`, `handleCanbus`).
 - `[job_queue] load_on_startup` is not supported (phobos warns at config load) and the queue does not pause on Klippy shutdown: both need a Klippy ready/shutdown hook from `klippy_connection.zig` into `JobQueueCtx` (`src/components/job_queue.zig`; Moonraker `job_queue.py` `_handle_ready`, `_handle_shutdown`).
 - button: `[button]` sections, `on_press`/`on_release` templates and their `notify_button_event` are not implemented (vendor `components/button.py`); only the notification name exists (`src/server/notify.zig`).
@@ -72,7 +74,6 @@ in [MEMORY.md](docs/MEMORY.md) and [PERFORMANCE.md](docs/PERFORMANCE.md).
 - power: the Klipper remote method `set_device_power` ignores `force`, so a locked device stays locked; Klipper remote calls run in order on one worker with a 16-call queue, where Moonraker runs each as its own task (`src/app.zig` `remoteMethodRequest`).
 - An idle HTTP connection waits in `receiveHead` without a timeout, so 128 idle connections (`io.Listener.max_concurrent_conns`) block new clients; tornado closes idle connections (`src/http_transport.zig` `serveConnInner`).
 - One inbound WebSocket message must fit the 16 KiB connection read buffer; a larger message (e.g. a big `server.database.post_item`) closes the socket, where tornado accepts up to 10 MiB (`src/http_transport.zig` `serveConnInner`, `src/transport/ws.zig`).
-- `access.logout` and user deletion do not mark other WebSocket connections of that user `need_auth` (Moonraker `WebsocketManager._process_logout`, `src/transport/ws.zig`).
 - `cors_domains` does not fall back to trusted client IPs in the Origin host (Moonraker `Authorization.check_cors`, `src/http_transport.zig` `corsOriginAllowed`).
 - The config file is parsed three times at startup (bind address, store backend, database path in `src/main.zig`) before `App.setConfig` parses it again.
 - Extension agents: `server.connection.identify` does not register `agent` clients, `server.extensions.list` is always empty, `server.extensions.request` is always `AgentNotConnected`, and `connection.register_remote_method`/`send_event` register nothing and emit no `notify_agent_event` (`src/components/extensions.zig`).

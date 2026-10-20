@@ -2,7 +2,7 @@
 
 Every JSON-RPC method registered by upstream Moonraker or phobos, or called by a reference client (web UIs and touchscreens). Regenerate with `tools/client_api_scanner/` after bumping any source; the diff is the changelog.
 
-- Moonraker: **120** · phobos: **144**
+- Moonraker: **130** · phobos: **145**
 - fluidd (v1.37.1): **98** calls
 - guppyscreen (git): **24** calls
 - helixscreen (git): **53** calls
@@ -27,26 +27,24 @@ These method names are absent from the checked-in phobos method set. The matrix 
 
 | Method | Moonraker | phobos | fluidd | guppyscreen | helixscreen | klipperscreen | mainsail |
 |---|---|---|---|---|---|---|---|
-| `access.delete_user` | · | ✅ | ✅ | · | · | · | · |
+| `access.delete_user` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.get_api_key` | ✅ | ✅ | ✅ | · | · | · | · |
-| `access.get_user` | · | ✅ | ✅ | · | · | · | · |
+| `access.get_user` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.info` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.login` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.logout` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.oneshot_token` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.post_api_key` | ✅ | ✅ | ✅ | · | · | · | · |
-| `access.post_user` | · | ✅ | ✅ | · | · | · | · |
+| `access.post_user` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.refresh_jwt` | ✅ | ✅ | ✅ | · | · | · | · |
-| `access.user` | ✅ | · | · | · | · | · | · |
 | `access.user.password` | ✅ | ✅ | ✅ | · | · | · | · |
 | `access.users.list` | ✅ | ✅ | ✅ | · | · | · | · |
 | `connection.register_remote_method` | ✅ | ✅ | · | · | · | · | · |
 | `connection.send_event` | ✅ | ✅ | · | · | · | · | · |
-| `debug.database.delete_item` | · | ✅ | · | · | · | · | · |
-| `debug.database.get_item` | · | ✅ | · | · | · | · | · |
-| `debug.database.item` | ✅ | · | · | · | · | · | · |
+| `debug.database.delete_item` | ✅ | ✅ | · | · | · | · | · |
+| `debug.database.get_item` | ✅ | ✅ | · | · | · | · | · |
 | `debug.database.list` | ✅ | ✅ | · | · | · | · | · |
-| `debug.database.post_item` | · | ✅ | · | · | · | · | · |
+| `debug.database.post_item` | ✅ | ✅ | · | · | · | · | · |
 | `debug.database.table` | ✅ | ✅ | · | · | · | · | · |
 | `debug.notifiers.test` | ✅ | ✅ | · | · | · | · | · |
 | `machine.device_power.devices` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -92,6 +90,7 @@ These method names are absent from the checked-in phobos method set. The matrix 
 | `machine.wled.status` | ✅ | ✅ | · | · | · | · | · |
 | `machine.wled.strips` | ✅ | ✅ | · | · | · | · | · |
 | `machine.wled.toggle` | ✅ | ✅ | · | · | · | · | · |
+| `notify` | · | ✅ | · | · | · | · | · |
 | `pause_job_queue` | · | ✅ | · | · | · | · | · |
 | `printer.emergency_stop` | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `printer.firmware_restart` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -121,26 +120,24 @@ These method names are absent from the checked-in phobos method set. The matrix 
 | `server.connection.identify` | ✅ | ✅ | ✅ | · | ✅ | ✅ | · |
 | `server.database.compact` | ✅ | ✅ | ✅ | · | · | · | · |
 | `server.database.delete_backup` | ✅ | ✅ | ✅ | · | · | · | · |
-| `server.database.delete_item` | · | ✅ | ✅ | · | ✅ | · | ✅ |
-| `server.database.get_item` | · | ✅ | ✅ | ✅ | ✅ | · | ✅ |
-| `server.database.item` | ✅ | · | · | · | · | · | · |
+| `server.database.delete_item` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.database.get_item` | ✅ | ✅ | ✅ | ✅ | ✅ | · | ✅ |
 | `server.database.list` | ✅ | ✅ | ✅ | · | · | · | ✅ |
 | `server.database.post_backup` | ✅ | ✅ | ✅ | · | · | · | · |
-| `server.database.post_item` | · | ✅ | ✅ | ✅ | ✅ | · | ✅ |
+| `server.database.post_item` | ✅ | ✅ | ✅ | ✅ | ✅ | · | ✅ |
 | `server.database.restore` | ✅ | ✅ | ✅ | · | · | · | · |
 | `server.extensions.list` | ✅ | ✅ | · | · | · | · | · |
 | `server.extensions.request` | ✅ | ✅ | · | · | · | · | · |
 | `server.files.copy` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
-| `server.files.delete_directory` | · | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.delete_directory` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
 | `server.files.delete_file` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
-| `server.files.directory` | ✅ | · | · | · | · | · | · |
-| `server.files.get_directory` | · | ✅ | ✅ | · | ✅ | ✅ | ✅ |
+| `server.files.get_directory` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
 | `server.files.get_file` | · | · | · | · | ✅ | · | · |
 | `server.files.list` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | · |
 | `server.files.metadata` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `server.files.metascan` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
 | `server.files.move` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
-| `server.files.post_directory` | · | ✅ | ✅ | · | ✅ | · | ✅ |
+| `server.files.post_directory` | ✅ | ✅ | ✅ | · | ✅ | · | ✅ |
 | `server.files.roots` | ✅ | ✅ | · | ✅ | · | · | · |
 | `server.files.thumbnails` | ✅ | ✅ | · | · | · | · | · |
 | `server.files.zip` | ✅ | ✅ | ✅ | · | · | · | ✅ |
@@ -174,11 +171,10 @@ These method names are absent from the checked-in phobos method set. The matrix 
 | `server.spoolman.proxy` | ✅ | ✅ | ✅ | ✅ | ✅ | · | ✅ |
 | `server.spoolman.status` | ✅ | ✅ | · | · | ✅ | · | · |
 | `server.temperature_store` | ✅ | ✅ | ✅ | · | · | ✅ | ✅ |
-| `server.webcams.delete_item` | · | ✅ | ✅ | · | · | · | ✅ |
-| `server.webcams.get_item` | · | ✅ | · | · | · | · | · |
-| `server.webcams.item` | ✅ | · | · | · | · | · | · |
+| `server.webcams.delete_item` | ✅ | ✅ | ✅ | · | · | · | ✅ |
+| `server.webcams.get_item` | ✅ | ✅ | · | · | · | · | · |
 | `server.webcams.list` | ✅ | ✅ | ✅ | · | ✅ | ✅ | ✅ |
-| `server.webcams.post_item` | · | ✅ | ✅ | · | · | · | ✅ |
+| `server.webcams.post_item` | ✅ | ✅ | ✅ | · | · | · | ✅ |
 | `server.webcams.test` | ✅ | ✅ | · | · | · | · | · |
 | `server.websocket.id` | ✅ | ✅ | · | · | · | · | · |
 | `set_wled` | · | ✅ | · | · | · | · | · |

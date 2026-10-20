@@ -17,7 +17,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/access/logout` | POST | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/oneshot_token` | GET | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/refresh_jwt` | POST | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
-| `/access/user` | GET, POST, DELETE | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
+| `/access/user` | GET, POST, DELETE | HTTP, WEBSOCKET | authorization | ⚠️ Partial | Creates users with non-empty, dot-free names. Dotted usernames return 400 because dots denote nested DataStore keys; Moonraker can store those names. Names are not rewritten. |
 | `/access/user/password` | POST | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/access/users/list` | GET | HTTP, WEBSOCKET | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `/api/currentuser` | GET | HTTP | octoprint_compat | ✅ Full | Matches Moonraker. |
@@ -48,7 +48,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/proc_stats` | GET | HTTP, WEBSOCKET, INTERNAL | proc_stats | ✅ Full | Matches Moonraker. |
 | `/machine/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | machine | 🚫 No-op | Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box). |
 | `/machine/services/restart` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | See machine.services.start. |
-| `/machine/services/start` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), `<script_path>/<service>` (simple), or in-memory (none). A name outside Moonraker's allow-list returns 403 "Forbidden" (Moonraker: 400 "Service '<name>' not allowed"); an allowed but undiscovered service is not refused as "not installed". |
+| `/machine/services/start` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | Dispatches to systemctl, supervisorctl, `<script_path>/<service>` or in-memory state by provider. Systemd/supervisord require discovered allowed units; simple/none accept fixed names. Provider state mapping and periodic service polling still differ (TODO.md). |
 | `/machine/services/stop` | POST | HTTP, WEBSOCKET, INTERNAL | machine | ⚠️ Partial | See machine.services.start. |
 | `/machine/shutdown` | POST | HTTP, WEBSOCKET, INTERNAL | machine | 🚫 No-op | Deliberate no-op: returns ok but never shuts the host down. |
 | `/machine/sudo/info` | GET | HTTP, WEBSOCKET, INTERNAL | machine | ✅ Full | Matches Moonraker. |
@@ -57,7 +57,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/machine/td1/data` | GET | HTTP, WEBSOCKET, INTERNAL | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
 | `/machine/td1/reboot` | POST | HTTP, WEBSOCKET, INTERNAL | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
 | `/machine/update/client` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
-| `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented. |
+| `/machine/update/full` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ⚠️ Partial | Runs the same Git and package steps as single-source updates. Package commands require an injected shell; the daemon installs none and refuses configured package steps before starting. Web/zip installation and service restarts are unimplemented. |
 | `/machine/update/klipper` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/moonraker` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
 | `/machine/update/recover` | POST | HTTP, WEBSOCKET, INTERNAL | update_manager | ✅ Full | Matches Moonraker. |
@@ -78,15 +78,15 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/printer/print/resume` | POST | HTTP, WEBSOCKET, INTERNAL | klippy_apis | ✅ Full | Matches Moonraker. |
 | `/printer/print/start` | POST | HTTP, WEBSOCKET, INTERNAL | klippy_apis | ✅ Full | Matches Moonraker. |
 | `/printer/restart` | POST | HTTP, WEBSOCKET, INTERNAL | klippy_apis | ✅ Full | Matches Moonraker. |
-| `/server/analysis/dump_config` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
-| `/server/analysis/estimate` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
-| `/server/analysis/process` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
-| `/server/analysis/status` | GET | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `/server/analysis/dump_config` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
+| `/server/analysis/estimate` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
+| `/server/analysis/process` | POST | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
+| `/server/analysis/status` | GET | HTTP, WEBSOCKET, INTERNAL | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
 | `/server/announcements/dismiss` | POST | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
 | `/server/announcements/feed` | POST, DELETE | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
 | `/server/announcements/feeds` | GET | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
 | `/server/announcements/list` | GET | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
-| `/server/announcements/update` | POST | HTTP, WEBSOCKET, INTERNAL | announcements | ✅ Full | Matches Moonraker. |
+| `/server/announcements/update` | POST | HTTP, WEBSOCKET, INTERNAL | announcements | ⚠️ Partial | Fetches RSS with conditional requests. Development mode skips fetching instead of reading local development feed files (TODO.md). |
 | `/server/config` | GET | HTTP, WEBSOCKET, INTERNAL | server | ✅ Full | Matches Moonraker. |
 | `/server/connection/identify` | POST | WEBSOCKET | websockets | ✅ Full | Matches Moonraker. |
 | `/server/database/backup` | POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | Matches Moonraker. |
@@ -105,7 +105,7 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/files/move` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/roots` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
 | `/server/files/thumbnails` | GET | HTTP, WEBSOCKET, INTERNAL | file_manager | ⚠️ Partial | Returns base64 `data` from the gcode header; no `.thumbs/*.png` files, so `relative_path`/`thumbnail_path` are missing (TODO.md). |
-| `/server/files/zip` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ✅ Full | Matches Moonraker. |
+| `/server/files/zip` | POST | HTTP, WEBSOCKET, INTERNAL | file_manager | ⚠️ Partial | Validates the destination and returns the response fields, but creates no archive (TODO.md). |
 | `/server/gcode_store` | GET | HTTP, WEBSOCKET, INTERNAL | data_store | ✅ Full | Matches Moonraker. |
 | `/server/history/job` | GET, DELETE | HTTP, WEBSOCKET, INTERNAL | history | ✅ Full | Matches Moonraker. |
 | `/server/history/list` | GET | HTTP, WEBSOCKET, INTERNAL | history | ✅ Full | Matches Moonraker. |
@@ -118,26 +118,26 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/job_queue/start` | POST | HTTP, WEBSOCKET, INTERNAL | job_queue | ✅ Full | Matches Moonraker. |
 | `/server/job_queue/status` | GET | HTTP, WEBSOCKET, INTERNAL | job_queue | ✅ Full | Matches Moonraker. |
 | `/server/logs/rollover` | POST | HTTP, WEBSOCKET, INTERNAL | loghelper | ✅ Full | Matches Moonraker. |
-| `/server/mqtt/publish` | POST | <dynamic> | mqtt | ✅ Full | Matches Moonraker. |
-| `/server/mqtt/subscribe` | POST | <dynamic> | mqtt | ✅ Full | Matches Moonraker. |
+| `/server/mqtt/publish` | POST | <dynamic> | mqtt | ⚠️ Partial | MQTT 3.1.1 with TLS, reconnect and API-topic dispatch. Publish replies after the write rather than PUBACK/PUBCOMP; subscribe retains its broker subscription. Klippy status publishing is not implemented (TODO.md). |
+| `/server/mqtt/subscribe` | POST | <dynamic> | mqtt | ⚠️ Partial | MQTT 3.1.1 with TLS, reconnect and API-topic dispatch. Publish replies after the write rather than PUBACK/PUBCOMP; subscribe retains its broker subscription. Klippy status publishing is not implemented (TODO.md). |
 | `/server/notifiers/list` | GET | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
 | `/server/restart` | POST | HTTP, WEBSOCKET, INTERNAL | server | ✅ Full | Matches Moonraker. |
-| `/server/sensors/info` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
-| `/server/sensors/list` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
-| `/server/sensors/measurements` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
-| `/server/spoolman/proxy` | POST | HTTP, WEBSOCKET, INTERNAL | spoolman | ✅ Full | Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted. |
+| `/server/sensors/info` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ⚠️ Partial | MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md). |
+| `/server/sensors/list` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ⚠️ Partial | MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md). |
+| `/server/sensors/measurements` | GET | HTTP, WEBSOCKET, INTERNAL | sensor | ⚠️ Partial | MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md). |
+| `/server/spoolman/proxy` | POST | HTTP, WEBSOCKET, INTERNAL | spoolman | ✅ Full | Per-request HTTP forwarder with a ten-second deadline. V1 preserves upstream status and reason text; v2 uses the JSON message field. External text and JSON depth are validated. A live WebSocket tracks connection state and spool deletion. |
 | `/server/spoolman/spool_id` | GET, POST | HTTP, WEBSOCKET, INTERNAL | spoolman | ✅ Full | Matches Moonraker. |
-| `/server/spoolman/status` | GET | HTTP, WEBSOCKET, INTERNAL | spoolman | ✅ Full | Matches Moonraker. |
+| `/server/spoolman/status` | GET | HTTP, WEBSOCKET, INTERNAL | spoolman | ⚠️ Partial | Reports connection state and active spool, but pending_reports stays empty because filament-use reporting is not implemented (TODO.md). |
 | `/server/temperature_store` | GET | HTTP, WEBSOCKET, INTERNAL | data_store | ✅ Full | Matches Moonraker. |
 | `/server/webcams/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
 | `/server/webcams/list` | GET | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
-| `/server/webcams/test` | POST | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
+| `/server/webcams/test` | POST | HTTP, WEBSOCKET, INTERNAL | webcam | ⚠️ Partial | Probes stream/snapshot URLs with bounded HTTP requests. Relative URLs resolve against loopback; Moonraker uses the public machine address and convert_local rewriting (TODO.md). |
 | `/server/websocket/id` | GET | WEBSOCKET | websockets | ✅ Full | Matches Moonraker. |
 | `/server/zeroconf/ssdp` | GET | HTTP | zeroconf | ✅ Full | Matches Moonraker. |
 | `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route. |
 | `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route. |
 
-_Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
+_Endpoints: 87 full, 36 partial, 2 no-op, 0 missing._
 
 ## JSON-RPC methods
 
@@ -151,7 +151,7 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 | `access.logout` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.oneshot_token` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.post_api_key` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
-| `access.post_user` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
+| `access.post_user` |  | authorization | ⚠️ Partial | Creates users with non-empty, dot-free names. Dotted usernames return 400 because dots denote nested DataStore keys; Moonraker can store those names. Names are not rewritten. |
 | `access.refresh_jwt` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.user.password` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
 | `access.users.list` |  | authorization | ✅ Full | JWT + oneshot + API-key + trusted-client all enforced. The `ldap` auth source is unsupported (moonraker source only); the user `source` field is kept for shape parity. |
@@ -176,7 +176,7 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 | `machine.proc_stats` |  | proc_stats | ✅ Full | Matches Moonraker. |
 | `machine.reboot` |  | machine | 🚫 No-op | Deliberate no-op: returns Moonraker's ok shape but never reboots the host (printer boards lack systemd; a stray call must not power-cycle the box). |
 | `machine.services.restart` |  | machine | ⚠️ Partial | See machine.services.start. |
-| `machine.services.start` |  | machine | ⚠️ Partial | Dispatches to the configured [machine] provider: systemctl (systemd_dbus/systemd_cli), supervisorctl (supervisord_cli), `<script_path>/<service>` (simple), or in-memory (none). A name outside Moonraker's allow-list returns 403 "Forbidden" (Moonraker: 400 "Service '<name>' not allowed"); an allowed but undiscovered service is not refused as "not installed". |
+| `machine.services.start` |  | machine | ⚠️ Partial | Dispatches to systemctl, supervisorctl, `<script_path>/<service>` or in-memory state by provider. Systemd/supervisord require discovered allowed units; simple/none accept fixed names. Provider state mapping and periodic service polling still differ (TODO.md). |
 | `machine.services.stop` |  | machine | ⚠️ Partial | See machine.services.start. |
 | `machine.shutdown` |  | machine | 🚫 No-op | Deliberate no-op: returns ok but never shuts the host down. |
 | `machine.sudo.info` |  | machine | ✅ Full | Matches Moonraker. |
@@ -185,7 +185,7 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 | `machine.td1.data` |  | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
 | `machine.td1.reboot` |  | td1 | ⚠️ Partial | Discovery and CSV readings work; the errors.txt and reboot handshakes are not sent, so `error` is null and reboot only forgets the device (TODO.md). |
 | `machine.update.client` |  | update_manager | ✅ Full | Matches Moonraker. |
-| `machine.update.full` |  | update_manager | ⚠️ Partial | Runs only package steps (apt-get, pip) through an injected shell; the daemon installs none, so it is refused while the system updater is enabled. Git sources only report progress lines; web/zip installation is unimplemented. |
+| `machine.update.full` |  | update_manager | ⚠️ Partial | Runs the same Git and package steps as single-source updates. Package commands require an injected shell; the daemon installs none and refuses configured package steps before starting. Web/zip installation and service restarts are unimplemented. |
 | `machine.update.klipper` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.moonraker` |  | update_manager | ✅ Full | Matches Moonraker. |
 | `machine.update.recover` |  | update_manager | ✅ Full | Matches Moonraker. |
@@ -207,16 +207,16 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 | `printer.print.resume` |  | klippy_apis | ✅ Full | Matches Moonraker. |
 | `printer.print.start` |  | klippy_apis | ✅ Full | Matches Moonraker. |
 | `printer.restart` |  | klippy_apis | ✅ Full | Matches Moonraker. |
-| `server.analysis.dump_config` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
-| `server.analysis.estimate` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
-| `server.analysis.process` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
-| `server.analysis.status` |  | analysis | ⚠️ Partial | Estimator execution requires an injected shell. No download or daemon runner is provided; status reports binary/config presence. |
+| `server.analysis.dump_config` |  | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
+| `server.analysis.estimate` |  | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
+| `server.analysis.process` |  | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
+| `server.analysis.status` |  | analysis | ⚠️ Partial | Estimator execution is unavailable. Status reports configured paths and config-file presence with estimator_ready false; no download or runner is provided. |
 | `server.announcements.delete_feed` |  | announcements | ✅ Full | Matches Moonraker. |
 | `server.announcements.dismiss` |  | announcements | ✅ Full | Matches Moonraker. |
 | `server.announcements.feeds` |  | announcements | ✅ Full | Matches Moonraker. |
 | `server.announcements.list` |  | announcements | ✅ Full | Matches Moonraker. |
 | `server.announcements.post_feed` |  | announcements | ✅ Full | Matches Moonraker. |
-| `server.announcements.update` |  | announcements | ✅ Full | Matches Moonraker. |
+| `server.announcements.update` |  | announcements | ⚠️ Partial | Fetches RSS with conditional requests. Development mode skips fetching instead of reading local development feed files (TODO.md). |
 | `server.config` |  | server | ✅ Full | Matches Moonraker. |
 | `server.connection.identify` |  | websockets | ✅ Full | Matches Moonraker. |
 | `server.database.compact` |  | database | ✅ Full | Matches Moonraker. |
@@ -240,7 +240,7 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 | `server.files.post_directory` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.roots` |  | file_manager | ✅ Full | Matches Moonraker. |
 | `server.files.thumbnails` |  | file_manager | ⚠️ Partial | Returns base64 `data` from the gcode header; no `.thumbs/*.png` files, so `relative_path`/`thumbnail_path` are missing (TODO.md). |
-| `server.files.zip` |  | file_manager | ✅ Full | Matches Moonraker. |
+| `server.files.zip` |  | file_manager | ⚠️ Partial | Validates the destination and returns the response fields, but creates no archive (TODO.md). |
 | `server.gcode_store` |  | data_store | ✅ Full | Matches Moonraker. |
 | `server.history.delete_job` |  | history | ✅ Full | Matches Moonraker. |
 | `server.history.get_job` |  | history | ✅ Full | Matches Moonraker. |
@@ -255,23 +255,23 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 | `server.job_queue.start` |  | job_queue | ✅ Full | Matches Moonraker. |
 | `server.job_queue.status` |  | job_queue | ✅ Full | Matches Moonraker. |
 | `server.logs.rollover` |  | loghelper | ✅ Full | Matches Moonraker. |
-| `server.mqtt.publish` |  | mqtt | ✅ Full | Matches Moonraker. |
-| `server.mqtt.subscribe` |  | mqtt | ✅ Full | Matches Moonraker. |
+| `server.mqtt.publish` |  | mqtt | ⚠️ Partial | MQTT 3.1.1 with TLS, reconnect and API-topic dispatch. Publish replies after the write rather than PUBACK/PUBCOMP; subscribe retains its broker subscription. Klippy status publishing is not implemented (TODO.md). |
+| `server.mqtt.subscribe` |  | mqtt | ⚠️ Partial | MQTT 3.1.1 with TLS, reconnect and API-topic dispatch. Publish replies after the write rather than PUBACK/PUBCOMP; subscribe retains its broker subscription. Klippy status publishing is not implemented (TODO.md). |
 | `server.notifiers.list` |  | notifier | ⚠️ Partial | List records come from `[notifier <name>]`. Sending is `AppriseNotAvailable` because apprise is not linked. |
 | `server.restart` |  | server | ✅ Full | Matches Moonraker. |
-| `server.sensors.info` |  | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
-| `server.sensors.list` |  | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
-| `server.sensors.measurements` |  | sensor | ✅ Full | MQTT sensors with state_response_template via an in-tree Jinja subset (sensor_template.zig): set/if/for, operators, ~20 filters, is-tests, set_result. Not a full Jinja2 engine (no macros/inheritance). |
+| `server.sensors.info` |  | sensor | ⚠️ Partial | MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md). |
+| `server.sensors.list` |  | sensor | ⚠️ Partial | MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md). |
+| `server.sensors.measurements` |  | sensor | ⚠️ Partial | MQTT measurements use a bounded Jinja subset. Parameter/history-field configuration is not loaded; history and notifications follow messages rather than Moonraker's sampling timer (TODO.md). |
 | `server.spoolman.get_spool_id` |  | spoolman | ✅ Full | Matches Moonraker. |
 | `server.spoolman.post_spool_id` |  | spoolman | ✅ Full | Matches Moonraker. |
-| `server.spoolman.proxy` |  | spoolman | ✅ Full | Per-request HTTP forwarder to the configured Spoolman server (no server-side response cache; Moonraker doesn't cache proxied responses either). Live WebSocket maintained for connection state + spool-deleted. |
-| `server.spoolman.status` |  | spoolman | ✅ Full | Matches Moonraker. |
+| `server.spoolman.proxy` |  | spoolman | ✅ Full | Per-request HTTP forwarder with a ten-second deadline. V1 preserves upstream status and reason text; v2 uses the JSON message field. External text and JSON depth are validated. A live WebSocket tracks connection state and spool deletion. |
+| `server.spoolman.status` |  | spoolman | ⚠️ Partial | Reports connection state and active spool, but pending_reports stays empty because filament-use reporting is not implemented (TODO.md). |
 | `server.temperature_store` |  | data_store | ✅ Full | Matches Moonraker. |
 | `server.webcams.delete_item` |  | webcam | ✅ Full | Matches Moonraker. |
 | `server.webcams.get_item` |  | webcam | ✅ Full | Matches Moonraker. |
 | `server.webcams.list` |  | webcam | ✅ Full | Matches Moonraker. |
 | `server.webcams.post_item` |  | webcam | ✅ Full | Matches Moonraker. |
-| `server.webcams.test` |  | webcam | ✅ Full | Matches Moonraker. |
+| `server.webcams.test` |  | webcam | ⚠️ Partial | Probes stream/snapshot URLs with bounded HTTP requests. Relative URLs resolve against loopback; Moonraker uses the public machine address and convert_local rewriting (TODO.md). |
 | `server.websocket.id` |  | websockets | ✅ Full | Matches Moonraker. |
 
 ## Notifications
@@ -280,8 +280,8 @@ _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 |---|---|---|---|
 | `notify_active_spool_set` | spoolman | ✅ Full | Matches Moonraker. |
 | `notify_agent_event` | extensions | ❌ Missing | Never emitted: no agent clients are registered (TODO.md). |
-| `notify_announcement_dismissed` | announcements | ✅ Full | Matches Moonraker. |
-| `notify_announcement_update` | announcements | ✅ Full | Matches Moonraker. |
+| `notify_announcement_dismissed` | announcements | ⚠️ Partial | Emitted during the handler, before the response; Moonraker schedules it after a short delay (TODO.md). |
+| `notify_announcement_update` | announcements | ⚠️ Partial | Emitted during the handler, before the response; Moonraker schedules it after a short delay (TODO.md). |
 | `notify_announcement_wake` | announcements | ✅ Full | Matches Moonraker. |
 | `notify_button_event` | button | ❌ Missing | Never emitted: `[button]` sections and templates are not implemented (TODO.md). |
 | `notify_cpu_throttled` | proc_stats | ✅ Full | Matches Moonraker. |
@@ -312,6 +312,7 @@ Calls phobos registers that the static baseline lists don't enumerate. Most are 
 
 | JSON-RPC method | Classification |
 |---|---|
+| `notify` | Klipper remote method (also exposed as JSON-RPC) |
 | `pause_job_queue` | Klipper remote method (also exposed as JSON-RPC) |
 | `printer.emergency_stop` | Klipper-proxied (is_remote) endpoint |
 | `printer.gcode.help` | Klipper-proxied (is_remote) endpoint |

@@ -21,8 +21,8 @@
       "count": 65
     }
   },
-  "moonraker_count": 120,
-  "phobos_count": 144,
+  "moonraker_count": 130,
+  "phobos_count": 145,
   "client_gaps": [
     "machine.timelapse.get_settings",
     "machine.timelapse.lastframeinfo",
@@ -37,7 +37,7 @@
   "matrix": [
     {
       "method": "access.delete_user",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -57,7 +57,7 @@
     },
     {
       "method": "access.get_user",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -117,7 +117,7 @@
     },
     {
       "method": "access.post_user",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -130,16 +130,6 @@
       "moonraker": true,
       "phobos": true,
       "fluidd": true,
-      "guppyscreen": false,
-      "helixscreen": false,
-      "klipperscreen": false,
-      "mainsail": false
-    },
-    {
-      "method": "access.user",
-      "moonraker": true,
-      "phobos": false,
-      "fluidd": false,
       "guppyscreen": false,
       "helixscreen": false,
       "klipperscreen": false,
@@ -187,7 +177,7 @@
     },
     {
       "method": "debug.database.delete_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": false,
       "guppyscreen": false,
@@ -197,18 +187,8 @@
     },
     {
       "method": "debug.database.get_item",
-      "moonraker": false,
-      "phobos": true,
-      "fluidd": false,
-      "guppyscreen": false,
-      "helixscreen": false,
-      "klipperscreen": false,
-      "mainsail": false
-    },
-    {
-      "method": "debug.database.item",
       "moonraker": true,
-      "phobos": false,
+      "phobos": true,
       "fluidd": false,
       "guppyscreen": false,
       "helixscreen": false,
@@ -227,7 +207,7 @@
     },
     {
       "method": "debug.database.post_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": false,
       "guppyscreen": false,
@@ -686,6 +666,16 @@
       "mainsail": false
     },
     {
+      "method": "notify",
+      "moonraker": false,
+      "phobos": true,
+      "fluidd": false,
+      "guppyscreen": false,
+      "helixscreen": false,
+      "klipperscreen": false,
+      "mainsail": false
+    },
+    {
       "method": "pause_job_queue",
       "moonraker": false,
       "phobos": true,
@@ -977,7 +967,7 @@
     },
     {
       "method": "server.database.delete_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -987,23 +977,13 @@
     },
     {
       "method": "server.database.get_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": true,
       "helixscreen": true,
       "klipperscreen": false,
       "mainsail": true
-    },
-    {
-      "method": "server.database.item",
-      "moonraker": true,
-      "phobos": false,
-      "fluidd": false,
-      "guppyscreen": false,
-      "helixscreen": false,
-      "klipperscreen": false,
-      "mainsail": false
     },
     {
       "method": "server.database.list",
@@ -1027,7 +1007,7 @@
     },
     {
       "method": "server.database.post_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": true,
@@ -1077,7 +1057,7 @@
     },
     {
       "method": "server.files.delete_directory",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -1096,18 +1076,8 @@
       "mainsail": true
     },
     {
-      "method": "server.files.directory",
-      "moonraker": true,
-      "phobos": false,
-      "fluidd": false,
-      "guppyscreen": false,
-      "helixscreen": false,
-      "klipperscreen": false,
-      "mainsail": false
-    },
-    {
       "method": "server.files.get_directory",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -1167,7 +1137,7 @@
     },
     {
       "method": "server.files.post_directory",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -1507,7 +1477,7 @@
     },
     {
       "method": "server.webcams.delete_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,
@@ -1517,18 +1487,8 @@
     },
     {
       "method": "server.webcams.get_item",
-      "moonraker": false,
-      "phobos": true,
-      "fluidd": false,
-      "guppyscreen": false,
-      "helixscreen": false,
-      "klipperscreen": false,
-      "mainsail": false
-    },
-    {
-      "method": "server.webcams.item",
       "moonraker": true,
-      "phobos": false,
+      "phobos": true,
       "fluidd": false,
       "guppyscreen": false,
       "helixscreen": false,
@@ -1547,7 +1507,7 @@
     },
     {
       "method": "server.webcams.post_item",
-      "moonraker": false,
+      "moonraker": true,
       "phobos": true,
       "fluidd": true,
       "guppyscreen": false,

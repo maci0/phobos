@@ -125,6 +125,11 @@ strings. Numeric arguments follow Moonraker's decimal conversions, including
 integer truncation and boolean numbers. Text arguments require strings rather
 than Python representations of objects. String lists accept arrays of strings
 or trimmed comma-separated text. Handler-specific validation follows conversion.
+Raw JSON readers preserve null, including database values and an optional read
+key. Spool clearing through HTTP uses an absent `spool_id`; explicit null is a
+conversion error. The Klipper remote method separately accepts an integer or
+null. Usernames must be non-empty single DataStore keys without dots; creating
+a dotted username returns 400 instead of writing a nested user record.
 
 Keep application grammars that have no standard implementation: Moonraker
 configuration, RSS/XML and RFC 2822 syntax, G-code comments, multipart

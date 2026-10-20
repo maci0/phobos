@@ -58,6 +58,7 @@
     "machine.wled.status",
     "machine.wled.strips",
     "machine.wled.toggle",
+    "notify",
     "pause_job_queue",
     "printer.emergency_stop",
     "printer.firmware_restart",
