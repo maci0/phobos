@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
             });
             addVendoredSqlite(bb, m);
             m.addCSourceFile(.{ .file = bb.path("src/disk_usage.c"), .flags = &.{"-std=c11"} });
+            m.addCSourceFile(.{ .file = bb.path("src/local_time.c"), .flags = &.{"-std=c11"} });
             m.addOptions("build_options", opts);
             return m;
         }
@@ -53,7 +54,14 @@ pub fn build(b: *std.Build) void {
 
     // `zig build test --fuzz` runs the std.testing.fuzz harnesses in this
     // artifact with coverage-guided input.
-    const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, build_opts, false) });
+    const timezone_probe_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    timezone_probe_module.addCSourceFiles(.{ .files = &.{ "src/local_time.c", "tests/fixtures/local_time_probe.c" }, .flags = &.{"-std=c11"} });
+    const timezone_probe = b.addExecutable(.{ .name = "local-time-probe", .root_module = timezone_probe_module });
+    const test_opts = b.addOptions();
+    test_opts.addOption([]const u8, "moonraker_version", moonraker_version);
+    test_opts.addOption([]const u8, "phobos_version", @import("build.zig.zon").version);
+    test_opts.addOptionPath("local_time_probe", timezone_probe.getEmittedBin());
+    const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, test_opts, false) });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit).step);
     b.step("test-artifact", "Build test binary (no run)").dependOn(&unit.step);
 }

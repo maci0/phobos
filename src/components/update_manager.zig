@@ -57,6 +57,13 @@ const process = @import("../util/process.zig");
 
 const Registry = registry.Registry;
 const status_refresh_interval_s = 60;
+extern fn phobos_local_hour(seconds: i64, hour: *c_int) c_int;
+
+fn localHour(seconds: i64) !i64 {
+    var hour: c_int = undefined;
+    if (phobos_local_hour(seconds, &hour) != 0) return error.LocalTimeUnavailable;
+    return hour;
+}
 
 // ---------------------------------------------------------------------------
 // Sources
@@ -292,9 +299,7 @@ pub const UpdateCtx = struct {
     auto_refresh: bool = false,
     /// Hours between refreshes. Moonraker default 168.
     refresh_interval_hours: i64 = 168,
-    /// Inclusive start hour and exclusive end hour, in UTC (`autoRefreshThread`
-    /// derives the hour from wall-clock seconds; Moonraker uses local time and
-    /// phobos reads no time zone). Default 0-5.
+    /// Inclusive start hour and exclusive end hour in the host's local time.
     refresh_window_start: i64 = 0,
     refresh_window_end: i64 = 5,
     /// Moonraker's first auto-refresh ignores the window. Later ones do not.
@@ -327,9 +332,6 @@ pub const UpdateCtx = struct {
         return true;
     }
 
-    /// One scheduler tick. Returns whether a refresh ran. A hook records the
-    /// run. Without a hook, `handleRefresh` runs; git fetch happens only when
-    /// a source has a repo path and io is set.
     /// Record an auto-refresh when one is due at `hour` and return whether it
     /// is. Runs under Core; the caller refreshes after releasing it.
     pub fn tickAutoRefresh(self: *UpdateCtx, hour: i64) bool {
@@ -405,7 +407,10 @@ fn autoRefreshThread(ctx: *UpdateCtx) void {
     while (!ctx.refresh_stop.isSet()) {
         if (sleep.untilStopped(io, .fromSeconds(3600), &ctx.refresh_stop)) break;
         const now = clock.wallSecondsInt(ctx.clock_io);
-        const hour: i64 = @mod(@divFloor(now, 3600), 24);
+        const hour = localHour(now) catch |err| {
+            std.debug.print("phobos: update refresh time unavailable: {}\n", .{err});
+            continue;
+        };
         if (!bus.core.run(io, UpdateCtx.tickAutoRefresh, .{ ctx, hour })) continue;
         var request_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer request_arena.deinit();
@@ -2412,4 +2417,43 @@ test "tickAutoRefresh: disabled and out of window do not refresh" {
     try testing.expect(!UpdateCtx.inRefreshWindow(0, 5, 12));
     try testing.expect(UpdateCtx.inRefreshWindow(0, 5, 0));
     try testing.expect(UpdateCtx.inRefreshWindow(22, 5, 23));
+}
+
+test "refresh hours follow local offsets and daylight saving without global TZ mutation" {
+    const Case = struct { zone: []const u8, timestamp: []const u8, hour: []const u8 };
+    for ([_]Case{
+        .{ .zone = "UTC0", .timestamp = "0", .hour = "0\n" },
+        .{ .zone = "UTC0", .timestamp = "-1", .hour = "23\n" },
+        .{ .zone = "EST5EDT,M3.2.0/2,M11.1.0/2", .timestamp = "1705320000", .hour = "7\n" },
+        .{ .zone = "EST5EDT,M3.2.0/2,M11.1.0/2", .timestamp = "1721044800", .hour = "8\n" },
+        .{ .zone = "EST5EDT,M3.2.0/2,M11.1.0/2", .timestamp = "2541499200", .hour = "8\n" },
+        .{ .zone = "NST3:30", .timestamp = "0", .hour = "20\n" },
+    }) |case| {
+        var environment = std.process.Environ.Map.init(testing.allocator);
+        defer environment.deinit();
+        try environment.put("TZ", case.zone);
+        const result = try process.run(testing.allocator, testing.io, .{
+            .argv = &.{ @import("build_options").local_time_probe, case.timestamp },
+            .environ_map = &environment,
+            .stdout_limit = .limited(32),
+            .stderr_limit = .limited(256),
+            .timeout = .{ .deadline = .fromNow(testing.io, .{ .raw = .fromSeconds(3), .clock = .awake }) },
+        });
+        defer testing.allocator.free(result.stdout);
+        defer testing.allocator.free(result.stderr);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try testing.expectEqualStrings(case.hour, result.stdout);
+    }
+    const hour = try localHour(clock.wallSecondsInt(testing.io));
+    try testing.expect(hour >= 0 and hour < 24);
+}
+
+test "fuzz local refresh hours stay within a day" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const seconds = smith.valueRangeAtMost(i64, -2208988800, 4102444800);
+            const hour = try localHour(seconds);
+            try testing.expect(hour >= 0 and hour < 24);
+        }
+    }.run, .{});
 }
