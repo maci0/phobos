@@ -70,10 +70,9 @@ const sd_manufacturers = std.StaticStringMap([]const u8).initComptime(.{
     .{ "74", "PNY" },
 });
 
-/// The list of services Moonraker treats as allowed by default
-/// (assets/default_allowed_services). Used to populate available_services /
-/// service_state shape; without systemd phobos reports an empty service map but
-/// still exposes the allowed list semantics through is_service_allowed.
+/// Moonraker's assets/default_allowed_services. With the moonraker/klipper
+/// prefixes in `isServiceAllowed`, the only services discovery reports and
+/// service actions accept.
 pub const default_allowed_services = [_][]const u8{
     "klipper",
     "klipper_mcu",
@@ -104,32 +103,11 @@ pub fn providerKind(name: []const u8) Provider {
     return .systemd; // systemd_dbus (default), systemd_cli, or unknown → systemd
 }
 
-/// All Moonraker-compatible service names that phobos registers or stubs.
-/// Used by buildAvailableServices, buildServiceState, and isServiceAllowed.
-pub const available_services = [_][]const u8{
-    "announce",
-    "data_store",
-    "device_power",
-    "file_manager",
-    "history",
-    "history_totals",
-    "job_queue",
-    "job_state",
-    "klipper",
-    "klippy_state",
-    "machine",
-    "moonraker",
-    "mqtt",
-    "octoprint_compat",
-    "proc_stats",
-    "shell_command",
-    "spoolman",
-    "td1",
-    "test",
-    "update_manager",
-    "webcam",
-    "wled",
-};
+/// Kill bound for one service-manager or `ip` command, in seconds. Moonraker
+/// gives supervisorctl 6 s; the commands run under Core.
+const cmd_timeout_s: f64 = 6;
+/// Cap on the stdout and on the stderr bytes one spawned command may buffer.
+const cmd_output_limit = 256 * 1024;
 
 /// Known systemd ActiveState values (systemctl show -p ActiveState).
 const known_active_states = [_][]const u8{ "active", "inactive", "failed", "activating", "deactivating", "reloading" };
@@ -183,7 +161,7 @@ pub const MachineCtx = struct {
     /// Empty means the action stays in-memory and no script is spawned.
     script_path: []const u8 = "",
     script_path_owned: bool = false,
-    /// `[machine] script_timeout` seconds. Stored for the simple provider.
+    /// `[machine] script_timeout` seconds: kill bound for each simple-provider script.
     script_timeout_s: f64 = 30,
     /// Set when a sudo password has been supplied. Owned by the ctx allocator.
     sudo_password: ?[]const u8 = null,
@@ -221,13 +199,13 @@ pub const MachineCtx = struct {
     /// invalidate cannot free. Do not mark this endpoint off_core.
     system_info_cache: ?std.json.Value = null,
     system_info_arena: ?std.heap.ArenaAllocator = null,
-    /// In-memory service state: allowed_service → { active_state, sub_state }.
-    /// Populated on first access; tracks starts/stops/restarts requested via
-    /// the service action handlers. The smp_allocator default lets a
-    /// struct-literal MachineCtx (tests) compile; init() recreates it with the
-    /// ctx allocator. Keys are always gpa-owned and freed with gpa, so the two
-    /// allocators never cross.
-    services: std.StringHashMap(ServiceEntry) = std.StringHashMap(ServiceEntry).init(std.heap.smp_allocator),
+    /// Service state: name → { active_state, sub_state }, in discovery order.
+    /// Holds the allowed services `discoverServices` found (Moonraker's
+    /// provider `available_services`) plus any service a start/stop/restart
+    /// action named. Keys are owned by `gpa`.
+    services: std.StringArrayHashMapUnmanaged(ServiceEntry) = .empty,
+    /// Set once service discovery has run (it runs at most once, like Moonraker).
+    services_discovered: bool = false,
     /// When true, setIo will NOT spawn a proc_stat timer thread. Set by test
     /// harnesses before calling httpServer to avoid background-thread + thread-
     /// pool interactions that can deadlock tests.
@@ -267,16 +245,6 @@ pub const MachineCtx = struct {
     /// "unknown" for states not in the known set.
     fn internState(state: []const u8) []const u8 {
         return state_intern_map.get(state) orelse "unknown";
-    }
-
-    pub fn init(alloc: std.mem.Allocator, clock_io: std.Io, bus: ?*NotifyBus, conns: ?*anyopaque) MachineCtx {
-        return .{
-            .gpa = alloc,
-            .clock_io = clock_io,
-            .bus = bus,
-            .conns = @ptrCast(@alignCast(conns)),
-            .services = std.StringHashMap(ServiceEntry).init(alloc),
-        };
     }
 
     /// Set the configured system provider (from `[machine] provider`). The string
@@ -319,14 +287,24 @@ pub const MachineCtx = struct {
         return if (self.run_cmd_fn == null) self.io else null;
     }
 
-    /// Run a command via the mock (when set) or std.process.run.
-    fn runCmd(self: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8) !RunCmdResult {
+    /// Run a command via the mock (when set) or std.process.run. A real process
+    /// is killed after `timeout_s` seconds (error.Timeout) and fails with
+    /// error.StreamTooLong once stdout or stderr exceeds `cmd_output_limit`.
+    fn runCmd(self: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8, timeout_s: f64) !RunCmdResult {
         if (self.run_cmd_fn) |f| {
             return f(self.run_cmd_ctx.?, alloc, argv);
         }
         if (self.io) |io| {
-            // Build a temporary []const []const u8 for std.process.run.
-            const result = try std.process.run(alloc, io, .{ .argv = argv });
+            const timeout: std.Io.Clock.Duration = .{
+                .raw = .fromNanoseconds(std.math.lossyCast(i96, timeout_s * std.time.ns_per_s)),
+                .clock = .awake,
+            };
+            const result = try std.process.run(alloc, io, .{
+                .argv = argv,
+                .stdout_limit = .limited(cmd_output_limit),
+                .stderr_limit = .limited(cmd_output_limit),
+                .timeout = .{ .deadline = .fromNow(io, timeout) },
+            });
             return .{ .stdout = result.stdout, .stderr = result.stderr };
         }
         return .{ .stdout = &.{}, .stderr = &.{} };
@@ -346,12 +324,8 @@ pub const MachineCtx = struct {
         if (self.provider_owned) self.gpa.free(self.provider_name);
         if (self.script_path_owned) self.gpa.free(self.script_path);
         self.sudo_password = null;
-        // Free service entry keys (StringHashMap stores slices, not owned copies).
-        var it = self.services.iterator();
-        while (it.next()) |entry| {
-            self.gpa.free(entry.key_ptr.*);
-        }
-        self.services.deinit();
+        for (self.services.keys()) |key| self.gpa.free(key);
+        self.services.deinit(self.gpa);
     }
 };
 
@@ -1053,7 +1027,7 @@ fn buildNetworkInfo(ctx: *MachineCtx, alloc: std.mem.Allocator) NetInfo {
         &.{ "/sbin/ip", "-json", "-det", "address" },
     };
     for (tries) |argv| {
-        const res = ctx.runCmd(alloc, argv) catch continue;
+        const res = ctx.runCmd(alloc, argv, cmd_timeout_s) catch continue;
         if (res.stdout.len == 0) continue;
         return parseIpAddrJson(alloc, res.stdout);
     }
@@ -1097,118 +1071,87 @@ fn buildVirtualization(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Val
 // available_services / service_state builders
 // ===========================================================================
 
-/// Returns the sorted list of all Moonraker-compatible service names that
-/// phobos registers or stubs. Mirrors the `available_services` key in
-/// Moonraker's machine._handle_info():
-///   sorted([name for name, comp in self.server.components.items() if comp])
-pub fn buildAvailableServices(ctx: *const MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
+/// `available_services`: the services discovery found (Moonraker reports its
+/// provider's discovered units). Empty for the `simple` and `none` providers,
+/// which discover nothing.
+pub fn buildAvailableServices(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
     var arr: std.json.Array = .init(alloc);
-    // Forge-X `simple` (and `none`) do not discover units. Moonraker's
-    // SimpleProvider leaves available_services empty, which is what the
-    // printer reports. systemd and supervisord keep the known list.
     const kind = providerKind(ctx.provider_name);
     if (kind == .simple or kind == .none) return .{ .array = arr };
-    for (available_services) |s| try arr.append(.{ .string = s });
+    try discoverServices(ctx, alloc);
+    for (ctx.services.keys()) |name| try arr.append(.{ .string = try alloc.dupe(u8, name) });
     return .{ .array = arr };
 }
 
-/// Returns a state map for all known services. Calls
-/// `refreshServiceStates` when io is available so the response reflects
-/// live systemd data. Falls back to in-memory tracking when io is absent.
+/// `service_state`: { name: { active_state, sub_state } } for every discovered
+/// service, refreshed through `systemctl show` for the systemd provider.
 pub fn buildServiceState(ctx: *MachineCtx, alloc: std.mem.Allocator) !std.json.Value {
-    const kind = providerKind(ctx.provider_name);
-    if (kind == .simple or kind == .none) return .{ .object = .empty };
-    if (ctx.io != null) refreshServiceStates(ctx, alloc);
-    const list = &available_services;
     var obj: std.json.ObjectMap = .empty;
-    for (list) |s| {
-        const entry = buildServiceEntry(ctx, s, alloc);
-        try obj.put(alloc, s, entry);
+    const kind = providerKind(ctx.provider_name);
+    if (kind == .simple or kind == .none) return .{ .object = obj };
+    try discoverServices(ctx, alloc);
+    refreshServiceStates(ctx, alloc);
+    var it = ctx.services.iterator();
+    while (it.next()) |e| {
+        var entry: std.json.ObjectMap = .empty;
+        try entry.put(alloc, "active_state", .{ .string = e.value_ptr.active_state });
+        try entry.put(alloc, "sub_state", .{ .string = e.value_ptr.sub_state });
+        try obj.put(alloc, try alloc.dupe(u8, e.key_ptr.*), .{ .object = entry });
     }
     return .{ .object = obj };
 }
 
-fn buildServiceEntry(ctx: *const MachineCtx, name: []const u8, alloc: std.mem.Allocator) std.json.Value {
-    // A service we have not actually queried is "unknown/unknown" (matches
-    // Moonraker machine.py:_detect_active_services), NOT a fabricated
-    // "active/running" — clients must not be told a service is up unverified.
-    const state: struct { active: []const u8, sub: []const u8 } = if (ctx.services.get(name)) |e|
-        .{ .active = e.active_state, .sub = e.sub_state }
-    else
-        .{ .active = "unknown", .sub = "unknown" };
-    var entry: std.json.ObjectMap = .empty;
-    entry.put(alloc, "active_state", .{ .string = state.active }) catch return errorOut();
-    entry.put(alloc, "sub_state", .{ .string = state.sub }) catch return errorOut();
-    return .{ .object = entry };
-}
-
-fn errorOut() std.json.Value {
-    var entry: std.json.ObjectMap = .empty;
-    entry.put(std.heap.smp_allocator, "active_state", .{ .string = "unknown" }) catch unreachable;
-    entry.put(std.heap.smp_allocator, "sub_state", .{ .string = "unknown" }) catch unreachable;
-    return .{ .object = entry };
-}
-
-/// Run `systemctl show -p ActiveState,SubState --value <services...>` and
-/// update the in-memory service state map. Emits
-/// `notify_service_state_changed` when a service transitions to a different
-/// (active_state, sub_state) pair. If systemctl is unavailable or fails,
-/// existing in-memory state is preserved.
-///
-/// Must only be called when ctx.io is available.
-fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
-    // Only the systemd provider queries systemctl. `simple` and `none` must
-    // not spawn it; a GET of system_info would otherwise hit the host.
-    if (providerKind(ctx.provider_name) != .systemd) return;
-
-    // Build argv: systemctl show -p ActiveState,SubState --value <svc1> <svc2> ...
-    var argv: [5 + available_services.len][]const u8 = undefined;
-
-    argv[0] = "systemctl";
-    argv[1] = "show";
-    argv[2] = "-p";
-    argv[3] = "ActiveState,SubState";
-    argv[4] = "--value";
-    for (available_services, 0..) |svc, i| {
-        argv[5 + i] = svc;
+/// Find the allowed services the provider manages, once (Moonraker
+/// `_detect_active_services`): `.service` unit names from `systemctl
+/// list-units`, or program names from `supervisorctl status`. A discovered
+/// service starts as unknown/unknown. A failed command discovers nothing.
+fn discoverServices(ctx: *MachineCtx, alloc: std.mem.Allocator) !void {
+    if (ctx.services_discovered or (ctx.io == null and ctx.run_cmd_fn == null)) return;
+    const kind = providerKind(ctx.provider_name);
+    const argv: []const []const u8 = switch (kind) {
+        .systemd => &.{ "systemctl", "list-units", "--all", "--type=service", "--plain", "--no-legend" },
+        .supervisord => &.{ "supervisorctl", "status" },
+        .simple, .none => return,
+    };
+    ctx.services_discovered = true;
+    const result = ctx.runCmd(alloc, argv, cmd_timeout_s) catch return;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    while (lines.next()) |line| {
+        var tokens = std.mem.tokenizeAny(u8, line, " \t\r");
+        const unit = tokens.next() orelse continue;
+        const name = if (kind == .systemd) std.mem.cutSuffix(u8, unit, ".service") orelse continue else unit;
+        if (!isServiceAllowed(name) or ctx.services.contains(name)) continue;
+        const key = try ctx.gpa.dupe(u8, name);
+        errdefer ctx.gpa.free(key);
+        try ctx.services.put(ctx.gpa, key, .active("unknown", "unknown"));
     }
+}
 
-    const result = ctx.runCmd(alloc, &argv) catch return;
+/// Update every discovered service from `systemctl show -p
+/// ActiveState,SubState --value <services...>` (systemd provider only). A
+/// failed query keeps the stored state.
+fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
+    // `simple` and `none` must not spawn systemctl.
+    if (providerKind(ctx.provider_name) != .systemd or ctx.services.count() == 0) return;
+    const prefix = [_][]const u8{ "systemctl", "show", "-p", "ActiveState,SubState", "--value" };
+    const argv = std.mem.concat(alloc, []const u8, &.{ &prefix, ctx.services.keys() }) catch return;
+    defer alloc.free(argv);
+    const result = ctx.runCmd(alloc, argv, cmd_timeout_s) catch return;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
-    // systemctl outputs one property value per line, with blank-line
-    // separators between services. Moonraker splits on "\n\n".
+    // One "ActiveState\nSubState" block per service, separated by a blank
+    // line. Moonraker splits on "\n\n".
     var svc_blocks = std.mem.splitSequence(u8, result.stdout, "\n\n");
-
-    for (available_services) |svc_name| {
+    for (ctx.services.values()) |*entry| {
         const block = svc_blocks.next() orelse break;
-        if (block.len == 0) continue;
-
-        // Each block has at most two non-empty lines: ActiveState, SubState.
         var lines = std.mem.splitScalar(u8, block, '\n');
         const active_line = lines.next() orelse continue;
         const sub_line = lines.next() orelse continue;
-
         if (active_line.len == 0) continue;
-
-        const new_active = MachineCtx.internState(active_line);
-        const new_sub = MachineCtx.internState(sub_line);
-
-        const prev = ctx.services.get(svc_name);
-        const changed = prev == null or
-            !std.mem.eql(u8, prev.?.active_state, new_active) or
-            !std.mem.eql(u8, prev.?.sub_state, new_sub);
-
-        if (!changed) continue;
-
-        // Update or insert the entry (reuse the key if it exists).
-        const entry = MachineCtx.ServiceEntry.active(new_active, new_sub);
-        if (ctx.services.getPtr(svc_name)) |existing| {
-            existing.* = entry;
-        } else {
-            ctx.services.put(ctx.gpa.dupe(u8, svc_name) catch continue, entry) catch continue;
-        }
+        entry.* = .active(MachineCtx.internState(active_line), MachineCtx.internState(sub_line));
     }
 }
 
@@ -1567,38 +1510,19 @@ pub fn handleShutdown(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocat
 // services.{restart,stop,start}
 // ===========================================================================
 
-/// True if a service name is allowed (matches machine.py `is_service_allowed`):
-/// the default allowed list, any phobos-registered service, or anything
-/// matching moonraker[_-]?\d* / klipper[_-]?\d*.
-/// Comptime perfect-hash set of all statically-allowed service names (in
-/// .rodata, no runtime allocation), replacing two linear scans per call.
+/// Moonraker `is_service_allowed`: a default allowed service, or a name that
+/// `re.match`es `moonraker[_-]?\d*` or `klipper[_-]?\d*`. `re.match` anchors
+/// only the start, so any name beginning with `moonraker` or `klipper` passes.
 const allowed_services_set = std.StaticStringMap(void).initComptime(blk: {
-    const all = default_allowed_services ++ available_services;
-    var kvs: [all.len]struct { []const u8 } = undefined;
-    for (all, 0..) |s, i| kvs[i] = .{s};
+    var kvs: [default_allowed_services.len]struct { []const u8 } = undefined;
+    for (default_allowed_services, 0..) |s, i| kvs[i] = .{s};
     break :blk kvs;
 });
 
 pub fn isServiceAllowed(name: []const u8) bool {
-    if (allowed_services_set.has(name)) return true;
-    return prefixWithOptIndex(name, "moonraker") or prefixWithOptIndex(name, "klipper");
-}
-
-/// Match `<base>` optionally followed by '_'/'-' then digits (and nothing
-/// else): the `base[_-]?\d*` regex from machine.py.
-fn prefixWithOptIndex(name: []const u8, base: []const u8) bool {
-    if (!std.mem.startsWith(u8, name, base)) return false;
-    var rest = name[base.len..];
-    if (rest.len == 0) return true;
-    if (rest[0] == '_' or rest[0] == '-') rest = rest[1..];
-    for (rest) |c| {
-        if (!std.ascii.isDigit(c)) return false;
-    }
-    return true;
-}
-
-fn hostPowerWord(arg: []const u8) bool {
-    return std.mem.eql(u8, arg, "reboot") or std.mem.eql(u8, arg, "shutdown") or std.mem.eql(u8, arg, "poweroff");
+    return allowed_services_set.has(name) or
+        std.mem.startsWith(u8, name, "moonraker") or
+        std.mem.startsWith(u8, name, "klipper");
 }
 
 /// Optimistic post-action state for a service when the manager can't be queried
@@ -1624,11 +1548,21 @@ fn supervisorState(out: []const u8) struct { []const u8, []const u8 } {
     return .{ "unknown", "unknown" };
 }
 
-/// Shared helper for the three service action endpoints. Validates the `service`
-/// param against the allow-list, runs `systemctl <action> <service>`, reads the
-/// resulting state via `systemctl show`, and emits
-/// `notify_service_state_changed`. Falls back to optimistic in-memory state
-/// when io is null (unit test path).
+/// Run a service command whose output is not used. A failed command leaves the
+/// state query to report the outcome.
+fn runDiscardingOutput(ctx: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8, timeout_s: f64) void {
+    const result = ctx.runCmd(alloc, argv, timeout_s) catch return;
+    alloc.free(result.stdout);
+    alloc.free(result.stderr);
+}
+
+/// Shared helper for the three service action endpoints. Validates the
+/// `service` param against the allow-list, runs the provider's action command,
+/// reads the resulting state, stores it and emits
+/// `notify_service_state_changed`. The `none` provider, and a ctx without io or
+/// a command runner, store the optimistic state without running anything.
+/// Reboot, shutdown and poweroff cannot reach a command: `action` is a
+/// `ServiceAction` and no allowed name is a host power word.
 fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allocator, action: ServiceAction) !std.json.Value {
     const name = try getStr(params, "service");
     if (!isServiceAllowed(name)) return error.Forbidden;
@@ -1636,114 +1570,58 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
     // drop it (covers every exit below). Runs under Core, same as handleSystemInfo.
     defer invalidateSystemInfo(ctx);
 
-    const kind = providerKind(ctx.provider_name);
-    // `none` keeps state in-memory only; otherwise run the manager when wired.
-    if (kind != .none and (ctx.io != null or ctx.run_cmd_fn != null)) {
-        const action_str = @tagName(action);
-        var new_active: []const u8 = "unknown";
-        var new_sub: []const u8 = "unknown";
-        switch (kind) {
-            .systemd => {
-                // systemctl <start|stop|restart> --no-block <service>.
-                var argv: [4][]const u8 = .{ "systemctl", action_str, "--no-block", name };
-                if (ctx.runCmd(alloc, &argv)) |ar| {
-                    alloc.free(ar.stdout);
-                    alloc.free(ar.stderr);
-                } else |_| {}
-                var show_argv: [6][]const u8 = .{ "systemctl", "show", "-p", "ActiveState,SubState", "--value", name };
-                const show_result = ctx.runCmd(alloc, &show_argv) catch return .{ .string = "ok" };
-                defer alloc.free(show_result.stdout);
-                defer alloc.free(show_result.stderr);
-                var lines = std.mem.splitScalar(u8, show_result.stdout, '\n');
+    const action_str = @tagName(action);
+    var new_active: []const u8, var new_sub: []const u8 = optimisticState(action);
+    if (ctx.io != null or ctx.run_cmd_fn != null) switch (providerKind(ctx.provider_name)) {
+        .none => {},
+        .systemd => {
+            runDiscardingOutput(ctx, alloc, &.{ "systemctl", action_str, "--no-block", name }, cmd_timeout_s);
+            if (ctx.runCmd(alloc, &.{ "systemctl", "show", "-p", "ActiveState,SubState", "--value", name }, cmd_timeout_s)) |show| {
+                defer alloc.free(show.stdout);
+                defer alloc.free(show.stderr);
+                var lines = std.mem.splitScalar(u8, show.stdout, '\n');
                 const active_line = lines.next() orelse "";
                 const sub_line = lines.next() orelse "";
-                if (active_line.len > 0) new_active = MachineCtx.internState(active_line);
-                if (sub_line.len > 0) new_sub = MachineCtx.internState(sub_line);
-            },
-            .supervisord => {
-                // supervisorctl <start|stop|restart> <service>; state from
-                // `supervisorctl status <service>` (RUNNING/STOPPED/…).
-                var argv: [3][]const u8 = .{ "supervisorctl", action_str, name };
-                if (ctx.runCmd(alloc, &argv)) |ar| {
-                    alloc.free(ar.stdout);
-                    alloc.free(ar.stderr);
-                } else |_| {}
-                var st_argv: [3][]const u8 = .{ "supervisorctl", "status", name };
-                if (ctx.runCmd(alloc, &st_argv)) |st| {
-                    defer alloc.free(st.stdout);
-                    defer alloc.free(st.stderr);
-                    new_active, new_sub = supervisorState(st.stdout);
-                } else |_| {
-                    // Optimistic fallback if the query fails.
-                    new_active, new_sub = optimisticState(action);
-                }
-            },
-            .simple => {
-                // Forge-X SimpleProvider: `<script_path>/<service> <action>`.
-                // No shell. reboot/shutdown/poweroff are refused. An empty
-                // script_path does not spawn anything.
-                new_active, new_sub = optimisticState(action);
-                if (!hostPowerWord(action_str) and !hostPowerWord(name) and ctx.script_path.len != 0) {
-                    if (std.fs.path.join(alloc, &.{ ctx.script_path, name })) |script| {
-                        defer alloc.free(script);
-                        if (!hostPowerWord(script)) {
-                            var argv: [2][]const u8 = .{ script, action_str };
-                            if (ctx.runCmd(alloc, &argv)) |ar| {
-                                alloc.free(ar.stdout);
-                                alloc.free(ar.stderr);
-                            } else |_| {}
-                        }
-                    } else |_| {}
-                }
-            },
-            .none => unreachable,
-        }
-
-        const entry = MachineCtx.ServiceEntry.active(new_active, new_sub);
-        if (ctx.services.getPtr(name)) |existing| {
-            existing.* = entry;
-        } else {
-            const key = try ctx.gpa.dupe(u8, name);
-            errdefer ctx.gpa.free(key);
-            try ctx.services.put(key, entry);
-        }
-
-        if (ctx.bus) |bus| {
-            if (ctx.io) |io| {
-                var svc_obj: std.json.ObjectMap = .empty;
-                svc_obj.put(alloc, "active_state", .{ .string = new_active }) catch {};
-                svc_obj.put(alloc, "sub_state", .{ .string = new_sub }) catch {};
-                var outer: std.json.ObjectMap = .empty;
-                outer.put(alloc, name, .{ .object = svc_obj }) catch {};
-                _ = bus.emitLocked(io, notify.names.service_state_changed, .{ .object = outer }) catch {};
+                new_active = if (active_line.len > 0) MachineCtx.internState(active_line) else "unknown";
+                new_sub = if (sub_line.len > 0) MachineCtx.internState(sub_line) else "unknown";
+            } else |_| {}
+        },
+        .supervisord => {
+            runDiscardingOutput(ctx, alloc, &.{ "supervisorctl", action_str, name }, cmd_timeout_s);
+            if (ctx.runCmd(alloc, &.{ "supervisorctl", "status", name }, cmd_timeout_s)) |st| {
+                defer alloc.free(st.stdout);
+                defer alloc.free(st.stderr);
+                new_active, new_sub = supervisorState(st.stdout);
+            } else |_| {}
+        },
+        .simple => {
+            // Forge-X SimpleProvider: `<script_path>/<service> <action>`, no
+            // shell. An empty script_path spawns nothing.
+            if (ctx.script_path.len != 0) {
+                const script = try std.fs.path.join(alloc, &.{ ctx.script_path, name });
+                defer alloc.free(script);
+                runDiscardingOutput(ctx, alloc, &.{ script, action_str }, ctx.script_timeout_s);
             }
-        }
+        },
+    };
 
-        return .{ .string = "ok" };
-    }
-
-    // `none` provider, or no runner: optimistic in-memory state.
-    const new_active: []const u8, const new_sub: []const u8 = optimisticState(action);
-
-    const entry = MachineCtx.ServiceEntry.active(new_active, new_sub);
+    const entry: MachineCtx.ServiceEntry = .active(new_active, new_sub);
     if (ctx.services.getPtr(name)) |existing| {
         existing.* = entry;
     } else {
         const key = try ctx.gpa.dupe(u8, name);
         errdefer ctx.gpa.free(key);
-        try ctx.services.put(key, entry);
+        try ctx.services.put(ctx.gpa, key, entry);
     }
 
-    if (ctx.bus != null and ctx.io != null) {
-        const bus = ctx.bus.?;
-        const io = ctx.io.?;
+    if (ctx.bus) |bus| if (ctx.io) |io| {
         var svc_obj: std.json.ObjectMap = .empty;
-        svc_obj.put(alloc, "active_state", .{ .string = new_active }) catch {};
-        svc_obj.put(alloc, "sub_state", .{ .string = new_sub }) catch {};
+        try svc_obj.put(alloc, "active_state", .{ .string = new_active });
+        try svc_obj.put(alloc, "sub_state", .{ .string = new_sub });
         var outer: std.json.ObjectMap = .empty;
-        outer.put(alloc, name, .{ .object = svc_obj }) catch {};
+        try outer.put(alloc, name, .{ .object = svc_obj });
         _ = bus.emitLocked(io, notify.names.service_state_changed, .{ .object = outer }) catch {};
-    }
+    };
 
     return .{ .string = "ok" };
 }
@@ -2356,7 +2234,7 @@ test "simple provider virtualization is unknown outside a container" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var c = MachineCtx.init(a, testing.io, null, null);
+    var c = MachineCtx{ .gpa = a, .clock_io = testing.io };
     defer c.deinit();
     try c.setProvider("simple");
     const v = try buildVirtualization(&c, a);
@@ -2368,7 +2246,7 @@ test "simple provider reports no discovered services" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var c = MachineCtx.init(a, testing.io, null, null);
+    var c = MachineCtx{ .gpa = a, .clock_io = testing.io };
     defer c.deinit();
     try c.setProvider("simple");
     const listed = try buildAvailableServices(&c, a);
@@ -2584,7 +2462,7 @@ test "buildNetworkInfo uses /usr/sbin/ip when ip is not on PATH" {
         }
     };
     var dummy: u8 = 0;
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
     c.setRunCmdFn(Mock.run, @ptrCast(&dummy));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2741,7 +2619,7 @@ test "fuzz computeBandwidth: never crashes, never negative" {
 // ---- applyBandwidth ----
 
 test "applyBandwidth: zero on first sight, real delta on second tick" {
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2767,7 +2645,7 @@ test "applyBandwidth: zero on first sight, real delta on second tick" {
 test "fuzz applyBandwidth: arbitrary net objects never crash" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+            var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
             defer c.deinit();
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
@@ -2798,8 +2676,14 @@ test "isServiceAllowed: defaults and moonraker/klipper patterns" {
     try testing.expect(isServiceAllowed("moonraker_1"));
     try testing.expect(isServiceAllowed("klipper-2"));
     try testing.expect(isServiceAllowed("moonraker2"));
+    // `re.match` anchors only the start of the name.
+    try testing.expect(isServiceAllowed("moonraker_foo"));
+    try testing.expect(isServiceAllowed("klipper_mcu2"));
     try testing.expect(!isServiceAllowed("sshd"));
-    try testing.expect(!isServiceAllowed("moonraker_foo"));
+    try testing.expect(!isServiceAllowed("my-klipper"));
+    // phobos component names are not services.
+    try testing.expect(!isServiceAllowed("history"));
+    try testing.expect(!isServiceAllowed("mqtt"));
     try testing.expect(!isServiceAllowed(""));
 }
 
@@ -2850,7 +2734,7 @@ test "handleProcStats: full shape present" {
 // runs the tests. Do not add a flag, a provider, or a real path behind the
 // stub. A skipped or no-op assertion is the correct result.
 test "handleReboot/handleShutdown: ack ok (io null)" {
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2860,7 +2744,7 @@ test "handleReboot/handleShutdown: ack ok (io null)" {
 }
 
 test "service handlers: start/stop/restart update state; disallowed Forbidden" {
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -2893,10 +2777,9 @@ test "service handlers: start/stop/restart update state; disallowed Forbidden" {
     try testing.expectError(error.InvalidParams, handleServiceStop(@ptrCast(&c), .null, a));
     try testing.expectError(error.InvalidParams, handleServiceRestart(@ptrCast(&c), .null, a));
 
-    // available_services: mqtt should be allowed now
-    const mqtt_ok = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"mqtt\"}"), a);
-    try testing.expectEqualStrings("ok", mqtt_ok.string);
-    try testing.expect(c.services.get("mqtt") != null);
+    // A phobos component name is not a systemd unit to restart.
+    try testing.expectError(error.Forbidden, handleServiceRestart(@ptrCast(&c), try objParams(a, "{\"service\":\"history\"}"), a));
+    try testing.expect(c.services.get("history") == null);
 }
 
 test "runCmd: delegates to mock when set, returns empty when no io" {
@@ -2910,12 +2793,12 @@ test "runCmd: delegates to mock when set, returns empty when no io" {
         }
     };
     var mock = MockCtx{};
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
 
     // Without mock and without io → returns empty.
     {
-        const r = try c.runCmd(testing.allocator, &.{ "echo", "hello" });
+        const r = try c.runCmd(testing.allocator, &.{ "echo", "hello" }, cmd_timeout_s);
         defer testing.allocator.free(r.stdout);
         defer testing.allocator.free(r.stderr);
         try testing.expectEqualStrings("", r.stdout);
@@ -2925,7 +2808,7 @@ test "runCmd: delegates to mock when set, returns empty when no io" {
     // With mock → delegates.
     c.setRunCmdFn(MockCtx.runCmd, @ptrCast(&mock));
     {
-        const r = try c.runCmd(testing.allocator, &.{ "systemctl", "show", "-p", "ActiveState", "--value", "klipper" });
+        const r = try c.runCmd(testing.allocator, &.{ "systemctl", "show", "-p", "ActiveState", "--value", "klipper" }, cmd_timeout_s);
         defer testing.allocator.free(r.stdout);
         defer testing.allocator.free(r.stderr);
         try testing.expectEqualStrings("mock_stdout", r.stdout);
@@ -2983,7 +2866,7 @@ test "provider abstraction: service action dispatches to the right manager" {
     // Default provider → systemctl.
     {
         var mock = Mock{};
-        var c = MachineCtx.init(a, testing.io, null, null);
+        var c = MachineCtx{ .gpa = a, .clock_io = testing.io };
         defer c.deinit();
         c.setRunCmdFn(Mock.run, @ptrCast(&mock));
         _ = try handleServiceStart(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
@@ -2992,7 +2875,7 @@ test "provider abstraction: service action dispatches to the right manager" {
     // supervisord → supervisorctl, RUNNING → active/running.
     {
         var mock = Mock{};
-        var c = MachineCtx.init(a, testing.io, null, null);
+        var c = MachineCtx{ .gpa = a, .clock_io = testing.io };
         defer c.deinit();
         try c.setProvider("supervisord_cli");
         c.setRunCmdFn(Mock.run, @ptrCast(&mock));
@@ -3003,7 +2886,7 @@ test "provider abstraction: service action dispatches to the right manager" {
     // none → no real command is ever run; state is in-memory only.
     {
         var mock = Mock{};
-        var c = MachineCtx.init(a, testing.io, null, null);
+        var c = MachineCtx{ .gpa = a, .clock_io = testing.io };
         defer c.deinit();
         try c.setProvider("none");
         c.setRunCmdFn(Mock.run, @ptrCast(&mock));
@@ -3031,7 +2914,7 @@ test "provider abstraction: service action dispatches to the right manager" {
         var rec = Rec{ .alloc = testing.allocator };
         defer if (rec.path.len > 0) testing.allocator.free(rec.path);
         defer if (rec.action.len > 0) testing.allocator.free(rec.action);
-        var c = MachineCtx.init(a, testing.io, null, null);
+        var c = MachineCtx{ .gpa = a, .clock_io = testing.io };
         defer c.deinit();
         try c.setProvider("simple");
         try c.setScriptPath("/no/such/scripts");
@@ -3060,7 +2943,7 @@ test "service handler with runCmd mock: uses mock output for state" {
         }
     };
     var mock = MockCtx{};
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
     c.setRunCmdFn(MockCtx.runCmd, @ptrCast(&mock));
 
@@ -3076,49 +2959,117 @@ test "service handler with runCmd mock: uses mock output for state" {
     try testing.expectEqualStrings("dead", c.services.get("klipper").?.sub_state);
 }
 
-test "buildServiceState: reflects tracked service states" {
-    var c = MachineCtx.init(testing.allocator, testing.io, null, null);
+test "service discovery: allowed systemd units only, discovered once" {
+    const Mock = struct {
+        list_calls: usize = 0,
+        show_names: usize = 0,
+        fn run(ctx: *anyopaque, gpa: std.mem.Allocator, argv: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (std.mem.eql(u8, argv[1], "list-units")) {
+                self.list_calls += 1;
+                return .{ .stdout = try gpa.dupe(u8, "klipper.service loaded active running Klipper\n" ++
+                    "moonraker-2.service loaded active running API\n" ++
+                    "sshd.service loaded active running OpenSSH\n" ++
+                    "crowsnest.socket loaded active listening Socket\n" ++
+                    "KlipperScreen.service loaded inactive dead Screen\n"), .stderr = &.{} };
+            }
+            if (std.mem.eql(u8, argv[1], "show")) {
+                self.show_names = argv.len - 5;
+                return .{ .stdout = try gpa.dupe(u8, "active\nrunning\n\ninactive\ndead\n\nfailed\nfailed\n"), .stderr = &.{} };
+            }
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    var mock = Mock{};
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
     defer c.deinit();
+    c.setRunCmdFn(Mock.run, @ptrCast(&mock));
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // Default (never queried): unknown/unknown, matching Moonraker.
-    const s0 = try buildServiceState(&c, a);
-    try testing.expect(s0.object.get("klipper") != null);
-    try testing.expectEqualStrings("unknown", s0.object.get("klipper").?.object.get("active_state").?.string);
-    try testing.expectEqualStrings("unknown", s0.object.get("klipper").?.object.get("sub_state").?.string);
-
-    // After stop: state changes
-    _ = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
-    const s1 = try buildServiceState(&c, a);
-    try testing.expectEqualStrings("inactive", s1.object.get("klipper").?.object.get("active_state").?.string);
-    try testing.expectEqualStrings("dead", s1.object.get("klipper").?.object.get("sub_state").?.string);
-
-    // Other (never queried) service still unknown.
-    try testing.expectEqualStrings("unknown", s1.object.get("mqtt").?.object.get("active_state").?.string);
-}
-
-test "buildServiceState: all available_services present" {
-    var c = testCtx(testing.allocator);
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const ss = try buildServiceState(&c, a);
-    const o = ss.object;
-    for (available_services) |s| {
-        try testing.expect(o.get(s) != null);
+    const avail = try buildAvailableServices(&c, a);
+    try testing.expectEqual(@as(usize, 3), avail.array.items.len);
+    for ([_][]const u8{ "klipper", "moonraker-2", "KlipperScreen" }, avail.array.items) |want, got| {
+        try testing.expectEqualStrings(want, got.string);
     }
+    const state = try buildServiceState(&c, a);
+    try testing.expectEqual(@as(usize, 1), mock.list_calls);
+    try testing.expectEqual(@as(usize, 3), mock.show_names);
+    try testing.expectEqual(@as(usize, 3), state.object.count());
+    try testing.expectEqualStrings("running", state.object.get("klipper").?.object.get("sub_state").?.string);
+    try testing.expectEqualStrings("inactive", state.object.get("moonraker-2").?.object.get("active_state").?.string);
+    try testing.expectEqualStrings("failed", state.object.get("KlipperScreen").?.object.get("active_state").?.string);
+    try testing.expect(state.object.get("sshd") == null);
 }
 
-test "buildAvailableServices: all available_services present in array" {
+test "service discovery: no runner and simple provider report nothing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var c = testCtx(a);
-    const v = try buildAvailableServices(&c, a);
-    try testing.expect(v == .array);
-    try testing.expectEqual(available_services.len, v.array.items.len);
+    try testing.expectEqual(@as(usize, 0), (try buildAvailableServices(&c, a)).array.items.len);
+    try testing.expectEqual(@as(usize, 0), (try buildServiceState(&c, a)).object.count());
+    try testing.expect(!c.services_discovered);
+    try c.setProvider("simple");
+    _ = try handleServiceStop(@ptrCast(&c), try objParams(a, "{\"service\":\"klipper\"}"), a);
+    try testing.expectEqual(@as(usize, 0), (try buildServiceState(&c, a)).object.count());
+}
+
+test "fuzz service discovery: arbitrary list-units output" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const Mock = struct {
+                out: []const u8,
+                fn run(ctx: *anyopaque, gpa: std.mem.Allocator, _: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+                    const self: *@This() = @ptrCast(@alignCast(ctx));
+                    return .{ .stdout = try gpa.dupe(u8, self.out), .stderr = &.{} };
+                }
+            };
+            var buf: [128]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var mock = Mock{ .out = &buf };
+            var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io };
+            defer c.deinit();
+            c.setRunCmdFn(Mock.run, @ptrCast(&mock));
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const state = try buildServiceState(&c, arena.allocator());
+            for (state.object.keys()) |name| try testing.expect(isServiceAllowed(name));
+        }
+    }.run, .{});
+}
+
+test "runCmd: real processes are bounded by time and output size" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io, .io = threaded.io() };
+    defer c.deinit();
+    const start = std.Io.Clock.Timestamp.now(threaded.io(), .awake);
+    try testing.expectError(error.Timeout, c.runCmd(testing.allocator, &.{ "sleep", "5" }, 0.2));
+    try testing.expect(start.untilNow(threaded.io()).raw.toMilliseconds() < 3000);
+    try testing.expectError(error.StreamTooLong, c.runCmd(testing.allocator, &.{ "head", "-c", "300000", "/dev/zero" }, cmd_timeout_s));
+}
+
+test "simple provider: script_timeout kills a hung script" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "klipper", .data = "#!/bin/sh\nexec sleep 5\n", .flags = .{ .permissions = .executable_file } });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    var c = MachineCtx{ .gpa = testing.allocator, .clock_io = testing.io, .io = io, .script_timeout_s = 0.2 };
+    defer c.deinit();
+    try c.setProvider("simple");
+    try c.setScriptPath(dir);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    const r = try handleServiceRestart(@ptrCast(&c), try objParams(arena.allocator(), "{\"service\":\"klipper\"}"), arena.allocator());
+    try testing.expectEqualStrings("ok", r.string);
+    try testing.expect(start.untilNow(io).raw.toMilliseconds() < 3000);
 }
 
 test "handleSudoInfo: shape" {
@@ -3466,9 +3417,9 @@ test "process CPU samples belong to each machine context" {
     var vtable = std.testing.io.vtable.*;
     vtable.now = Clocks.now;
     const io: std.Io = .{ .userdata = &state, .vtable = &vtable };
-    var first = MachineCtx.init(std.testing.allocator, io, null, null);
+    var first = MachineCtx{ .gpa = std.testing.allocator, .clock_io = io };
     defer first.deinit();
-    var second = MachineCtx.init(std.testing.allocator, io, null, null);
+    var second = MachineCtx{ .gpa = std.testing.allocator, .clock_io = io };
     defer second.deinit();
     try std.testing.expectEqual(@as(f64, 0), procCpuUsage(&first, io));
     state.wall += std.time.ns_per_s;
@@ -3480,11 +3431,11 @@ test "process CPU samples belong to each machine context" {
 test "fuzz process CPU sample starts independently of other contexts" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) !void {
-            var first = MachineCtx.init(std.testing.allocator, std.testing.io, null, null);
+            var first = MachineCtx{ .gpa = std.testing.allocator, .clock_io = std.testing.io };
             defer first.deinit();
             first.proc_cpu_wall = @floatFromInt(smith.valueRangeAtMostWithHash(u32, 1, 1000, 0));
             _ = procCpuUsage(&first, std.testing.io);
-            var second = MachineCtx.init(std.testing.allocator, std.testing.io, null, null);
+            var second = MachineCtx{ .gpa = std.testing.allocator, .clock_io = std.testing.io };
             defer second.deinit();
             try std.testing.expectEqual(@as(f64, 0), procCpuUsage(&second, std.testing.io));
         }
