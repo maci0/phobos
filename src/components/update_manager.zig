@@ -109,6 +109,7 @@ pub const Source = struct {
     pinned_behind: i64 = 0,
     /// Commit `rollback` resets to. Empty means rollback is not performed.
     rollback_ref: []const u8 = "",
+    managed_services: []const []const u8 = &.{},
     /// Whether this source is a git repository eligible for recover/rollback.
     pub fn isGit(self: Source) bool {
         return self.type == .git_repo;
@@ -119,8 +120,8 @@ pub const Source = struct {
 /// klipper (git repos). Mirrors UpdateManager.__init__.
 pub const default_sources = [_]Source{
     .{ .name = "system", .type = .system, .owner = "", .repo_name = "" },
-    .{ .name = "moonraker", .type = .git_repo, .owner = "Arksine", .repo_name = "moonraker", .branch = "master" },
-    .{ .name = "klipper", .type = .git_repo, .owner = "Klipper3d", .repo_name = "klipper", .branch = "master" },
+    .{ .name = "moonraker", .type = .git_repo, .owner = "Arksine", .repo_name = "moonraker", .branch = "master", .managed_services = &.{"moonraker"} },
+    .{ .name = "klipper", .type = .git_repo, .owner = "Klipper3d", .repo_name = "klipper", .branch = "master", .managed_services = &.{"klipper"} },
 };
 
 /// `github.com/<owner>/<repo>` from an origin URL. Slices borrow `origin`.
@@ -177,6 +178,18 @@ pub fn sourcesFromConfig(arena: std.mem.Allocator, cfg: *const config_helper.Con
         const branch = cfg.get(sect, "primary_branch") orelse if (stype == .git_repo) "master" else "";
         const channel = cfg.get(sect, "channel") orelse if (stype == .git_repo) "dev" else "stable";
         const path = cfg.get(sect, "path") orelse "";
+        var services: std.ArrayList([]const u8) = .empty;
+        if (stype != .web) {
+            if (cfg.get(sect, "managed_services")) |raw| {
+                var names_iter = std.mem.tokenizeAny(u8, raw, ", \t\r\n");
+                while (names_iter.next()) |service| {
+                    if (!std.mem.eql(u8, service, name) and !std.mem.eql(u8, service, "klipper") and !std.mem.eql(u8, service, "moonraker")) return error.InvalidManagedService;
+                    try services.append(arena, try arena.dupe(u8, service));
+                }
+            } else if ((cfg.getBoolean(sect, "is_system_service") catch true) and @import("machine.zig").isServiceAllowed(name)) {
+                try services.append(arena, try arena.dupe(u8, name));
+            }
+        }
         try list.append(arena, .{
             .name = try arena.dupe(u8, name),
             .type = stype,
@@ -186,6 +199,7 @@ pub fn sourcesFromConfig(arena: std.mem.Allocator, cfg: *const config_helper.Con
             .repo_path = try arena.dupe(u8, path),
             .channel = try arena.dupe(u8, channel),
             .origin = try arena.dupe(u8, origin),
+            .managed_services = try services.toOwnedSlice(arena),
         });
     }
     return list.items;
@@ -294,6 +308,8 @@ pub const UpdateCtx = struct {
     /// no package provider (Moonraker: "Cannot upgrade packages, no provider set").
     shell: ?ShellFn = null,
     shell_ctx: ?*anyopaque = null,
+    restart_service: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void = null,
+    service_ctx: ?*anyopaque = null,
     /// `[update_manager] enable_auto_refresh`. False does not start a timer
     /// and `tickAutoRefresh` does not refresh. The printer sets this false.
     auto_refresh: bool = false,
@@ -950,18 +966,36 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
 
 /// The commands of one single-target update (see `runUpdate`).
 fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
-    try ctx.commands.lock(ctx.clock_io);
-    defer ctx.commands.unlock(ctx.clock_io);
-    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
-    if (src.type == .git_repo and src.repo_path.len > 0) {
-        if (ctx.io) |io| {
-            if (!gitFetch(io, alloc, src.repo_path, ctx.gitEnvironment())) return error.GitFailed;
-            const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
-            defer alloc.free(ref);
-            if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
+    var changed = false;
+    {
+        try ctx.commands.lock(ctx.clock_io);
+        defer ctx.commands.unlock(ctx.clock_io);
+        if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+        if (src.type == .git_repo and src.repo_path.len > 0) {
+            if (ctx.io) |io| {
+                const previous = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()) orelse return error.GitFailed;
+                defer alloc.free(previous);
+                const dirty = gitOutput(io, alloc, src.repo_path, &.{ "status", "--porcelain" }, ctx.gitEnvironment());
+                defer if (dirty) |bytes| alloc.free(bytes);
+                if (!gitFetch(io, alloc, src.repo_path, ctx.gitEnvironment())) return error.GitFailed;
+                const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
+                defer alloc.free(ref);
+                if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
+                const current = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()) orelse return error.GitFailed;
+                defer alloc.free(current);
+                changed = !std.mem.eql(u8, previous, current) or (dirty != null and dirty.?.len > 0);
+            }
         }
+        try updatePackages(ctx, alloc, src);
     }
-    try updatePackages(ctx, alloc, src);
+    if (changed) try restartServices(ctx, alloc, src);
+}
+
+fn restartServices(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    if (src.managed_services.len == 0) return;
+    const restart = ctx.restart_service orelse return error.ServiceUnavailable;
+    const service_ctx = ctx.service_ctx orelse return error.ServiceUnavailable;
+    for (src.managed_services) |service| try restart(service_ctx, alloc, service);
 }
 
 /// apt-get for the system source, then pip for a source with `requirements`.
@@ -1088,19 +1122,22 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 }
 
 fn recoverRepo(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source, hard: bool) !void {
-    try ctx.commands.lock(ctx.clock_io);
-    defer ctx.commands.unlock(ctx.clock_io);
-    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const io = ctx.io orelse return;
-    if (hard) {
-        if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" }, ctx.gitEnvironment())) return error.GitFailed;
-        if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" }, ctx.gitEnvironment())) return error.GitFailed;
-    } else {
-        const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
-        defer alloc.free(ref);
-        if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch }, ctx.gitEnvironment())) return error.GitFailed;
-        if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
+    {
+        try ctx.commands.lock(ctx.clock_io);
+        defer ctx.commands.unlock(ctx.clock_io);
+        if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+        if (hard) {
+            if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" }, ctx.gitEnvironment())) return error.GitFailed;
+            if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" }, ctx.gitEnvironment())) return error.GitFailed;
+        } else {
+            const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
+            defer alloc.free(ref);
+            if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch }, ctx.gitEnvironment())) return error.GitFailed;
+            if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
+        }
     }
+    try restartServices(ctx, alloc, src);
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,6 +1176,7 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
             notifyLine(ctx, alloc, app, proc_id, true, "GitFailed", .{});
             return error.GitFailed;
         }
+        if (src.repo_path.len > 0) try restartServices(ctx, alloc, src);
     }
     notifyLine(ctx, alloc, app, proc_id, true, "{s} rollback finished", .{app});
     return .{ .string = "ok" };
@@ -1928,20 +1966,91 @@ test "update dispatcher runs commands outside Core and serializes the operation"
 }
 
 test "full update applies the Git source in a local fixture" {
+    const Restart = struct {
+        ctx: *UpdateCtx,
+        calls: usize = 0,
+        fn run(raw: *anyopaque, _: std.mem.Allocator, service: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expectEqualStrings("klipper", service);
+            try testing.expect(self.ctx.commands.tryLock());
+            self.ctx.commands.unlock(testing.io);
+            try testing.expect(self.ctx.busy.load(.acquire));
+            self.calls += 1;
+        }
+    };
     var repo = try TestRepo.init();
     defer repo.deinit();
     try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "original" });
     try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "add", "tracked" }, null));
     try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "tracked" }, null));
     try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "modified" });
-    const sources = [_]Source{.{ .name = "fixture", .type = .git_repo, .repo_path = repo.path, .branch = "main" }};
+    const sources = [_]Source{.{ .name = "fixture", .type = .git_repo, .repo_path = repo.path, .branch = "main", .managed_services = &.{"klipper"} }};
     var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &sources, .bus = null, .io = testing.io };
+    var restarted: Restart = .{ .ctx = &ctx };
+    ctx.restart_service = Restart.run;
+    ctx.service_ctx = &restarted;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     try testing.expectEqualStrings("ok", (try handleFull(&ctx, .null, arena_state.allocator())).string);
     var bytes: [32]u8 = undefined;
     const data = try repo.tmp.dir.readFile(testing.io, "tracked", &bytes);
     try testing.expectEqualStrings("original", data);
+    try testing.expectEqual(@as(usize, 1), restarted.calls);
+    _ = try handleFull(&ctx, .null, arena_state.allocator());
+    try testing.expectEqual(@as(usize, 1), restarted.calls);
+}
+
+test "source services parse explicit choices and disabled defaults" {
+    var cfg = config_helper.ConfigParser.init(testing.allocator);
+    defer cfg.deinit();
+    try cfg.parseString(
+        \\[update_manager moonraker-2]
+        \\type: git_repo
+        \\[update_manager disabled]
+        \\type: zip
+        \\is_system_service: false
+        \\[update_manager client]
+        \\type: zip
+        \\managed_services: klipper, moonraker
+        \\[update_manager web]
+        \\type: web
+        \\managed_services: moonraker
+    , "<test>");
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const sources = try sourcesFromConfig(arena_state.allocator(), &cfg);
+    var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = sources, .bus = null };
+    try testing.expectEqualStrings("moonraker-2", ctx.findSource("moonraker-2").?.managed_services[0]);
+    try testing.expectEqual(@as(usize, 0), ctx.findSource("disabled").?.managed_services.len);
+    try testing.expectEqual(@as(usize, 2), ctx.findSource("client").?.managed_services.len);
+    try testing.expectEqual(@as(usize, 0), ctx.findSource("web").?.managed_services.len);
+    try cfg.parseString("[update_manager invalid]\ntype: zip\nmanaged_services: shutdown\n", "<invalid>");
+    try testing.expectError(error.InvalidManagedService, sourcesFromConfig(arena_state.allocator(), &cfg));
+}
+
+test "fuzz service restart callbacks propagate failures without a command lock" {
+    try testing.fuzz({}, struct {
+        fn check(_: void, smith: *testing.Smith) !void {
+            const Runner = struct {
+                fail: bool,
+                ctx: *UpdateCtx,
+                fn run(raw: *anyopaque, _: std.mem.Allocator, _: []const u8) !void {
+                    const self: *@This() = @ptrCast(@alignCast(raw));
+                    try testing.expect(self.ctx.commands.tryLock());
+                    self.ctx.commands.unlock(testing.io);
+                    if (self.fail) return error.ServiceFailed;
+                }
+            };
+            var ctx = testCtx();
+            var runner: Runner = .{ .fail = smith.value(bool), .ctx = &ctx };
+            ctx.restart_service = Runner.run;
+            ctx.service_ctx = &runner;
+            const source: Source = .{ .name = "fixture", .type = .git_repo, .managed_services = &.{"klipper"} };
+            if (runner.fail) {
+                try testing.expectError(error.ServiceFailed, restartServices(&ctx, testing.allocator, source));
+            } else try restartServices(&ctx, testing.allocator, source);
+        }
+    }.check, .{});
 }
 
 test "fuzz update operation admission retains the current busy owner" {

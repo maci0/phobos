@@ -51,6 +51,11 @@ const config_helper = @import("config/confighelper.zig");
 
 const feather_component_name = [_][]const u8{"feather_updates"};
 
+fn restartUpdatedService(ctx: *anyopaque, alloc: std.mem.Allocator, service: []const u8) !void {
+    const machine: *MachineCtx = @ptrCast(@alignCast(ctx));
+    try machine.serviceAction(alloc, .restart, service);
+}
+
 fn featherPrinterIdle(ctx: *anyopaque) bool {
     const app: *App = @ptrCast(@alignCast(ctx));
     return app.core.run(app.update_ctx.clock_io, featherPrinterIdleLocked, .{app});
@@ -643,6 +648,8 @@ pub const App = struct {
             // Refuse update operations while a print is active (Moonraker 503).
             .printing_check = JobStateCtx.isActiveErased,
             .printing_ctx = job_state_ctx,
+            .restart_service = restartUpdatedService,
+            .service_ctx = machine_ctx,
         };
 
         // --- Power device context (machine.device_power.*) ---
