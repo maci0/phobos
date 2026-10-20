@@ -37,7 +37,7 @@ const file_manager_component = @import("components/file_manager.zig");
 const machine_component = @import("components/machine.zig");
 const update_manager_component = @import("components/update_manager.zig");
 const power_component = @import("components/power.zig");
-const gpio_sysfs = @import("components/gpio_sysfs.zig");
+const button_component = @import("components/button.zig");
 const wled_component = @import("components/wled.zig");
 const td1_component = @import("components/td1.zig");
 const printer_component = @import("components/printer.zig");
@@ -301,6 +301,7 @@ const MachineCtx = machine_component.MachineCtx;
 const UpdateCtx = update_manager_component.UpdateCtx;
 const UpdateSource = update_manager_component.Source;
 const PowerCtx = power_component.PowerCtx;
+const ButtonCtx = button_component.ButtonCtx;
 const WledCtx = wled_component.WledCtx;
 const Td1Ctx = td1_component.Td1Ctx;
 const PrinterCtx = printer_component.PrinterCtx;
@@ -382,6 +383,7 @@ pub const App = struct {
     machine_ctx: *MachineCtx,
     update_ctx: *UpdateCtx,
     power_ctx: *PowerCtx,
+    button_ctx: *ButtonCtx,
     wled_ctx: *WledCtx,
     td1_ctx: *Td1Ctx,
     printer_ctx: *PrinterCtx,
@@ -685,6 +687,11 @@ pub const App = struct {
         power_ctx.printing_check = JobStateCtx.isActiveErased;
         power_ctx.printing_ctx = job_state_ctx;
 
+        const button_ctx = try alloc.create(ButtonCtx);
+        errdefer alloc.destroy(button_ctx);
+        button_ctx.* = ButtonCtx.init(alloc, bus);
+        errdefer button_ctx.deinit();
+
         // --- WLED context (machine.wled.*) ---
         // Strips come from [wled <name>] config (none in the bare spine).
         // Address strips use the WLED JSON HTTP API; serial strips write JSON to
@@ -776,6 +783,7 @@ pub const App = struct {
             .machine_ctx = machine_ctx,
             .update_ctx = update_ctx,
             .power_ctx = power_ctx,
+            .button_ctx = button_ctx,
             .wled_ctx = wled_ctx,
             .td1_ctx = td1_ctx,
             .printer_ctx = printer_ctx,
@@ -1066,52 +1074,8 @@ pub const App = struct {
         if (cfg.hasSection("mqtt")) self.applyMqttConfig(aio, cfg) catch |err|
             std.debug.print("phobos: warning: invalid [mqtt] config: {}, MQTT disabled\n", .{err});
 
-        // Wire power devices from [power <name>] sections. addDevice copies
-        // every string, so config values are passed borrowed.
-        if (cfg.sectionNames(self.alloc)) |names| {
-            defer self.alloc.free(names);
-            var url_arena = std.heap.ArenaAllocator.init(self.alloc);
-            defer url_arena.deinit();
-            for (names) |sect| {
-                if (!std.mem.startsWith(u8, sect, "power ")) continue;
-                const dev_name = sect["power ".len..];
-                if (dev_name.len == 0) continue;
-                const dev_type = cfg.get(sect, "type") orelse "gpio";
-                // Explicit on_url/off_url/status_url win; protocol types
-                // (tasmota/shelly) derive them from `address` + `output_id`.
-                var urls: ?power_component.ProtoUrls = null;
-                if (cfg.get(sect, "on_url") == null) if (cfg.get(sect, "address")) |addr| {
-                    const output_id = cfg.getInt(sect, "output_id") catch 1;
-                    const ua = url_arena.allocator();
-                    if (std.mem.eql(u8, dev_type, "tasmota"))
-                        urls = power_component.tasmotaUrls(ua, addr, output_id, cfg.get(sect, "password")) catch null
-                    else if (std.mem.eql(u8, dev_type, "shelly"))
-                        urls = power_component.shellyUrls(ua, addr, output_id) catch null;
-                };
-                // Moonraker gpio devices: `pin` in Klipper syntax, "!" = active-low.
-                const pin: ?gpio_sysfs.ParsedPin = if (cfg.get(sect, "pin")) |spec|
-                    gpio_sysfs.parsePin(spec) orelse {
-                        std.debug.print("phobos: warning: power device '{s}': invalid pin '{s}', device not added\n", .{ dev_name, spec });
-                        continue;
-                    }
-                else
-                    null;
-                self.power_ctx.addDevice(.{
-                    .name = dev_name,
-                    .type_str = dev_type,
-                    .state = "off",
-                    .locked_while_printing = cfg.getBoolean(sect, "locked_while_printing") catch false,
-                    .initial_state = cfg.get(sect, "initial_state"),
-                    .on_url = cfg.get(sect, "on_url") orelse if (urls) |u| u.on else null,
-                    .off_url = cfg.get(sect, "off_url") orelse if (urls) |u| u.off else null,
-                    .status_url = cfg.get(sect, "status_url") orelse if (urls) |u| u.status else null,
-                    .gpio_pin = if (pin) |p| p.line else null,
-                    .gpio_active_low = if (pin) |p| p.inverted else false,
-                }) catch |err| {
-                    std.debug.print("phobos: warning: failed to add power device '{s}': {}\n", .{ dev_name, err });
-                };
-            }
-        } else |_| {}
+        try self.power_ctx.configure(cfg);
+        try self.button_ctx.configure(cfg);
 
         // Wire WLED strips, webcams, and notifiers from prefixed sections.
         self.notifier_ctx.deinit(self.alloc);
@@ -1265,6 +1229,8 @@ pub const App = struct {
 
     /// Stop and join workers before freeing their dependencies.
     pub fn deinit(self: *App, io: std.Io) void {
+        self.power_ctx.stopTimerWorker();
+        self.button_ctx.stop();
         self.remote_calls.close(io);
         if (self.remote_worker) |*w| {
             // Cancel and join the worker's calls before component teardown.
@@ -1304,6 +1270,8 @@ pub const App = struct {
         self.alloc.destroy(self.update_ctx);
         self.power_ctx.deinit();
         self.alloc.destroy(self.power_ctx);
+        self.button_ctx.deinit();
+        self.alloc.destroy(self.button_ctx);
         self.wled_ctx.deinit();
         self.alloc.destroy(self.wled_ctx);
         self.td1_ctx.deinit();
@@ -1701,6 +1669,8 @@ pub const App = struct {
         self.power_ctx.applyInitialStates();
         // Handlers hold Core from here on; device HTTP releases it.
         self.power_ctx.core = self.core;
+        self.button_ctx.io = io;
+        self.button_ctx.core = self.core;
         self.wled_ctx.setIo(io);
         self.wled_ctx.applyInitialStates();
         self.wled_ctx.core = self.core;
@@ -2396,6 +2366,24 @@ test "setConfig [power] reads pin and protocol URLs without leaking" {
     try std.testing.expect(app.power_ctx.findDevice("bad") == null);
 }
 
+test "setConfig reads GPIO button sections without starting device readers" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "moonraker.conf", .data = "[button estop]\npin: !gpiochip1/gpio3\non_press: {% do call_method('printer.emergency_stop') %}\n" });
+    var path: [128]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&path, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    var application = try testApp(alloc, io, &tmp);
+    defer application.deinit(io);
+    try application.setConfig(io, config_path);
+    const button = application.button_ctx.buttons.get("estop").?;
+    try std.testing.expectEqual(@as(u32, 1), button.pin.chip);
+    try std.testing.expect(button.pin.inverted);
+    try std.testing.expect(button.input == null and button.reader == null);
+    try std.testing.expect(application.button_ctx.worker == null);
+}
+
 test "setConfig [wled] builds http and serial transports and rejects bad strips" {
     const alloc = std.testing.allocator;
     const io = std.testing.io;
@@ -2900,6 +2888,7 @@ test "App.init: dispatcher has exactly the expected methods" {
         "machine.device_power.off",
         "machine.device_power.get_device",
         "machine.device_power.post_device",
+        "set_device_power",
         // WLED (machine.wled.*)
         "machine.wled.strips",
         "machine.wled.status",

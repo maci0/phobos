@@ -62,7 +62,8 @@ primitives are gone, so use `std.Io.Mutex`.
     - unavoidable low-level code sits behind a local wrapper
     - platform exceptions: termios in `serial.zig`, system identity in
       `machine.zig`, V4L2 layouts in `video_modes.zig`, CAN socket creation and
-      binding in `canbus.zig`, and the C `statvfs` and local-time shims. Use typed
+      binding in `canbus.zig`, GPIO event layouts in `gpio_input.zig`, and the C
+      `statvfs` and local-time shims. Use typed
       platform declarations; transfers, close, cancellation and device control
       go through `std.Io`.
       `docs/STDLIB.md` lists the checked APIs and adapter limits.

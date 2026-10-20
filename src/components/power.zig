@@ -39,6 +39,11 @@ const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const Core = @import("../server/core.zig").Core;
 const gpio_sysfs = @import("gpio_sysfs.zig");
 const http_get = @import("http_get.zig");
+const templates = @import("sensor_template.zig");
+const clock = @import("../util/clock.zig");
+const sleep = @import("../util/sleep.zig");
+const jsonrpc = @import("../jsonrpc.zig");
+const Config = @import("../config/confighelper.zig").ConfigParser;
 
 const Registry = registry.Registry;
 
@@ -46,6 +51,9 @@ const Registry = registry.Registry;
 const http_timeout: std.Io.Duration = .fromSeconds(20);
 /// Largest device response body kept. Status replies are a few hundred bytes.
 const max_response_bytes = 4096;
+const generic_request_attempts = 3;
+const generic_retry_pause: std.Io.Duration = .fromSeconds(1);
+const max_request_template_bytes = 64 * 1024;
 
 /// Send one HTTP request to a power or WLED device and return the 2xx response
 /// body, a slice of `body`. A longer body, a non-2xx status or an expired
@@ -61,11 +69,14 @@ pub fn deviceRequest(
     timeout: std.Io.Duration,
     body: []u8,
 ) ![]u8 {
+    const json_header = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+    return deviceRequestHeaders(gpa, io, method, url, payload, if (payload != null) &json_header else &.{}, timeout, body, null);
+}
+
+fn deviceRequestHeaders(gpa: std.mem.Allocator, io: std.Io, method: std.http.Method, url: []const u8, payload: ?[]const u8, headers: []const std.http.Header, timeout: std.Io.Duration, body: []u8, status_out: ?*std.http.Status) ![]u8 {
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
     var writer: std.Io.Writer = .fixed(body);
-    const json_header = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
-    const headers: []const std.http.Header = if (payload != null) &json_header else &.{};
     const Outcome = union(enum) {
         fetched: @typeInfo(@TypeOf(http_get.requestToWriter)).@"fn".return_type.?,
         expired: std.Io.Cancelable!void,
@@ -81,7 +92,9 @@ pub fn deviceRequest(
             return error.Timeout;
         },
         .fetched => |result| {
-            if ((try result).class() != .success) return error.HttpStatus;
+            const status = try result;
+            if (status_out) |out| out.* = status;
+            if (status.class() != .success) return error.HttpStatus;
             return writer.buffered();
         },
     }
@@ -113,6 +126,23 @@ pub const Device = struct {
     gpio_pin: ?u32 = null,
     /// Active-low line: "on" drives the physical level low (Moonraker "!pin").
     gpio_active_low: bool = false,
+    off_when_shutdown: bool = false,
+    off_when_shutdown_delay: f64 = 0,
+    on_when_job_queued: bool = false,
+    bound_services: ?[]const u8 = null,
+    restart_klipper_when_powered: bool = false,
+    restart_delay: f64 = 1,
+    restrict_action_processing: bool = true,
+    timer: ?f64 = null,
+    request_template: ?[]const u8 = null,
+    response_template: ?[]const u8 = null,
+    auto_off_at: ?f64 = null,
+    shutdown_off_at: ?f64 = null,
+    restart_at: ?f64 = null,
+    need_scheduled_restart: bool = false,
+    queued_on: bool = false,
+    request_error: ?[]const u8 = null,
+    requested_state: ?[]const u8 = null,
 
     fn dupe(self: Device, alloc: std.mem.Allocator) !Device {
         var owned = self;
@@ -157,6 +187,17 @@ pub const PowerCtx = struct {
     printing_ctx: ?*anyopaque = null,
     /// sysfs GPIO controller root. Overridable so tests can target a temp dir.
     gpio_root: []const u8 = "/sys/class/gpio",
+    requests: std.Io.Mutex = .init,
+    timer_stop: std.Io.Event = .unset,
+    timer_worker: ?std.Io.Future(void) = null,
+    klippy_shutdown: bool = false,
+    klippy_started: bool = false,
+    klippy_ready: bool = false,
+    tick_time: ?f64 = null,
+    action_ctx: ?*anyopaque = null,
+    service_action: ?*const fn (*anyopaque, std.mem.Allocator, []const u8, []const u8) anyerror!void = null,
+    service_validate: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void = null,
+    firmware_restart: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
 
     pub fn init(alloc: std.mem.Allocator, bus: ?*NotifyBus) PowerCtx {
         return .{
@@ -168,6 +209,7 @@ pub const PowerCtx = struct {
     }
 
     pub fn deinit(self: *PowerCtx) void {
+        self.stopTimerWorker();
         var it = self.devices.iterator();
         while (it.next()) |entry| {
             self.gpa.free(entry.key_ptr.*);
@@ -178,6 +220,213 @@ pub const PowerCtx = struct {
 
     pub fn setIo(self: *PowerCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    pub fn configure(self: *PowerCtx, cfg: *const Config) !void {
+        const names = try cfg.sectionNames(self.gpa);
+        defer self.gpa.free(names);
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        for (names) |section| {
+            if (!std.mem.startsWith(u8, section, "power ")) continue;
+            const name = section["power ".len..];
+            if (name.len == 0) return error.InvalidValue;
+            const kind = cfg.get(section, "type") orelse "gpio";
+            const pin = if (cfg.get(section, "pin")) |spec| gpio_sysfs.parsePin(spec) orelse {
+                std.debug.print("phobos: warning: power device '{s}': invalid pin, device not added\n", .{name});
+                continue;
+            } else null;
+            var urls: ?ProtoUrls = null;
+            if (cfg.get(section, "on_url") == null) if (cfg.get(section, "address")) |address| {
+                const id = cfg.getInt(section, "output_id") catch |err| if (err == error.NoOption) @as(i64, if (std.mem.eql(u8, kind, "shelly")) 0 else 1) else return err;
+                if (std.mem.eql(u8, kind, "tasmota")) urls = try tasmotaUrls(a, address, id, cfg.get(section, "password")) else if (std.mem.eql(u8, kind, "shelly")) urls = try shellyUrls(a, address, id);
+            };
+            const shutdown_delay = try configFloat(cfg, section, "off_when_shutdown_delay", 0, 0);
+            const restart_delay = try configFloat(cfg, section, "restart_delay", 1, 0.000001);
+            if (restart_delay <= 0.000001) return error.InvalidValue;
+            if (std.mem.eql(u8, kind, "klipper_device") and
+                ((try configBool(cfg, section, "off_when_shutdown", false)) or (try configBool(cfg, section, "restart_klipper_when_powered", false)))) return error.InvalidValue;
+            const timer_value: ?f64 = if (cfg.get(section, "timer") != null) try configFloat(cfg, section, "timer", 0, 0.000001) else null;
+            if (urls) |*u| if (cfg.get(section, "timer")) |delay| {
+                const escaped = std.fmt.alt(std.Uri.Component{ .raw = delay }, .formatEscaped);
+                if (std.mem.eql(u8, kind, "shelly")) u.off = try std.fmt.allocPrint(a, "{s}?turn=on&timer={f}", .{ u.status, escaped }) else if (std.mem.eql(u8, kind, "tasmota")) {
+                    const address = cfg.get(section, "address").?;
+                    const id = cfg.getInt(section, "output_id") catch 1;
+                    const command = try std.fmt.allocPrint(a, "Backlog Delay {s}0; Power{d} OFF", .{ delay, id });
+                    const auth = if (cfg.get(section, "password")) |password| try std.fmt.allocPrint(a, "&user=admin&password={f}", .{std.fmt.alt(std.Uri.Component{ .raw = password }, .formatEscaped)}) else "";
+                    u.off = try std.fmt.allocPrint(a, "http://{s}/cm?cmnd={f}{s}", .{ address, std.fmt.alt(std.Uri.Component{ .raw = command }, .formatEscaped), auth });
+                }
+            };
+            for ([_][]const u8{ "request_template", "response_template" }) |option| if (cfg.get(section, option)) |source| {
+                var template = try templates.Template.init(self.gpa, source);
+                template.deinit();
+            };
+            const services = cfg.get(section, "bound_services") orelse "";
+            const service = cfg.get(section, "bound_service") orelse "";
+            try self.addDevice(.{
+                .name = name,
+                .type_str = kind,
+                .state = "off",
+                .gpio_pin = if (pin) |p| p.line else null,
+                .gpio_active_low = if (pin) |p| p.inverted else false,
+                .locked_while_printing = try configBool(cfg, section, "locked_while_printing", false),
+                .initial_state = if (cfg.get(section, "initial_state") != null) (if (try cfg.getBoolean(section, "initial_state")) "on" else "off") else null,
+                .on_url = cfg.get(section, "on_url") orelse if (urls) |u| u.on else null,
+                .off_url = cfg.get(section, "off_url") orelse if (urls) |u| u.off else null,
+                .status_url = cfg.get(section, "status_url") orelse if (urls) |u| u.status else null,
+                .off_when_shutdown = try configBool(cfg, section, "off_when_shutdown", false),
+                .off_when_shutdown_delay = shutdown_delay,
+                .on_when_job_queued = try configBool(cfg, section, if (cfg.get(section, "on_when_upload_queued") != null) "on_when_upload_queued" else "on_when_job_queued", false),
+                .bound_services = try std.fmt.allocPrint(a, "{s},{s}", .{ services, service }),
+                .restart_klipper_when_powered = try configBool(cfg, section, "restart_klipper_when_powered", false),
+                .restart_delay = restart_delay,
+                .restrict_action_processing = try configBool(cfg, section, "restrict_action_processing", true),
+                .timer = if (std.mem.eql(u8, kind, "gpio") or std.mem.eql(u8, kind, "klipper_device") or std.mem.eql(u8, kind, "rf")) timer_value else null,
+                .request_template = cfg.get(section, "request_template"),
+                .response_template = cfg.get(section, "response_template"),
+            });
+        }
+    }
+
+    pub fn startTimerWorker(self: *PowerCtx) !void {
+        const io = self.io orelse return error.NotReady;
+        if (self.timer_worker != null or self.devices.count() == 0) return;
+        self.timer_stop.reset();
+        self.timer_worker = try io.concurrent(timerWorker, .{self});
+    }
+
+    pub fn stopTimerWorker(self: *PowerCtx) void {
+        const io = self.io orelse return;
+        self.timer_stop.set(io);
+        if (self.timer_worker) |*worker| {
+            worker.cancel(io);
+            self.timer_worker = null;
+        }
+    }
+
+    fn now(self: *const PowerCtx) f64 {
+        return if (self.io) |io| clock.monotonicSeconds(io) else self.tick_time orelse 0;
+    }
+
+    /// Klippy callbacks run under Core and only schedule device work.
+    pub fn onKlippyState(self: *PowerCtx, state: []const u8, now_seconds: f64) void {
+        self.klippy_shutdown = std.mem.eql(u8, state, "shutdown");
+        self.klippy_ready = std.mem.eql(u8, state, "ready");
+        self.klippy_started = self.klippy_ready or self.klippy_shutdown or std.mem.eql(u8, state, "error");
+        var it = self.devices.valueIterator();
+        while (it.next()) |dev| {
+            if (self.klippy_shutdown and dev.off_when_shutdown) dev.shutdown_off_at = now_seconds + dev.off_when_shutdown_delay;
+            if (!self.klippy_shutdown) dev.shutdown_off_at = null;
+            if (self.klippy_started and dev.need_scheduled_restart) {
+                dev.need_scheduled_restart = false;
+                dev.restart_at = if (self.klippy_ready) null else now_seconds + dev.restart_delay;
+            }
+        }
+    }
+
+    pub fn onJobQueued(self: *PowerCtx) void {
+        var it = self.devices.valueIterator();
+        while (it.next()) |dev| if (dev.on_when_job_queued) {
+            dev.queued_on = true;
+        };
+    }
+
+    pub fn validateBoundServices(self: *PowerCtx, alloc: std.mem.Allocator) !void {
+        var it = self.devices.valueIterator();
+        while (it.next()) |dev| {
+            var tokens = std.mem.tokenizeAny(u8, dev.bound_services orelse "", ",\n");
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(alloc);
+            while (tokens.next()) |token| {
+                var name = std.mem.trim(u8, token, " \t\r");
+                if (std.mem.endsWith(u8, name, ".service")) name = name[0 .. name.len - ".service".len];
+                if (name.len == 0) continue;
+                const prior = try seen.getOrPut(alloc, name);
+                if (prior.found_existing) continue;
+                const validate = self.service_validate orelse return error.NotReady;
+                try validate(self.action_ctx orelse return error.NotReady, alloc, name);
+            }
+        }
+    }
+
+    /// Tick under Core; callers provide monotonic seconds for deterministic tests.
+    pub fn tick(self: *PowerCtx, now_seconds: f64, alloc: std.mem.Allocator) !void {
+        self.tick_time = now_seconds;
+        defer self.tick_time = null;
+        var names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (names.items) |name| alloc.free(name);
+            names.deinit(alloc);
+        }
+        var it = self.devices.keyIterator();
+        while (it.next()) |name| {
+            const copy = try alloc.dupe(u8, name.*);
+            errdefer alloc.free(copy);
+            try names.append(alloc, copy);
+        }
+        for (names.items) |name| {
+            const dev = self.findDevice(name) orelse continue;
+            const queued = dev.queued_on;
+            dev.queued_on = false;
+            const off = (if (dev.auto_off_at) |at| at <= now_seconds else false) or
+                (self.klippy_shutdown and (if (dev.shutdown_off_at) |at| at <= now_seconds else false));
+            if (off) {
+                dev.auto_off_at = null;
+                dev.shutdown_off_at = null;
+            }
+            const restart = if (dev.restart_at) |at| at <= now_seconds else false;
+            if (restart) dev.restart_at = null;
+            if (off or queued) _ = self.processDevice(name, if (off) "off" else "on", false, alloc) catch |err| {
+                std.debug.print("phobos: warning: power device '{s}' scheduled request failed: {}\n", .{ name, err });
+                continue;
+            };
+            if (restart) if (self.firmware_restart) |run| try run(self.action_ctx orelse return error.NotReady, alloc);
+        }
+    }
+
+    fn processChanged(self: *PowerCtx, name: []const u8, alloc: std.mem.Allocator, actions: bool) !void {
+        const dev = self.findDevice(name) orelse return error.NotFound;
+        emitPowerChanged(self, alloc, dev);
+        if (!actions) return;
+        const state = try alloc.dupe(u8, dev.state);
+        if (!std.mem.eql(u8, state, "on") and !std.mem.eql(u8, state, "off")) return;
+        if (dev.restart_klipper_when_powered and std.mem.eql(u8, state, "on")) {
+            dev.need_scheduled_restart = !self.klippy_started;
+            dev.restart_at = if (self.klippy_started and !self.klippy_ready) self.now() + dev.restart_delay else null;
+        }
+        try self.processServices(name, alloc);
+    }
+
+    fn processServices(self: *PowerCtx, name: []const u8, alloc: std.mem.Allocator) !void {
+        const dev = self.findDevice(name) orelse return error.NotFound;
+        const state = try alloc.dupe(u8, dev.state);
+        if (!std.mem.eql(u8, state, "on") and !std.mem.eql(u8, state, "off")) return;
+        const services = try alloc.dupe(u8, dev.bound_services orelse "");
+        var seen: std.StringHashMapUnmanaged(void) = .empty;
+        defer seen.deinit(alloc);
+        var tokens = std.mem.tokenizeAny(u8, services, ",\n");
+        while (tokens.next()) |token| {
+            var service = std.mem.trim(u8, token, " \t\r");
+            if (std.mem.endsWith(u8, service, ".service")) service = service[0 .. service.len - ".service".len];
+            if (service.len == 0) continue;
+            const prior = try seen.getOrPut(alloc, service);
+            if (prior.found_existing) continue;
+            const run = self.service_action orelse return error.NotReady;
+            run(self.action_ctx orelse return error.NotReady, alloc, if (std.mem.eql(u8, state, "on")) "start" else "stop", service) catch |err|
+                std.debug.print("phobos: warning: bound service '{s}' action failed: {}\n", .{ service, err });
+        }
+    }
+
+    /// Trusted callers may force a request past the printing lock.
+    pub fn processDevice(self: *PowerCtx, name: []const u8, action: []const u8, force: bool, alloc: std.mem.Allocator) ![]const u8 {
+        if (self.io) |io| {
+            if (self.core) |core| core.unlock(io);
+            self.requests.lockUncancelable(io);
+            if (self.core) |core| core.lock(io);
+        }
+        defer if (self.io) |io| self.requests.unlock(io);
+        return processRequest(self, self.findDevice(name) orelse return error.NotFound, action, alloc, force);
     }
 
     /// Drive every device configured with an `initial_state` to that state at
@@ -194,6 +443,8 @@ pub const PowerCtx = struct {
             if (!on and !std.mem.eql(u8, target, "off")) continue;
             self.setPower(arena.allocator(), dev.name, on) catch |err|
                 std.debug.print("phobos: warning: power device '{s}' initial state failed: {}\n", .{ dev.name, err });
+            self.processServices(dev.name, arena.allocator()) catch |err|
+                std.debug.print("phobos: warning: power device '{s}' initial services failed: {}\n", .{ dev.name, err });
         }
     }
 
@@ -223,21 +474,75 @@ pub const PowerCtx = struct {
     /// borrow from a device: Core is released during HTTP.
     fn setPower(self: *PowerCtx, alloc: std.mem.Allocator, name: []const u8, on: bool) !void {
         const dev = self.findDevice(name) orelse return error.NotFound;
+        const requested = try self.gpa.dupe(u8, if (on) "on" else "off");
+        if (dev.requested_state) |old| self.gpa.free(old);
+        dev.requested_state = requested;
         const url: ?[]const u8 = if (on) dev.on_url else dev.off_url;
         const owned_url = if (url) |u| try alloc.dupe(u8, u) else null;
         const ok = blk: {
             self.driveGpio(dev, on) catch |err| {
                 std.debug.print("phobos: warning: power device '{s}' gpio drive failed: {}\n", .{ name, err });
+                try self.recordError(name, err);
                 break :blk false;
             };
-            if (owned_url) |u| _ = self.deviceGet(alloc, u) catch |err| {
+            if (dev.response_template != null and self.io != null) {
+                const result = self.genericRequest(alloc, name, if (on) "on" else "off") catch |err| {
+                    try self.recordError(name, err);
+                    break :blk false;
+                };
+                try self.setState(name, result);
+                const updated = self.findDevice(name).?;
+                updated.auto_off_at = if (std.mem.eql(u8, result, "on")) if (updated.timer) |timer| self.now() + timer else null else null;
+                return;
+            } else if (owned_url) |u| _ = self.deviceGet(alloc, u) catch |err| {
                 std.debug.print("phobos: warning: power device '{s}' http request failed: {}\n", .{ name, err });
+                try self.recordError(name, err);
                 break :blk false;
             };
             break :blk true;
         };
         try self.setState(name, if (!ok) "error" else if (on) "on" else "off");
         if (!ok) return error.DeviceRequestFailed;
+        const updated = self.findDevice(name).?;
+        updated.auto_off_at = if (on) if (updated.timer) |timer| self.now() + timer else null else null;
+    }
+
+    fn recordError(self: *PowerCtx, name: []const u8, err: anyerror) !void {
+        const dev = self.findDevice(name) orelse return error.NotFound;
+        const message = try self.gpa.dupe(u8, @errorName(err));
+        if (dev.request_error) |old| self.gpa.free(old);
+        dev.request_error = message;
+    }
+
+    fn genericRequest(self: *PowerCtx, alloc: std.mem.Allocator, name: []const u8, command: []const u8) ![]const u8 {
+        const dev = self.findDevice(name) orelse return error.NotFound;
+        const url = try alloc.dupe(u8, if (std.mem.eql(u8, command, "status")) dev.status_url orelse return error.InvalidParams else if (std.mem.eql(u8, command, "on")) dev.on_url orelse return error.InvalidParams else dev.off_url orelse return error.InvalidParams);
+        var request_storage: [max_request_template_bytes]u8 = undefined;
+        var request_alloc = std.heap.FixedBufferAllocator.init(&request_storage);
+        var request = GenericRequest{ .ctx = self, .alloc = request_alloc.allocator(), .url = url, .default_url = url };
+        var vars: std.json.ObjectMap = .empty;
+        var marker: std.json.ObjectMap = .empty;
+        try marker.put(alloc, "__native", .{ .string = "http_request" });
+        try vars.put(alloc, "http_request", .{ .object = marker });
+        try vars.put(alloc, "command", .{ .string = command });
+        var urls: std.json.ObjectMap = .empty;
+        try urls.put(alloc, "on", .{ .string = try alloc.dupe(u8, dev.on_url orelse "") });
+        try urls.put(alloc, "off", .{ .string = try alloc.dupe(u8, dev.off_url orelse "") });
+        try urls.put(alloc, "status", .{ .string = try alloc.dupe(u8, dev.status_url orelse "") });
+        try vars.put(alloc, "urls", .{ .object = urls });
+        const response_source = try alloc.dupe(u8, dev.response_template orelse return error.InvalidParams);
+        if (dev.request_template) |source| {
+            var template = try templates.Template.init(alloc, source);
+            defer template.deinit();
+            _ = template.renderText(alloc, vars, .{ .ctx = &request, .call = GenericRequest.call }) catch |err| return request.failure orelse err;
+            if (!request.sent) return error.NoHttpResponse;
+        } else try request.send();
+        var template = try templates.Template.init(alloc, response_source);
+        defer template.deinit();
+        const response = try template.renderText(alloc, vars, .{ .ctx = &request, .call = GenericRequest.call });
+        if (std.ascii.eqlIgnoreCase(response, "on")) return "on";
+        if (std.ascii.eqlIgnoreCase(response, "off")) return "off";
+        return error.InvalidTemplateResult;
     }
 
     /// Get a device by name (borrowed pointer into the map).
@@ -274,6 +579,135 @@ pub const PowerCtx = struct {
         }
     }
 };
+
+const GenericRequest = struct {
+    ctx: *PowerCtx,
+    alloc: std.mem.Allocator,
+    url: []const u8,
+    default_url: []const u8,
+    method: std.http.Method = .GET,
+    payload: ?[]const u8 = null,
+    headers: std.ArrayList(std.http.Header) = .empty,
+    body: [max_response_bytes]u8 = undefined,
+    response: []const u8 = "",
+    sent: bool = false,
+    status: std.http.Status = .ok,
+    failure: ?anyerror = null,
+
+    fn send(self: *GenericRequest) !void {
+        const io = self.ctx.io orelse return error.NotReady;
+        if (self.ctx.core) |core| core.unlock(io);
+        defer if (self.ctx.core) |core| core.lock(io);
+        for (0..generic_request_attempts) |attempt| {
+            self.response = deviceRequestHeaders(self.ctx.gpa, io, self.method, self.url, self.payload, self.headers.items, http_timeout, &self.body, &self.status) catch |err| {
+                if (err == error.Canceled or attempt + 1 == generic_request_attempts) return err;
+                try io.sleep(generic_retry_pause, .awake);
+                continue;
+            };
+            self.sent = true;
+            return;
+        }
+    }
+
+    fn marker(self: *const GenericRequest, alloc: std.mem.Allocator) !std.json.Value {
+        var object: std.json.ObjectMap = .empty;
+        try object.put(alloc, "__native", .{ .string = "response" });
+        try object.put(alloc, "text", .{ .string = self.response });
+        try object.put(alloc, "content", .{ .string = self.response });
+        try object.put(alloc, "status_code", .{ .integer = @backingInt(self.status) });
+        try object.put(alloc, "url", .{ .string = self.url });
+        return .{ .object = object };
+    }
+
+    fn call(raw: *anyopaque, name: []const u8, args: []const std.json.Value, kwargs: std.json.ObjectMap, alloc: std.mem.Allocator) templates.RenderError!std.json.Value {
+        const self: *GenericRequest = @ptrCast(@alignCast(raw));
+        if (std.mem.eql(u8, name, "async_sleep")) {
+            if (args.len != 1) return error.EvalError;
+            const seconds: f64 = switch (args[0]) {
+                .integer => |n| @floatFromInt(n),
+                .float => |n| n,
+                else => return error.EvalError,
+            };
+            if (!std.math.isFinite(seconds) or seconds < 0 or seconds > std.time.s_per_day) return error.EvalError;
+            const io = self.ctx.io orelse return error.EvalError;
+            if (self.ctx.core) |core| core.unlock(io);
+            defer if (self.ctx.core) |core| core.lock(io);
+            io.sleep(.fromMilliseconds(@intFromFloat(seconds * std.time.ms_per_s)), .awake) catch return error.EvalError;
+            return .null;
+        }
+        if (std.mem.eql(u8, name, "http_request.send")) {
+            if (args.len != 0) return error.EvalError;
+            if (kwargs.get("method")) |value| self.method = std.meta.stringToEnum(std.http.Method, if (value == .string) value.string else return error.EvalError) orelse return error.EvalError;
+            if (kwargs.get("url")) |value| self.url = try self.alloc.dupe(u8, if (value == .string) value.string else return error.EvalError);
+            if (kwargs.get("body")) |value| self.payload = if (value == .null) null else if (value == .string) try self.alloc.dupe(u8, value.string) else try std.json.Stringify.valueAlloc(self.alloc, value, .{});
+            self.send() catch |err| {
+                self.failure = err;
+                return error.EvalError;
+            };
+            return self.marker(alloc);
+        }
+        if (std.mem.eql(u8, name, "http_request.last_response")) return if (self.sent) self.marker(alloc) else .null;
+        if (std.mem.eql(u8, name, "response.json")) return std.json.parseFromSliceLeaky(std.json.Value, alloc, self.response, .{}) catch error.EvalError;
+        if (std.mem.eql(u8, name, "response.text")) return .{ .string = self.response };
+        if (std.mem.eql(u8, name, "response.raise_for_status")) return .null;
+        if (std.mem.eql(u8, name, "http_request.set_method")) {
+            if (args.len != 1 or args[0] != .string) return error.EvalError;
+            self.method = std.meta.stringToEnum(std.http.Method, args[0].string) orelse return error.EvalError;
+        } else if (std.mem.eql(u8, name, "http_request.set_url")) {
+            if (args.len != 1 or args[0] != .string) return error.EvalError;
+            self.url = try self.alloc.dupe(u8, args[0].string);
+        } else if (std.mem.eql(u8, name, "http_request.set_body")) {
+            if (args.len != 1) return error.EvalError;
+            self.payload = if (args[0] == .null) null else if (args[0] == .string) try self.alloc.dupe(u8, args[0].string) else try std.json.Stringify.valueAlloc(self.alloc, args[0], .{});
+        } else if (std.mem.eql(u8, name, "http_request.add_header")) {
+            if (args.len != 2 or args[0] != .string or args[1] != .string) return error.EvalError;
+            try self.addHeader(args[0].string, args[1].string);
+        } else if (std.mem.eql(u8, name, "http_request.set_headers")) {
+            if (args.len != 1 or args[0] != .object) return error.EvalError;
+            self.headers.clearRetainingCapacity();
+            var it = args[0].object.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* != .string) return error.EvalError;
+                try self.addHeader(entry.key_ptr.*, entry.value_ptr.string);
+            }
+        } else if (std.mem.eql(u8, name, "http_request.reset")) {
+            self.method = .GET;
+            self.url = self.default_url;
+            self.payload = null;
+            self.headers.clearRetainingCapacity();
+        } else return error.EvalError;
+        return .null;
+    }
+
+    fn addHeader(self: *GenericRequest, name: []const u8, value: []const u8) templates.RenderError!void {
+        if (name.len == 0) return error.EvalError;
+        for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", byte) == null) return error.EvalError;
+        for (value) |byte| if ((byte < 32 and byte != '\t') or byte == 127) return error.EvalError;
+        try self.headers.append(self.alloc, .{ .name = try self.alloc.dupe(u8, name), .value = try self.alloc.dupe(u8, value) });
+    }
+};
+
+fn timerWorker(ctx: *PowerCtx) void {
+    const io = ctx.io orelse return;
+    while (!sleep.untilStopped(io, .fromMilliseconds(50), &ctx.timer_stop)) {
+        var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+        defer arena.deinit();
+        if (ctx.core) |core| core.lock(io);
+        defer if (ctx.core) |core| core.unlock(io);
+        ctx.tick(clock.monotonicSeconds(io), arena.allocator()) catch |err|
+            std.debug.print("phobos: warning: power timer failed: {}\n", .{err});
+    }
+}
+
+fn configBool(cfg: *const Config, section: []const u8, option: []const u8, default: bool) !bool {
+    return cfg.getBoolean(section, option) catch |err| if (err == error.NoOption) default else return err;
+}
+
+fn configFloat(cfg: *const Config, section: []const u8, option: []const u8, default: f64, minimum: f64) !f64 {
+    const value = cfg.getFloat(section, option) catch |err| if (err == error.NoOption) default else return err;
+    if (value < minimum) return error.InvalidValue;
+    return value;
+}
 
 // ---------------------------------------------------------------------------
 // Param helpers
@@ -388,33 +822,41 @@ pub fn parseStatus(alloc: std.mem.Allocator, type_str: []const u8, body: []const
 fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {
     // Device HTTP releases Core, which may replace `dev`; work by name.
     const name = try alloc.dupe(u8, dev.name);
-    if (std.mem.eql(u8, req, "status")) {
-        const url = try alloc.dupe(u8, dev.status_url orelse return dev.state);
+    const before = try alloc.dupe(u8, dev.state);
+    if (dev.status_url != null) {
+        const url = try alloc.dupe(u8, dev.status_url.?);
         const type_str = try alloc.dupe(u8, dev.type_str);
-        const before = try alloc.dupe(u8, dev.state);
-        const body = ctx.deviceGet(alloc, url) catch null;
+        const generic = dev.response_template != null;
+        const state = if (generic and ctx.io != null) ctx.genericRequest(alloc, name, "status") catch "error" else null;
+        const body = if (!generic) ctx.deviceGet(alloc, url) catch null else null;
         const after = ctx.findDevice(name) orelse return error.NotFound;
-        if (body == null and ctx.io == null) return after.state;
-        const on = if (body) |b| parseStatus(alloc, type_str, b) else null;
-        try ctx.setState(name, if (on) |v| (if (v) "on" else "off") else "error");
-        const updated = ctx.findDevice(name) orelse return error.NotFound;
-        if (!std.mem.eql(u8, before, updated.state)) emitPowerChanged(ctx, alloc, updated);
-        return updated.state;
+        if (ctx.io != null) {
+            const on = if (body) |b| parseStatus(alloc, type_str, b) else null;
+            try ctx.setState(name, state orelse if (on) |v| (if (v) "on" else "off") else "error");
+        }
+        _ = after;
     }
-    // Enforce the printing lock on mutating actions (Moonraker `process_request`).
-    if (!force) try ctx.checkPrintingLock(dev);
+    const current = ctx.findDevice(name) orelse return error.NotFound;
+    if (std.mem.eql(u8, req, "status")) {
+        if (!std.mem.eql(u8, before, current.state)) try ctx.processChanged(name, alloc, !current.restrict_action_processing);
+        return (ctx.findDevice(name) orelse return error.NotFound).state;
+    }
     // Resolve "toggle" to the opposite of the current state.
     const action: []const u8 = blk: {
         if (!std.mem.eql(u8, req, "toggle")) break :blk req;
-        break :blk if (std.mem.eql(u8, dev.state, "off")) "on" else "off";
+        break :blk if (std.mem.eql(u8, current.state, "off")) "on" else "off";
     };
     if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
         return error.InvalidParams;
     }
-    try ctx.setPower(alloc, name, std.mem.eql(u8, action, "on"));
-    const updated = ctx.findDevice(name) orelse return error.NotFound;
-    emitPowerChanged(ctx, alloc, updated);
-    return updated.state;
+    if (std.mem.eql(u8, action, current.state)) {
+        if (!std.mem.eql(u8, before, current.state)) try ctx.processChanged(name, alloc, !current.restrict_action_processing);
+    } else {
+        if (!force) try ctx.checkPrintingLock(current);
+        try ctx.setPower(alloc, name, std.mem.eql(u8, action, "on"));
+        try ctx.processChanged(name, alloc, true);
+    }
+    return (ctx.findDevice(name) orelse return error.NotFound).state;
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +889,7 @@ pub fn handleDevices(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allo
 pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *PowerCtx = @ptrCast(@alignCast(ctx_ptr));
     const dev_name = try webreq.required([]const u8, params, "device");
-    const dev = ctx.findDevice(dev_name) orelse {
+    _ = ctx.findDevice(dev_name) orelse {
         // Matches Moonraker: "No valid device named <x>"
         return error.NotFound;
     };
@@ -464,7 +906,14 @@ pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
         break :blk al;
     } else "status";
 
-    const result_state = try processRequest(ctx, dev, action, alloc, false);
+    const result_state = ctx.processDevice(dev_name, action, false, alloc) catch |err| {
+        if (err != error.DeviceRequestFailed) return err;
+        const failed = ctx.findDevice(dev_name) orelse return error.NotFound;
+        if (params.object.get(jsonrpc.method_key) == null) return err;
+        const message = try std.fmt.allocPrint(alloc, "Error Setting Device Status: {s} to {s}: {s}", .{ dev_name, failed.requested_state orelse action, failed.request_error orelse "DeviceRequestFailed" });
+        try jsonrpc.setErrorReply(alloc, params, .bad_request, message);
+        return error.UpstreamRequestFailed;
+    };
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, dev_name, .{ .string = result_state });
     return .{ .object = obj };
@@ -490,8 +939,8 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
                 const name = entry.key_ptr.*;
                 if (std.mem.startsWith(u8, name, "_")) continue;
                 device_count += 1;
-                if (ctx.findDevice(name)) |dev| {
-                    const state = processRequest(ctx, dev, action, alloc, false) catch "error";
+                if (ctx.findDevice(name) != null) {
+                    const state = ctx.processDevice(name, action, false, alloc) catch "error";
                     try out.put(alloc, name, .{ .string = try alloc.dupe(u8, state) });
                 } else {
                     try out.put(alloc, name, .{ .string = "device_not_found" });
@@ -529,6 +978,22 @@ pub fn registerPower(reg: *Registry, ctx: *PowerCtx) !void {
     try reg.registerEndpoint(.{ .path = "/machine/device_power/on", .methods = &.{.POST} }, c, handleOn);
     try reg.registerEndpoint(.{ .path = "/machine/device_power/off", .methods = &.{.POST} }, c, handleOff);
     try reg.registerEndpoint(.{ .path = "/machine/device_power/device", .methods = &.{ .GET, .POST } }, c, handleSingleDevice);
+    try reg.dispatcher.registerEntry("set_device_power", .{ .ctx = c, .handler = handleRemotePower, .transports = &.{.INTERNAL} });
+}
+
+pub fn handleRemotePower(raw: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *PowerCtx = @ptrCast(@alignCast(raw));
+    const name = try webreq.required([]const u8, params, "device");
+    const state = if (params == .object) params.object.get("state") orelse return .null else return error.InvalidParams;
+    const action: []const u8 = if (state == .bool) (if (state.bool) "on" else "off") else if (state == .string) blk: {
+        const lower = try std.ascii.allocLowerString(alloc, state.string);
+        if (std.mem.eql(u8, lower, "true")) break :blk "on";
+        if (std.mem.eql(u8, lower, "false")) break :blk "off";
+        if (!std.mem.eql(u8, lower, "on") and !std.mem.eql(u8, lower, "off") and !std.mem.eql(u8, lower, "toggle")) return .null;
+        break :blk lower;
+    } else return .null;
+    _ = try ctx.processDevice(name, action, (try webreq.optional(bool, params, "force")) orelse false, alloc);
+    return .null;
 }
 
 // ===========================================================================
@@ -771,8 +1236,10 @@ test "handleSingleDevice: a failed device request sets error and fails" {
     ctx.setIo(io);
     var url_buf: [64]u8 = undefined;
     try ctx.addDevice(.{ .name = "psu", .type_str = "http", .state = "off", .on_url = try device.url(&url_buf, "/on") });
-    const params = try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}");
-    try testing.expectError(error.DeviceRequestFailed, handleSingleDevice(@ptrCast(&ctx), params, a));
+    const params = try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}");
+    try testing.expectError(error.UpstreamRequestFailed, handleSingleDevice(@ptrCast(&ctx), params, a));
+    const reply = try jsonrpc.errorReply(error.UpstreamRequestFailed, params, a);
+    try testing.expectEqualStrings("Error Setting Device Status: psu to on: HttpStatus", reply.message);
     try testing.expectEqualStrings("error", ctx.findDevice("psu").?.state);
 }
 
@@ -934,7 +1401,8 @@ test "handleSingleDevice: locked_while_printing blocks mutating actions while pr
     ctx.printing_ctx = &ctx;
 
     try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a));
-    try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"off\",\"_method\":\"POST\"}"), a));
+    const unchanged = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"off\",\"_method\":\"POST\"}"), a);
+    try testing.expectEqualStrings("off", unchanged.object.get("psu").?.string);
     try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}"), a));
     // status is allowed even when locked (read-only).
     const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\"}"), a);
@@ -1040,7 +1508,7 @@ test "batch handlers: locked_while_printing blocks on/off but not status" {
     const v_on = try handleOn(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
     try testing.expectEqualStrings("error", v_on.object.get("psu").?.string);
     const v_off = try handleOff(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
-    try testing.expectEqualStrings("error", v_off.object.get("psu").?.string);
+    try testing.expectEqualStrings("off", v_off.object.get("psu").?.string);
     // Status is still allowed.
     const v = try handleStatus(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
     try testing.expectEqualStrings("off", v.object.get("psu").?.string);
@@ -1141,7 +1609,6 @@ test "fuzz_handleDevices: arbitrary params never crash" {
 }
 
 test "registerPower: wires expected routes and JSON-RPC methods" {
-    const jsonrpc = @import("../jsonrpc.zig");
     var d = jsonrpc.Dispatcher.init(testing.allocator);
     defer d.deinit();
     var reg = Registry.init(testing.allocator, &d);
@@ -1491,4 +1958,276 @@ test "power devices preserve ownership on replacement and allocation failure" {
             try std.testing.expectEqualStrings("off", ctx.findDevice("test").?.state);
         }
     }.check, .{});
+}
+
+test "power schedules queue, shutdown, services, firmware restart and automatic off" {
+    const Actions = struct {
+        starts: usize = 0,
+        stops: usize = 0,
+        restarts: usize = 0,
+        fn service(raw: *anyopaque, _: std.mem.Allocator, action: []const u8, name: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expectEqualStrings("klipper", name);
+            if (std.mem.eql(u8, action, "start")) self.starts += 1 else self.stops += 1;
+        }
+        fn restart(raw: *anyopaque, _: std.mem.Allocator) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.restarts += 1;
+        }
+    };
+    var actions: Actions = .{};
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.action_ctx = &actions;
+    ctx.service_action = Actions.service;
+    ctx.firmware_restart = Actions.restart;
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .on_when_job_queued = true, .off_when_shutdown = true, .off_when_shutdown_delay = 2, .bound_services = "klipper.service", .restart_klipper_when_powered = true, .restart_delay = 1, .timer = 10 });
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    ctx.onJobQueued();
+    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
+    try ctx.tick(5, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    try testing.expectEqual(@as(usize, 1), actions.starts);
+    ctx.onKlippyState("error", 5);
+    try ctx.tick(5.9, a);
+    try testing.expectEqual(@as(usize, 0), actions.restarts);
+    try ctx.tick(6, a);
+    try testing.expectEqual(@as(usize, 1), actions.restarts);
+    ctx.onKlippyState("shutdown", 7);
+    try ctx.tick(8, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    ctx.onKlippyState("ready", 8);
+    try ctx.tick(9, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    try ctx.tick(14.9, a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    try ctx.tick(15, a);
+    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
+    try testing.expectEqual(@as(usize, 1), actions.stops);
+    ctx.onJobQueued();
+    try ctx.tick(20, a);
+    ctx.onKlippyState("shutdown", 20);
+    try ctx.tick(22, a);
+    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
+    try testing.expectEqual(@as(usize, 2), actions.stops);
+}
+
+test "remote power force bypasses the printing lock only on the internal method" {
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.printing_check = alwaysPrinting;
+    ctx.printing_ctx = &ctx;
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = true });
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectError(error.PrinterLocked, handleSingleDevice(&ctx, try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"force\":true,\"_method\":\"POST\"}"), a));
+    _ = try handleRemotePower(&ctx, try objParams(a, "{\"device\":\"psu\",\"state\":\"TRUE\",\"force\":true}"), a);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+    var dispatcher = jsonrpc.Dispatcher.init(testing.allocator);
+    defer dispatcher.deinit();
+    var reg = Registry.init(testing.allocator, &dispatcher);
+    defer reg.deinit();
+    try registerPower(&reg, &ctx);
+    const request = try objParams(a, "{\"jsonrpc\":\"2.0\",\"method\":\"set_device_power\",\"params\":{\"device\":\"psu\",\"state\":false,\"force\":true},\"id\":1}");
+    const response = try dispatcher.handleParsedRoot(.{ .transport = .WEBSOCKET }, request, a);
+    try testing.expect(std.mem.indexOf(u8, response, "Method not found for transport") != null);
+    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
+}
+
+test "generic HTTP renders request and response templates against a local device" {
+    const io = testing.io;
+    var device = try DeviceDouble.bind(io, "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"power\":1}");
+    defer device.server.deinit(io);
+    var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(io);
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    var url: [96]u8 = undefined;
+    try ctx.addDevice(.{ .name = "plug", .type_str = "http", .state = "off", .on_url = try device.url(&url, "/switch"), .request_template = "{% do http_request.set_method('POST') %}{% do http_request.set_body('on') %}{% do http_request.add_header('content-type', 'text/plain') %}{% do http_request.send() %}", .response_template = "{% set response = http_request.last_response().json() %}{% if response.power == 1 %}on{% else %}off{% endif %}" });
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("on", try ctx.processDevice("plug", "on", false, arena.allocator()));
+    try testing.expectEqualStrings("POST /switch HTTP/1.1\r\n", device.request_line[0..device.request_len]);
+}
+
+test "power config validates timers and reads action options" {
+    var cfg = Config.init(testing.allocator);
+    defer cfg.deinit();
+    try cfg.parseString("[power psu]\npin: !gpio23\noff_when_shutdown: true\noff_when_shutdown_delay: 2\non_when_job_queued: true\nbound_services: klipper.service\nrestart_klipper_when_powered: true\nrestart_delay: 3\nrestrict_action_processing: false\ntimer: 5\n[power plug]\ntype: shelly\naddress: localhost\ntimer: 4\n", "test");
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    try ctx.configure(&cfg);
+    const dev = ctx.findDevice("psu").?;
+    try testing.expect(dev.off_when_shutdown and dev.on_when_job_queued and dev.restart_klipper_when_powered);
+    try testing.expect(!dev.restrict_action_processing);
+    try testing.expectEqual(@as(f64, 2), dev.off_when_shutdown_delay);
+    try testing.expectEqual(@as(f64, 3), dev.restart_delay);
+    try testing.expectEqual(@as(?f64, 5), dev.timer);
+    const plug = ctx.findDevice("plug").?;
+    try testing.expectEqual(@as(?f64, null), plug.timer);
+    try testing.expectEqualStrings("http://localhost/relay/0?turn=on&timer=4", plug.off_url.?);
+    var bad = Config.init(testing.allocator);
+    defer bad.deinit();
+    try bad.parseString("[power bad]\npin: gpio2\ntimer: -1\n", "test");
+    try testing.expectError(error.InvalidValue, ctx.configure(&bad));
+}
+
+test "generic request wrapper validates headers, resets defaults and exposes response text" {
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var request: GenericRequest = .{ .ctx = &ctx, .alloc = a, .url = "http://device/on", .default_url = "http://device/on" };
+    _ = try GenericRequest.call(&request, "http_request.set_url", &.{.{ .string = "http://device/other" }}, .empty, a);
+    _ = try GenericRequest.call(&request, "http_request.set_method", &.{.{ .string = "POST" }}, .empty, a);
+    try testing.expectError(error.EvalError, request.addHeader("bad\nname", "value"));
+    try testing.expectError(error.EvalError, request.addHeader("valid", "bad\r\nvalue"));
+    try request.addHeader("x-device", "value");
+    _ = try GenericRequest.call(&request, "http_request.reset", &.{}, .empty, a);
+    try testing.expectEqualStrings("http://device/on", request.url);
+    try testing.expectEqual(.GET, request.method);
+    try testing.expectEqual(@as(usize, 0), request.headers.items.len);
+    request.response = "on";
+    request.sent = true;
+    var marker: std.json.ObjectMap = .empty;
+    try marker.put(a, "__native", .{ .string = "http_request" });
+    var vars: std.json.ObjectMap = .empty;
+    try vars.put(a, "http_request", .{ .object = marker });
+    var template = try templates.Template.init(testing.allocator, "{ http_request.last_response().text }");
+    defer template.deinit();
+    try testing.expectEqualStrings("on", try template.renderText(a, vars, .{ .ctx = &request, .call = GenericRequest.call }));
+}
+
+test "request template method calls cannot retain more than the request memory budget" {
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    ctx.setIo(testing.io);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const target: [1024]u8 = @splat('x');
+    const source = try std.fmt.allocPrint(a, "{{% for i in range(1000) %}}{{% do http_request.set_url('{s}') %}}{{% endfor %}}", .{target});
+    try ctx.addDevice(.{ .name = "plug", .type_str = "http", .state = "off", .on_url = "invalid", .request_template = source, .response_template = "on" });
+    try testing.expectError(error.OutOfMemory, ctx.genericRequest(a, "plug", "on"));
+}
+
+test "fuzz generic request wrapper rejects unsafe header bytes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var ctx = PowerCtx.init(testing.allocator, null);
+            defer ctx.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var request: GenericRequest = .{ .ctx = &ctx, .alloc = arena.allocator(), .url = "", .default_url = "" };
+            const methods = [_][]const u8{ "http_request.set_url", "http_request.set_method", "http_request.set_body", "http_request.add_header", "http_request.set_headers", "http_request.reset", "http_request.last_response", "response.json", "response.text", "async_sleep" };
+            const method = methods[bytes[0] % methods.len];
+            _ = GenericRequest.call(&request, method, &.{ .{ .string = bytes[0..32] }, .{ .string = bytes[32..] } }, .empty, arena.allocator()) catch {};
+            request.addHeader(bytes[0..32], bytes[32..]) catch return;
+            try testing.expect(std.mem.indexOfAny(u8, request.headers.items[0].name, "\r\n") == null);
+            try testing.expect(std.mem.indexOfAny(u8, request.headers.items[0].value, "\r\n") == null);
+        }
+    }.run, .{});
+}
+
+test "external status changes run services only when action processing is unrestricted" {
+    const Actions = struct {
+        calls: usize = 0,
+        fn service(raw: *anyopaque, _: std.mem.Allocator, _: []const u8, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+        }
+    };
+    const io = testing.io;
+    for ([_]bool{ true, false }) |restrict| {
+        var device = try DeviceDouble.bind(io, "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"ison\":true}");
+        defer device.server.deinit(io);
+        var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+        defer serving.cancel(io);
+        var ctx = PowerCtx.init(testing.allocator, null);
+        defer ctx.deinit();
+        ctx.setIo(io);
+        var actions: Actions = .{};
+        ctx.action_ctx = &actions;
+        ctx.service_action = Actions.service;
+        var url: [96]u8 = undefined;
+        try ctx.addDevice(.{ .name = "plug", .type_str = "shelly", .state = "off", .status_url = try device.url(&url, "/status"), .restrict_action_processing = restrict, .bound_services = "klipper,klipper.service" });
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try testing.expectEqualStrings("on", try ctx.processDevice("plug", "status", false, arena.allocator()));
+        try testing.expectEqual(@as(usize, if (restrict) 0 else 1), actions.calls);
+    }
+}
+
+test "bound service validation normalizes names and rejects unavailable bindings" {
+    const Validation = struct {
+        calls: usize = 0,
+        fn validate(raw: *anyopaque, _: std.mem.Allocator, name: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (!std.mem.eql(u8, name, "klipper")) return error.ServiceNotInstalled;
+        }
+    };
+    var ctx = PowerCtx.init(testing.allocator, null);
+    defer ctx.deinit();
+    var validation: Validation = .{};
+    ctx.action_ctx = &validation;
+    ctx.service_validate = Validation.validate;
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .bound_services = " klipper.service,klipper" });
+    try ctx.validateBoundServices(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), validation.calls);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .bound_services = "unknown" });
+    try testing.expectError(error.ServiceNotInstalled, ctx.validateBoundServices(testing.allocator));
+}
+
+test "fuzz power config validates numeric and template fields without leaking" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var cfg = Config.init(testing.allocator);
+            defer cfg.deinit();
+            const source = try std.fmt.allocPrint(arena.allocator(), "[power test]\npin: gpio2\ntimer: {s}\nresponse_template: {s}\n", .{ bytes[0..16], bytes[16..] });
+            cfg.parseString(source, "test") catch return;
+            var ctx = PowerCtx.init(testing.allocator, null);
+            defer ctx.deinit();
+            ctx.configure(&cfg) catch {};
+        }
+    }.run, .{});
+}
+
+test "fuzz power timers and internal requests preserve valid states" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const n = smith.valueRangeAtMostWithHash(u16, 0, 1000, 0);
+            var ctx = PowerCtx.init(testing.allocator, null);
+            defer ctx.deinit();
+            try ctx.addDevice(.{ .name = "p", .type_str = "gpio", .state = "off", .on_when_job_queued = true, .off_when_shutdown = true, .timer = @as(f64, @floatFromInt(n)) + 1 });
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            ctx.onJobQueued();
+            try ctx.tick(n, arena.allocator());
+            ctx.onKlippyState("shutdown", n);
+            try ctx.tick(@as(f64, @floatFromInt(n)) + 2, arena.allocator());
+            try testing.expectEqualStrings("off", ctx.findDevice("p").?.state);
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 1);
+            _ = handleRemotePower(&ctx, .{ .string = &bytes }, arena.allocator()) catch {};
+            try ctx.addDevice(.{ .name = "bound", .type_str = "gpio", .state = "off", .bound_services = &bytes });
+            const Validator = struct {
+                fn validate(_: *anyopaque, _: std.mem.Allocator, _: []const u8) !void {}
+            };
+            ctx.action_ctx = &ctx;
+            ctx.service_validate = Validator.validate;
+            try ctx.validateBoundServices(arena.allocator());
+        }
+    }.run, .{});
 }

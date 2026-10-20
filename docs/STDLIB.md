@@ -68,6 +68,7 @@ API becomes available and passes both host and ARM checks.
 | Serial configuration in `serial.zig` | `std.Io` has no termios configuration operation. Use `std.posix.tcgetattr` and `tcsetattr`, including Linux baud bits. |
 | System identity in `machine.zig` | No higher-level uname or effective-UID operation. `process.getUserInfo` resolves names to IDs, not IDs to names. |
 | Video capability layout in `machine.zig` | No V4L2 declaration. Use a local `extern struct`, `std.os.linux.IOCTL.IOR` and `io.operate(.device_io_control)`. |
+| GPIO input layout in `gpio_input.zig` | No GPIO declaration. Local Linux ABI v1 structs and `std.os.linux.IOCTL.IOWR` provide edge requests and initial values through `io.operate(.device_io_control)`; event reads and cancellation use `std.Io.File`. |
 | Disk capacity in `disk_usage.c` | No `std.Io` filesystem-capacity operation. ARM C translation produces an opaque `statvfs` type because its platform header has a bitfield. The C header owns its ABI. |
 | Local refresh hours in `local_time.c` | `std.Tz` parses TZif tables but does not evaluate POSIX footers or expose local-time conversion. `localtime_r` applies host timezone and future DST rules; C owns `struct tm` and `time_t`. |
 | SQLite bindings in `sqlite_c.zig` | No standard SQLite driver. The translated `SQLITE_TRANSIENT` function-pointer sentinel fails ARM alignment checks; the local opaque-pointer declaration preserves the C sentinel. |
