@@ -24,6 +24,7 @@ const jv = @import("../json/value.zig");
 const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
+const clock = @import("../util/clock.zig");
 
 /// One in-flight request awaiting its response. The persistent reader routes
 /// a matching response frame here and posts the semaphore.
@@ -708,7 +709,8 @@ pub const KlippyCtx = struct {
 
     /// Emit a `notify_gcode_response` (Core held). Klippy's params are the
     /// kwarg object `{"response": "..."}`; Moonraker forwards only the string,
-    /// so clients get `[response]`.
+    /// so clients get `[response]`. String responses also enter the gcode
+    /// store (data_store.py `_update_gcode_store`).
     fn emitGcodeResponse(self: *KlippyCtx, io: std.Io, params: std.json.Value) !void {
         const resp: std.json.Value = switch (params) {
             .array => return self.bus.emitLocked(io, notify.names.gcode_response, params),
@@ -716,6 +718,9 @@ pub const KlippyCtx = struct {
             .null => return,
             else => params,
         };
+        if (resp == .string) {
+            if (self.temp_store) |ts| try ts.pushGcodeResponse(resp.string, clock.wallSeconds(io));
+        }
         var arr: std.json.Array = .init(std.heap.smp_allocator);
         defer arr.deinit();
         try arr.append(resp);
@@ -791,6 +796,7 @@ pub const KlippyCtx = struct {
     /// Send a request from a handler that holds Core and return the result.
     /// Core is released while waiting (see `call`).
     pub fn request(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        try self.recordGcodeCommand(method, params);
         const params_json = try serializeParams(alloc, params);
         defer if (params_json.len > 0) alloc.free(params_json);
         return self.call(method, params_json, self.bus.core, alloc);
@@ -799,9 +805,21 @@ pub const KlippyCtx = struct {
     /// `request` for callers that do NOT hold Core (off-Core proxies, the job
     /// queue worker).
     pub fn requestOffCore(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        if (self.io) |io| try self.bus.core.run(io, recordGcodeCommand, .{ self, method, params });
         const params_json = try serializeParams(alloc, params);
         defer if (params_json.len > 0) alloc.free(params_json);
         return self.call(method, params_json, null, alloc);
+    }
+
+    /// Store a non-empty `gcode/script` script as a gcode store command
+    /// (klippy_connection.py `gcode_received`). Core held: the store is read
+    /// under Core.
+    fn recordGcodeCommand(self: *KlippyCtx, method: []const u8, params: std.json.Value) !void {
+        if (!std.mem.eql(u8, method, "gcode/script") or params != .object) return;
+        const ts = self.temp_store orelse return;
+        const io = self.io orelse return;
+        const script = params.object.get("script") orelse return;
+        if (script == .string) try ts.pushGcodeCommand(script.string, clock.wallSeconds(io));
     }
 
     /// Resubscribe Klippy to the aggregate object set with the
@@ -1181,6 +1199,41 @@ test "processStatusUpdate: live shutdown sets state and emits once" {
 
     try ctx.processStatusUpdate(io, try statusParams(a, "ready"));
     try std.testing.expectEqual(State.ready, ctx.state);
+}
+
+test "gcode scripts and responses enter the gcode store like data_store.py" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+    var store = try @import("data_store.zig").DataStoreCtx.init(std.testing.allocator);
+    defer store.deinit();
+    const io = std.testing.io;
+    ctx.io = io;
+    ctx.temp_store = &store;
+
+    var params: std.json.ObjectMap = .empty;
+    try params.put(a, "script", .{ .string = "G28" });
+    try ctx.recordGcodeCommand("gcode/script", .{ .object = params });
+    // Blank scripts and other methods are not stored.
+    var blank: std.json.ObjectMap = .empty;
+    try blank.put(a, "script", .{ .string = "  " });
+    try ctx.recordGcodeCommand("gcode/script", .{ .object = blank });
+    try ctx.recordGcodeCommand("info", .{ .object = params });
+    var resp: std.json.ObjectMap = .empty;
+    try resp.put(a, "response", .{ .string = "ok" });
+    try ctx.emitGcodeResponse(io, .{ .object = resp });
+
+    var out: [4]@import("data_store.zig").GcodeEntry = undefined;
+    const n = store.gcode_ring.copyAll(&out);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("G28", out[0].message);
+    try std.testing.expectEqual(.command, out[0].type);
+    try std.testing.expectEqualStrings("ok", out[1].message);
+    try std.testing.expectEqual(.response, out[1].type);
 }
 
 test "processStatusUpdate: malformed params return early" {

@@ -840,14 +840,16 @@ fn diskUsage(alloc: std.mem.Allocator, dir: Dir) !std.json.Value {
     var total: u64 = 0;
     var used: u64 = 0;
     var free: u64 = 0;
-    phobos_disk_usage(dir.handle, &total, &used, &free);
-    try obj.put(alloc, "total", .{ .integer = @intCast(total) });
-    try obj.put(alloc, "used", .{ .integer = @intCast(used) });
-    try obj.put(alloc, "free", .{ .integer = @intCast(free) });
+    // shutil.disk_usage raises on failure, so Moonraker answers 500 too.
+    if (phobos_disk_usage(dir.handle, &total, &used, &free) != 0) return error.DiskUsageUnavailable;
+    try obj.put(alloc, "total", .{ .integer = std.math.lossyCast(i64, total) });
+    try obj.put(alloc, "used", .{ .integer = std.math.lossyCast(i64, used) });
+    try obj.put(alloc, "free", .{ .integer = std.math.lossyCast(i64, free) });
     return .{ .object = obj };
 }
 
-extern "c" fn phobos_disk_usage(fd: c_int, total: *u64, used: *u64, available: *u64) void;
+/// Returns 0, or the fstatvfs errno with the outputs unchanged.
+extern "c" fn phobos_disk_usage(fd: c_int, total: *u64, used: *u64, available: *u64) c_int;
 
 // ---------------------------------------------------------------------------
 // POST /server/files/directory (mkdir)
@@ -1711,14 +1713,10 @@ test "handleGetDirectory: dirs/files/disk_usage/root_info shape" {
     try testing.expectEqual(@as(usize, 1), o.get("files").?.array.items.len);
 }
 
-test "diskUsage: invalid directory returns zero byte counts" {
+test "diskUsage: an invalid directory is an error, not zero byte counts" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const a = arena.allocator();
-    const result = try diskUsage(a, .{ .handle = -1 });
-    inline for (.{ "total", "used", "free" }) |field| {
-        try testing.expectEqual(@as(i64, 0), result.object.get(field).?.integer);
-    }
+    try testing.expectError(error.DiskUsageUnavailable, diskUsage(arena.allocator(), .{ .handle = -1 }));
 }
 
 test "handleGetDirectory: extended gcodes include metadata and preserve basenames" {
@@ -1759,7 +1757,10 @@ test "fuzz diskUsage: directory handles return bounded byte counts" {
             else
                 .{ .handle = -1 };
             defer if (dir.handle != -1) dir.close(testing.io);
-            const result = try diskUsage(a, dir);
+            const result = diskUsage(a, dir) catch |err| {
+                try testing.expect(dir.handle == -1 and err == error.DiskUsageUnavailable);
+                return;
+            };
             const total = result.object.get("total").?.integer;
             const used = result.object.get("used").?.integer;
             const free = result.object.get("free").?.integer;
