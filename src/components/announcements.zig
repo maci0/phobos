@@ -249,7 +249,10 @@ pub const AnnouncementsCtx = struct {
         {
             self.bus.core.unlock(io);
             defer self.bus.core.lock(io);
-            for (downloads, urls) |*d, url| d.fetch(arena, io, url, FETCH_TIMEOUT);
+            for (downloads, urls) |*d, url| {
+                if (self.refresh_stop.isSet()) break;
+                d.fetch(arena, io, url, FETCH_TIMEOUT);
+            }
         }
         var changed = false;
         var index: ?EntryIndex = null;
@@ -1953,4 +1956,37 @@ test "handleUpdate: explicit empty list, comma-separated names and unknown names
     try testing.expectError(error.InvalidParams, handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":\"klipper,nope\"}"), a));
     try testing.expectError(error.InvalidParams, handleUpdate(@ptrCast(&env.ctx), try mkParams(a, "{\"subscriptions\":1}"), a));
     try testing.expectEqual(@as(usize, 0), env.frames.items.len);
+}
+
+test "announcement refresh stops before starting another feed download" {
+    const Fake = struct {
+        ctx: *AnnouncementsCtx,
+        attempts: usize = 0,
+        stop_after: usize = 1,
+
+        fn launch(raw: ?*anyopaque, _: usize, _: std.mem.Alignment, _: []const u8, _: std.mem.Alignment, _: *const fn (*const anyopaque, *anyopaque) void) std.Io.ConcurrentError!*std.Io.AnyFuture {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.attempts += 1;
+            if (self.attempts == self.stop_after) self.ctx.refresh_stop = .is_set;
+            return error.ConcurrencyUnavailable;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var env: TestEnv = undefined;
+    try env.init(arena.allocator(), testing.io);
+    defer env.deinit(testing.io);
+    var fake: Fake = .{ .ctx = &env.ctx };
+    var vtable = std.Io.failing.vtable.*;
+    vtable.concurrent = Fake.launch;
+    env.ctx.io = .{ .userdata = &fake, .vtable = &vtable };
+    env.ctx.dev_mode = false;
+    for (0..4) |stop_after| {
+        fake.attempts = 0;
+        fake.stop_after = stop_after;
+        env.ctx.refresh_stop = if (stop_after == 0) .is_set else .unset;
+        const result = try env.core.run(testing.io, handleUpdate, .{ @as(*anyopaque, &env.ctx), std.json.Value.null, arena.allocator() });
+        try testing.expectEqual(@min(stop_after, AnnouncementsCtx.builtin_feeds.len), fake.attempts);
+        try testing.expect(!result.object.get("modified").?.bool);
+    }
 }

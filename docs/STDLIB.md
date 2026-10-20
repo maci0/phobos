@@ -122,6 +122,8 @@ the next device request can release Core and change that state.
 TD-1 scans use `std.Io.Clock` to share one serial-timeout budget across reads;
 their final in-flight read can add at most one further serial timeout. Polling
 checks its stop event before opening each device.
+Announcement refreshes check their stop event before starting the next feed
+download, so shutdown does not wait through every configured feed timeout.
 
 Update tests create native temporary repositories whose `origin` points to the
 same local fixture. Refresh assertions check the resulting tracking ref; the
