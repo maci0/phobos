@@ -166,14 +166,11 @@ const cam_fields = [_]CamFieldMapping{
 pub fn configWebcamUid(instance_uuid: []const u8, name: []const u8, buf: *[36]u8) ![]const u8 {
     var ns: [16]u8 = undefined;
     try parseUuid(instance_uuid, &ns);
-    var labeled: [192]u8 = undefined;
     const prefix = "moonraker.webcam.";
-    if (prefix.len + name.len > labeled.len) return error.InvalidParams;
-    @memcpy(labeled[0..prefix.len], prefix);
-    @memcpy(labeled[prefix.len..][0..name.len], name);
     var hasher = std.crypto.hash.Sha1.init(.{});
     hasher.update(&ns);
-    hasher.update(labeled[0 .. prefix.len + name.len]);
+    hasher.update(prefix);
+    hasher.update(name);
     var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
     hasher.final(&digest);
     var bytes: [16]u8 = undefined;
@@ -928,6 +925,25 @@ test "configWebcamUid matches Moonraker uuid5 for the printer instance" {
     try testing.expectEqualStrings("1616e509-4515-53e4-8cd8-74875fb859c9", cam);
     const example = try configWebcamUid("a48b2888-8e48-4d4f-ac9b-7bc09e068dea", "Example", &buf);
     try testing.expectEqualStrings("e98363d4-af2e-5f41-8515-e84af7baf3c2", example);
+    const name: [256]u8 = @splat('a');
+    try testing.expectEqualStrings("30378439-b391-518d-9ef1-63eb2e1b3b9e", try configWebcamUid(ns, &name, &buf));
+}
+
+test "fuzz configWebcamUid hashes bounded names without intermediate storage" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var name: [1024]u8 = undefined;
+            smith.bytesWithHash(&name, 0);
+            const len = smith.valueRangeAtMostWithHash(u16, 0, name.len, 1);
+            var first: [36]u8 = undefined;
+            var second: [36]u8 = undefined;
+            const namespace = "a48b28888e484d4fac9b7bc09e068dea";
+            const uuid = try configWebcamUid(namespace, name[0..len], &first);
+            try testing.expectEqualStrings(uuid, try configWebcamUid(namespace, name[0..len], &second));
+            try testing.expectEqual(@as(u8, '5'), uuid[14]);
+            try testing.expect(std.mem.findScalar(u8, "89ab", uuid[19]) != null);
+        }
+    }.run, .{});
 }
 
 test "addFromConfig: config webcam is listed and cannot be overwritten" {

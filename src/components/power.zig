@@ -324,23 +324,28 @@ pub const ProtoUrls = struct { on: []const u8, off: []const u8, status: []const 
 /// Tasmota HTTP command URLs (Moonraker tasmota.py): cmnd=Power<id>%20<ON|OFF|>.
 /// `password` (with user "admin") is appended when set.
 pub fn tasmotaUrls(alloc: std.mem.Allocator, address: []const u8, output_id: i64, password: ?[]const u8) !ProtoUrls {
-    var auth_buf: [128]u8 = undefined;
-    const auth: []const u8 = if (password) |p|
-        try std.fmt.bufPrint(&auth_buf, "&user=admin&password={s}", .{p})
-    else
-        "";
+    const auth = if (password != null) "&user=admin&password=" else "";
+    const escaped = std.fmt.alt(std.Uri.Component{ .raw = password orelse "" }, .formatEscaped);
+    const on = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}%20ON{s}{f}", .{ address, output_id, auth, escaped });
+    errdefer alloc.free(on);
+    const off = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}%20OFF{s}{f}", .{ address, output_id, auth, escaped });
+    errdefer alloc.free(off);
     return .{
-        .on = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}%20ON{s}", .{ address, output_id, auth }),
-        .off = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}%20OFF{s}", .{ address, output_id, auth }),
-        .status = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}{s}", .{ address, output_id, auth }),
+        .on = on,
+        .off = off,
+        .status = try std.fmt.allocPrint(alloc, "http://{s}/cm?cmnd=Power{d}{s}{f}", .{ address, output_id, auth, escaped }),
     };
 }
 
 /// Shelly Gen1 relay URLs (Moonraker shelly.py): /relay/<id>?turn=<on|off>.
 pub fn shellyUrls(alloc: std.mem.Allocator, address: []const u8, output_id: i64) !ProtoUrls {
+    const on = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}?turn=on", .{ address, output_id });
+    errdefer alloc.free(on);
+    const off = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}?turn=off", .{ address, output_id });
+    errdefer alloc.free(off);
     return .{
-        .on = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}?turn=on", .{ address, output_id }),
-        .off = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}?turn=off", .{ address, output_id }),
+        .on = on,
+        .off = off,
         .status = try std.fmt.allocPrint(alloc, "http://{s}/relay/{d}", .{ address, output_id }),
     };
 }
@@ -544,6 +549,36 @@ test "tasmotaUrls: cmnd=Power<id> on/off/status, optional auth" {
     try testing.expectEqualStrings("http://host/cm?cmnd=Power2%20ON&user=admin&password=secret", ua.on);
 }
 
+test "tasmotaUrls escapes reserved password bytes as one query value" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const urls = try tasmotaUrls(arena.allocator(), "host", 2, "a&b #+c");
+    try testing.expectEqualStrings("http://host/cm?cmnd=Power2%20ON&user=admin&password=a%26b%20%23%2Bc", urls.on);
+}
+
+test "tasmotaUrls accepts passwords larger than the former intermediate buffer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const password: [256]u8 = @splat('p');
+    const urls = try tasmotaUrls(arena.allocator(), "host", 2, &password);
+    try testing.expect(std.mem.endsWith(u8, urls.status, &password));
+}
+
+test "power protocol URL constructors release partial allocations" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const tasmota = try tasmotaUrls(alloc, "host", 2, "a&b");
+            defer alloc.free(tasmota.on);
+            defer alloc.free(tasmota.off);
+            defer alloc.free(tasmota.status);
+            const shelly = try shellyUrls(alloc, "host", 0);
+            defer alloc.free(shelly.on);
+            defer alloc.free(shelly.off);
+            defer alloc.free(shelly.status);
+        }
+    }.run, .{});
+}
+
 test "shellyUrls: /relay/<id>?turn=on|off + status" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -565,6 +600,12 @@ test "fuzz tasmota/shellyUrls: arbitrary address never crashes" {
             const id = smith.valueRangeLessThanWithHash(i64, 0, 16, 1);
             _ = tasmotaUrls(a, &addr, id, null) catch {};
             _ = shellyUrls(a, &addr, id) catch {};
+            const escaped = try tasmotaUrls(a, "device", id, &addr);
+            const start = std.mem.find(u8, escaped.status, "password=").? + "password=".len;
+            const encoded = escaped.status[start..];
+            try testing.expect(std.mem.findAny(u8, encoded, "&+#? ") == null);
+            const decoded = try (std.Uri.Component{ .percent_encoded = encoded }).toRawMaybeAlloc(a);
+            try testing.expectEqualSlices(u8, &addr, decoded);
         }
     }.run, .{});
 }

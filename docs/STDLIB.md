@@ -188,6 +188,10 @@ or log output uses the existing unavailable-status fallback.
 Base32, UUID layout and CIDR prefix matching remain small local codecs. The
 standard library has no matching complete API. Address comparison for trusted
 clients intentionally ignores ports; `IpAddress.eql` also compares the port.
+Webcam UUID5 hashing streams the namespace, prefix and name through
+`std.crypto.hash.Sha1.update`. Power URL credentials use
+`std.Uri.Component.formatEscaped`, and URL constructors free partial results
+when a later allocation fails.
 
 Owned JSON snapshots still require a recursive copy and matching cleanup.
 `std.json.Value.jsonParseFromValue` returns its source unchanged, so it cannot
