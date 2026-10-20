@@ -74,6 +74,8 @@ pub const JobQueueCtx = struct {
     /// Locked via lockJobs/unlockJobs, which no-op when `io` is unset (single-
     /// threaded init / unit tests have no concurrent mutator).
     mutex: std.Io.Mutex = .init,
+    /// Serializes snapshots with their writes. Callers release `mutex` first.
+    save_mutex: std.Io.Mutex = .init,
     /// Opaque pointer to KlippyCtx for print dispatch. Set by app.zig via
     /// setKlippyDispatch (avoids circular @import with klippy_connection.zig).
     klippy: ?*anyopaque = null,
@@ -348,6 +350,8 @@ pub const JobQueueCtx = struct {
     /// Persist the queued jobs. A failure is logged: the in-memory queue stays
     /// authoritative. Callers must NOT hold `mutex`.
     fn saveToStore(self: *JobQueueCtx, arena: std.mem.Allocator) void {
+        self.save_mutex.lockUncancelable(self.clock_io);
+        defer self.save_mutex.unlock(self.clock_io);
         const queue = buildResponse(self, arena) catch |err| {
             std.debug.print("phobos: warning: failed to persist job queue: {} — queued jobs may be lost on restart\n", .{err});
             return;
@@ -433,8 +437,8 @@ pub const QueuedJob = struct {
 
     fn asJson(self: *const QueuedJob, alloc: std.mem.Allocator, cur_time: f64) !std.json.Value {
         var obj: std.json.ObjectMap = .empty;
-        try obj.put(alloc, "filename", .{ .string = self.filename });
-        try obj.put(alloc, "job_id", .{ .string = self.job_id });
+        try obj.put(alloc, "filename", .{ .string = try alloc.dupe(u8, self.filename) });
+        try obj.put(alloc, "job_id", .{ .string = try alloc.dupe(u8, self.job_id) });
         try obj.put(alloc, "time_added", .{ .float = self.time_added });
         const time_in_queue = if (cur_time > self.time_added) cur_time - self.time_added else 0.0;
         try obj.put(alloc, "time_in_queue", .{ .float = time_in_queue });
@@ -1249,6 +1253,103 @@ const NoopStore = struct {
         return .{ .ctx = @ptrCast(&dummy), .vtable = &vtable };
     }
 };
+
+test "queue snapshots own filename and id strings" {
+    const alloc = testing.allocator;
+    var job = blk: {
+        const filename = try alloc.dupe(u8, "original.gcode");
+        errdefer alloc.free(filename);
+        const id = try alloc.dupe(u8, "ONE");
+        break :blk QueuedJob{ .filename = filename, .job_id = id, .time_added = 1 };
+    };
+    defer job.deinit(alloc);
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const snapshot = try job.asJson(arena.allocator(), 2);
+    job.filename[0] = 'X';
+    job.job_id[0] = 'Y';
+    try testing.expectEqualStrings("original.gcode", snapshot.object.get("filename").?.string);
+    try testing.expectEqualStrings("ONE", snapshot.object.get("job_id").?.string);
+}
+
+test "queue saves cannot persist older snapshots after newer changes" {
+    const alloc = std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(io, ":memory:");
+    defer db.deinit();
+    const Fixture = struct {
+        io: std.Io,
+        backend: ds.DataStore,
+        first_blocked: std.Io.Event = .unset,
+        release_first: std.Io.Event = .unset,
+        second_started: std.Io.Event = .unset,
+        second_committed: std.Io.Event = .unset,
+        attempts: std.atomic.Value(u32) = .init(0),
+        fn insert(raw: *anyopaque, a: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const first = self.attempts.fetchAdd(1, .monotonic) == 0;
+            if (first) {
+                self.first_blocked.set(self.io);
+                if (!sleep.untilStopped(self.io, .fromSeconds(5), &self.release_first)) return error.BackendError;
+            }
+            try self.backend.insertItem(a, ns, key, value);
+            if (!first) self.second_committed.set(self.io);
+        }
+        fn save(ctx: *JobQueueCtx, started: ?*std.Io.Event) void {
+            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+            defer arena.deinit();
+            if (started) |event| event.set(ctx.clock_io);
+            ctx.saveToStore(arena.allocator());
+        }
+    };
+    var fixture = Fixture{ .io = io, .backend = db.dataStore() };
+    var vtable = NoopStore.vtable;
+    vtable.insertItem = Fixture.insert;
+    var bus: NotifyBus = undefined;
+    var ctx = try JobQueueCtx.init(alloc, io, .{ .ctx = &fixture, .vtable = &vtable }, &bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    try ctx.jobs.ensureTotalCapacity(alloc, 2);
+    {
+        const filename = try alloc.dupe(u8, "one.gcode");
+        errdefer alloc.free(filename);
+        const id = try alloc.dupe(u8, "ONE");
+        errdefer alloc.free(id);
+        ctx.jobs.appendAssumeCapacity(.{ .filename = filename, .job_id = id, .time_added = 1 });
+    }
+    var first = try io.concurrent(Fixture.save, .{ &ctx, @as(?*std.Io.Event, null) });
+    defer first.cancel(io);
+    defer fixture.release_first.set(io);
+    try testing.expect(sleep.untilStopped(io, .fromSeconds(1), &fixture.first_blocked));
+    {
+        ctx.lockJobs();
+        defer ctx.unlockJobs();
+        const filename = try alloc.dupe(u8, "two.gcode");
+        errdefer alloc.free(filename);
+        const id = try alloc.dupe(u8, "TWO");
+        errdefer alloc.free(id);
+        ctx.jobs.appendAssumeCapacity(.{ .filename = filename, .job_id = id, .time_added = 2 });
+    }
+    var second = try io.concurrent(Fixture.save, .{ &ctx, @as(?*std.Io.Event, &fixture.second_started) });
+    defer second.cancel(io);
+    defer fixture.release_first.set(io);
+    try testing.expect(sleep.untilStopped(io, .fromSeconds(1), &fixture.second_started));
+    _ = sleep.untilStopped(io, .fromMilliseconds(100), &fixture.second_committed);
+    fixture.release_first.set(io);
+    first.await(io);
+    second.await(io);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const stored = (try db.getItem(arena.allocator(), ns_queue, queue_key)).?;
+    const jobs = stored.object.get("queued_jobs").?.array.items;
+    try testing.expectEqual(ctx.jobs.items.len, jobs.len);
+    for (ctx.jobs.items, jobs) |live, saved| {
+        try testing.expectEqualStrings(live.filename, saved.object.get("filename").?.string);
+        try testing.expectEqualStrings(live.job_id, saved.object.get("job_id").?.string);
+    }
+}
 
 test "stress: concurrent handlers + reader callback don't corrupt the queue" {
     const JE = @import("job_state.zig").JobEvent;

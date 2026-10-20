@@ -130,6 +130,7 @@ pub const ConfigParser = struct {
         visited: *std.ArrayList(u64),
     ) ConfigError!void {
         _ = _file_label;
+        if (!std.unicode.utf8ValidateSlice(source)) return ConfigError.ParseError;
 
         var current_section: ?[]const u8 = null;
         var current_key: ?[]const u8 = null;
@@ -853,6 +854,37 @@ test "parse: malformed section header returns ParseError" {
     try std.testing.expectError(ConfigError.ParseError, p.parseString("[unclosed\nkey: val\n", ""));
 }
 
+test "parse: invalid UTF-8 is rejected before any configuration is stored" {
+    const bad = [_][]const u8{
+        "[section\xff]\nkey: value\n",
+        "[section]\nkey\xfe: value\n",
+        "[section]\nkey: \xc3(\n",
+    };
+    for (bad) |source| {
+        var p = ConfigParser.init(std.testing.allocator);
+        defer p.deinit();
+        try std.testing.expectError(ConfigError.ParseError, p.parseString(source, "test"));
+        try std.testing.expectEqual(@as(usize, 0), p.sections_map.count());
+    }
+    var p = ConfigParser.init(std.testing.allocator);
+    defer p.deinit();
+    try p.parseString("[section]\nkey: température\n", "test");
+    try std.testing.expectEqualStrings("température", p.get("section", "key").?);
+}
+
+test "parseFile: invalid UTF-8 in an included file is a parse error" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.conf", .data = "[include child.conf]\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "child.conf", .data = "[child]\nkey: \xff\n" });
+    const path = try tmp.dir.realPathFileAlloc(io, "main.conf", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    var p = ConfigParser.init(std.testing.allocator);
+    defer p.deinit();
+    try std.testing.expectError(ConfigError.ParseError, p.parseFile(io, path));
+}
+
 test "parse: duplicate section within same file returns ParseError" {
     var p = ConfigParser.init(std.testing.allocator);
     defer p.deinit();
@@ -1080,7 +1112,12 @@ test "fuzz parseString: never crashes on arbitrary input" {
             smith.bytesWithHash(&buf, 0);
             var p = ConfigParser.init(std.testing.allocator);
             defer p.deinit();
-            _ = p.parseString(&buf, "") catch {};
+            if (std.unicode.utf8ValidateSlice(&buf)) {
+                _ = p.parseString(&buf, "") catch {};
+            } else {
+                try std.testing.expectError(ConfigError.ParseError, p.parseString(&buf, ""));
+                try std.testing.expectEqual(@as(usize, 0), p.sections_map.count());
+            }
         }
     }.run, .{});
 }

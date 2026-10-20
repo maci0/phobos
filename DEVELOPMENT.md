@@ -244,9 +244,15 @@ Configuration wildcard matching uses an iterative last-star retry, so repeated
 wildcards cannot consume recursive stack space or exponential retry work.
 Only an explicit `[database] path` overrides the backend defaults under the
 datadir: `database/moonraker-sql.db` for SQLite, `database` for the file backend.
+File-backend deployments that used the previous default directory can retain it
+by setting `[database] path` to `<data>/database/moonraker-sql.db` explicitly.
 SQLite scalar records require their exact encoded length and UTF-8 strings;
 corrupt values produce a backend error instead of a substituted value.
 SQLite paths reject embedded NUL before creating parents or entering the C API.
 Reads and dotted mutations share the migrated history/totals record loader.
 KV records shadow complete table records; deleting the final shadow field clears
 the backing row in the same transaction so it cannot reappear.
+Queue snapshots own their filename/id strings; snapshot and persistence share a
+save mutex so concurrent changes cannot commit an older snapshot last. Callers
+release the jobs mutex before saving, and backend I/O holds only the save mutex.
+Configuration text, including every included file, must be valid UTF-8.
