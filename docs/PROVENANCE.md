@@ -741,3 +741,18 @@ chroot on loopback port 7126, using a consistent SQLite backup and private
 writable data. Klippy reached ready; twenty read requests succeeded; no
 components failed; the last print was complete and both heater targets were
 zero. The private probe was stopped before production installation.
+
+## Production installation
+
+v0.2.0 now serves `http://192.168.0.150:7125` through the existing
+`/data/phobos-run.sh` launcher. Before replacement, the exact running v0.1.2
+executable, previously installed binary, launcher and stopped database including
+WAL/SHM files were preserved at `/data/phobos-backups/v0.2.0-20261021/`.
+The launcher was replaced atomically; printer configuration and init scripts
+were unchanged. Production PID 10891 maps the ARM asset checksum above.
+
+Twenty read requests plus HTTP and WebSocket readiness/object queries passed.
+No components failed; the last print remained complete and both heater targets
+remained zero. The board boot ID is unchanged. Only the Phobos daemon was
+restarted. The private probe and its copied data were removed. Reboot
+persistence was not tested; no board reboot or printer control command was sent.
