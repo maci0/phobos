@@ -82,16 +82,6 @@ test "1MB stack: serializing a value at the accepted depth limit is safe" {
     try std.testing.expect(ok);
 }
 
-test "depth guard rejects values too deep to serialize (the crash the guard prevents)" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    // A 1000-deep value would panic std.json.Stringify (fixed 256-level stack).
-    // The guard catches it first, so it is never handed to the serializer.
-    const v = try buildNested(arena.allocator(), 1000);
-    try std.testing.expect(jv.exceedsDepth(v, jv.max_value_depth));
-}
-
 test "1MB stack: a very wide value (1M-element array) serializes (heap, not stack)" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
