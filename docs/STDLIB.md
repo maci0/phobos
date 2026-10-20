@@ -107,6 +107,12 @@ Directory copies also preserve completed entries if a later entry fails. A
 loaded gcode file is protected from mutation only while Klippy is ready and
 print_stats is printing or paused. Listed linked files have read-only permissions.
 
+Metadata parsing uses a per-file arena backed by the stable file-manager
+allocator, then copies the resulting JSON into the response allocator. Extended
+directory listings retain metadata and thumbnail data, without retaining each
+file's 256 KiB header and 32 KiB footer buffers. A scratch arena backed by the
+response arena would retain those buffers until the whole request ended.
+
 ## Protocol and ownership code
 
 HTTP query and JSON-RPC handlers share `json/params.zig`. Optional readers use
