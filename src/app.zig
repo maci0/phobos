@@ -269,6 +269,8 @@ pub const App = struct {
     /// `[server] use_xheaders`, Moonraker default true. Copied onto the HTTP
     /// server in `httpServer`.
     use_xheaders: bool = true,
+    /// `[server] max_websocket_connections`, Moonraker default 50.
+    max_websocket_connections: usize = http_transport.default_max_websocket_connections,
     /// PanelDue serial-line processor. `processPanelDueLine` is the reader
     /// entry: it strips the line and calls `parseLine`.
     paneldue: paneldue_component.PanelDue = .{},
@@ -672,6 +674,9 @@ pub const App = struct {
         if (cfg.getBoolean("server", "use_xheaders")) |v| {
             self.use_xheaders = v;
         } else |_| {}
+        if (cfg.getInt("server", "max_websocket_connections")) |n| {
+            self.max_websocket_connections = clampInt(usize, n, http_transport.default_max_websocket_connections);
+        } else |_| {}
 
         if (cfg.get("server", "klippy_uds_address")) |uds| {
             if (uds.len > 0) {
@@ -790,12 +795,12 @@ pub const App = struct {
 
         if (cfg.hasSection("data_store")) {
             if (cfg.getInt("data_store", "gcode_store_size")) |n| {
-                if (n > 0) self.data_store_ctx.setGcodeStoreSize(@intCast(n)) catch |err| {
+                if (n > 0) self.data_store_ctx.setGcodeStoreSize(clampInt(usize, n, 0)) catch |err| {
                     std.debug.print("phobos: warning: gcode_store_size not applied: {}\n", .{err});
                 };
             } else |_| {}
             if (cfg.getInt("data_store", "temperature_store_size")) |n| {
-                if (n > 0) self.data_store_ctx.setTemperatureStoreSize(@intCast(n)) catch |err| {
+                if (n > 0) self.data_store_ctx.setTemperatureStoreSize(clampInt(usize, n, 0)) catch |err| {
                     std.debug.print("phobos: warning: temperature_store_size not applied: {}\n", .{err});
                 };
             } else |_| {}
@@ -1568,6 +1573,7 @@ pub const App = struct {
             .klippy_ctx = self.klippy_ctx,
             .cors_domains = self.cors_domains,
             .use_xheaders = self.use_xheaders,
+            .max_websocket_connections = self.max_websocket_connections,
         };
     }
 };
@@ -1585,7 +1591,8 @@ fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerro
 /// method, so wrapping this in core.run would deadlock.
 fn mqttApiDispatch(ctx: *anyopaque, request: std.json.Value, alloc: std.mem.Allocator) anyerror![]u8 {
     const app: *App = @ptrCast(@alignCast(ctx));
-    return app.dispatcher.handleParsedRoot(request, alloc);
+    // MQTT requests are not authenticated (Moonraker MQTTClient.screen_rpc_request).
+    return app.dispatcher.handleParsedRoot(.{ .transport = .MQTT }, request, alloc);
 }
 
 /// Spoolman WS spool-deletion hook: clear the active spool (if it was the

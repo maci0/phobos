@@ -154,8 +154,10 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
     + upload/download + router routes (`/`, `/server/redirect`, `/server/jsonrpc`).
   - `src/transport/ws.zig` — WebSocket over `std.http`'s WS; `/websocket`, `/klippysocket`;
     WS-only methods (`server.connection.identify`, `server.websocket.id`).
-- **Dispatcher** (`src/jsonrpc.zig`): runtime method table, error codes
-  -32700/-32600/-32601/-32602 (+ -32603, +503 for Klippy-disconnected).
+- **Dispatcher** (`src/jsonrpc.zig`): runtime method table following Moonraker's
+  `JsonRPC.process_object` (batches, per-transport methods, -32602 "Unauthorized" for
+  unauthenticated callers); handler errors map through `errorReply` (404 → -32601,
+  otherwise the HTTP status, unmapped → 500).
 - **Registry** (`src/server/registry.zig`): `ApiDef` → registers an HTTP route AND the
   derived JSON-RPC method (path `/`→`.`, multi-verb → `get_/post_/delete_` prefix,
   GET,POST,DELETE order). Mirrors `common.py::APIDefinition.create`.

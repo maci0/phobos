@@ -40,6 +40,14 @@ pub const Connection = struct {
     identified: bool = false,
     /// Identify metadata; the slices are owned by `Connections.alloc`.
     client: ClientData = .{},
+    /// Authenticated user (Moonraker `user_info`), owned by `Connections.alloc`.
+    /// Read and written only by the connection's own serve loop.
+    user: ?[]const u8 = null,
+    /// The upgrade request failed authentication: `auth_required` methods are
+    /// refused until identify supplies credentials. Serve loop only.
+    need_auth: bool = false,
+    /// Client address, borrowed from the transport for the session.
+    remote_ip: ?[]const u8 = null,
     /// Per-connection write mutex. EVERY write to this connection's WebSocket —
     /// JSON-RPC responses from the read loop AND notifications from the emitter —
     /// must be held while writing, so frames never interleave. Reads are
@@ -93,6 +101,7 @@ pub const Connections = struct {
         self.alloc.free(c.client.version);
         self.alloc.free(c.client.type);
         self.alloc.free(c.client.url);
+        if (c.user) |u| self.alloc.free(u);
         var it = c.subs.keyIterator();
         while (it.next()) |k| self.alloc.free(k.*);
         c.subs.deinit(self.alloc);
@@ -287,6 +296,15 @@ pub const Connections = struct {
         return false;
     }
 
+    /// Record the authenticated user (copied) and clear `need_auth`. Called
+    /// only from the connection's own serve loop.
+    pub fn setUser(self: *Connections, conn: *Connection, user: []const u8) !void {
+        const owned = try self.alloc.dupe(u8, user);
+        if (conn.user) |old| self.alloc.free(old);
+        conn.user = owned;
+        conn.need_auth = false;
+    }
+
     /// Store identify metadata on a connection, replacing any prior values.
     /// Copies all strings into the registry allocator. Thread-safe.
     pub fn identify(self: *Connections, io: Io, conn: *Connection, data: ClientData) !void {
@@ -367,6 +385,46 @@ test "remove drops the connection and frees it" {
     // Double remove is a no-op.
     conns.remove(io, c1);
     try std.testing.expectEqual(@as(usize, 1), conns.count(io));
+}
+
+test "setUser copies the user, replaces the old one and clears need_auth" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(io);
+
+    const c = try conns.add(io);
+    c.need_auth = true;
+    var name = "alice".*;
+    try conns.setUser(c, &name);
+    name[0] = 'X';
+    try std.testing.expectEqualStrings("alice", c.user.?);
+    try std.testing.expect(!c.need_auth);
+    try conns.setUser(c, "bob");
+    try std.testing.expectEqualStrings("bob", c.user.?);
+}
+
+test "fuzz setUser owns every user it stores" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var core = Core.init();
+            var conns = Connections.init(std.testing.allocator, &core);
+            defer conns.deinit(io);
+            const c = try conns.add(io);
+            var buf: [32]u8 = undefined;
+            for (0..smith.valueRangeAtMostWithHash(u8, 0, 4, 0)) |i| {
+                const n = smith.valueRangeAtMostWithHash(u8, 0, buf.len, @intCast(i + 1));
+                smith.bytesWithHash(buf[0..n], @intCast(i + 10));
+                try conns.setUser(c, buf[0..n]);
+                try std.testing.expectEqualSlices(u8, buf[0..n], c.user.?);
+            }
+        }
+    }.run, .{});
 }
 
 test "identify stores client data and sets identified" {

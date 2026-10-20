@@ -1,41 +1,149 @@
-//! JSON-RPC 2.0 dispatcher.
+//! JSON-RPC 2.0 dispatcher, following Moonraker's `JsonRPC.dispatch`
+//! (common.py).
 //!
 //! Handler signature:
 //!   fn(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value
 //!
-//! Handlers return either a result Value (caller owns any allocations inside) or an error.
-//! Errors are mapped to JSON-RPC codes matching Moonraker's `JsonRPC.execute_method`:
-//! `error.InvalidParams` → -32602, `error.NotFound` → -32601, `error.Forbidden` → 403,
-//! the Klippy/MQTT/service-unavailable family → 503, the agent/estimator/Klippy-request
-//! family → 400, and any unmapped error → -32603 Internal error. See the `switch (err)`
-//! in `handleParsedRoot` for the full table.
-//!
-//! Notifications (requests without "id") execute the handler but produce no response bytes.
+//! Request processing, in Moonraker's order: parse error -32700; a batch array
+//! answers with an array of the item responses; `jsonrpc` other than "2.0"
+//! -32600; an object without `method` is a response and gets no reply; a
+//! non-string method -32600; unknown method -32601; a method not exposed on the
+//! caller's transport -32601 "Method not found for transport <T>"; non-object
+//! params -32602 "Invalid params:"; an `auth_required` method on an
+//! unauthenticated caller -32602 "Unauthorized". Handler errors map through
+//! `errorReply` (404 → -32601, otherwise the HTTP status). Requests without an
+//! id (or with `"id": null`) get no reply on success; errors are still sent.
 const std = @import("std");
 const jv = @import("json/value.zig");
 const Core = @import("server/core.zig").Core;
+const registry = @import("server/registry.zig");
 
-pub const Error = error{
-    InvalidParams,
-};
+const RequestType = registry.RequestType;
+const TransportType = registry.TransportType;
 
 /// Erased handler function pointer.
-const HandlerFn = *const fn (ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value;
+pub const HandlerFn = *const fn (ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value;
 
-const Entry = struct {
+/// Params keys owned by the transports. Client-supplied values are removed
+/// before injection.
+pub const method_key = "_method";
+pub const current_user_key = "_current_user";
+pub const current_ip_key = "_remote_ip";
+
+pub const Entry = struct {
     ctx: *anyopaque,
     handler: HandlerFn,
-    /// Run without the Core lock (read-only handler — see ApiDef.off_core).
+    /// Run without the Core lock (read-only handler, see ApiDef.off_core).
     off_core: bool = false,
+    auth_required: bool = true,
+    /// Request type injected as `_method` (Moonraker passes it to the callback).
+    verb: RequestType = .POST,
+    transports: []const TransportType = std.enums.values(TransportType),
 };
 
-/// Trampoline so a runtime handler pointer can run inside `Core.run` (which
-/// needs a comptime-known function).
+/// Who sent a request. In-process callers use the default (INTERNAL, trusted).
+pub const Caller = struct {
+    transport: TransportType = .INTERNAL,
+    /// Authenticated user, injected as `_current_user` for access.* methods.
+    user: ?[]const u8 = null,
+    /// Client address, injected as `_remote_ip` for access.* methods.
+    remote_ip: ?[]const u8 = null,
+    /// No authenticated user: `auth_required` methods answer "Unauthorized".
+    need_auth: bool = false,
+};
+
 /// Comptime-known trampoline so a runtime handler pointer can run inside
-/// `Core.run` (which requires a comptime-known function). Shared by both
-/// transports (HTTP REST + JSON-RPC) so the dispatch shim is defined once.
+/// `Core.run` (which requires a comptime-known function). Shared by the REST
+/// and JSON-RPC paths.
 pub fn callHandlerTramp(handler: HandlerFn, ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     return handler(ctx, params, alloc);
+}
+
+/// A handler error as Moonraker reports it: the ServerError status and message.
+pub const ErrorReply = struct {
+    status: std.http.Status,
+    message: []const u8,
+    /// JSON-RPC code: `JsonRPC.execute_method` maps 404 to -32601 and 401 to
+    /// -32602; invalid params are -32602; otherwise the HTTP status.
+    rpc_code: i64,
+};
+
+/// Map a handler error to its HTTP status, JSON-RPC code and message. The
+/// message may be allocated in `alloc`.
+pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}!ErrorReply {
+    const status: std.http.Status, const message: []const u8 = switch (err) {
+        error.InvalidParams => .{ .bad_request, "Invalid params" },
+        error.MissingFilename => .{ .bad_request, "No data for argument: filename" },
+        error.MissingWebcamName => .{ .bad_request, "No data for argument: name" },
+        error.Forbidden => .{ .forbidden, "Forbidden" },
+        error.NotFound => .{ .not_found, "Not Found" },
+        error.UnknownDbNamespace => .{ .not_found, try std.fmt.allocPrint(alloc, "Namespace {s} not found", .{paramStr(params, "namespace")}) },
+        error.MissingDbKey => .{ .not_found, try std.fmt.allocPrint(alloc, "Key '{s}' in namespace '{s}' not found", .{ paramStr(params, "key"), paramStr(params, "namespace") }) },
+        // Moonraker ServerError("Klippy Host not connected", 503).
+        error.KlippyDisconnected => .{ .service_unavailable, "Klippy Host not connected" },
+        error.MqttNotConfigured => .{ .service_unavailable, "MQTT not configured" },
+        error.ServiceUnavailable, error.NotReady => .{ .service_unavailable, "Service Unavailable" },
+        error.UpdateRefusedPrinting => .{ .service_unavailable, "Update Refused: Klippy is printing" },
+        error.PrinterLocked => .{ .service_unavailable, "Printer is busy" },
+        error.AgentNotConnected => .{ .bad_request, "Agent not connected" },
+        error.AgentRpcNotSupported => .{ .bad_request, "Agent method not supported" },
+        error.AgentAlreadyRegistered => .{ .bad_request, "Agent already registered" },
+        error.ReservedEvent => .{ .bad_request, "Reserved event name" },
+        error.EstimatorNotAvailable => .{ .bad_request, "Estimator not available" },
+        // Klippy rejected the command (bad gcode, unknown mcu command): a
+        // client error, as in Moonraker.
+        error.KlippyRequestFailed => .{ .bad_request, "Klippy request failed" },
+        error.Unauthorized => .{ .unauthorized, "Unauthorized" },
+        // Moonraker klippy_connection.py: objects/subscribe needs a socket.
+        error.NoSubscriptionConnection => .{ .bad_request, "No connection associated with subscription request" },
+        else => .{ .internal_server_error, "Internal Server Error" },
+    };
+    const rpc_code: i64 = switch (err) {
+        error.InvalidParams => -32602,
+        else => switch (status) {
+            .not_found => -32601,
+            .unauthorized => -32602,
+            else => @backingInt(status),
+        },
+    };
+    return .{ .status = status, .message = message, .rpc_code = rpc_code };
+}
+
+/// The string at `key` in `params`, or "" when absent or not a string.
+fn paramStr(params: std.json.Value, key: []const u8) []const u8 {
+    if (params != .object) return "";
+    return switch (params.object.get(key) orelse return "") {
+        .string => |s| s,
+        else => "",
+    };
+}
+
+/// Build handler params from the request's object: drop client-supplied
+/// transport keys, set `_method` to `verb`, and when `identity` is set add the
+/// caller's user and client address. Entries are copied shallowly into `alloc`.
+pub fn requestParams(
+    alloc: std.mem.Allocator,
+    src: ?std.json.ObjectMap,
+    verb: RequestType,
+    caller: Caller,
+    identity: bool,
+) error{OutOfMemory}!std.json.Value {
+    var obj: std.json.ObjectMap = .empty;
+    if (src) |s| {
+        try obj.ensureTotalCapacity(alloc, s.count() + 3);
+        var it = s.iterator();
+        while (it.next()) |e| {
+            const k = e.key_ptr.*;
+            if (std.mem.eql(u8, k, method_key) or std.mem.eql(u8, k, current_user_key) or std.mem.eql(u8, k, current_ip_key)) continue;
+            obj.putAssumeCapacity(k, e.value_ptr.*);
+        }
+    }
+    try obj.put(alloc, method_key, .{ .string = @tagName(verb) });
+    if (identity) {
+        if (caller.user) |u| try obj.put(alloc, current_user_key, .{ .string = u });
+        if (caller.remote_ip) |ip| try obj.put(alloc, current_ip_key, .{ .string = ip });
+    }
+    return .{ .object = obj };
 }
 
 pub const Dispatcher = struct {
@@ -64,167 +172,110 @@ pub const Dispatcher = struct {
         self.io = io;
     }
 
-    /// Register a method.  `name` must outlive the Dispatcher (caller-owned string).
-    /// `ctx` is passed back to `handler` on each call.
+    /// Register a method with default `Entry` settings. `name` must outlive
+    /// the Dispatcher.
     pub fn register(
         self: *Dispatcher,
         name: []const u8,
         ctx: *anyopaque,
         handler: HandlerFn,
     ) error{OutOfMemory}!void {
-        try self.registerEx(name, ctx, handler, false);
+        try self.registerEntry(name, .{ .ctx = ctx, .handler = handler });
     }
 
-    /// Register a method, choosing whether it runs off the Core lock.
-    pub fn registerEx(
-        self: *Dispatcher,
-        name: []const u8,
-        ctx: *anyopaque,
-        handler: HandlerFn,
-        off_core: bool,
-    ) error{OutOfMemory}!void {
-        try self.methods.put(name, .{ .ctx = ctx, .handler = handler, .off_core = off_core });
+    /// Register a method with default `Entry` settings, choosing whether it
+    /// runs off the Core lock.
+    pub fn registerEx(self: *Dispatcher, name: []const u8, ctx: *anyopaque, handler: HandlerFn, off_core: bool) error{OutOfMemory}!void {
+        try self.registerEntry(name, .{ .ctx = ctx, .handler = handler, .off_core = off_core });
     }
 
-    /// Process a raw JSON-RPC request.  Returns owned response bytes (caller must free),
-    /// or an empty slice for notifications.  Never returns an error — malformed input
-    /// produces an appropriate JSON-RPC error response.
+    /// Register a method with explicit settings. `name` must outlive the
+    /// Dispatcher.
+    pub fn registerEntry(self: *Dispatcher, name: []const u8, entry: Entry) error{OutOfMemory}!void {
+        try self.methods.put(name, entry);
+    }
+
+    /// Process a raw request from an in-process caller (INTERNAL transport, no
+    /// authentication). Returns owned response bytes, or an empty slice when
+    /// there is nothing to send. Malformed input produces a JSON-RPC error.
     pub fn handle(self: *Dispatcher, request_json: []const u8, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
-        // --- Parse ---
         var parsed = std.json.parseFromSlice(std.json.Value, alloc, request_json, .{}) catch {
             return jv.errorResponse(alloc, .null, -32700, "Parse error");
         };
         defer parsed.deinit();
-        return self.handleParsedRoot(parsed.value, alloc);
+        return self.handleParsedRoot(.{}, parsed.value, alloc);
     }
 
-    /// Same as `handle` but takes an already-parsed JSON-RPC root, so callers
-    /// that already parsed the request (the WS transport peeks the method) don't
-    /// pay a second parse. `root`'s backing memory must outlive this call.
-    pub fn handleParsedRoot(self: *Dispatcher, root: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
-        // Must be an object
-        if (root != .object) {
-            return jv.errorResponse(alloc, .null, -32600, "Invalid Request");
+    /// Process an already-parsed request for `caller`. `root`'s backing memory
+    /// must outlive this call. Returns owned bytes in `alloc`; empty when
+    /// there is nothing to send.
+    pub fn handleParsedRoot(self: *Dispatcher, caller: Caller, root: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
+        // std.json.Stringify recurses per nesting level; the id is echoed, so
+        // an over-deep request is refused before anything is serialized.
+        if (jv.exceedsDepth(root, jv.max_value_depth)) return jv.errorResponse(alloc, .null, -32600, "Invalid Request");
+        switch (root) {
+            .object => |obj| return (try self.processObject(caller, obj, alloc)) orelse alloc.dupe(u8, &.{}),
+            .array => |items| {
+                var out: std.Io.Writer.Allocating = .init(alloc);
+                defer out.deinit();
+                for (items.items) |item| {
+                    const resp = switch (item) {
+                        .object => |obj| try self.processObject(caller, obj, alloc),
+                        else => try jv.errorResponse(alloc, .null, -32600, "Invalid Request"),
+                    } orelse continue;
+                    defer alloc.free(resp);
+                    out.writer.writeByte(if (out.written().len == 0) '[' else ',') catch return error.OutOfMemory;
+                    out.writer.writeAll(resp) catch return error.OutOfMemory;
+                }
+                if (out.written().len == 0) return alloc.dupe(u8, &.{});
+                out.writer.writeByte(']') catch return error.OutOfMemory;
+                return out.toOwnedSlice();
+            },
+            else => return jv.errorResponse(alloc, .null, -32600, "Invalid Request"),
         }
-        const obj = root.object;
+    }
 
-        // Determine id (may be absent = notification)
-        const id_val: ?std.json.Value = obj.get("id");
-        const id: std.json.Value = id_val orelse .null;
-        const is_notification = (id_val == null);
-
-        // Validate jsonrpc == "2.0"
-        const jsonrpc_field = obj.get("jsonrpc") orelse {
-            return jv.errorResponse(alloc, id, -32600, "Invalid Request");
-        };
-        if (jsonrpc_field != .string or !std.mem.eql(u8, jsonrpc_field.string, "2.0")) {
-            return jv.errorResponse(alloc, id, -32600, "Invalid Request");
-        }
-
-        // Validate method
-        const method_field = obj.get("method") orelse {
-            return jv.errorResponse(alloc, id, -32600, "Invalid Request");
-        };
-        if (method_field != .string) {
-            return jv.errorResponse(alloc, id, -32600, "Invalid Request");
-        }
-        const method = method_field.string;
-
-        // Params (optional, may be absent)
-        var params: std.json.Value = obj.get("params") orelse .null;
-
-        // Look up method
-        const entry = self.methods.get(method) orelse {
-            if (is_notification) return try alloc.dupe(u8, &.{});
-            return jv.errorResponse(alloc, id, -32601, "Method not found");
-        };
-
-        // Handler allocations go into an arena so they are freed after the
-        // response is serialized.  The outer allocator is used only for
-        // parsing and the final response bytes.
+    /// One request object. Null means no reply (a response object, or a
+    /// successful request without an id).
+    fn processObject(self: *Dispatcher, caller: Caller, obj: std.json.ObjectMap, alloc: std.mem.Allocator) error{OutOfMemory}!?[]u8 {
+        // Everything except the returned bytes is freed on return.
         var handler_arena = std.heap.ArenaAllocator.init(alloc);
         defer handler_arena.deinit();
         const handler_alloc = handler_arena.allocator();
 
-        // Inject the HTTP verb as _method when params is an object, so
-        // multi-verb handlers can dispatch correctly (mirrors the HTTP
-        // transport behaviour). Non-object params are passed through
-        // as-is; multi-verb endpoints always receive objects in practice.
-        if (params == .object) {
-            const verb: []const u8 = verb: {
-                if (std.mem.lastIndexOfScalar(u8, method, '.')) |dot| {
-                    const last = method[dot + 1 ..];
-                    if (std.mem.startsWith(u8, last, "get_")) break :verb "GET";
-                    if (std.mem.startsWith(u8, last, "post_")) break :verb "POST";
-                    if (std.mem.startsWith(u8, last, "delete_")) break :verb "DELETE";
-                }
-                break :verb method;
-            };
-            try params.object.put(handler_alloc, "_method", .{ .string = verb });
+        const id: std.json.Value = obj.get("id") orelse .null;
+        const jsonrpc_field = obj.get("jsonrpc") orelse .null;
+        if (jsonrpc_field != .string or !std.mem.eql(u8, jsonrpc_field.string, "2.0")) {
+            return try jv.errorResponse(alloc, id, -32600, "Invalid Request");
         }
+        const method_field = obj.get("method") orelse return null;
+        if (method_field != .string) return try jv.errorResponse(alloc, id, -32600, "Invalid Request");
+        const method = method_field.string;
 
-        // Call handler under the serialized Core, unless it is a read-only
-        // (`off_core`) method or no Core is wired (bare tests). This is the one
-        // place the lock is taken for JSON-RPC, so REST and JSON-RPC agree: both
-        // skip Core for off_core methods and hold it for everything else.
+        const entry = self.methods.get(method) orelse return try jv.errorResponse(alloc, id, -32601, "Method not found");
+        if (std.mem.indexOfScalar(TransportType, entry.transports, caller.transport) == null) {
+            const msg = try std.fmt.allocPrint(handler_alloc, "Method not found for transport {t}", .{caller.transport});
+            return try jv.errorResponse(alloc, id, -32601, msg);
+        }
+        const src: ?std.json.ObjectMap = switch (obj.get("params") orelse std.json.Value{ .object = .empty }) {
+            .object => |o| o,
+            else => return try jv.errorResponse(alloc, id, -32602, "Invalid params:"),
+        };
+        if (caller.need_auth and entry.auth_required) return try jv.errorResponse(alloc, id, -32602, "Unauthorized");
+
+        const params = try requestParams(handler_alloc, src, entry.verb, caller, std.mem.startsWith(u8, method, "access."));
+
+        // REST and JSON-RPC agree: off_core methods skip the Core lock, the
+        // rest hold it. Bare tests wire no Core.
         const result = (if (entry.off_core or self.core == null)
             entry.handler(entry.ctx, params, handler_alloc)
         else
             self.core.?.run(self.io.?, callHandlerTramp, .{ entry.handler, entry.ctx, params, handler_alloc })) catch |err| {
-            if (is_notification) return try alloc.dupe(u8, &.{});
-            // Moonraker's JsonRPC.execute_method maps a ServerError to its
-            // status_code verbatim (except 404→-32601, 401→-32602). The
-            // Klippy-disconnected error is ServerError("Klippy Host not
-            // connected", 503), so it surfaces as code 503 with that message.
-            const code: i64 = switch (err) {
-                error.InvalidParams => -32602,
-                error.MissingFilename, error.MissingWebcamName => 400,
-                error.Forbidden => 403,
-                // Moonraker remaps a 404 ServerError to -32601 over JSON-RPC
-                // (JsonRPC.execute_method); only HTTP keeps the literal 404.
-                error.NotFound, error.UnknownDbNamespace, error.MissingDbKey => -32601,
-                error.KlippyDisconnected => 503,
-                error.MqttNotConfigured => 503,
-                error.ServiceUnavailable => 503,
-                error.UpdateRefusedPrinting => 503,
-                error.NotReady => 503,
-                error.PrinterLocked => 503,
-                error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => 400,
-                // Klippy rejected the command (bad gcode, unknown mcu command, …):
-                // a client error, not a phobos internal error. Moonraker surfaces
-                // these as 400, not 500/-32603.
-                error.KlippyRequestFailed => 400,
-                else => -32603,
-            };
-            const msg: []const u8 = switch (err) {
-                error.InvalidParams => "Invalid params",
-                error.MissingFilename => "No data for argument: filename",
-                error.MissingWebcamName => "No data for argument: name",
-                error.UnknownDbNamespace => try std.fmt.allocPrint(alloc, "Namespace {s} not found", .{params.object.get("namespace").?.string}),
-                error.MissingDbKey => try std.fmt.allocPrint(alloc, "Key '{s}' in namespace '{s}' not found", .{ params.object.get("key").?.string, params.object.get("namespace").?.string }),
-                error.Forbidden => "Forbidden",
-                error.NotFound => "Not Found",
-                error.KlippyDisconnected => "Klippy Host not connected",
-                error.MqttNotConfigured => "MQTT not configured",
-                error.ServiceUnavailable => "Service Unavailable",
-                error.UpdateRefusedPrinting => "Update Refused: Klippy is printing",
-                error.NotReady => "Service Unavailable",
-                error.PrinterLocked => "Printer is busy",
-                error.AgentNotConnected => "Agent not connected",
-                error.AgentRpcNotSupported => "Agent method not supported",
-                error.AgentAlreadyRegistered => "Agent already registered",
-                error.ReservedEvent => "Reserved event name",
-                error.EstimatorNotAvailable => "Estimator not available",
-                error.KlippyRequestFailed => "Klippy request failed",
-                else => "Internal error",
-            };
-            return jv.errorResponse(alloc, id, code, msg);
+            const reply = try errorReply(err, params, handler_alloc);
+            return try jv.errorResponse(alloc, id, reply.rpc_code, reply.message);
         };
-
-        // Notification: handler ran but produce no bytes
-        if (is_notification) return try alloc.dupe(u8, &.{});
-
-        return jv.successResponse(alloc, id, result);
+        if (id == .null) return null;
+        return try jv.successResponse(alloc, id, result);
     }
 };
 
@@ -373,7 +424,7 @@ test "notification: handle returns empty slice, handler still ran" {
 
     // No "id" field = notification
     const req =
-        \\{"jsonrpc":"2.0","method":"notify_me","params":null}
+        \\{"jsonrpc":"2.0","method":"notify_me"}
     ;
     const resp = try d.handle(req, alloc);
     defer alloc.free(resp);
@@ -405,14 +456,222 @@ test "fuzz_jsonrpc: arbitrary bytes never crash, always valid JSON or empty" {
             };
             defer parsed.deinit();
 
-            // Must have "jsonrpc":"2.0"
-            const obj = parsed.value.object;
-            const jsonrpc = obj.get("jsonrpc") orelse return error.FuzzMissingJsonrpc;
-            if (!std.mem.eql(u8, jsonrpc.string, "2.0")) return error.FuzzBadJsonrpcVersion;
+            // A batch answers with an array of responses.
+            const items: []const std.json.Value = switch (parsed.value) {
+                .array => |a| a.items,
+                else => &.{parsed.value},
+            };
+            for (items) |item| {
+                const obj = item.object;
+                const jsonrpc = obj.get("jsonrpc") orelse return error.FuzzMissingJsonrpc;
+                if (!std.mem.eql(u8, jsonrpc.string, "2.0")) return error.FuzzBadJsonrpcVersion;
+                if (obj.get("result") == null and obj.get("error") == null) {
+                    return error.FuzzNoResultOrError;
+                }
+            }
+        }
+    }.run, .{});
+}
 
-            // Must have either "result" or "error"
-            if (obj.get("result") == null and obj.get("error") == null) {
-                return error.FuzzNoResultOrError;
+fn expectErrorCode(d: *Dispatcher, caller: Caller, req: []const u8, code: i64, message: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, a, req, .{});
+    const resp = try d.handleParsedRoot(caller, root, a);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, resp, .{});
+    const err = parsed.object.get("error").?.object;
+    try std.testing.expectEqual(code, err.get("code").?.integer);
+    try std.testing.expectEqualStrings(message, err.get("message").?.string);
+}
+
+test "unauthenticated callers cannot run auth_required methods" {
+    var d = try makeDispatcher(std.testing.allocator);
+    defer d.deinit();
+    try d.registerEntry("open", .{ .ctx = @ptrCast(&_dummy_ctx), .handler = echoHandler, .auth_required = false });
+    const anon: Caller = .{ .transport = .WEBSOCKET, .need_auth = true };
+    try expectErrorCode(&d, anon,
+        \\{"jsonrpc":"2.0","method":"echo","id":1}
+    , -32602, "Unauthorized");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"jsonrpc":"2.0","method":"open","id":2}
+    , .{});
+    const ok = try d.handleParsedRoot(anon, root, a);
+    try std.testing.expect(std.mem.indexOf(u8, ok, "\"result\"") != null);
+}
+
+test "client-supplied identity keys are replaced by the caller's" {
+    var d = Dispatcher.init(std.testing.allocator);
+    defer d.deinit();
+    try d.register("access.echo", @ptrCast(&_dummy_ctx), echoHandler);
+    try d.register("other.echo", @ptrCast(&_dummy_ctx), echoHandler);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const caller: Caller = .{ .transport = .WEBSOCKET, .user = "bob", .remote_ip = "10.0.0.2" };
+
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"jsonrpc":"2.0","method":"access.echo","params":{"_current_user":"alice","_remote_ip":"1.2.3.4","_method":"DELETE"},"id":1}
+    , .{});
+    const resp = try std.json.parseFromSliceLeaky(std.json.Value, a, try d.handleParsedRoot(caller, root, a), .{});
+    const result = resp.object.get("result").?.object;
+    try std.testing.expectEqualStrings("bob", result.get(current_user_key).?.string);
+    try std.testing.expectEqualStrings("10.0.0.2", result.get(current_ip_key).?.string);
+    try std.testing.expectEqualStrings("POST", result.get(method_key).?.string);
+
+    // Outside access.* the keys are stripped and not injected.
+    const other = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"jsonrpc":"2.0","method":"other.echo","params":{"_current_user":"alice"},"id":2}
+    , .{});
+    const other_resp = try std.json.parseFromSliceLeaky(std.json.Value, a, try d.handleParsedRoot(caller, other, a), .{});
+    try std.testing.expect(other_resp.object.get("result").?.object.get(current_user_key) == null);
+}
+
+test "requests follow Moonraker's JsonRPC.process_object order" {
+    var d = try makeDispatcher(std.testing.allocator);
+    defer d.deinit();
+    const ws_only = [_]TransportType{.WEBSOCKET};
+    try d.registerEntry("ws.only", .{ .ctx = @ptrCast(&_dummy_ctx), .handler = echoHandler, .transports = &ws_only });
+    const http: Caller = .{ .transport = .HTTP };
+    try expectErrorCode(&d, http,
+        \\{"jsonrpc":"2.0","method":"ws.only","id":1}
+    , -32601, "Method not found for transport HTTP");
+    try expectErrorCode(&d, http,
+        \\{"jsonrpc":"2.0","method":"echo","params":[1],"id":1}
+    , -32602, "Invalid params:");
+    // Errors are sent for id-less requests too.
+    try expectErrorCode(&d, http,
+        \\{"jsonrpc":"2.0","method":"nope"}
+    , -32601, "Method not found");
+
+    const alloc = std.testing.allocator;
+    // A response object (no method) gets no reply; "id": null success is silent.
+    for ([_][]const u8{
+        \\{"jsonrpc":"2.0","result":1,"id":3}
+        ,
+        \\{"jsonrpc":"2.0","method":"echo","id":null}
+        ,
+        \\[]
+    }) |req| {
+        const resp = try d.handle(req, alloc);
+        defer alloc.free(resp);
+        try std.testing.expectEqual(@as(usize, 0), resp.len);
+    }
+}
+
+test "absent params still carry the request verb" {
+    var d = Dispatcher.init(std.testing.allocator);
+    defer d.deinit();
+    try d.registerEntry("x.get_y", .{ .ctx = @ptrCast(&_dummy_ctx), .handler = echoHandler, .verb = .GET });
+    const resp = try d.handle(
+        \\{"jsonrpc":"2.0","method":"x.get_y","id":1}
+    , std.testing.allocator);
+    defer std.testing.allocator.free(resp);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","result":{"_method":"GET"},"id":1}
+    , resp);
+}
+
+test "a batch answers with an array of the item responses" {
+    var d = try makeDispatcher(std.testing.allocator);
+    defer d.deinit();
+    const resp = try d.handle(
+        \\[{"jsonrpc":"2.0","method":"echo","params":{"a":1},"id":1},{"jsonrpc":"2.0","method":"notify_me"},{"jsonrpc":"2.0","method":"nope","id":2}]
+    , std.testing.allocator);
+    defer std.testing.allocator.free(resp);
+    try std.testing.expectEqualStrings(
+        \\[{"jsonrpc":"2.0","result":{"a":1,"_method":"POST"},"id":1},{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":2}]
+    , resp);
+}
+
+test "a request nested past max_value_depth is refused before serialization" {
+    var d = try makeDispatcher(std.testing.allocator);
+    defer d.deinit();
+    const depth = 300;
+    const req = "{\"jsonrpc\":\"2.0\",\"method\":\"echo\",\"id\":" ++ @as([depth]u8, @splat('[')) ++ @as([depth]u8, @splat(']')) ++ "}";
+    const resp = try d.handle(req, std.testing.allocator);
+    defer std.testing.allocator.free(resp);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":null}
+    , resp);
+}
+
+test "errorReply maps statuses to Moonraker JSON-RPC codes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nf = try errorReply(error.NotFound, .null, a);
+    try std.testing.expectEqual(std.http.Status.not_found, nf.status);
+    try std.testing.expectEqual(@as(i64, -32601), nf.rpc_code);
+    try std.testing.expectEqual(@as(i64, -32602), (try errorReply(error.Unauthorized, .null, a)).rpc_code);
+    try std.testing.expectEqual(@as(i64, -32602), (try errorReply(error.InvalidParams, .null, a)).rpc_code);
+    try std.testing.expectEqual(@as(i64, 503), (try errorReply(error.KlippyDisconnected, .null, a)).rpc_code);
+    const no_conn = try errorReply(error.NoSubscriptionConnection, .null, a);
+    try std.testing.expectEqual(@as(i64, 400), no_conn.rpc_code);
+    try std.testing.expectEqualStrings("No connection associated with subscription request", no_conn.message);
+    const unknown = try errorReply(error.SomethingElse, .null, a);
+    try std.testing.expectEqual(@as(i64, 500), unknown.rpc_code);
+    // A missing namespace param does not crash the message builder.
+    try std.testing.expectEqualStrings("Namespace  not found", (try errorReply(error.UnknownDbNamespace, .null, a)).message);
+}
+
+test "fuzz requestParams never keeps a client-supplied transport key" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const keys = [_][]const u8{ method_key, current_user_key, current_ip_key, "x", "" };
+            var src: std.json.ObjectMap = .empty;
+            for (0..smith.valueRangeAtMostWithHash(u8, 0, 8, 0)) |i| {
+                const k = keys[smith.valueRangeAtMostWithHash(u8, 0, keys.len - 1, @intCast(i + 1))];
+                try src.put(a, k, .{ .string = "client" });
+            }
+            const identity = smith.valueRangeAtMostWithHash(u8, 0, 1, 99) == 1;
+            const params = try requestParams(a, src, .GET, .{ .user = "u" }, identity);
+            const o = params.object;
+            try std.testing.expectEqualStrings("GET", o.get(method_key).?.string);
+            if (o.get(current_user_key)) |u| try std.testing.expectEqualStrings("u", u.string);
+            try std.testing.expect(o.get(current_ip_key) == null);
+            try std.testing.expectEqual(identity, o.get(current_user_key) != null);
+        }
+    }.run, .{});
+}
+
+test "successResponse and errorResponse write the Moonraker envelopes" {
+    const alloc = std.testing.allocator;
+    const ok = try jv.successResponse(alloc, .{ .integer = 1 }, .{ .string = "ok" });
+    defer alloc.free(ok);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","result":"ok","id":1}
+    , ok);
+    const err = try jv.errorResponse(alloc, .null, -32601, "Method not found");
+    defer alloc.free(err);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","error":{"code":-32601,"message":"Method not found"},"id":null}
+    , err);
+}
+
+test "fuzz successResponse and errorResponse always produce parseable JSON" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            const n = smith.valueRangeAtMostWithHash(u8, 0, buf.len, 0);
+            smith.bytesWithHash(buf[0..n], 1);
+            // Printable ASCII plus quotes and backslashes that need escaping.
+            for (buf[0..n]) |*b| b.* = 0x20 + b.* % 0x5f;
+            const alloc = std.testing.allocator;
+            const ok = try jv.successResponse(alloc, .{ .string = buf[0..n] }, .{ .string = buf[0..n] });
+            defer alloc.free(ok);
+            const err = try jv.errorResponse(alloc, .{ .integer = n }, -1, buf[0..n]);
+            defer alloc.free(err);
+            for ([_][]const u8{ ok, err }) |bytes| {
+                const parsed = try std.json.parseFromSlice(std.json.Value, alloc, bytes, .{});
+                parsed.deinit();
             }
         }
     }.run, .{});

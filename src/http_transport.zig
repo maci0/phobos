@@ -2,11 +2,14 @@
 //! stream — no hand-rolled HTTP).
 //!
 //! A single `Registry` + `Dispatcher` back both transports:
-//!   * REST: look up the route by (method, path), run the handler under the
-//!     serialized `Core`, then respond — wrapping the result as
-//!     `{"result": <r>}` unless the endpoint sets `wrap_result = false`.
-//!   * JSON-RPC: `POST /server/jsonrpc` feeds the raw body to `Dispatcher.handle`
-//!     and returns the JSON-RPC envelope verbatim.
+//!   * REST: look up the route by (method, path), authenticate, run the
+//!     handler under the serialized `Core`, then respond — wrapping the result
+//!     as `{"result": <r>}` unless the endpoint sets `wrap_result = false`.
+//!   * JSON-RPC: `POST /server/jsonrpc` authenticates like Moonraker's
+//!     `RPCHandler` (auth optional for the request, enforced per method) and
+//!     returns the JSON-RPC envelope verbatim.
+//!   * WebSocket: `/websocket` and `/klippysocket` upgrades pass tornado's
+//!     origin check (or `cors_domains`) and authenticate at the upgrade.
 //!
 //! Unknown route -> 404 with Moonraker's `{"error":{"code","message"}}` shape.
 
@@ -32,52 +35,26 @@ const Route = registry.Route;
 /// The JSON-RPC bridge path. POSTs here are dispatched as JSON-RPC.
 pub const jsonrpc_path = "/server/jsonrpc";
 
-/// Transport-aware auth hook. Returns true if the request is permitted.
-/// `auth_required` is the endpoint's own flag; the hook may still bypass auth
-/// for trusted transports (INTERNAL is always allowed).
-pub const AuthHook = *const fn (transport: TransportType, auth_required: bool) bool;
+/// Moonraker `[server] max_websocket_connections` default.
+pub const default_max_websocket_connections = 50;
 
-/// Fallback hook used only when no authorization component is wired (e.g. unit
-/// tests that build a bare Server). The real daemon path sets `Server.auth` to
-/// the AuthCtx, and request auth then runs the full JWT → oneshot → API key →
-/// trusted-client chain in `handleParsedAuth` (this hook is not consulted).
-/// INTERNAL always bypasses; `auth_required = false` skips auth (see `authorize`).
 fn routeHasTransport(route: *const Route, kind: TransportType) bool {
     for (route.transports) |t| if (t == kind) return true;
     return false;
 }
 
-pub fn defaultAuthHook(transport: TransportType, auth_required: bool) bool {
-    if (transport == .INTERNAL) return true;
-    _ = auth_required;
-    return true;
-}
-
-/// Apply the auth policy for a route. `auth_required = false` short-circuits to
-/// allowed without consulting the hook.
-pub fn authorize(hook: AuthHook, transport: TransportType, route: *const Route) bool {
-    if (!route.auth_required) return true;
-    return hook(transport, route.auth_required);
-}
-
-/// Run the real auth chain for the binary file routes (upload / download /
-/// delete). These are handled outside the registry — the streaming upload in
-/// `serveConnInner` and the download/delete branch in `handleParsedAuth` both
-/// short-circuit before the auth gate — so without this they would be reachable
-/// by any unauthenticated client. Moonraker serves them via AuthorizedFileHandler
-/// (auth_required), so the same JWT → oneshot → API key → trusted-IP chain
-/// applies here. Returns true when the request must be rejected as unauthorized.
-/// When no authorization component is wired (bare-Server tests) this is a no-op.
-fn fileRouteUnauthorized(srv: *Server, transport: TransportType, creds: HttpCreds, alloc: std.mem.Allocator) bool {
-    const auth_ctx = srv.auth orelse return false;
-    if (transport == .INTERNAL) return false;
+/// Run the auth chain (JWT → oneshot → API key → trusted client) for `creds`.
+/// Without an authorization component (bare-Server tests) every request is
+/// anonymous and allowed.
+fn authenticate(srv: *Server, transport: TransportType, creds: HttpCreds, alloc: std.mem.Allocator, auth_required: bool) authz.AuthOutcome {
+    const auth_ctx = srv.auth orelse return .{ .anonymous = {} };
     return authz.authenticateRequest(auth_ctx, alloc, transport, .{
         .jwt = creds.jwt,
         .oneshot = creds.oneshot,
         .api_key = creds.api_key,
         .remote_ip = creds.remote_ip,
         .proxy_ip = creds.proxy_ip,
-    }, true) == .unauthorized;
+    }, auth_required);
 }
 
 /// A built HTTP response: status + JSON body. The body is owned by the caller's
@@ -98,16 +75,13 @@ pub const Server = struct {
     core: *Core,
     reg: *Registry,
     dispatcher: *jsonrpc.Dispatcher,
-    hook: AuthHook = defaultAuthHook,
     /// Active WebSocket connection registry. Optional so non-WS callers/tests
     /// can construct a Server without it; when null, upgrade requests are
     /// rejected (400) instead of handed off.
     conns: ?*connections.Connections = null,
-    /// Authorization component backing the auth hook. When set, requests are
-    /// authenticated via the JWT → oneshot → API key → trusted chain; the
-    /// resolved user is injected into the handler params under the reserved
-    /// keys so access.* handlers can identify the caller. When null, the
-    /// transport falls back to `hook` (spine default = allow).
+    /// Authorization component. When set, requests are authenticated via the
+    /// JWT → oneshot → API key → trusted chain and the resolved user is
+    /// injected into access.* params. When null, every request is allowed.
     auth: ?*authz.AuthCtx = null,
     /// File manager context backing upload/download + the
     /// GET/DELETE /server/files/<root>/<path> routes. Optional so tests can
@@ -126,9 +100,12 @@ pub const Server = struct {
     /// and `X-Forwarded-For` replace the socket peer for trusted-client checks
     /// and the socket peer must itself be trusted.
     use_xheaders: bool = true,
+    /// Upgrades are refused once this many WebSocket sessions are open.
+    max_websocket_connections: usize = default_max_websocket_connections,
 };
 
-/// Credentials carried by an HTTP request, extracted from headers and query.
+/// Credentials and client headers carried by an HTTP request. All slices
+/// live in the request arena.
 pub const HttpCreds = struct {
     jwt: ?[]const u8 = null,
     oneshot: ?[]const u8 = null,
@@ -138,8 +115,9 @@ pub const HttpCreds = struct {
     proxy_ip: ?[]const u8 = null,
     x_real_ip: ?[]const u8 = null,
     x_forwarded_for: ?[]const u8 = null,
-    /// Request `Origin` header (for CORS), duped into the arena.
+    /// `Origin` header, else `Sec-WebSocket-Origin`.
     origin: ?[]const u8 = null,
+    host: ?[]const u8 = null,
 };
 
 /// Shared dispatch trampoline (see jsonrpc.callHandlerTramp) — one definition
@@ -193,31 +171,17 @@ fn decodeUriPart(alloc: std.mem.Allocator, encoded: []const u8, form: bool) ![]c
 
 /// Build a Moonraker-shaped error body `{"error":{"code":<code>,"message":<m>}}`.
 fn errorBody(alloc: std.mem.Allocator, code: i64, message: []const u8) ![]const u8 {
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    defer aw.deinit();
-    var w: std.json.Stringify = .{ .writer = &aw.writer };
-    try w.beginObject();
-    try w.objectField("error");
-    try w.beginObject();
-    try w.objectField("code");
-    try w.write(code);
-    try w.objectField("message");
-    try w.write(message);
-    try w.endObject();
-    try w.endObject();
-    return aw.toOwnedSlice();
+    return std.json.Stringify.valueAlloc(alloc, .{ .@"error" = .{ .code = code, .message = message } }, .{});
+}
+
+/// An error response whose body code is the HTTP status.
+fn errorResponse(alloc: std.mem.Allocator, status: std.http.Status, message: []const u8) !Response {
+    return .{ .status = status, .body = try errorBody(alloc, @backingInt(status), message) };
 }
 
 /// Wrap a handler result as `{"result": <r>}`.
 fn wrapResult(alloc: std.mem.Allocator, result: std.json.Value) ![]const u8 {
-    var aw: std.Io.Writer.Allocating = .init(alloc);
-    defer aw.deinit();
-    var w: std.json.Stringify = .{ .writer = &aw.writer };
-    try w.beginObject();
-    try w.objectField("result");
-    try w.write(result);
-    try w.endObject();
-    return aw.toOwnedSlice();
+    return std.json.Stringify.valueAlloc(alloc, .{ .result = result }, .{});
 }
 
 /// Handle GET /server/redirect. Mirrors Moonraker's RedirectHandler under the
@@ -247,36 +211,33 @@ pub fn handleRedirect(target: []const u8, body: []const u8, alloc: std.mem.Alloc
         } else |_| {}
     }
 
-    if (url) |u| {
-        const msg = try std.fmt.allocPrint(alloc, "Unauthorized URL redirect: {s}", .{u});
-        const b = try errorBody(alloc, 400, msg);
-        return .{ .status = .bad_request, .body = b };
-    }
-    const b = try errorBody(alloc, 400, "No url argument provided");
-    return .{ .status = .bad_request, .body = b };
+    if (url) |u| return errorResponse(alloc, .bad_request, try std.fmt.allocPrint(alloc, "Unauthorized URL redirect: {s}", .{u}));
+    return errorResponse(alloc, .bad_request, "No url argument provided");
+}
+
+/// POST /server/jsonrpc, Moonraker's `RPCHandler`: the request authenticates
+/// with auth optional; without a user, `auth_required` methods answer -32602
+/// "Unauthorized". An invalid JWT or API key is a 401 for the whole request.
+fn handleJsonRpc(srv: *Server, transport: TransportType, body: []const u8, creds: HttpCreds, alloc: std.mem.Allocator) !Response {
+    var caller: jsonrpc.Caller = .{ .transport = transport, .remote_ip = creds.remote_ip };
+    if (srv.auth != null and transport != .INTERNAL) switch (authenticate(srv, transport, creds, alloc, false)) {
+        .user => |u| caller.user = u,
+        .anonymous => caller.need_auth = true,
+        .unauthorized => return errorResponse(alloc, .unauthorized, "Unauthorized"),
+    };
+    const bytes = if (std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{})) |root|
+        try srv.dispatcher.handleParsedRoot(caller, root, alloc)
+    else |_|
+        try jv.errorResponse(alloc, .null, -32700, "Parse error");
+    // Nothing to send (e.g. an id-less request): keep the body valid JSON.
+    return .{ .status = .ok, .body = if (bytes.len == 0) "{}" else bytes };
 }
 
 /// Core request handling, independent of sockets, so it can be unit- and
 /// fuzz-tested directly. Produces the response body + status for a parsed
-/// request. `alloc` should be a per-request arena.
-///
-/// `transport` is the channel the request arrived on (HTTP for real sockets).
+/// request. `creds` are the credentials extracted by the socket layer;
+/// `alloc` should be a per-request arena.
 pub fn handleParsed(
-    srv: *Server,
-    transport: TransportType,
-    method: ?RequestType,
-    target: []const u8,
-    body: []const u8,
-    alloc: std.mem.Allocator,
-) !Response {
-    return handleParsedAuth(srv, transport, method, target, body, .{}, alloc);
-}
-
-/// Like `handleParsed` but with the request credentials extracted by the
-/// socket layer (headers + query). When `srv.auth` is set these drive the real
-/// authentication chain; otherwise they are ignored and the legacy `hook`
-/// applies.
-pub fn handleParsedAuth(
     srv: *Server,
     transport: TransportType,
     method: ?RequestType,
@@ -287,134 +248,67 @@ pub fn handleParsedAuth(
 ) !Response {
     const path = pathOf(target);
 
-    // JSON-RPC bridge: POST /server/jsonrpc. `Dispatcher.handle` now takes the
-    // Core lock itself, per-method (skipping it for off_core read methods).
-    if (method == .POST and std.mem.eql(u8, path, jsonrpc_path)) {
-        const bytes = try srv.dispatcher.handle(body, alloc);
-        // A JSON-RPC notification yields empty bytes; reply with the literal `{}`
-        // (a []const u8, no allocation) so the body stays valid JSON.
-        const out: []const u8 = if (bytes.len == 0) "{}" else bytes;
-        return .{ .status = .ok, .body = out };
-    }
+    if (method == .POST and std.mem.eql(u8, path, jsonrpc_path)) return handleJsonRpc(srv, transport, body, creds, alloc);
 
     // CORS redirect: GET /server/redirect (a Tornado router route, not a
-    // register_endpoint). Moonraker's RedirectHandler reads `?url=` (or a JSON
-    // body `url`), validates the origin via the authorization component's CORS
-    // check, then issues an HTTP redirect to it. With no CORS domains configured
-    // (phobos's default — there is no cors check wired) every candidate URL is
-    // rejected, so the faithful behavior is:
-    //   * missing url       → 400 "No url argument provided"
-    //   * url present        → 400 "Unauthorized URL redirect: <url>"
+    // register_endpoint). With no CORS check wired every candidate URL is
+    // rejected (see handleRedirect).
     if (method == .GET and std.mem.eql(u8, path, "/server/redirect")) {
         return handleRedirect(target, body, alloc);
     }
 
     // File manager download / delete: /server/files/<root>/<path...>. Matched by
-    // prefix so the dynamic tail is captured. Skips the named sub-routes above
-    // (list, roots, directory, ...) which the registry already owns.
+    // prefix so the dynamic tail is captured. Skips the named sub-routes
+    // (list, roots, directory, ...) which the registry already owns. Moonraker
+    // serves these through AuthorizedFileHandler (auth required).
     if ((method == .GET or method == .DELETE) and isFileServePath(path)) {
         if (srv.file_ctx) |fctx| {
-            if (fileRouteUnauthorized(srv, transport, creds, alloc)) {
-                const b = try errorBody(alloc, 401, "Unauthorized");
-                return .{ .status = .unauthorized, .body = b };
+            if (authenticate(srv, transport, creds, alloc, true) == .unauthorized) {
+                return errorResponse(alloc, .unauthorized, "Unauthorized");
             }
             return handleFileServe(srv, fctx, method.?, path, alloc);
         }
     }
 
     // Unsupported HTTP verb -> 404 (no route can match).
-    const verb = method orelse {
-        const b = try errorBody(alloc, 404, "Not Found");
-        return .{ .status = .not_found, .body = b };
-    };
+    const verb = method orelse return errorResponse(alloc, .not_found, "Not Found");
 
     const route = srv.reg.lookup(verb, path) orelse {
         // Distinguish wrong-verb (405) from genuinely-unknown path (404).
         inline for (.{ RequestType.GET, RequestType.POST, RequestType.DELETE }) |other_verb| {
             if (srv.reg.lookup(other_verb, path)) |other_route| {
-                if (routeHasTransport(other_route, .HTTP)) {
-                    const b = try errorBody(alloc, 405, "Method Not Allowed");
-                    return .{ .status = .method_not_allowed, .body = b };
-                }
+                if (routeHasTransport(other_route, .HTTP)) return errorResponse(alloc, .method_not_allowed, "Method Not Allowed");
             }
         }
-        const b = try errorBody(alloc, 404, "Not Found");
-        return .{ .status = .not_found, .body = b };
+        return errorResponse(alloc, .not_found, "Not Found");
     };
 
     // Websocket-only routes (server.websocket.id, server.connection.identify)
     // are still registered so the API surface lists them. HTTP must 404, the
     // same as Moonraker. The handler would otherwise answer 500.
-    if (!routeHasTransport(route, .HTTP)) {
-        const b = try errorBody(alloc, 404, "Not Found");
-        return .{ .status = .not_found, .body = b };
+    if (!routeHasTransport(route, .HTTP)) return errorResponse(alloc, .not_found, "Not Found");
+
+    var caller: jsonrpc.Caller = .{ .transport = transport, .remote_ip = creds.remote_ip };
+    switch (authenticate(srv, transport, creds, alloc, route.auth_required)) {
+        .user => |u| caller.user = u,
+        .anonymous => {},
+        .unauthorized => return errorResponse(alloc, .unauthorized, "Unauthorized"),
     }
 
-    // Auth gate. When the authorization component is wired, run the real
-    // JWT → oneshot → API key → trusted chain; otherwise fall back to the
-    // legacy hook (spine default = allow). INTERNAL always bypasses.
-    var resolved_user: ?[]const u8 = null;
-    if (srv.auth) |auth_ctx| {
-        if (transport != .INTERNAL) {
-            const outcome = authz.authenticateRequest(auth_ctx, alloc, transport, .{
-                .jwt = creds.jwt,
-                .oneshot = creds.oneshot,
-                .api_key = creds.api_key,
-                .remote_ip = creds.remote_ip,
-                .proxy_ip = creds.proxy_ip,
-            }, route.auth_required);
-            switch (outcome) {
-                .user => |u| resolved_user = u,
-                .anonymous => {},
-                .unauthorized => {
-                    const b = try errorBody(alloc, 401, "Unauthorized");
-                    return .{ .status = .unauthorized, .body = b };
-                },
-            }
-        }
-    } else if (!authorize(srv.hook, transport, route)) {
-        const b = try errorBody(alloc, 401, "Unauthorized");
-        return .{ .status = .unauthorized, .body = b };
-    }
-
-    // Assemble params. REST requests carry params two ways:
-    //   * query string ("?raw=true&...") for GET/DELETE
-    //   * a JSON object body for POST
-    // Query params take object form with string values, matching Moonraker's
-    // `WebRequest` arg coercion (handlers coerce strings to bool/int as needed).
-    var params: std.json.Value = .null;
-    var parsed: ?std.json.Parsed(std.json.Value) = null;
-    defer if (parsed) |*p| p.deinit();
-
+    // Params come from a JSON object body (POST) or the query string, with
+    // string values like Moonraker's `WebRequest` arg coercion.
+    var src: ?std.json.ObjectMap = null;
     if (body.len > 0) {
-        parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch null;
-        if (parsed) |p| params = p.value;
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{}) catch std.json.Value.null;
+        if (jv.exceedsDepth(parsed, jv.max_value_depth)) return errorResponse(alloc, .bad_request, "Request body nested too deeply");
+        if (parsed == .object) src = parsed.object;
     }
-
-    if (params == .null) {
-        params = queryParams(alloc, target) catch |err| return fileErrResponse(alloc, err);
+    if (src == null) {
+        const qp = queryParams(alloc, target) catch |err| return fileErrResponse(alloc, err);
+        if (qp == .object) src = qp.object;
     }
-
-    // Inject the resolved user, remote IP and HTTP method into the params so the
-    // access.* handlers can identify the caller (mirrors Moonraker injecting the
-    // current user / ip into the WebRequest). User/ip are access.* only; _method
-    // is injected for every route so multi-verb handlers can dispatch correctly.
-    {
-        var obj: std.json.ObjectMap = switch (params) {
-            .object => |o| o,
-            else => .empty,
-        };
-        try obj.put(alloc, "_method", .{ .string = @tagName(verb) });
-        if (std.mem.startsWith(u8, path, "/access/")) {
-            if (resolved_user) |u| {
-                try obj.put(alloc, authz.current_user_key, .{ .string = u });
-            }
-            if (creds.remote_ip) |ip| {
-                try obj.put(alloc, authz.current_ip_key, .{ .string = ip });
-            }
-        }
-        params = .{ .object = obj };
-    }
+    // `_method` for every route; the caller's user and address for access.*.
+    const params = try jsonrpc.requestParams(alloc, src, verb, caller, std.mem.startsWith(u8, path, "/access/"));
 
     // Run the handler under the serialized core. `Core.run` needs a
     // comptime-known function, so dispatch the runtime handler pointer through a
@@ -424,67 +318,14 @@ pub fn handleParsedAuth(
         callHandler(route.handler, route.ctx, params, alloc)
     else
         srv.core.run(srv.io, callHandler, .{ route.handler, route.ctx, params, alloc })) catch |err| {
-        // `error.KlippyDisconnected` mirrors Moonraker's
-        // ServerError("Klippy Host not connected", 503): a 503 whose body carries
-        // both the 503 code and the exact message (AuthorizedRequestHandler
-        // .write_error → {"code": status, "message": reason}).
-        const code: i64 = switch (err) {
-            error.InvalidParams, error.MissingFilename, error.MissingWebcamName => 400,
-            error.Forbidden => 403,
-            error.NotFound, error.UnknownDbNamespace, error.MissingDbKey => 404,
-            error.KlippyDisconnected => 503,
-            error.MqttNotConfigured => 503,
-            error.ServiceUnavailable => 503,
-            error.UpdateRefusedPrinting => 503,
-            error.NotReady => 503,
-            error.PrinterLocked => 503,
-            error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => 400,
-            error.KlippyRequestFailed => 400,
-            else => 500,
-        };
-        const msg: []const u8 = switch (err) {
-            error.InvalidParams => "Bad Request",
-            error.MissingFilename => "No data for argument: filename",
-            error.MissingWebcamName => "No data for argument: name",
-            error.UnknownDbNamespace => try std.fmt.allocPrint(alloc, "Namespace {s} not found", .{params.object.get("namespace").?.string}),
-            error.MissingDbKey => try std.fmt.allocPrint(alloc, "Key '{s}' in namespace '{s}' not found", .{ params.object.get("key").?.string, params.object.get("namespace").?.string }),
-            error.Forbidden => "Forbidden",
-            error.NotFound => "Not Found",
-            error.KlippyDisconnected => @import("components/printer.zig").klippy_disconnected_message,
-            error.MqttNotConfigured => "MQTT not configured",
-            error.ServiceUnavailable => "Service Unavailable",
-            error.UpdateRefusedPrinting => "Update Refused: Klippy is printing",
-            error.NotReady => "Service Unavailable",
-            error.PrinterLocked => "Printer is busy",
-            error.AgentNotConnected => "Agent not connected",
-            error.AgentRpcNotSupported => "Agent method not supported",
-            error.AgentAlreadyRegistered => "Agent already registered",
-            error.ReservedEvent => "Reserved event name",
-            error.EstimatorNotAvailable => "Estimator not available",
-            error.KlippyRequestFailed => "Klippy request failed",
-            else => "Internal Server Error",
-        };
-        const status: std.http.Status = switch (err) {
-            error.InvalidParams, error.MissingFilename, error.MissingWebcamName => .bad_request,
-            error.Forbidden => .forbidden,
-            error.NotFound, error.UnknownDbNamespace, error.MissingDbKey => .not_found,
-            error.KlippyDisconnected => .service_unavailable,
-            error.MqttNotConfigured => .service_unavailable,
-            error.ServiceUnavailable => .service_unavailable,
-            error.UpdateRefusedPrinting => .service_unavailable,
-            error.NotReady, error.PrinterLocked => .service_unavailable,
-            error.AgentNotConnected, error.AgentRpcNotSupported, error.AgentAlreadyRegistered, error.ReservedEvent, error.EstimatorNotAvailable => .bad_request,
-            error.KlippyRequestFailed => .bad_request,
-            else => .internal_server_error,
-        };
-        const b = try errorBody(alloc, code, msg);
-        return .{ .status = status, .body = b };
+        const reply = try jsonrpc.errorReply(err, params, alloc);
+        return errorResponse(alloc, reply.status, reply.message);
     };
 
     const out = if (route.wrap_result)
         try wrapResult(alloc, result)
     else
-        try jv.serializeAlloc(alloc, result);
+        try std.json.Stringify.valueAlloc(alloc, result, .{});
 
     return .{ .status = .ok, .body = out };
 }
@@ -496,9 +337,7 @@ pub fn connHandler(ctx: *anyopaque, _: Io, stream: net.Stream) void {
     serveConn(srv, stream);
 }
 
-/// Serve a single HTTP connection: build the std.http.Server over the stream,
-/// receive the head, dispatch, and respond. Keeps the connection alive for
-/// subsequent requests until the client closes or an error occurs.
+/// The client address of a socket peer, without the port.
 fn peerAddress(buf: []u8, address: net.IpAddress) ![]const u8 {
     return switch (address) {
         .ip4 => |ip| std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip.bytes[0], ip.bytes[1], ip.bytes[2], ip.bytes[3] }),
@@ -506,6 +345,9 @@ fn peerAddress(buf: []u8, address: net.IpAddress) ![]const u8 {
     };
 }
 
+/// Serve a single HTTP connection: build the std.http.Server over the stream,
+/// receive the head, dispatch, and respond. Keeps the connection alive for
+/// subsequent requests until the client closes or an error occurs.
 pub fn serveConn(srv: *Server, stream: net.Stream) void {
     serveConnInner(srv, stream) catch {};
 }
@@ -514,15 +356,14 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     const io = srv.io;
 
     var peer_ip_buf: [64]u8 = undefined;
-    const peer_ip: ?[]const u8 = try peerAddress(&peer_ip_buf, stream.socket.address);
+    const peer_ip = try peerAddress(&peer_ip_buf, stream.socket.address);
 
     // Reader buffer also backs WebSocket input after upgrade
     // (std.http.WebSocket.input == server.reader.in), and `readSmallMessage`
-    // requires each INBOUND WS message fit it. Inbound is JSON-RPC requests only
-    // (the largest being objects/subscribe|query with a big object list) — 16 KB
-    // is ample. The writer streams responses/notifications, so 8 KB suffices.
-    // These live for the whole connection; 64+64 KB × the WS-connection ceiling
-    // (default 50) was ~6.4 MB of stack — far over the RSS budget.
+    // requires each INBOUND WS message fit it, so 16 KiB caps one inbound
+    // JSON-RPC message. The writer streams responses/notifications, so 8 KB
+    // suffices. These live for the whole connection; 64+64 KB × the
+    // WS-connection ceiling (default 50) was ~6.4 MB of stack.
     var sbuf: [16 * 1024]u8 = undefined;
     var s_r = stream.reader(io, &sbuf);
     var wbuf: [8 * 1024]u8 = undefined;
@@ -533,70 +374,29 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
     while (true) {
         var req = http_server.receiveHead() catch return;
 
-        // WebSocket upgrade: hand the connection off to the WS transport. The
-        // returned WebSocket borrows the HTTP reader/writer buffers above.
-        switch (req.upgradeRequested()) {
-            .websocket => |key| {
-                const upgrade_path = pathOf(req.head.target);
-
-                // /klippysocket = Moonraker's BridgeSocket. Relay frames between
-                // the WS client and the live Klippy Unix socket.
-                if (std.mem.eql(u8, upgrade_path, "/klippysocket")) {
-                    var bridge = req.respondWebSocket(.{ .key = key orelse "" }) catch return;
-                    const kc = srv.klippy_ctx orelse {
-                        // No KlippyCtx wired — close with 1001.
-                        var payload: [2 + 19]u8 = undefined;
-                        std.mem.writeInt(u16, payload[0..2], 1001, .big);
-                        @memcpy(payload[2..][0..19], "Klippy Disconnected");
-                        bridge.writeMessage(&payload, .connection_close) catch {};
-                        bridge.flush() catch {};
-                        return;
-                    };
-                    ws.serveBridge(io, &bridge, kc);
-                    return;
-                }
-
-                const conns = srv.conns orelse {
-                    req.respond("{\"error\":{\"code\":400,\"message\":\"WebSocket unsupported\"}}", .{
-                        .status = .bad_request,
-                        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
-                    }) catch return;
-                    return;
-                };
-                var web_socket = req.respondWebSocket(.{ .key = key orelse "" }) catch return;
-                web_socket.flush() catch return;
-                var ws_srv = ws.WsServer{
-                    .io = io,
-                    .dispatcher = srv.dispatcher,
-                    .conns = conns,
-                    .klippy = srv.klippy_ctx,
-                };
-                ws.serveWebSocket(&ws_srv, &web_socket);
-                return; // connection consumed by the WS session
-            },
-            .other, .none => {},
-        }
-
-        // Read the body (if any) into the request arena.
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer arena.deinit();
         const alloc = arena.allocator();
 
-        // Capture head fields BEFORE reading the body: `readerExpectNone`
-        // invalidates the string memory backing `req.head` (target etc.).
+        // Copy head fields before reading the body: the body reader
+        // invalidates the string memory backing `req.head`.
         const verb = RequestType.fromHttp(req.head.method);
-        const target = alloc.dupe(u8, req.head.target) catch req.head.target;
+        const target = try alloc.dupe(u8, req.head.target);
+        var creds = try extractCreds(&req, target, alloc);
+        const addr = authz.resolveClientAddr(peer_ip, creds.x_real_ip, creds.x_forwarded_for, srv.use_xheaders);
+        creds.remote_ip = try alloc.dupe(u8, addr.client);
+        if (addr.proxy) |proxy| creds.proxy_ip = try alloc.dupe(u8, proxy);
+        const path = pathOf(target);
+        const headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
 
-        // Extract auth credentials from headers + query (duped into the arena,
-        // since the header backing memory is invalidated once the body reader
-        // runs). Only meaningful when the authorization component is wired.
-        var creds = extractCreds(&req, target, alloc);
-        // Plumb the socket peer IP (extracted once per connection above) so
-        // the authorization layer can match trusted-client CIDRs.
-        if (peer_ip) |ip| {
-            const addr = authz.resolveClientAddr(ip, creds.x_real_ip, creds.x_forwarded_for, srv.use_xheaders);
-            creds.remote_ip = alloc.dupe(u8, addr.client) catch null;
-            if (addr.proxy) |proxy| creds.proxy_ip = alloc.dupe(u8, proxy) catch null;
+        switch (req.upgradeRequested()) {
+            .websocket => |key| {
+                // /klippysocket is the bridge; any other path is the client
+                // socket. The session consumes the connection.
+                serveUpgrade(srv, &req, key orelse "", path, creds, headers, alloc);
+                return;
+            },
+            .other, .none => {},
         }
 
         // Streaming upload: handle POST /server/files/upload before reading the
@@ -604,48 +404,51 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
         // buffering the whole multipart blob in the request arena.
         // `/api/files/local` is the OctoPrint slicer-upload alias (different
         // response shape; same streaming multipart body).
-        const upload_path = pathOf(target);
-        const is_octo_upload = std.mem.eql(u8, upload_path, "/api/files/local");
-        if (req.head.method == .POST and (std.mem.eql(u8, upload_path, "/server/files/upload") or is_octo_upload)) {
+        const is_octo_upload = std.mem.eql(u8, path, "/api/files/local");
+        if (req.head.method == .POST and (std.mem.eql(u8, path, "/server/files/upload") or is_octo_upload)) {
             if (srv.file_ctx) |fctx| {
-                const up_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
                 // File upload is a write primitive and must pass the same auth
                 // chain as every other REST route (Moonraker's upload handler is
-                // auth_required). Reject before touching the multipart body; the
-                // body is left undrained, so close the connection afterward.
-                if (fileRouteUnauthorized(srv, .HTTP, creds, alloc)) {
-                    const eb = errorBody(alloc, 401, "Unauthorized") catch
-                        "{\"error\":{\"code\":401,\"message\":\"Unauthorized\"}}";
-                    req.respond(eb, .{ .status = .unauthorized, .extra_headers = up_headers }) catch {};
+                // auth_required). Reject before touching the multipart body,
+                // without a 100 Continue, then close.
+                if (authenticate(srv, .HTTP, creds, alloc, true) == .unauthorized) {
+                    req.head.expect = null;
+                    const eb = try errorBody(alloc, 401, "Unauthorized");
+                    req.respond(eb, .{ .status = .unauthorized, .extra_headers = headers, .keep_alive = false }) catch {};
                     return;
                 }
-                handleUploadStreaming(srv, fctx, &req, alloc, up_headers, is_octo_upload) catch {};
-                // The streaming parser consumes the body only up to the closing
-                // boundary (and on a rejected upload, not at all), so the request
-                // body is not fully drained — the connection is no longer
-                // byte-synced for the next request. Close it rather than risk
-                // parsing leftover body bytes as the next request (desync /
-                // request smuggling). Clients reconnect for the next request.
+                // The parser consumes the body only up to the closing boundary,
+                // so the connection is not byte-synced for another request.
+                handleUploadStreaming(srv, fctx, &req, alloc, headers, is_octo_upload) catch {};
                 return;
             }
         }
 
-        const body: []const u8 = readBody(&req, alloc) catch &.{};
+        const body = readBody(&req, alloc) catch |err| {
+            // The body is not fully consumed: answer and close so its
+            // remainder is never parsed as the next request.
+            const status: std.http.Status, const message: []const u8 = switch (err) {
+                error.StreamTooLong => .{ .payload_too_large, "Request body too large" },
+                error.HttpExpectationFailed => .{ .expectation_failed, "Expectation Failed" },
+                error.OutOfMemory => .{ .internal_server_error, "Internal Server Error" },
+                error.ReadFailed, error.WriteFailed => return,
+            };
+            req.head.expect = null;
+            const eb = try errorBody(alloc, @backingInt(status), message);
+            req.respond(eb, .{ .status = status, .extra_headers = headers, .keep_alive = false }) catch {};
+            return;
+        };
 
         // CORS preflight: answer OPTIONS directly with the allow headers, no auth.
         if (req.head.method == .OPTIONS) {
-            req.respond("", .{
-                .status = .no_content,
-                .extra_headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin),
-            }) catch return;
+            req.respond("", .{ .status = .no_content, .extra_headers = headers }) catch return;
             if (!req.head.keep_alive) return;
             continue;
         }
 
-        const resp = handleParsedAuth(srv, .HTTP, verb, target, body, creds, alloc) catch
+        const resp = handleParsed(srv, .HTTP, verb, target, body, creds, alloc) catch
             Response{ .status = .internal_server_error, .body = "{\"error\":{\"code\":500,\"message\":\"Internal Server Error\"}}" };
 
-        const headers = buildResponseHeaders(alloc, srv.cors_domains, creds.origin);
         if (resp.file_request) |file_request| {
             // Stream the file from disk in 64 KB chunks — constant memory
             // regardless of file size. Falls back to a 404 on open failure.
@@ -659,6 +462,68 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
 
         if (!req.head.keep_alive) return;
     }
+}
+
+/// Upgrade `/websocket` or `/klippysocket`, following Moonraker's
+/// `WebSocket.prepare` / `BridgeSocket.prepare` and tornado's origin check.
+/// The client socket authenticates at the upgrade; a failure leaves the
+/// session open but unauthenticated. The bridge socket requires it.
+fn serveUpgrade(
+    srv: *Server,
+    req: *std.http.Server.Request,
+    key: []const u8,
+    path: []const u8,
+    creds: HttpCreds,
+    headers: []const std.http.Header,
+    alloc: std.mem.Allocator,
+) void {
+    const refuse = struct {
+        fn f(r: *std.http.Server.Request, a: std.mem.Allocator, h: []const std.http.Header, status: std.http.Status, msg: []const u8) void {
+            const b = errorBody(a, @backingInt(status), msg) catch return;
+            r.respond(b, .{ .status = status, .extra_headers = h, .keep_alive = false }) catch {};
+        }
+    }.f;
+    if (!originAllowed(srv.cors_domains, creds.origin, creds.host)) return refuse(req, alloc, headers, .forbidden, "Cross origin websockets not allowed");
+    const conns = srv.conns orelse return refuse(req, alloc, headers, .bad_request, "WebSocket unsupported");
+    if (conns.count(srv.io) >= srv.max_websocket_connections) return refuse(req, alloc, headers, .service_unavailable, "Maximum Number of Websocket Connections Reached");
+    const outcome = authenticate(srv, .HTTP, creds, alloc, true);
+
+    if (std.mem.eql(u8, path, "/klippysocket")) {
+        if (outcome == .unauthorized) return refuse(req, alloc, headers, .unauthorized, "Unauthorized");
+        const kc = srv.klippy_ctx orelse return refuse(req, alloc, headers, .service_unavailable, "Failed to open connection to Klippy");
+        var bridge = req.respondWebSocket(.{ .key = key }) catch return;
+        ws.serveBridge(srv.io, &bridge, kc);
+        return;
+    }
+
+    var web_socket = req.respondWebSocket(.{ .key = key }) catch return;
+    web_socket.flush() catch return;
+    var ws_srv = ws.WsServer{
+        .io = srv.io,
+        .dispatcher = srv.dispatcher,
+        .conns = conns,
+        .klippy = srv.klippy_ctx,
+        .auth = srv.auth,
+    };
+    ws.serveWebSocket(&ws_srv, &web_socket, .{
+        .user = switch (outcome) {
+            .user => |u| u,
+            .anonymous, .unauthorized => null,
+        },
+        .need_auth = outcome == .unauthorized,
+        .remote_ip = creds.remote_ip,
+    });
+}
+
+/// Tornado `WebSocketHandler.check_origin` with Moonraker's CORS fallback: no
+/// origin, or one whose host[:port] equals the Host header, is allowed;
+/// otherwise the origin must match `cors_domains`.
+fn originAllowed(cors_domains: []const []const u8, origin: ?[]const u8, host: ?[]const u8) bool {
+    const o = origin orelse return true;
+    const rest = if (std.mem.indexOf(u8, o, "://")) |i| o[i + 3 ..] else o;
+    const netloc = rest[0 .. std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len];
+    if (host) |h| if (std.ascii.eqlIgnoreCase(netloc, h)) return true;
+    return corsOriginAllowed(cors_domains, o);
 }
 
 /// Stream a file from disk to the HTTP response in 64 KB chunks, with
@@ -693,11 +558,6 @@ fn sendFileStreaming(io: Io, req: *std.http.Server.Request, file_request: file_m
     try bw.end();
 }
 
-/// Extract the auth credentials Moonraker recognizes from the request:
-///   * JWT: "Authorization: Bearer <t>" / "X-Access-Token" / "?access_token="
-///   * Oneshot: "?token="
-///   * API key: "X-Api-Key"
-/// All returned slices are duped into `alloc` so they survive the body read.
 /// True if `origin` is permitted by `cors_domains` (Moonraker rules): `*` allows
 /// any; `*.example.com` matches subdomains; otherwise an exact origin or host match.
 fn corsOriginAllowed(cors_domains: []const []const u8, origin: []const u8) bool {
@@ -728,39 +588,51 @@ fn buildResponseHeaders(alloc: std.mem.Allocator, cors_domains: []const []const 
     return list.items;
 }
 
-fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.mem.Allocator) HttpCreds {
+/// Extract the auth credentials Moonraker recognizes from the request:
+///   * JWT: "Authorization: Bearer <t>" / "X-Access-Token" / "?access_token="
+///   * Oneshot: "?token="
+///   * API key: "X-Api-Key"
+/// plus the client headers the transport needs. All returned slices are duped
+/// into `alloc` so they survive the body read.
+fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.mem.Allocator) !HttpCreds {
     var creds = HttpCreds{};
 
     var it = req.iterateHeaders();
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) {
-            creds.jwt = alloc.dupe(u8, h.value) catch null;
+            creds.jwt = try alloc.dupe(u8, h.value);
         } else if (std.ascii.eqlIgnoreCase(h.name, "x-access-token")) {
-            if (creds.jwt == null) creds.jwt = alloc.dupe(u8, h.value) catch null;
+            if (creds.jwt == null) creds.jwt = try alloc.dupe(u8, h.value);
         } else if (std.ascii.eqlIgnoreCase(h.name, "x-api-key")) {
-            creds.api_key = alloc.dupe(u8, h.value) catch null;
+            creds.api_key = try alloc.dupe(u8, h.value);
         } else if (std.ascii.eqlIgnoreCase(h.name, "x-real-ip")) {
-            creds.x_real_ip = alloc.dupe(u8, h.value) catch null;
+            creds.x_real_ip = try alloc.dupe(u8, h.value);
         } else if (std.ascii.eqlIgnoreCase(h.name, "x-forwarded-for")) {
-            creds.x_forwarded_for = alloc.dupe(u8, h.value) catch null;
+            creds.x_forwarded_for = try alloc.dupe(u8, h.value);
         } else if (std.ascii.eqlIgnoreCase(h.name, "origin")) {
-            creds.origin = alloc.dupe(u8, h.value) catch null;
+            creds.origin = try alloc.dupe(u8, h.value);
+        } else if (std.ascii.eqlIgnoreCase(h.name, "sec-websocket-origin")) {
+            if (creds.origin == null) creds.origin = try alloc.dupe(u8, h.value);
+        } else if (std.ascii.eqlIgnoreCase(h.name, "host")) {
+            creds.host = try alloc.dupe(u8, h.value);
         }
     }
 
-    // Query params: access_token (JWT) and token (oneshot).
-    const qp = queryParams(alloc, target) catch std.json.Value{ .null = {} };
+    // Query params: access_token (JWT) and token (oneshot). An undecodable
+    // query carries no credentials; the route reports the bad query.
+    const qp = queryParams(alloc, target) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidParams => std.json.Value.null,
+    };
     if (qp == .object) {
         if (qp.object.get("access_token")) |v| switch (v) {
             .string => |s| if (creds.jwt == null) {
-                creds.jwt = alloc.dupe(u8, s) catch null;
+                creds.jwt = s;
             },
             else => {},
         };
         if (qp.object.get("token")) |v| switch (v) {
-            .string => |s| {
-                creds.oneshot = alloc.dupe(u8, s) catch null;
-            },
+            .string => |s| creds.oneshot = s,
             else => {},
         };
     }
@@ -768,12 +640,12 @@ fn extractCreds(req: *std.http.Server.Request, target: []const u8, alloc: std.me
     return creds;
 }
 
-/// Read the full request body into `alloc`. Returns an empty slice when there
-/// is no body.
-/// Cap for non-upload request bodies. JSON-RPC / DB-value / form bodies are
-/// small; large gcode goes through the streaming upload path, not here. Without
-/// a cap a single large POST could drive the daemon to OOM.
-const max_request_body = 32 * 1024 * 1024;
+/// Cap for non-upload request bodies, which are buffered and parsed in the
+/// request arena (uploads stream to disk instead). Moonraker applies
+/// `max_upload_size` (1 GiB) to every body; phobos bounds buffered JSON to
+/// 1 MiB because a body costs several times its size once parsed and up to
+/// `io.Listener.max_concurrent_conns` requests run at once.
+const max_request_body = 1024 * 1024;
 
 /// Hard upper bound on a single streamed file-upload part. Real gcode is far
 /// smaller; this only backstops an unbounded/never-terminating upload body from
@@ -782,11 +654,15 @@ const max_upload_bytes = 2 * 1024 * 1024 * 1024;
 /// Multipart form fields (root/path) are a few bytes; cap them tight so a giant
 /// field value can't balloon the request arena before the file part is reached.
 const max_field_bytes = 64 * 1024;
+/// RFC 2046 boundary: at most 70 characters, after the leading "--".
+const max_boundary_line = 2 + 70;
 
+/// Read the full request body into `alloc`, answering `Expect: 100-continue`.
+/// Returns an empty slice when there is no body.
 fn readBody(req: *std.http.Server.Request, alloc: std.mem.Allocator) ![]const u8 {
-    if (req.head.content_length == null or req.head.content_length.? == 0) return &.{};
+    if (req.head.transfer_encoding == .none and (req.head.content_length orelse 0) == 0) return &.{};
     var rbuf: [16 * 1024]u8 = undefined;
-    const reader = req.readerExpectNone(&rbuf);
+    const reader = try req.readerExpectContinue(&rbuf);
     return reader.allocRemaining(alloc, .limited(max_request_body));
 }
 
@@ -850,8 +726,7 @@ fn handleFileServe(
     // only the streaming HTTP path (which opens it again — a tiny benign re-open).
     const probe = resolved.openFile(srv.io, alloc) catch |err| {
         if (err == error.Forbidden or err == error.InvalidParams) return fileErrResponse(alloc, err);
-        const b = try errorBody(alloc, 404, "File not found");
-        return .{ .status = .not_found, .body = b };
+        return errorResponse(alloc, .not_found, "File not found");
     };
     probe.close(srv.io);
     return .{ .status = .ok, .body = "", .file_request = resolved };
@@ -866,26 +741,8 @@ fn mapResolveErr(err: file_manager.ResolveError) anyerror {
 }
 
 fn fileErrResponse(alloc: std.mem.Allocator, err: anyerror) !Response {
-    const code: i64 = switch (err) {
-        error.InvalidParams => 400,
-        error.Forbidden => 403,
-        error.NotFound => 404,
-        else => 500,
-    };
-    const status: std.http.Status = switch (err) {
-        error.InvalidParams => .bad_request,
-        error.Forbidden => .forbidden,
-        error.NotFound => .not_found,
-        else => .internal_server_error,
-    };
-    const msg: []const u8 = switch (err) {
-        error.InvalidParams => "Bad Request",
-        error.Forbidden => "Forbidden",
-        error.NotFound => "Not Found",
-        else => "Internal Server Error",
-    };
-    const b = try errorBody(alloc, code, msg);
-    return .{ .status = status, .body = b };
+    const reply = try jsonrpc.errorReply(err, .null, alloc);
+    return errorResponse(alloc, reply.status, reply.message);
 }
 
 /// Read from `r` into `out` (or discard, when null) until `sep` is found,
@@ -935,7 +792,14 @@ fn handleUploadStreaming(
 ) !void {
     const io = srv.io;
     var rbuf: [64 * 1024]u8 = undefined;
-    const r = req.readerExpectNone(&rbuf);
+    const r = req.readerExpectContinue(&rbuf) catch |err| switch (err) {
+        error.HttpExpectationFailed => {
+            req.head.expect = null;
+            const b = try errorBody(alloc, 417, "Expectation Failed");
+            return req.respond(b, .{ .status = .expectation_failed, .extra_headers = headers, .keep_alive = false });
+        },
+        error.WriteFailed => return err,
+    };
     const bad = struct {
         fn f(rq: *std.http.Server.Request, a: std.mem.Allocator, h: []const std.http.Header, msg: []const u8) !void {
             const b = try errorBody(a, 400, msg);
@@ -952,7 +816,8 @@ fn handleUploadStreaming(
     // First line is "--<boundary>\r\n"; the inter-part separator is "\r\n--<boundary>".
     const first = r.takeDelimiterInclusive('\n') catch return bad(req, alloc, headers, "Invalid upload form");
     const boundary_line = std.mem.trimEnd(u8, first, "\r\n");
-    if (!std.mem.startsWith(u8, boundary_line, "--")) return bad(req, alloc, headers, "Invalid upload form");
+    // An over-long boundary would make the separator outgrow the read buffer.
+    if (!std.mem.startsWith(u8, boundary_line, "--") or boundary_line.len > max_boundary_line) return bad(req, alloc, headers, "Invalid upload form");
     const part_sep = try std.fmt.allocPrint(alloc, "\r\n{s}", .{boundary_line});
 
     var root_field: ?[]const u8 = null;
@@ -1035,7 +900,7 @@ fn handleUploadStreaming(
         try out.put(alloc, "files", .{ .object = files });
         try out.put(alloc, "done", .{ .bool = true });
         const ov: std.json.Value = .{ .object = out };
-        const ob = try jv.serializeAlloc(alloc, ov);
+        const ob = try std.json.Stringify.valueAlloc(alloc, ov, .{});
         try req.respond(ob, .{ .status = .ok, .extra_headers = headers });
         return;
     }
@@ -1229,7 +1094,7 @@ test "handleParsed: GET /server/info wraps result with klippy_connected false" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/info", "", arena.allocator());
+    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/info", "", .{}, arena.allocator());
     try std.testing.expectEqual(std.http.Status.ok, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"result\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"klippy_connected\":false") != null);
@@ -1253,7 +1118,7 @@ test "handleParsed: GET /server/config present" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/config", "", arena.allocator());
+    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/config", "", .{}, arena.allocator());
     try std.testing.expectEqual(std.http.Status.ok, resp.status);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"result\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"config\"") != null);
@@ -1279,11 +1144,11 @@ test "handleParsed: POST /server/jsonrpc returns raw envelope matching REST" {
 
     const rpc = try handleParsed(&srv, .HTTP, .POST, jsonrpc_path,
         \\{"jsonrpc":"2.0","method":"server.info","id":1}
-    , a);
+    , .{}, a);
     try std.testing.expectEqual(std.http.Status.ok, rpc.status);
 
     // The JSON-RPC result payload must equal the REST result payload.
-    const rest = try handleParsed(&srv, .HTTP, .GET, "/server/info", "", a);
+    const rest = try handleParsed(&srv, .HTTP, .GET, "/server/info", "", .{}, a);
 
     const rpc_parsed = try std.json.parseFromSlice(std.json.Value, a, rpc.body, .{});
     const rest_parsed = try std.json.parseFromSlice(std.json.Value, a, rest.body, .{});
@@ -1327,10 +1192,10 @@ test "handleParsed: websocket-only route is 404 over HTTP" {
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/websocket/id", "", arena.allocator());
+    const resp = try handleParsed(&srv, .HTTP, .GET, "/server/websocket/id", "", .{}, arena.allocator());
     try std.testing.expectEqual(std.http.Status.not_found, resp.status);
     inline for (.{ RequestType.GET, RequestType.POST, RequestType.DELETE }) |verb| {
-        const wrong_verb = try handleParsed(&srv, .HTTP, verb, "/server/connection/identify", "", arena.allocator());
+        const wrong_verb = try handleParsed(&srv, .HTTP, verb, "/server/connection/identify", "", .{}, arena.allocator());
         try std.testing.expectEqual(std.http.Status.not_found, wrong_verb.status);
     }
 }
@@ -1352,46 +1217,13 @@ test "handleParsed: unknown route is 404 with Moonraker error shape" {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
 
-    const resp = try handleParsed(&srv, .HTTP, .GET, "/does/not/exist", "", arena.allocator());
+    const resp = try handleParsed(&srv, .HTTP, .GET, "/does/not/exist", "", .{}, arena.allocator());
     try std.testing.expectEqual(std.http.Status.not_found, resp.status);
 
     const p = try std.json.parseFromSlice(std.json.Value, arena.allocator(), resp.body, .{});
     const err = p.value.object.get("error").?.object;
     try std.testing.expectEqual(@as(i64, 404), err.get("code").?.integer);
     try std.testing.expectEqualStrings("Not Found", err.get("message").?.string);
-}
-
-test "authorize: auth_required=false skips the hook" {
-    const route = Route{
-        .path = "/x",
-        .method = .GET,
-        .wrap_result = true,
-        .auth_required = false,
-        .transports = &.{.HTTP},
-        .ctx = undefined,
-        .handler = undefined,
-    };
-    // A hook that always denies; with auth_required=false it must be bypassed.
-    const denyHook = struct {
-        fn f(_: TransportType, _: bool) bool {
-            return false;
-        }
-    }.f;
-    try std.testing.expect(authorize(denyHook, .HTTP, &route));
-}
-
-test "authorize: INTERNAL transport bypasses default hook" {
-    const route = Route{
-        .path = "/x",
-        .method = .GET,
-        .wrap_result = true,
-        .auth_required = true,
-        .transports = &.{.INTERNAL},
-        .ctx = undefined,
-        .handler = undefined,
-    };
-    // Default hook always allows INTERNAL even when auth is required.
-    try std.testing.expect(authorize(defaultAuthHook, .INTERNAL, &route));
 }
 
 test "corsOriginAllowed: wildcard, exact, subdomain, host" {
@@ -1462,7 +1294,7 @@ test "fuzz_http_transport: random request bytes never crash, always a well-forme
             const target = raw[0..split];
             const body = raw[split..n];
 
-            const resp = try handleParsed(s, .HTTP, verb, target, body, a);
+            const resp = try handleParsed(s, .HTTP, verb, target, body, .{}, a);
 
             // Body must always be valid JSON (result/error envelope or {} ).
             const parsed = std.json.parseFromSlice(std.json.Value, a, resp.body, .{}) catch {
@@ -1526,4 +1358,207 @@ test "fuzz HTTP query decoding returns UTF-8 or rejects the request" {
             }
         }
     }.run, .{});
+}
+
+/// A live test server that trusts no client address.
+fn untrustedServer(alloc: std.mem.Allocator, io: Io, tmp: *std.testing.TmpDir) !*@import("testutil/server.zig").TestServer {
+    try tmp.dir.writeFile(io, .{ .sub_path = "m.cfg", .data = "[authorization]\ntrusted_clients:\n 10.0.0.0/8\n" });
+    const cfg_path = try tmp.dir.realPathFileAlloc(io, "m.cfg", alloc);
+    defer alloc.free(cfg_path);
+    return @import("testutil/server.zig").TestServer.initWithConfig(alloc, cfg_path);
+}
+
+/// Send raw request bytes to the live server and return the response status line.
+fn rawStatusLine(io: Io, port: u16, request: []const u8, out: []u8) ![]const u8 {
+    const stream = try (try net.IpAddress.parse("127.0.0.1", port)).connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var wbuf: [1024]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll(request);
+    try w.interface.flush();
+    var r = stream.reader(io, out);
+    return std.mem.trimEnd(u8, try r.interface.takeDelimiterInclusive('\n'), "\r\n");
+}
+
+test "an unauthenticated /server/jsonrpc caller runs only auth-free methods" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ts = try untrustedServer(alloc, threaded.io(), &tmp);
+    defer ts.stop();
+
+    const denied = try ts.postJson(alloc, jsonrpc_path,
+        \\{"jsonrpc":"2.0","method":"access.get_api_key","id":1}
+    );
+    defer alloc.free(denied);
+    try std.testing.expectEqualStrings(
+        \\{"jsonrpc":"2.0","error":{"code":-32602,"message":"Unauthorized"},"id":1}
+    , denied);
+    const open = try ts.postJson(alloc, jsonrpc_path,
+        \\{"jsonrpc":"2.0","method":"access.info","id":2}
+    );
+    defer alloc.free(open);
+    try std.testing.expect(std.mem.indexOf(u8, open, "\"result\"") != null);
+}
+
+test "client-supplied _current_user does not make a request trusted" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ts = try untrustedServer(alloc, threaded.io(), &tmp);
+    defer ts.stop();
+
+    const rest = try ts.get(alloc, "/access/info?_current_user=_TRUSTED_USER_&_remote_ip=10.0.0.1");
+    defer alloc.free(rest);
+    try std.testing.expect(std.mem.indexOf(u8, rest, "\"trusted\":false") != null);
+    const rpc = try ts.postJson(alloc, jsonrpc_path,
+        \\{"jsonrpc":"2.0","method":"access.info","params":{"_current_user":"_TRUSTED_USER_","_remote_ip":"10.0.0.1"},"id":1}
+    );
+    defer alloc.free(rpc);
+    try std.testing.expect(std.mem.indexOf(u8, rpc, "\"trusted\":false") != null);
+}
+
+test "an untrusted WebSocket client must identify with credentials" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ts = try untrustedServer(alloc, threaded.io(), &tmp);
+    defer ts.stop();
+    const ws_client = @import("testutil/ws_client.zig");
+    const c = try ws_client.connect(ts, alloc);
+    defer c.close();
+
+    const denied = try c.call(alloc, "access.get_api_key", null);
+    defer alloc.free(denied);
+    try std.testing.expect(std.mem.indexOf(u8, denied, "\"Unauthorized\"") != null);
+    const no_creds = try c.call(alloc, "server.connection.identify",
+        \\{"client_name":"t","version":"1","type":"web","url":"u"}
+    );
+    defer alloc.free(no_creds);
+    try std.testing.expect(std.mem.indexOf(u8, no_creds, "\"Unauthorized\"") != null);
+
+    var params_buf: [192]u8 = undefined;
+    const params = try std.fmt.bufPrint(&params_buf,
+        \\{{"client_name":"t","version":"1","type":"web","url":"u","api_key":"{s}"}}
+    , .{&ts.app.auth_ctx.api_key});
+    const ok = try c.call(alloc, "server.connection.identify", params);
+    defer alloc.free(ok);
+    try std.testing.expect(std.mem.indexOf(u8, ok, "\"connection_id\"") != null);
+    const key = try c.call(alloc, "access.get_api_key", null);
+    defer alloc.free(key);
+    try std.testing.expect(std.mem.indexOf(u8, key, &ts.app.auth_ctx.api_key) != null);
+}
+
+test "WebSocket upgrades check the origin and the bridge requires auth" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ts = try untrustedServer(alloc, threaded.io(), &tmp);
+    defer ts.stop();
+    const upgrade = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n";
+    var buf: [1024]u8 = undefined;
+
+    try std.testing.expectEqualStrings("HTTP/1.1 403 Forbidden", try rawStatusLine(ts.io, ts.port(), "GET /websocket HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\n" ++ upgrade ++ "\r\n", &buf));
+    var req_buf: [512]u8 = undefined;
+    const same = try std.fmt.bufPrint(&req_buf, "GET /websocket HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nOrigin: http://127.0.0.1:{d}\r\n" ++ upgrade ++ "\r\n", .{ ts.port(), ts.port() });
+    try std.testing.expectEqualStrings("HTTP/1.1 101 Switching Protocols", try rawStatusLine(ts.io, ts.port(), same, &buf));
+    try std.testing.expectEqualStrings("HTTP/1.1 401 Unauthorized", try rawStatusLine(ts.io, ts.port(), "GET /klippysocket HTTP/1.1\r\nHost: 127.0.0.1\r\n" ++ upgrade ++ "\r\n", &buf));
+}
+
+test "originAllowed matches the Host header or cors_domains" {
+    const cors = [_][]const u8{"*.example.com"};
+    try std.testing.expect(originAllowed(&.{}, null, "h:1"));
+    try std.testing.expect(originAllowed(&.{}, "http://Printer.local:7125/path", "printer.local:7125"));
+    try std.testing.expect(!originAllowed(&.{}, "http://evil.example", "printer.local:7125"));
+    try std.testing.expect(!originAllowed(&.{}, "http://printer.local", "printer.local:7125"));
+    try std.testing.expect(originAllowed(&cors, "https://ui.example.com", "printer.local"));
+}
+
+test "fuzz originAllowed never crashes and allows a missing origin" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var o: [48]u8 = undefined;
+            var h: [24]u8 = undefined;
+            const ol = smith.valueRangeAtMostWithHash(u8, 0, o.len, 0);
+            const hl = smith.valueRangeAtMostWithHash(u8, 0, h.len, 1);
+            smith.bytesWithHash(o[0..ol], 2);
+            smith.bytesWithHash(h[0..hl], 3);
+            _ = originAllowed(&.{"*.x"}, o[0..ol], h[0..hl]);
+            try std.testing.expect(originAllowed(&.{}, null, h[0..hl]));
+        }
+    }.run, .{});
+}
+
+test "Expect: 100-continue gets an interim response, then the body is read" {
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    const body =
+        \\{"jsonrpc":"2.0","method":"server.info","id":1}
+    ;
+    const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+    defer stream.close(ts.io);
+    var wbuf: [512]u8 = undefined;
+    var w = stream.writer(ts.io, &wbuf);
+    try w.interface.print("POST /server/jsonrpc HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nExpect: 100-continue\r\nContent-Length: {d}\r\n\r\n", .{body.len});
+    try w.interface.flush();
+    var rbuf: [4096]u8 = undefined;
+    var r = stream.reader(ts.io, &rbuf);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n", try r.interface.takeDelimiterInclusive('\n'));
+    try std.testing.expectEqualStrings("\r\n", try r.interface.takeDelimiterInclusive('\n'));
+    try w.interface.writeAll(body);
+    try w.interface.flush();
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\n", try r.interface.takeDelimiterInclusive('\n'));
+}
+
+test "an oversized body gets 413 and the connection closes before its remainder" {
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+    defer stream.close(ts.io);
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(ts.io, &wbuf);
+    try w.interface.print("POST /server/database/item HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{max_request_body + 64});
+    try w.interface.splatByteAll(' ', max_request_body + 1);
+    try w.interface.flush();
+    var rbuf: [4096]u8 = undefined;
+    var r = stream.reader(ts.io, &rbuf);
+    try std.testing.expectEqualStrings("HTTP/1.1 413 Payload Too Large\r\n", try r.interface.takeDelimiterInclusive('\n'));
+    // The server closes instead of parsing the rest of the body as a request.
+    var closes = false;
+    while (true) {
+        const line = try r.interface.takeDelimiterInclusive('\n');
+        if (std.mem.eql(u8, line, "\r\n")) break;
+        if (std.ascii.eqlIgnoreCase(line, "connection: close\r\n")) closes = true;
+    }
+    try std.testing.expect(closes);
+}
+
+test "a multipart boundary longer than RFC 2046 allows is refused" {
+    const TestServer = @import("testutil/server.zig").TestServer;
+    const ts = try TestServer.init(std.testing.allocator);
+    defer ts.stop();
+    // A 65535-byte boundary line fills the 64 KiB upload buffer; its
+    // separator would not fit the buffer.
+    const line_len = 64 * 1024 - 1;
+    const stream = try (try net.IpAddress.parse("127.0.0.1", ts.port())).connect(ts.io, .{ .mode = .stream });
+    defer stream.close(ts.io);
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(ts.io, &wbuf);
+    try w.interface.print("POST /server/files/upload HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n", .{line_len + 1 + 8});
+    try w.interface.splatByteAll('-', line_len);
+    try w.interface.writeAll("\nxxxxxxxx");
+    try w.interface.flush();
+    var rbuf: [4096]u8 = undefined;
+    var r = stream.reader(ts.io, &rbuf);
+    try std.testing.expectEqualStrings("HTTP/1.1 400 Bad Request\r\n", try r.interface.takeDelimiterInclusive('\n'));
 }

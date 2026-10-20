@@ -52,14 +52,14 @@ pub const TransportType = enum {
 
 /// The handler signature is the Dispatcher's erased handler: it is invoked the
 /// same way for HTTP and JSON-RPC, the transport only differs in framing.
-pub const HandlerFn = *const fn (ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value;
+pub const HandlerFn = jsonrpc.HandlerFn;
 
 /// Definition of one endpoint. `methods` is the set of HTTP verbs the path
 /// accepts; `transports` the channels it is exposed on.
 pub const ApiDef = struct {
     path: []const u8,
     methods: []const RequestType,
-    transports: []const TransportType = &.{ .HTTP, .WEBSOCKET, .INTERNAL },
+    transports: []const TransportType = std.enums.values(TransportType),
     /// When true the HTTP transport wraps the handler result as
     /// `{"result": <r>}`; when false the raw handler result is the body.
     wrap_result: bool = true,
@@ -177,7 +177,7 @@ pub const Registry = struct {
     alloc: std.mem.Allocator,
     dispatcher: *jsonrpc.Dispatcher,
     routes: std.ArrayList(Route) = .empty,
-    /// path → route index per verb, so `lookup`/`pathExists` are O(1) instead of
+    /// path → route index per verb, so `lookup` is O(1) instead of
     /// a linear scan of every route on each HTTP request. Values are indices into
     /// `routes.items` (stable across ArrayList reallocation, unlike pointers).
     /// Keys are the comptime-literal `def.path` strings — stable, no dup needed.
@@ -237,12 +237,22 @@ pub const Registry = struct {
         // JSON-RPC methods: derived only when a non-HTTP transport exists, to
         // mirror Moonraker (`transports != TransportType.HTTP`).
         if (comptime hasNonHttpTransport(def.transports)) {
+            const entry: jsonrpc.Entry = .{
+                .ctx = ctx,
+                .handler = handler,
+                .off_core = def.off_core,
+                .auth_required = def.auth_required,
+                .verb = def.methods[0],
+                .transports = def.transports,
+            };
             if (comptime def.is_remote) {
                 // Klipper-proxied: one plain dotted method regardless of verbs.
-                try self.dispatcher.registerEx(comptime deriveNameConst(def.path, def.methods[0], false), ctx, handler, def.off_core);
+                try self.dispatcher.registerEntry(comptime deriveNameConst(def.path, def.methods[0], false), entry);
             } else {
                 inline for (def.methods) |verb| {
-                    try self.dispatcher.registerEx(comptime deriveNameConst(def.path, verb, multi), ctx, handler, def.off_core);
+                    var verb_entry = entry;
+                    verb_entry.verb = verb;
+                    try self.dispatcher.registerEntry(comptime deriveNameConst(def.path, verb, multi), verb_entry);
                 }
             }
         }
@@ -258,12 +268,6 @@ pub const Registry = struct {
             .DELETE => slots.delete,
         } orelse return null;
         return &self.routes.items[idx];
-    }
-
-    /// Look up a route by path alone (any verb) — used to distinguish a 404
-    /// (no such path) from a 405 (path exists, wrong verb). O(1).
-    pub fn pathExists(self: *Registry, path: []const u8) bool {
-        return self.path_index.contains(path);
     }
 };
 
@@ -386,17 +390,23 @@ test "registerEndpoint HTTP-only transport derives no JSON-RPC method" {
     try std.testing.expect(d.methods.get("server.info") == null);
 }
 
-test "pathExists distinguishes missing path from wrong verb" {
+test "registerEndpoint gives each JSON-RPC method its verb, auth flag and transports" {
     const alloc = std.testing.allocator;
     var d = jsonrpc.Dispatcher.init(alloc);
     defer d.deinit();
     var reg = Registry.init(alloc, &d);
     defer reg.deinit();
 
-    try reg.registerEndpoint(.{ .path = "/server/info", .methods = &.{.GET} }, @ptrCast(&_ctx), dummyHandler);
-
-    try std.testing.expect(reg.pathExists("/server/info"));
-    try std.testing.expect(!reg.pathExists("/nope"));
+    try reg.registerEndpoint(.{ .path = "/a/b", .methods = &.{ .GET, .DELETE }, .auth_required = false }, @ptrCast(&_ctx), dummyHandler);
+    try reg.registerEndpoint(.{ .path = "/a/ws", .methods = &.{.POST}, .transports = &.{.WEBSOCKET} }, @ptrCast(&_ctx), dummyHandler);
+    const get = d.methods.get("a.get_b").?;
+    try std.testing.expectEqual(RequestType.GET, get.verb);
+    try std.testing.expect(!get.auth_required);
+    try std.testing.expectEqual(RequestType.DELETE, d.methods.get("a.delete_b").?.verb);
+    try std.testing.expectEqual(@as(usize, 4), get.transports.len);
+    const ws = d.methods.get("a.ws").?;
+    try std.testing.expect(ws.auth_required);
+    try std.testing.expectEqualSlices(TransportType, &.{.WEBSOCKET}, ws.transports);
 }
 
 test "fuzz_registry: deriveMethodName never crashes and stays in bounds" {
