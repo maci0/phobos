@@ -151,3 +151,31 @@ names, including `get_`/`post_`/`delete_` variants. The client matrix still repo
 scanner suites and measurement helper tests passed together: 88 tests.
 No unchanged full Zig suite was repeated for this documentation-only change;
 the integrated source gate is recorded separately.
+
+## 2026-10-20: queue locking before notifications and stable start responses
+
+Requested by the user: finish the codebase review and fix the confirmed bugs.
+`src/components/job_queue.zig:lockJobs` and `unlockJobs` now use constructor
+`clock_io`, matching the dispatch worker's lifetime. Optional notification I/O
+no longer disables synchronization. The existing concurrent queue stress test
+now runs with notification I/O unset and joins its thread on error paths too.
+
+`handleStart` allocates its accepted response before changing the paused state
+or launching a worker. The response remains `loading` when the worker has
+already entered `starting`; a failed worker launch returns `paused` and retains
+the queued job. This follows the response-before-delayed-callback ordering in
+Moonraker `900848584374`, `job_queue.py:start_queue` and `_handle_start_queue`.
+
+The dispatch regression blocks the real owned worker with `std.Io.Event` until
+the loading response is checked, then releases and joins it. Separate handler
+tests cover every response allocation failure and a zero concurrency limit.
+Actual asynchronous queue fixtures use the thread-safe allocator and stateless
+store; request arenas remain caller-owned. Cancellation fixtures join before
+reading dispatch results.
+
+Verification: the filtered queue run passed 55 tests, including 9 fuzz
+harnesses. The broader focused start/timer run passed 15 tests with 2 fuzz
+harnesses. `zig fmt --check src/components/job_queue.zig` and `git diff --check`
+passed. The Debug standalone suite built with `zig build test-artifact
+-Doptimize=Debug` passed in 120.9 seconds: 1424 passed, 1 skipped, 0 failed,
+with 262 fuzz harnesses. Printer access and deployment were outside this change.
