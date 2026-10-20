@@ -1,53 +1,54 @@
-# Moonraker Test-Run Findings
+# Moonraker test-run findings
 
 Vendored commit: `9008485` ("build: bump pillow to 12.2.0").
-Host: Python 3.14 system / tests executed under uv-provisioned CPython 3.12.12.
+Host: system Python 3.14; tests ran under uv-provisioned CPython 3.12.12.
 Date: 2026-06-01.
 
-## TL;DR
+## Result
 
-The upstream Moonraker test suite **does not run out of the box and is not a usable
-parity oracle as-is.** Of **473 collected tests: 1 passed, 6 failed, 466 errored**
-(all at fixture setup). The suite is not wired into CI and has bit-rotted against
-the current source layout and its own pinned dependencies.
+The upstream Moonraker test suite does not run out of the box and cannot serve
+as a parity oracle. Of 473 collected tests, 1 passed, 6 failed and 466 errored,
+all at fixture setup. CI does not run the suite, and it no longer matches the
+current source layout or its own pinned dependencies.
 
-## How tests are (not) run in CI
+## CI
 
-`.github/workflows/test_code.yaml` is the only workflow. It runs **flake8 + mypy
-only** (`weibullguy/python-lint-plus`). **`pytest` is never invoked in CI.** Nothing
-guards the test suite against rot, which explains everything below.
+`.github/workflows/test_code.yaml` is the only workflow. It runs flake8 and mypy
+(`weibullguy/python-lint-plus`) and never invokes `pytest`, so nothing catches
+test-suite breakage.
 
-## What it took to even collect the tests
+## Collecting the tests
 
-`pytest.ini` declares `pythonpath = moonraker scripts` and depends on an editable
-install. On a fresh checkout this is broken in several independent ways:
+`pytest.ini` declares `pythonpath = moonraker scripts` and assumes an editable
+install. A fresh checkout breaks in four independent ways:
 
-1. **Package-shadow.** `pythonpath = moonraker` puts the inner package dir first on
-   `sys.path`, so `import moonraker` resolves to `moonraker/moonraker.py` (a module)
-   instead of the `moonraker/` package → `'moonraker' is not a package`.
-2. **Mixed legacy/new imports in the same files.** Test modules mix
-   `import confighelper` / `from utils import ServerError` (legacy top-level layout)
-   with `from moonraker.confighelper import ConfigError` (current package layout).
-   The bare modules use relative imports internally (`from .utils import ...`), so
-   they only resolve when bound as package submodules — the two import styles are
-   mutually exclusive under any single `sys.path` ordering.
+1. **Package shadowing.** `pythonpath = moonraker` puts the inner package
+   directory first on `sys.path`, so `import moonraker` resolves to the module
+   `moonraker/moonraker.py` instead of the `moonraker/` package and fails with
+   `'moonraker' is not a package`.
+2. **Mixed import layouts in one file.** Test modules mix legacy top-level
+   imports (`import confighelper`, `from utils import ServerError`) with package
+   imports (`from moonraker.confighelper import ConfigError`). The bare modules
+   use relative imports (`from .utils import ...`) and resolve only as package
+   submodules, so no single `sys.path` order satisfies both styles.
 3. **Moved module.** `tests/test_klippy_connection.py` imports
-   `from moonraker.klippy_connection import KlippyRequest`, but the module now lives
+   `from moonraker.klippy_connection import KlippyRequest`; the module now lives
    at `moonraker.components.klippy_connection`.
-4. **Missing test deps.** the pytest plugins
-   (`pytest-asyncio`, `pytest-timeout`) are not in any dependency group, only named
-   in `required_plugins`.
+4. **Missing test dependencies.** `pytest-asyncio` and `pytest-timeout` appear
+   only in `required_plugins`, not in any dependency group.
 
-### Workaround applied (documented, non-invasive)
+### Local patch
 
-Added `vendor/moonraker/conftest.py` (clearly marked **PHOBOS VENDOR PATCH**, not
-upstream) that aliases the legacy bare names to package submodules:
+`vendor/moonraker/conftest.py` (marked `PHOBOS VENDOR PATCH`, not upstream)
+aliases the legacy bare names to package submodules:
 
 - `confighelper` → `moonraker.confighelper`
 - `utils` → `moonraker.utils`
 - `moonraker.klippy_connection` → `moonraker.components.klippy_connection`
 
-Run command that collects all 473 tests:
+It changes no source logic. `vendor/` is gitignored, so the patch exists only in
+a local checkout; delete it to reproduce the broken state. This command
+collects all 473 tests:
 
 ```
 cd vendor/moonraker
@@ -55,11 +56,9 @@ uv run --with pytest --with 'pytest-asyncio==0.21.2' --with 'pytest-timeout>=2.1
   pytest -o "pythonpath=scripts tests"
 ```
 
-No source logic is modified. Delete `conftest.py` to reproduce the broken state.
+## Why 466 tests still error
 
-## Why 466/473 still error: source/test semantic drift
-
-Even after collection succeeds, nearly every test errors at **fixture setup** with:
+After collection, nearly every test fails at fixture setup:
 
 ```
 RuntimeError: no running event loop
@@ -69,23 +68,22 @@ RuntimeError: no running event loop
     evtloop = EventLoop()
 ```
 
-Root cause is a genuine incompatibility, not just a dependency pin:
+The fixtures and the source disagree:
 
-- `tests/conftest.py` builds the server from a **synchronous, class-scoped**
-  `base_server` fixture that constructs `EventLoop()` outside any running loop, and
-  relies on a custom `event_loop` fixture (the pre-0.23 pytest-asyncio pattern).
-- Current source `EventLoop.reset()` calls `asyncio.get_running_loop()`, which
-  **requires** an already-running loop. When the suite was written, this almost
-  certainly used `asyncio.get_event_loop()` (returns/creates a loop even when none is
-  running). The source moved on; the fixtures did not.
-- Pinning `pytest-asyncio==0.21.2` (honors the custom `event_loop` fixture) does not
-  help, because the sync fixture still constructs `EventLoop` with no loop *running*.
+- `tests/conftest.py` builds the server in a synchronous, class-scoped
+  `base_server` fixture that constructs `EventLoop()` outside a running loop,
+  and supplies a custom `event_loop` fixture (the pytest-asyncio pattern before
+  0.23).
+- `EventLoop.reset()` calls `asyncio.get_running_loop()`, which requires a
+  running loop. The fixtures were not updated when the source changed.
+- Pinning `pytest-asyncio==0.21.2`, which honors the custom `event_loop`
+  fixture, does not help: the synchronous fixture still has no running loop.
 
-Making these pass would require rewriting `conftest.py` to construct the server inside
-a running loop. **Deliberately not done** — this is a faithful-behavior study; we do
-not want to perturb source or fabricate green by changing test semantics.
+Passing tests would need `conftest.py` rewritten to construct the server inside
+a running loop. That was deliberately not done, so the run reflects upstream
+behavior without changed test semantics.
 
-### Error signature breakdown (full-suite run)
+### Error signatures (full-suite run)
 
 | Signature | Count |
 |---|---|
@@ -94,10 +92,9 @@ not want to perturb source or fabricate green by changing test semantics.
 | `AttributeError` | 8 |
 | `AssertionError` (real assertion reached) | 5 |
 | reported `FAILED` | 6 |
-| **passed** | **1** |
+| passed | 1 |
 
-The single pass + the 5 `AssertionError`s are the only tests that get far enough to
-exercise real assertions; everything else dies before the test body runs.
+Only the one pass and the five `AssertionError`s reach a test body.
 
 ## Per-file result
 
@@ -108,18 +105,15 @@ exercise real assertions; everything else dies before the test body runs.
 | `test_klippy_connection.py` | 24 | 24 error |
 | `test_server.py` | 60 | 5 failed, 55 error |
 
-## Implications for phobos (the Zig reimplementation)
+## Consequences for phobos
 
-1. **The upstream suite cannot be the parity oracle.** It is abandoned, unguarded by
-   CI, and incompatible with its own current source. We cannot "make the Python tests
-   pass against Zig."
-2. **Parity must be established empirically.** Build a black-box conformance suite
-   that drives a *running* stock Moonraker (golden capture) and replays the same
-   HTTP/WebSocket/JSON-RPC requests against phobos, asserting byte/JSON-equal
-   responses and identical notification streams. The existing `tests/fixtures`
-   (`KlippyProcess`, `HttpClient`, `WebsocketClient`) and `tests/assets` configs are
-   reusable scaffolding for that capture harness.
-3. **The real spec is the code + `docs/`, not the tests.** See
-   [`api/API_SURFACE.md`](api/API_SURFACE.md) (full endpoint/JSON-RPC/notification
-   inventory) and [`TEST_COVERAGE.md`](TEST_COVERAGE.md) (what is nominally tested vs
-   the large untested surface).
+1. The upstream suite cannot be the parity oracle: CI does not run it and it is
+   incompatible with its own source.
+2. Parity comes from a black-box oracle instead. `conformance/capture.py` drives
+   a running stock Moonraker and records golden responses and notification
+   streams; `conformance/replay.py` replays them against phobos and asserts
+   normalized equality using the manifest in `conformance/replay.py`.
+3. The API contract is the Moonraker source plus
+   [`api/API_SURFACE.md`](api/API_SURFACE.md) (endpoint, JSON-RPC and
+   notification inventory). [`TEST_COVERAGE.md`](TEST_COVERAGE.md) maps what
+   upstream nominally tests.

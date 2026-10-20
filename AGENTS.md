@@ -1,175 +1,176 @@
-# AGENTS.md — coding conventions for phobos
+# AGENTS.md: coding conventions for phobos
 
-Phobos is a memory-efficient Zig 0.17 reimplementation of Moonraker. See
-`TODO.md`, `DEVELOPMENT.md`, and `docs/` for status and architecture.
+Phobos is a memory-efficient Zig 0.17 reimplementation of Moonraker. Status lives
+in `TODO.md`, workflow in `DEVELOPMENT.md`, architecture and measurements in `docs/`.
+The append-only change and verification ledger is `docs/PROVENANCE.md`.
 
 ## Project goals (weigh every change against these)
 
-- **Low memory usage is an EXPLICIT, primary goal.** Target is a static musl
-  binary on 32-bit ARM (Cortex-A7). Measured (pre-SQLite-switch): ~1.2 MB binary, idle RSS ~2.2 MB on
-  a real armv7 printer (of which only ~0.7 MB is unreclaimable private-dirty heap)
-  vs that same printer's own Moonraker at ~10 MB and desktop Moonraker at
-  50–80 MB. Must stay tiny — reproduce with `scripts/measure-memory.sh`, see
-  `docs/MEMORY.md`. Concretely:
-    - prefer fixed/stack buffers and caller-provided buffers over heap; reach for
-      `std.heap` allocators only when a fixed buffer genuinely can't bound the size
-    - per-request work uses an arena that is freed on return — keep long-lived
-      state minimal; don't cache what you can recompute cheaply
-    - bound every buffer/ring/queue; no unbounded growth on hostile/large input
-    - avoid per-item heap churn in hot paths (status fan-out, parsing); reuse
-      buffers, stream rather than accumulate
+- **Low memory use is a primary goal.** Target: a static musl binary on 32-bit
+  ARM (Cortex-A7). Measured idle on a real armv7 printer (`docs/MEMORY.md`):
+  historical measurements are in `docs/MEMORY.md`; they are not a current
+  performance guarantee. Reproduce with `scripts/measure-memory.sh`. Rules:
+    - prefer fixed, stack, and caller-provided buffers; use `std.heap`
+      allocators only when a fixed buffer cannot bound the size
+    - per-request work uses an arena freed on return; keep long-lived state
+      minimal and do not cache what is cheap to recompute
+    - bound every buffer, ring, and queue; no unbounded growth on hostile or
+      large input
+    - no per-item heap churn in hot paths (status fan-out, parsing): reuse
+      buffers, stream instead of accumulating
     - a new dependency or a large static table needs a memory justification
-- **100% Moonraker API parity** (surface + behaviour) — the coverage gate and
-  conformance oracle must stay green.
-- **Idiomatic Zig.** Lean on the language: `comptime` and `@typeInfo` to generate
-  tables/dispatch instead of runtime duplication; tagged unions + exhaustive
-  `switch` (no `else` when you want the compiler to catch new cases); explicit
-  error sets and `try`/`errdefer`; slices over pointers; `defer` for cleanup.
-  Push work to compile time wherever it removes runtime cost or branches.
+- **100% Moonraker API parity** (surface and behaviour). The coverage gate and
+  the conformance oracle must stay green.
+- **Idiomatic Zig.** Generate tables and dispatch with `comptime` and
+  `@typeInfo` instead of runtime duplication; tagged unions with exhaustive
+  `switch` (no `else` where the compiler should catch new cases); explicit
+  error sets with `try`/`errdefer`; slices over pointers; `defer` for cleanup.
+  Move work to compile time wherever it removes runtime cost or branches.
 
 ## Stay on Zig 0.17.0
 
-Avoid writing code that assumes older `std.fs`, `std.net`, or `std.Thread`
-synchronization APIs. In Zig 0.17, `std.fs.cwd`,
-`std.posix.access`, `std.Thread.Mutex`, and `std.Thread.sleep` are NOT available
-— verify an API exists before using it, and prefer the `std.Io` paths below.
-(`std.Thread.spawn`/`join` ARE available and used for background workers; only
-the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
+Zig 0.17 has no `std.fs.cwd`, `std.posix.access`, `std.Thread.Mutex`, or
+`std.Thread.sleep`. Verify an API exists before using it. `std.Thread.spawn`
+and `join` exist and run the background workers; only the `std.Thread` sync
+primitives are gone, so use `std.Io.Mutex`.
 
-- Prefer `std.Io` paths:
-    - filesystem through `std.Io.Dir.cwd().<op>(io, ...)` (e.g. `openFile`,
+- Use `std.Io` paths:
+    - filesystem through `std.Io.Dir.cwd().<op>(io, ...)` (`openFile`,
       `writeFile`, `access`, `createDirPath`, `deleteTree`)
-    - sockets through `std.Io.net`; the threaded `io` handle for async/sleeps
-    - avoid reintroducing `std.fs.cwd()`, `std.net`, `std.Thread.sleep`,
+    - sockets through `std.Io.net`; async work and sleeps through the threaded
+      `io` handle
+    - do not reintroduce `std.fs.cwd()`, `std.net`, `std.Thread.sleep`, or
       `std.Thread.Mutex`
 
-- Prefer Zig builtins and comptime — push work to compile time:
+- Use builtins and comptime:
     - `@typeInfo`, `@TypeOf`, `@import("builtin")`
     - `@intCast`, `@fromBackingInt`, `@backingInt`
     - `@memcpy`, `@memset`
     - `@atomicLoad`, `@atomicStore`
-    - use `comptime` to build lookup tables, derive enum↔string maps, and
-      generate per-variant dispatch from a tagged union instead of hand-writing
-      parallel runtime code; `inline for` over a comptime spec list (e.g. the
-      proxy/endpoint spec arrays) keeps the data in one place with zero runtime cost
-    - exhaustive `switch` on enums/tagged unions WITHOUT an `else` where you want
-      the compiler to flag every new case
-    - Note: Zig has no `@builtin`; platform/build info is `const builtin =
-      @import("builtin");`.
+    - build lookup tables, enum↔string maps, and per-variant dispatch from a
+      tagged union with `comptime`; `inline for` over a comptime spec list (the
+      proxy and endpoint spec arrays) keeps the data in one place at zero
+      runtime cost
+    - exhaustive `switch` on enums and tagged unions, without `else`, where the
+      compiler should flag every new case
+    - Zig has no `@builtin`; platform and build info is
+      `const builtin = @import("builtin");`
 
-- Avoid low-level OS work by default:
+- No low-level OS work by default:
     - no direct syscalls
     - no new fork/exec code
-    - avoid `std.os`, `std.posix`, raw libc unless there is no Zig 0.17 API
-    - keep any unavoidable low-level code behind a local wrapper
-    - platform exceptions: termios in `serial.zig`, system identity and the
-      V4L2 layout in `machine.zig`, and the C `statvfs` shim. Use typed platform declarations;
-      reads, close, cancellation and device control use `std.Io`.
-      See `docs/STDLIB.md` for the checked APIs and adapter limits.
+    - no `std.os`, `std.posix`, or raw libc unless Zig 0.17 has no API for it
+    - unavoidable low-level code sits behind a local wrapper
+    - platform exceptions: termios in `serial.zig`, system identity and the V4L2 layout in
+      `machine.zig`, and the C `statvfs` shim. Use typed platform declarations;
+      reads, close, cancellation, and device control go through `std.Io`.
+      `docs/STDLIB.md` lists the checked APIs and adapter limits.
     - socket addresses and bound ports come from `socket.address`, not raw syscalls
-    - file-root paths open through `file_manager.Resolved`; its `abs` field is
-      only a display/cache key. Use checked directory handles for mutations and
-      atomic replacement for uploaded or copied files.
+    - file-root paths open through `file_manager.Resolved`; its `abs` field is a
+      display and cache key only. Mutate through checked directory handles and
+      replace uploaded or copied files atomically.
     - timestamps use `std.Io.Clock`; secrets use `io.randomSecure` with errors
       propagated. Pass the startup I/O handle through constructors. `clock_io`
-      keeps clocks available before optional component I/O and workers are enabled.
-    - interruptible timers use `std.Io.Event.waitTimeout` with an absolute deadline
-      to handle spurious wakes. Signal the event before joining the worker.
+      keeps clocks available before optional component I/O and workers start.
+    - interruptible timers use `std.Io.Event.waitTimeout` with an absolute
+      deadline to handle spurious wakes. Signal the event before joining the worker.
 
-- Prefer structured stdlib helpers:
-    - `std.mem` for slicing/search/copying
+- Use structured stdlib helpers:
+    - `std.mem` for slicing, search, and copying
     - `std.fmt.bufPrint` / `bufPrintSentinel` for fixed buffers
     - `std.testing` helpers in tests
     - `std.heap` allocators only when fixed buffers are not enough
 
 - Make ownership explicit:
-    - functions that allocate should document who frees
-    - prefer caller-provided buffers for hot paths and config serialization
-    - use `defer` / `errdefer` consistently
-    - watch for the classic bugs (all hit real defects in this codebase):
+    - a function that allocates documents who frees
+    - caller-provided buffers for hot paths and config serialization
+    - `defer` / `errdefer` throughout
+    - known bugs, each hit in this codebase:
         - a StringHashMap key and a struct field duped from the same source must
-          be SEPARATE allocations (else double-free in deinit)
-        - a setter that replaces an owned slice must free the old one
-        - `*Locked` emit variants assume the Core lock is already held
+          be separate allocations, or `deinit` double-frees
+        - a setter that replaces an owned slice frees the old one
+        - `*Locked` emit variants assume the Core lock is held
 
-- Allocator lifetime — the #1 source of UAF/leaks here:
-    - NEVER store memory allocated from a per-request / per-message arena into a
-      structure that outlives that arena (maps, caches, `last_value`, etc.). Dupe
-      into the owning *stable* allocator (`self.gpa`) instead. The arena is freed
-      on return → dangling keys + cross-allocator free at `deinit`.
-    - "store" APIs that DEEP-COPY their input (e.g. `publishTopic` →
-      `deepCopyValue`, `setMeasurement`) leave the caller owning the builder —
-      `defer builder.deinit(gpa)` it; do not assume the store took ownership.
-    - keys/values in a map must be freed with the SAME allocator that made them;
-      a snapshot map that aliases another map's entries must not be cleared with
-      `clearRetainingCapacity` (leaks the entries) — deep-copy + free, or free
-      the entries explicitly.
+- Allocator lifetime, the main source of UAFs and leaks here:
+    - never store memory from a per-request or per-message arena in a structure
+      that outlives the arena (maps, caches, `last_value`). Dupe into the stable
+      owner (`self.gpa`). The arena is freed on return, leaving dangling keys and
+      a cross-allocator free at `deinit`.
+    - store APIs that deep-copy their input (`publishTopic` → `deepCopyValue`,
+      `setMeasurement`) leave the caller owning the builder: `defer
+      builder.deinit(gpa)`; the store does not take ownership.
+    - free map keys and values with the allocator that made them. A snapshot map
+      that aliases another map's entries must not be cleared with
+      `clearRetainingCapacity` (it leaks them); deep-copy and free, or free the
+      entries explicitly.
 
-- Prefer slices over raw pointers internally:
-    - use `[]const u8` / `[]u8` for Zig logic
-    - reserve `[*:0]const u8` for C interop boundaries only
-    - convert with `std.mem.span()` only at boundaries
+- Slices over raw pointers internally:
+    - `[]const u8` / `[]u8` in Zig logic
+    - `[*:0]const u8` only at C interop boundaries
+    - convert with `std.mem.span()` only at those boundaries
 
-- Keep enum APIs consistent:
-    - `count`, `toIndex`, `fromIndex`, `toStr`, `label`, out-of-range safe default
+- Enum APIs stay consistent: `count`, `toIndex`, `fromIndex`, `toStr`, `label`,
+  and a safe default for out-of-range input.
 
-- Use errors idiomatically:
+- Errors:
     - return `!T` / `!void`
-    - use `catch return` for non-critical failure paths
-    - avoid silent `catch {}` except known acceptable best-effort cases
-      (e.g. best-effort hardware writes after in-memory state is committed)
+    - `catch return` on non-critical failure paths
+    - no silent `catch {}` outside known best-effort cases (such as hardware
+      writes after in-memory state is committed)
 
-- For concurrency:
-    - use `std.Io.Mutex` (lock via the `io` handle: `lockUncancelable(io)` /
-      `unlock(io)`); use `std.atomic.Value(T)` for cross-thread scalar flags.
-      On teardown paths use `lockUncancelable` — `lock(io) catch {}` then mutating
-      is a bug (you'd unlock without holding it).
+- Concurrency:
+    - `std.Io.Mutex`, locked through the `io` handle (`lockUncancelable(io)` /
+      `unlock(io)`); `std.atomic.Value(T)` for cross-thread scalar flags. Teardown
+      paths use `lockUncancelable`: `lock(io) catch {}` followed by a mutation
+      unlocks a mutex it never held.
     - the `Core` mutex (`src/server/core.zig`) serializes handler execution and
-      notification fan-out; background tasks run OUTSIDE it. Inbound work from a
-      background thread (e.g. the MQTT reader) that mutates shared state or emits
-      MUST run under `core.run(io, fn, args)` so it serializes with handlers.
-    - fan-out over a shared list while connections can be concurrently removed:
-      do NOT hold the registry lock across the (blocking) socket writes — that
-      stalls all add/remove. Instead pin under the lock (refcount++), release,
-      write, re-lock and drop the refs; `remove` defers the free while pinned.
-      See `Connections.broadcast`. (Holding the lock the whole time is also
-      memory-safe but a liveness hazard; the refcount pattern is preferred.)
-    - never select-then-act across a dropped lock without pinning — the classic
+      notification fan-out; background tasks run outside it. Inbound work on a
+      background thread (the MQTT reader, for one) that mutates shared state or
+      emits must run under `core.run(io, fn, args)` to serialize with handlers.
+    - fan-out over a list whose connections can be removed concurrently: do not
+      hold the registry lock across blocking socket writes, which stalls every
+      add and remove. Pin under the lock (refcount++), release, write, re-lock,
+      drop the refs; `remove` defers the free while pinned. See
+      `Connections.broadcast`. Holding the lock throughout is memory-safe but a
+      liveness hazard.
+    - never select-then-act across a dropped lock without pinning; that is the
       snapshot-pointers-then-write UAF.
-    - background threads/tasks: store EVERY spawned thread/future that references
-      ctx state and join it before freeing that state (a fire-and-forget
-      `io.async`/`std.Thread.spawn` racing `deinit` is a UAF). Use an atomic stop
-      flag; `shutdown(.recv)` to unblock a blocked read before joining.
-    - NEVER block on a network round-trip (e.g. a Klippy proxy request) while
-      holding the `Core` lock. A handler runs under `Core`; if it then blocks
-      reading a socket whose reader thread needs `Core` to dispatch, you deadlock
-      and wedge the whole server. The Klippy bridge (`klippy_connection.zig`)
-      solves this: ONE persistent reader continuously drains the socket (so Klippy
-      never backpressures on its status flood — a stalled drain was a real wedge),
-      routes responses to per-id waiters, and `request()` RELEASES `Core` for the
-      round-trip and blocks on its waiter. Reuse that pattern for any
-      request/response over a shared, continuously-pushed socket; cap stack
-      reservations on background threads (`.{ .stack_size = 1 << 20 }`).
-    - background thread stacks default to 16 MiB reserved each — pass
-      `.{ .stack_size = 1 << 20 }` to `std.Thread.spawn` (ample for bounded
+    - store every spawned thread or future that references ctx state and join it
+      before freeing that state; a fire-and-forget `io.async`/`std.Thread.spawn`
+      racing `deinit` is a UAF. Stop with an atomic flag; `shutdown(.recv)`
+      unblocks a blocked read before the join.
+    - never block on a network round-trip (a Klippy proxy request, for one) while
+      holding `Core`. If a handler blocks reading a socket whose reader thread
+      needs `Core` to dispatch, the server deadlocks. The Klippy bridge
+      (`klippy_connection.zig`) shows the fix: one persistent reader drains the
+      socket continuously (a stalled drain lets Klippy's status flood
+      backpressure and wedge the server), routes responses to per-id waiters,
+      and `request()` releases `Core` for the round-trip while it blocks on its
+      waiter. Reuse that pattern for any request/response over a shared,
+      continuously-pushed socket.
+    - background thread stacks reserve 16 MiB each by default. Pass
+      `.{ .stack_size = 1 << 20 }` to `std.Thread.spawn` (enough for bounded
       JSON/TLS/HTTP work) to keep VmSize small.
 
-- For process spawning:
-    - use `std.process` only where Zig 0.17 environment handling is safe
-    - prefer a mockable command-runner (see `machine.zig` `RunCmdFn`) so logic is
-      unit-testable without touching the host
-    - NEVER run host-mutating commands (reboot/shutdown/apt/pip) by default —
-      those are deliberate no-ops
+- Process spawning:
+    - `std.process` only where Zig 0.17 environment handling is safe
+    - go through a mockable command runner (`machine.zig` `RunCmdFn`) so the
+      logic is unit-testable without touching the host
+    - host-mutating commands (reboot, shutdown, apt, pip) are deliberate no-ops;
+      never run them by default
 
-- For tests:
-    - Temperature sampling and automatic update refresh start only in the daemon
-      entry point. Tests tick them synchronously; no sampler uses the testing allocator.
-    - keep tests at the bottom of modules (`test { ... }` blocks)
-    - every function gets a unit test AND a fuzz test (project rule)
-    - add pure tests for parsers/builders/helpers
-    - tests run under `std.testing.allocator` — it detects leaks/double-free, so
-      exercise allocation paths with it (arenas mask these bugs)
-    - keep fuzz harnesses deterministic and bounded
+- Tests:
+    - temperature sampling and automatic update refresh start only in the daemon
+      entry point. Tests tick them synchronously; no sampler uses the testing
+      allocator.
+    - tests sit at the bottom of each module (`test { ... }` blocks)
+    - every function gets a unit test and a fuzz test (project rule)
+    - pure tests for parsers, builders, and helpers
+    - tests run under `std.testing.allocator`, which catches leaks and
+      double-frees; exercise allocation paths with it (arenas hide these bugs)
+    - fuzz harnesses are deterministic and bounded
+    - update tests fetch only local temporary repositories, never the checkout's
+      `origin` or a real deployment
     - fixtures (datadirs, config files, sockets, fake sysfs roots, missing
       paths) live in a `std.testing.tmpDir`, never a fixed `/tmp` or cwd path.
       `App.init` takes the datadir; Unix sockets use the relative
@@ -177,41 +178,48 @@ the `std.Thread` *sync* primitives are absent — use `std.Io.Mutex` instead.)
       Every wait in a test has a time deadline.
     - update tests fetch only local temporary repositories. Never use the
       checkout's `origin` or a real deployment for refresh/recovery tests.
-    - the Klippy sim (`testutil/klippy_sim.zig`) does NOT reproduce a real
-      Klippy's continuous status flood or backpressure, so it MASKS bridge
-      concurrency/protocol bugs (a proxy deadlock + a wrong `objects/subscribe`
-      shape both passed the sim and only showed against a real Klippy). For
-      bridge/transport changes, cross-compile and validate against a real printer:
-      `cat binary | ssh root@<printer> 'cat >/tmp/p; chmod +x /tmp/p'`, symlink
-      `/tmp/klippy_uds -> /tmp/uds`, run on a NON-7125 port, hit it READ-ONLY
-      (no gcode/move/heat), then kill + remove the symlink. Diagnose hangs with
-      `/proc/<pid>/task/*/wchan` (e.g. `unix_stream_read_generic` = blocked read,
+    - the Klippy sim (`src/testutil/klippy_sim.zig`) does not reproduce a real
+      Klippy's continuous status flood or backpressure, so it hides bridge
+      concurrency and protocol bugs (a proxy deadlock and a wrong
+      `objects/subscribe` shape both passed the sim). Validate bridge and
+      transport changes on a real printer: cross-compile, `cat binary | ssh
+      root@<printer> 'cat >/tmp/p; chmod +x /tmp/p'`, symlink
+      `/tmp/klippy_uds -> /tmp/uds`, run on a port other than 7125, send
+      read-only requests only (no gcode, moves, or heating), then kill the
+      process and remove the symlink. Diagnose hangs with
+      `/proc/<pid>/task/*/wchan` (`unix_stream_read_generic` = blocked read,
       `futex_wait_queue_me` = lock contention).
-    - standalone-testable files (no `../` imports) run via
+    - files with no `../` imports run standalone via
       `zig test -target x86_64-linux-musl src/<f>.zig`; files under
       `src/components` use `../` imports and build only via `zig build test`
 
-- For build.zig:
-    - keep link/backend choices explicit
-    - avoid global-machine assumptions (this host's glibc cannot be linked; the
-      native target defaults to musl — never run plain `zig build` against glibc)
-    - prefer project-local cache/config for reproducible test runs
+- build.zig:
+    - keep link and backend choices explicit
+    - no global-machine assumptions: this host's glibc cannot be linked, so the
+      native target defaults to musl; never run a plain `zig build` against glibc
+    - project-local cache and config for reproducible test runs
 
 ## Build / test quick reference
 
-- The DataStore backend is selectable via `[database] backend` (sqlite | file).
-  SQLite (default) vendors the amalgamation in `vendor/sqlite/`; the file backend
-  is pure Zig (no C dependency).
-- Build test binary (avoids the `--listen=-` hang):
-  `zig build test-artifact && ./.zig-cache/o/*/test --cache-dir=./.zig-cache`
+- DataStore backend: `[database] backend` (`sqlite` | `file`). SQLite (default)
+  compiles the amalgamation from `vendor/sqlite/` (gitignored, not in the
+  repo); the file backend is pure Zig with no C dependency.
+- Test binary without the build runner's `--listen=-` hang:
+  `zig build test-artifact -Doptimize=Debug`, then run the newest standalone
+  `.zig-cache/o/<hash>/test --cache-dir=./.zig-cache` under a timeout. Do not pass
+  `--test-filter` to the standalone runner or expand all cached test binaries.
 - Full suite: `timeout 220 zig build test --summary all`
-- `schema` prints a CLI Spec 0.3 document and does not load config or bind a socket. `-o`/`--output` accept `auto`, `text`, or `json`. `auto` stays text on a pipe. `--dump-api` stdout stays the API document. `--version` stays the Moonraker compatibility string; `-o json --version` prints the package version.
+- `schema` prints a CLI Spec 0.3 document without loading config or binding a
+  socket. `-o`/`--output` take `auto`, `text`, or `json`; `auto` is text on a
+  pipe. `--dump-api` stdout is the API document. `--version` prints the
+  Moonraker compatibility string; `-o json --version` prints the package version.
 - Coverage gate (must stay 100%):
   `mkdir -p .scratch && zig build && zig-out/bin/phobos --dump-api > .scratch/api-dump.json &&
    PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/api-dump.json`
-- Release (LTO + stripped): add `-Doptimize=ReleaseSmall`.
+- Release (LTO, stripped): add `-Doptimize=ReleaseSmall`.
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
-- Conformance oracle (normalized equality vs vendored Moonraker): see
+- Conformance oracle (normalized equality against vendored Moonraker):
   `conformance/replay.py` against `conformance/golden/`.
 - Gated real-Klippy integration test: boot the stack with `.testenv/run-klippy.sh`
-  (native linux host MCU + klippy via uv); the test skips when `/tmp/klippy_uds` is absent.
+  (local, gitignored; native Linux host MCU plus Klippy via uv). The test skips
+  when `/tmp/klippy_uds` is absent.

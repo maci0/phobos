@@ -1,6 +1,6 @@
 # phobos API Coverage
 
-Per-call implementation status of every Moonraker API surface element, with any behavioural difference. **Auto-generated** (`python3 -m api_scanner table`) from the Moonraker baseline (`api/api_surface.json`) × phobos `--dump-api` × curated deltas — do not hand-edit; update the deltas in `tools/api_scanner/table.py`.
+Per-call implementation status of every Moonraker API surface element, with any behavioural difference. **Auto-generated** (`python3 -m api_scanner table`) from the Moonraker baseline (`api/api_surface.json`) × phobos `--dump-api` × curated deltas. do not hand-edit; update the deltas in `tools/api_scanner/table.py`.
 
 - Moonraker baseline: `0.10.1.dev20+g9008485` (commit `900848584374`).
 - Endpoints: 125 · JSON-RPC methods: 130 · notifications: 27 · remote methods: 14.
@@ -134,8 +134,8 @@ Status: ✅ Full (matches Moonraker) · ⚠️ Partial (shape matches; behaviour
 | `/server/webcams/test` | POST | HTTP, WEBSOCKET, INTERNAL | webcam | ✅ Full | Matches Moonraker. |
 | `/server/websocket/id` | GET | WEBSOCKET | websockets | ✅ Full | Matches Moonraker. |
 | `/server/zeroconf/ssdp` | GET | HTTP | zeroconf | ✅ Full | Matches Moonraker. |
-| `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
-| `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route. |
+| `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route. |
+| `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route. |
 
 _Endpoints: 97 full, 26 partial, 2 no-op, 0 missing._
 

@@ -1,6 +1,6 @@
 # Client API coverage matrix
 
-Every Moonraker JSON-RPC method, cross-referenced across upstream Moonraker, phobos, and the reference clients (web UIs + touchscreens). Regenerate with `tools/client_api_scanner/` after bumping any source — the diff is the changelog.
+Every JSON-RPC method registered by upstream Moonraker or phobos, or called by a reference client (web UIs and touchscreens). Regenerate with `tools/client_api_scanner/` after bumping any source; the diff is the changelog.
 
 - Moonraker: **120** · phobos: **144**
 - fluidd (v1.37.1): **98** calls
@@ -9,19 +9,19 @@ Every Moonraker JSON-RPC method, cross-referenced across upstream Moonraker, pho
 - klipperscreen (git): **36** calls
 - mainsail (v2.13.2): **65** calls
 
-## Client-called methods phobos does NOT register (9)
+## Client-called methods phobos does not register (9)
 
-These are all **third-party Moonraker plugins or client-specific extensions**, absent from core Moonraker too — phobos returns `-32601` and the clients hide the feature, exactly as against a stock Moonraker without the plugin. Not phobos bugs.
+These method names are absent from the checked-in phobos method set. The matrix shows whether upstream Moonraker registers them; notes identify known plugin calls. Client fallback behavior is not tested here.
 
-- `machine.timelapse.get_settings` — wanted by fluidd, mainsail — `moonraker-timelapse` plugin (3rd-party)
-- `machine.timelapse.lastframeinfo` — wanted by fluidd, helixscreen, mainsail — `moonraker-timelapse` plugin (3rd-party)
-- `machine.timelapse.post_settings` — wanted by fluidd, mainsail — `moonraker-timelapse` plugin (3rd-party)
-- `machine.timelapse.render` — wanted by fluidd, helixscreen, mainsail — `moonraker-timelapse` plugin (3rd-party)
-- `machine.timelapse.saveframes` — wanted by fluidd, helixscreen, mainsail — `moonraker-timelapse` plugin (3rd-party)
-- `server.files.get_file` — wanted by helixscreen — non-standard (not a core Moonraker JSON-RPC method; file download is HTTP)
-- `server.helix.phase_tracking.status` — wanted by helixscreen — HelixScreen's own Moonraker plugin
-- `server.helix.print_modified` — wanted by helixscreen — HelixScreen's own Moonraker plugin
-- `server.helix.status` — wanted by helixscreen — HelixScreen's own Moonraker plugin
+- `machine.timelapse.get_settings`, called by fluidd, mainsail: `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.lastframeinfo`, called by fluidd, helixscreen, mainsail: `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.post_settings`, called by fluidd, mainsail: `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.render`, called by fluidd, helixscreen, mainsail: `moonraker-timelapse` plugin (3rd-party)
+- `machine.timelapse.saveframes`, called by fluidd, helixscreen, mainsail: `moonraker-timelapse` plugin (3rd-party)
+- `server.files.get_file`, called by helixscreen: non-standard (not a core Moonraker JSON-RPC method; file download is HTTP)
+- `server.helix.phase_tracking.status`, called by helixscreen: HelixScreen's own Moonraker plugin
+- `server.helix.print_modified`, called by helixscreen: HelixScreen's own Moonraker plugin
+- `server.helix.status`, called by helixscreen: HelixScreen's own Moonraker plugin
 
 ## Matrix
 

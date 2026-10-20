@@ -1,11 +1,11 @@
-"""Generate docs/api/API_COVERAGE.md — a per-call table of every Moonraker API
+"""Generate docs/api/API_COVERAGE.md, a per-call table of every Moonraker API
 endpoint / JSON-RPC method / notification / remote method, with phobos's
 implementation status and any difference from Moonraker.
 
 Driven by:
-  * the Moonraker baseline (api/api_surface.json) — the authoritative call list,
-  * phobos --dump-api output — what phobos actually registers (→ status),
-  * the curated DELTAS below — known behavioural differences.
+  * the Moonraker baseline (api/api_surface.json): the authoritative call list,
+  * phobos --dump-api output: registered names,
+  * the curated DELTAS below: known behavioural differences.
 
 Regenerate with:  PYTHONPATH=tools python3 -m api_scanner table \\
                     --phobos <dump.json> > docs/api/API_COVERAGE.md
@@ -119,7 +119,7 @@ def generate(baseline: Dict[str, Any], phobos: Dict[str, Any]) -> str:
     lines.append("Per-call implementation status of every Moonraker API surface element, "
                  "with any behavioural difference. **Auto-generated** "
                  "(`python3 -m api_scanner table`) from the Moonraker baseline "
-                 "(`api/api_surface.json`) × phobos `--dump-api` × curated deltas — "
+                 "(`api/api_surface.json`) × phobos `--dump-api` × curated deltas. "
                  "do not hand-edit; update the deltas in `tools/api_scanner/table.py`.")
     lines.append("")
     lines.append(f"- Moonraker baseline: `{s.get('moonraker_version','?')}` "
@@ -147,7 +147,7 @@ def generate(baseline: Dict[str, Any], phobos: Dict[str, Any]) -> str:
             # Moonraker's runtime endpoint-registration facility (Klipper-
             # registered endpoints). phobos handles these via the is_remote
             # proxy path, not as a fixed --dump-api route.
-            status, note = (S_FULL, "Dynamic endpoint registration — Klipper-registered endpoints are proxied via the is_remote path; not a fixed route.")
+            status, note = (S_FULL, "Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route.")
         else:
             impl = (path.rstrip("/") or "/") in ph_paths
             keys = [path] + list(methods) + [f"path:{path}", f"component:{comp}"]
@@ -197,7 +197,7 @@ def generate(baseline: Dict[str, Any], phobos: Dict[str, Any]) -> str:
     lines.append("")
 
     # --- phobos methods beyond the static JSON-RPC baseline ----------------
-    # These aren't necessarily "extra" — most are Moonraker functionality
+    # Most are Moonraker functionality
     # registered through a different mechanism (Klipper remote methods, or the
     # dynamic is_remote printer.* endpoints), which the static jsonrpc_methods
     # list in the baseline doesn't enumerate. Classify each so the comparison is

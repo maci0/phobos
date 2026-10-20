@@ -3,8 +3,8 @@
 Use the installed Zig 0.17.0 sources when choosing an API. Prefer `std.Io` for
 I/O, standard containers and codecs for primitives, and builtins for typed
 conversions and memory operations. Keep Moonraker protocol rules at their callers.
-The review covers first-party Zig modules, build code and `disk_usage.c`;
-vendored libraries retain their upstream implementations.
+These choices apply to first-party Zig modules, build code and `disk_usage.c`;
+vendored libraries keep their upstream implementations.
 
 | Operation | Implementation |
 | --- | --- |
