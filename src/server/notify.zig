@@ -30,13 +30,13 @@
 //!
 //! Subscription gating: `notify_status_update` is delivered only to connections
 //! subscribed to the relevant topics (Moonraker masks unsubscribed uids); every
-//! other notification broadcasts to all live connections. `emitStatus` applies
+//! other notification broadcasts to all authenticated connections. `emitStatus` applies
 //! the per-topic gate; `emit` broadcasts.
 //!
 //! Backpressure / slow clients: Moonraker queues messages per connection
 //! without bound and never blocks its loop. Here fan-out writes straight to
-//! the socket under the Core lock, so each WebSocket send waits at most
-//! `ws.write_timeout` for buffer space (`ws.DeadlineWriter`). A failed or
+//! the socket under the Core lock. Each complete frame uses one absolute
+//! `deadline_writer.write_timeout` budget for socket writes. A failed or
 //! timed-out write flags the connection `dead` (later writes are skipped) and
 //! shuts the socket down, which ends its serve loop. No message queue is kept.
 

@@ -235,3 +235,9 @@ no authenticated user. Upgrade authentication, registry insertion and identify
 run under Core, ordered with credential changes; network writes happen afterward.
 Klippy method frames and parsed results pass the JSON depth bound before they
 can reach handlers or serializers.
+
+WebSocket responses, notifications, pongs and bridge close frames use one absolute
+five-second write budget per complete frame. Native `net_write` consumes buffered
+headers, payload vectors and repeated slices without resetting that deadline.
+Each frame starts its budget under the session's write mutex, including the first
+frame after an idle period. A timeout shuts down both socket directions.

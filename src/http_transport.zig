@@ -26,6 +26,7 @@ const ws = @import("transport/ws.zig");
 const authz = @import("components/authorization.zig");
 const file_manager = @import("components/file_manager.zig");
 const klippy_connection = @import("components/klippy_connection.zig");
+const DeadlineWriter = @import("util/deadline_writer.zig").DeadlineWriter;
 
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
@@ -500,9 +501,9 @@ fn serveUpgrade(
         const kc = srv.klippy_ctx orelse return refuse(req, alloc, headers, .service_unavailable, "Failed to open connection to Klippy");
         var bridge = req.respondWebSocket(.{ .key = key }) catch return;
         bridge.flush() catch return;
-        var out = ws.DeadlineWriter.init(srv.io, stream, out_buf);
+        var out = DeadlineWriter.init(srv.io, stream, out_buf);
         bridge.output = &out.interface;
-        ws.serveBridge(srv.io, &bridge, kc, stream);
+        kc.serveBridge(srv.io, &bridge, stream, &out);
         return;
     }
 
@@ -510,7 +511,7 @@ fn serveUpgrade(
     defer conns.remove(srv.io, conn);
     var web_socket = req.respondWebSocket(.{ .key = key }) catch return;
     web_socket.flush() catch return;
-    var out = ws.DeadlineWriter.init(srv.io, stream, out_buf);
+    var out = DeadlineWriter.init(srv.io, stream, out_buf);
     web_socket.output = &out.interface;
     var ws_srv = ws.WsServer{
         .io = srv.io,
@@ -518,6 +519,7 @@ fn serveUpgrade(
         .conns = conns,
         .klippy = srv.klippy_ctx,
         .auth = srv.auth,
+        .writer = &out,
     };
     ws.serveWebSocket(&ws_srv, &web_socket, conn);
 }

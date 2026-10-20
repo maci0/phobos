@@ -26,6 +26,7 @@ const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
 const clock = @import("../util/clock.zig");
 const SocketDeadline = @import("../util/socket_deadline.zig").SocketDeadline;
+const DeadlineWriter = @import("../util/deadline_writer.zig").DeadlineWriter;
 const connections = @import("../server/connections.zig");
 
 /// One in-flight request awaiting its response. The persistent reader routes
@@ -164,7 +165,8 @@ fn parseKlippyResult(alloc: std.mem.Allocator, payload: []const u8) !std.json.Va
 }
 
 /// Close a `/klippysocket` WebSocket with 1001 "Klippy Disconnected".
-fn closeBridge(ws: *std.http.Server.WebSocket) void {
+fn closeBridge(ws: *std.http.Server.WebSocket, writer: ?*DeadlineWriter) void {
+    if (writer) |out| out.beginFrame();
     var payload: [2 + bridge_close_reason.len]u8 = undefined;
     std.mem.writeInt(u16, payload[0..2], bridge_close_code, .big);
     @memcpy(payload[2..], bridge_close_reason);
@@ -179,12 +181,14 @@ const Bridge = struct {
     ws: *std.http.Server.WebSocket,
     stream: net.Stream,
     client_stream: net.Stream,
+    writer: ?*DeadlineWriter,
     /// Serializes WebSocket writes (relayed frames, pongs, close).
     ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
     fn writeWs(self: *Bridge, data: []const u8, op: std.http.Server.WebSocket.Opcode) !void {
         self.ws_mutex.lockUncancelable(self.io);
         defer self.ws_mutex.unlock(self.io);
+        if (self.writer) |writer| writer.beginFrame();
         try self.ws.writeMessage(data, op);
     }
 
@@ -201,7 +205,7 @@ const Bridge = struct {
         }
         self.ws_mutex.lockUncancelable(self.io);
         defer self.ws_mutex.unlock(self.io);
-        closeBridge(self.ws);
+        closeBridge(self.ws, self.writer);
     }
 
     /// Client to Klippy, on the calling task. Returns when the client closes
@@ -383,15 +387,15 @@ pub const KlippyCtx = struct {
     /// either side closes. Klippy keeps one subscription per connection, so a
     /// bridge client never replaces phobos's. Refused with close 1001 while
     /// phobos itself is not connected.
-    pub fn serveBridge(self: *KlippyCtx, io: std.Io, ws: *std.http.Server.WebSocket, client_stream: net.Stream) void {
-        if (!self.isConnected()) return closeBridge(ws);
-        const addr = net.UnixAddress.init(self.uds_path) catch return closeBridge(ws);
-        const stream = addr.connect(io) catch return closeBridge(ws);
+    pub fn serveBridge(self: *KlippyCtx, io: std.Io, ws: *std.http.Server.WebSocket, client_stream: net.Stream, writer: ?*DeadlineWriter) void {
+        if (!self.isConnected()) return closeBridge(ws, writer);
+        const addr = net.UnixAddress.init(self.uds_path) catch return closeBridge(ws, writer);
+        const stream = addr.connect(io) catch return closeBridge(ws, writer);
         defer stream.close(io);
         // Send the upgrade response: Klippy says nothing until the client does.
         ws.flush() catch return;
-        var bridge: Bridge = .{ .gpa = self.gpa, .io = io, .ws = ws, .stream = stream, .client_stream = client_stream };
-        var klippy_side = io.concurrent(Bridge.relayKlippy, .{&bridge}) catch return closeBridge(ws);
+        var bridge: Bridge = .{ .gpa = self.gpa, .io = io, .ws = ws, .stream = stream, .client_stream = client_stream, .writer = writer };
+        var klippy_side = io.concurrent(Bridge.relayKlippy, .{&bridge}) catch return closeBridge(ws, writer);
         bridge.relayClient();
         klippy_side.cancel(io);
     }
@@ -1722,7 +1726,7 @@ test "serveBridge relays over a dedicated Klippy connection" {
     var swbuf: [4096]u8 = undefined;
     var sw = server_side.writer(io, &swbuf);
     var ws: std.http.Server.WebSocket = .{ .key = "", .input = &sr.interface, .output = &sw.interface };
-    var bridge_task = try io.concurrent(KlippyCtx.serveBridge, .{ &ctx, io, &ws, server_side });
+    var bridge_task = try io.concurrent(KlippyCtx.serveBridge, .{ &ctx, io, &ws, server_side, null });
 
     const klippy_side = try klippy_server.accept(io);
     var krbuf: [512]u8 = undefined;
@@ -1772,7 +1776,7 @@ test "serveBridge refuses while Klippy is not connected" {
     var out_buf: [64]u8 = undefined;
     var out: std.Io.Writer = .fixed(&out_buf);
     var ws: std.http.Server.WebSocket = .{ .key = "", .input = &in, .output = &out };
-    ctx.serveBridge(std.testing.io, &ws, undefined);
+    ctx.serveBridge(std.testing.io, &ws, undefined, null);
     const frame = out.buffered();
     try std.testing.expectEqual(@as(u8, 0x88), frame[0]);
     try std.testing.expectEqualStrings(bridge_close_reason, frame[4..]);
