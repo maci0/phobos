@@ -1117,7 +1117,7 @@ test "Spoolman startup notifications hold Core and unchanged spools do not notif
         }
     };
     var capture: Capture = .{ .core = &core, .io = io };
-    const conn = try conns.add(io);
+    const conn = try conns.add(io, false);
     conns.attachWriter(io, conn, &capture, Capture.write);
     ctx.setIo(io);
     for ([_]?i64{ 7, 7, null, null }) |id| core.run(io, SpoolmanCtx.setSpoolId, .{ &ctx, id });
