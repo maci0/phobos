@@ -744,7 +744,7 @@ pub fn handleGetDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
                     var metadata_params: std.json.ObjectMap = .empty;
                     try metadata_params.put(alloc, "filename", .{ .string = child_rel });
                     const metadata = handleMetadata(ctx_ptr, .{ .object = metadata_params }, alloc) catch |err| switch (err) {
-                        error.NotFound => continue,
+                        error.MetadataNotAvailable => continue,
                         else => return err,
                     };
                     var fields = metadata.object.iterator();
@@ -979,9 +979,15 @@ pub fn handleMetadata(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     const io = try ctx.requireIo();
     const filename = try getStr(params, "filename");
 
+    // Moonraker keeps metadata only for gcode files under the gcodes root;
+    // anything else is 404 "Metadata not available for <filename>".
+    if (!isGcodeExt(filename)) return error.MetadataNotAvailable;
     const req = try std.fmt.allocPrint(alloc, "gcodes/{s}", .{filename});
     const resolved = try resolveRequestPath(ctx, alloc, req);
-    const file = resolved.openFile(io, alloc) catch |err| return accessError(err);
+    const file = resolved.openFile(io, alloc) catch |err| return switch (accessError(err)) {
+        error.NotFound => error.MetadataNotAvailable,
+        else => |e| e,
+    };
     defer file.close(io);
     const st = try file.stat(io);
     const mtime = mtimeSecs(st);
@@ -1010,41 +1016,27 @@ fn buildMetadata(io: std.Io, alloc: std.mem.Allocator, file: std.Io.File, st: st
 
     // Deep gcode header parsing: read up to 256 KiB of the file header
     // to extract slicer info, layer count, estimated time, filament usage,
-    // temperatures, layer height, and embedded thumbnails.
-    if (isGcodeExt(filename)) {
-        if (readFileHeader(io, alloc, file, st.size)) |header_text| {
-            // Real PrusaSlicer/Orca/Bambu files carry their config block at the
-            // end, so also scan the footer for est-time/filament/height/temps.
-            const footer_text = readFileFooter(io, alloc, file, st.size);
-            const meta = gcode_metadata.parseFull(alloc, header_text, footer_text);
+    // temperatures, layer height, and embedded thumbnails. Real
+    // PrusaSlicer/Orca/Bambu files carry their config block at the end, so
+    // also scan the footer for est-time/filament/height/temps.
+    const header_text = try readFileHeader(io, alloc, file, st.size);
+    const footer_text = readFileFooter(io, alloc, file, st.size);
+    const meta = gcode_metadata.parseFull(alloc, header_text, footer_text);
 
-            if (meta.slicer) |s| {
-                try obj.put(alloc, "slicer", .{ .string = s });
-                if (meta.slicer_version) |v| {
-                    try obj.put(alloc, "slicer_version", .{ .string = v });
-                }
-            } else {
-                try obj.put(alloc, "slicer", .{ .string = "Unknown" });
-            }
-            if (meta.layer_count) |lc| try obj.put(alloc, "layer_count", .{ .integer = lc });
-            if (meta.estimated_time) |et| try obj.put(alloc, "estimated_time", .{ .float = et });
-            if (meta.filament_total) |ft| try obj.put(alloc, "filament_total", .{ .float = ft });
-            if (meta.filament_weight_total) |fw| try obj.put(alloc, "filament_weight_total", .{ .float = fw });
-            if (meta.first_layer_extr_temp) |t| try obj.put(alloc, "first_layer_extr_temp", .{ .float = t });
-            if (meta.first_layer_bed_temp) |t| try obj.put(alloc, "first_layer_bed_temp", .{ .float = t });
-            if (meta.layer_height) |lh| try obj.put(alloc, "layer_height", .{ .float = lh });
-            if (meta.object_height) |oh| try obj.put(alloc, "object_height", .{ .float = oh });
-            if (meta.nozzle_diameter) |nd| try obj.put(alloc, "nozzle_diameter", .{ .float = nd });
-
-            try obj.put(alloc, "thumbnails", try thumbnailsJson(alloc, meta.thumbnails));
-        } else |_| {
-            try obj.put(alloc, "slicer", .{ .string = "Unknown" });
-            try obj.put(alloc, "thumbnails", .{ .array = .init(alloc) });
-        }
-    } else {
-        try obj.put(alloc, "slicer", .{ .string = "Unknown" });
-        try obj.put(alloc, "thumbnails", .{ .array = .init(alloc) });
+    try obj.put(alloc, "slicer", .{ .string = meta.slicer orelse "Unknown" });
+    if (meta.slicer != null) {
+        if (meta.slicer_version) |v| try obj.put(alloc, "slicer_version", .{ .string = v });
     }
+    if (meta.layer_count) |lc| try obj.put(alloc, "layer_count", .{ .integer = lc });
+    if (meta.estimated_time) |et| try obj.put(alloc, "estimated_time", .{ .float = et });
+    if (meta.filament_total) |ft| try obj.put(alloc, "filament_total", .{ .float = ft });
+    if (meta.filament_weight_total) |fw| try obj.put(alloc, "filament_weight_total", .{ .float = fw });
+    if (meta.first_layer_extr_temp) |t| try obj.put(alloc, "first_layer_extr_temp", .{ .float = t });
+    if (meta.first_layer_bed_temp) |t| try obj.put(alloc, "first_layer_bed_temp", .{ .float = t });
+    if (meta.layer_height) |lh| try obj.put(alloc, "layer_height", .{ .float = lh });
+    if (meta.object_height) |oh| try obj.put(alloc, "object_height", .{ .float = oh });
+    if (meta.nozzle_diameter) |nd| try obj.put(alloc, "nozzle_diameter", .{ .float = nd });
+    try obj.put(alloc, "thumbnails", try thumbnailsJson(alloc, meta.thumbnails));
 
     return .{ .object = obj };
 }
@@ -1444,13 +1436,13 @@ test "root handles retain in-root aliases and reject link loops and recursive co
     const opened = try indirect.openFile(tr.io, alloc);
     defer opened.close(tr.io);
     try testing.expectEqualStrings("correct\n", try readFileHeader(tr.io, alloc, opened, (try opened.stat(tr.io)).size));
-    try tr.tmp.dir.symLink(tr.io, "loop_b", "gcodes/loop_a", .{});
-    try tr.tmp.dir.symLink(tr.io, "loop_a", "gcodes/loop_b", .{});
-    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"loop_a\"}"), alloc));
+    try tr.tmp.dir.symLink(tr.io, "loop_b.gcode", "gcodes/loop_a.gcode", .{});
+    try tr.tmp.dir.symLink(tr.io, "loop_a.gcode", "gcodes/loop_b.gcode", .{});
+    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"loop_a.gcode\"}"), alloc));
     const prefix_escape = try std.fmt.allocPrint(alloc, "{s}-outside/file.gcode", .{tr.roots[0].path});
     try tr.writeFile("gcodes-outside/file.gcode", "outside\n");
-    try tr.tmp.dir.symLink(tr.io, prefix_escape, "gcodes/prefix_escape", .{});
-    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"prefix_escape\"}"), alloc));
+    try tr.tmp.dir.symLink(tr.io, prefix_escape, "gcodes/prefix_escape.gcode", .{});
+    try testing.expectError(error.Forbidden, handleMetadata(@ptrCast(&ctx), try objParams(alloc, "{\"filename\":\"prefix_escape.gcode\"}"), alloc));
     try testing.expectError(error.InvalidParams, handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/alias/copy\"}"), alloc));
     try testing.expectEqual(StatKind.missing, tr.exists("gcodes/real/copy"));
     const copied = try handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/copied\"}"), alloc);
@@ -1858,14 +1850,28 @@ test "handleMetadata: cache hit returns same record; file change invalidates" {
     try testing.expect(r3.object.get("size").?.integer != size1);
 }
 
-test "handleMetadata: missing file → NotFound" {
+test "handleMetadata: missing file → MetadataNotAvailable" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var tr = try TestRoots.init(a);
     defer tr.deinit();
     var c = tr.ctx();
-    try testing.expectError(error.NotFound, handleMetadata(@ptrCast(&c), try objParams(a, "{\"filename\":\"none.gcode\"}"), a));
+    try testing.expectError(error.MetadataNotAvailable, handleMetadata(@ptrCast(&c), try objParams(a, "{\"filename\":\"none.gcode\"}"), a));
+
+    // file_manager.py: 404 "Metadata not available for <name>", -32601 over JSON-RPC.
+    const jsonrpc = @import("../jsonrpc.zig");
+    var d = jsonrpc.Dispatcher.init(testing.allocator);
+    defer d.deinit();
+    var reg = Registry.init(testing.allocator, &d);
+    defer reg.deinit();
+    try registerFileManager(&reg, &c);
+    const out = try d.handle("{\"jsonrpc\":\"2.0\",\"method\":\"server.files.metadata\",\"params\":{\"filename\":\"none.gcode\"},\"id\":1}", testing.allocator);
+    defer testing.allocator.free(out);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqual(@as(i64, -32601), err.get("code").?.integer);
+    try testing.expectEqualStrings("Metadata not available for <none.gcode>", err.get("message").?.string);
 }
 
 test "handleMetadata: gcode header parsing extracts slicer and stats" {
@@ -1917,7 +1923,7 @@ test "handleMetadata: gcode header parsing extracts slicer and stats" {
     try testing.expectEqual(@as(i64, 16), thumbs.items[0].object.get("width").?.integer);
 }
 
-test "handleMetadata: non-gcode file returns Unknown slicer" {
+test "handleMetadata: non-gcode files have no metadata; unknown slicers are Unknown" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -1925,7 +1931,9 @@ test "handleMetadata: non-gcode file returns Unknown slicer" {
     defer tr.deinit();
     try tr.writeFile("gcodes/test.txt", "not a gcode file");
     var c = tr.ctx();
-    const result = try handleMetadata(@ptrCast(&c), try objParams(a, "{\"filename\":\"test.txt\"}"), a);
+    try testing.expectError(error.MetadataNotAvailable, handleMetadata(@ptrCast(&c), try objParams(a, "{\"filename\":\"test.txt\"}"), a));
+    try tr.writeFile("gcodes/plain.gcode", "G28\n");
+    const result = try handleMetadata(@ptrCast(&c), try objParams(a, "{\"filename\":\"plain.gcode\"}"), a);
     try testing.expectEqualStrings("Unknown", result.object.get("slicer").?.string);
 }
 

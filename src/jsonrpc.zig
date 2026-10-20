@@ -78,7 +78,13 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.MissingFilename => .{ .bad_request, "No data for argument: filename" },
         error.MissingWebcamName => .{ .bad_request, "No data for argument: name" },
         error.Forbidden => .{ .forbidden, "Forbidden" },
+        // file_manager.py _handle_operation_check.
+        error.FileInUse => .{ .forbidden, "File currently in use" },
         error.NotFound => .{ .not_found, "Not Found" },
+        // file_manager.py get_file_metadata.
+        error.MetadataNotAvailable => .{ .not_found, try std.fmt.allocPrint(alloc, "Metadata not available for <{s}>", .{paramStr(params, "filename")}) },
+        // analysis.py; the "exit" typo is Moonraker's.
+        error.GcodeNotFound => .{ .bad_request, try std.fmt.allocPrint(alloc, "GCode File '{s}' does not exit in gcodes path", .{std.mem.trim(u8, paramStr(params, "filename"), "/")}) },
         error.UnknownDbNamespace => .{ .not_found, try std.fmt.allocPrint(alloc, "Namespace {s} not found", .{paramStr(params, "namespace")}) },
         error.MissingDbKey => .{ .not_found, try std.fmt.allocPrint(alloc, "Key '{s}' in namespace '{s}' not found", .{ paramStr(params, "key"), paramStr(params, "namespace") }) },
         // Moonraker ServerError("Klippy Host not connected", 503).
