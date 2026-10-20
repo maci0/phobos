@@ -694,3 +694,50 @@ Release publication uses an annotated tag and a normal fast-forward push. No
 printer deployment, restart, control action, live database access or image
 mutation was part of packaging. Optional hardware, current performance and
 production restart behavior retain the verification limits recorded above.
+
+## 2026-10-21: integration audit and minor release v0.2.0
+
+Requested by the user: integrate local branches and clones, preserve drafts,
+clean obsolete workspaces, and cut a minor release. The current published
+checkpoint was v0.1.5 (`861c6af`); its push and release assets were already
+complete. This release changes package metadata and documentation only.
+The reviewed daemon source remains unchanged from that checkpoint.
+
+Forty scratch repositories were inventoried. Their intended changes were already
+incorporated or superseded by the reviewed source and ledger entries above.
+All repository refs were preserved in verified Git bundles; non-cache working
+files were also archived with SHA-256 manifests before 38 inactive clones were
+removed. The intentionally dirty `deadline-before` negative fixture and the
+small Git probe fixture remain in place. Vendored sources and active/shared
+workspaces were retained. Preservation records live outside the repository at
+`../.integration-archive/20261021/preservation.json`.
+
+Verification: the version-matched standalone Debug artifact passed 1717 tests,
+with one hardware-gated skip, zero failures and 325 discovered bounded fuzz
+harnesses. The ordinary build runner timed out at its documented 220-second
+limit. A separate run of the prior v0.1.5 test artifact had one simulated-Klippy
+connection failure; the version-matched full run passed. The scanner and
+measurement suites passed 88 Python tests with all three language grammars.
+Formatting and diff checks passed. The release API dump registers 123/123
+endpoints, 130/130 methods and 27/27 notifications.
+
+The external 54-event golden replay reports seven mismatches on both v0.2.0
+and the published v0.1.5 binary. Detailed comparison identifies two intentionally
+registered optional components (`octoprint_compat`, `update_manager`), the
+harness's checkout-prefix path normalization, and a USB device count of 26
+instead of the captured 32 with identical key schemas. The strict oracle and
+original capture were retained; this replay is not reported as passing.
+Graphify is unavailable. No fresh performance measurement or physical optional
+device test is claimed.
+
+Static ReleaseSmall binaries built for x86-64 Linux musl and Cortex-A7
+ARM hard-float. JSON package identity is `0.2.0`. Checksums:
+
+- ARM: `5bb67a878c91f5fe16676460785ddafe61e42ab7b7e3bc75d0d587e75c58d370`.
+- x86-64: `003602f417a90d8146267f5e95d6c6aad7e9e2c10bed21bdf53adf07971ac626`.
+
+The exact ARM release binary passed a read-only probe in the existing printer
+chroot on loopback port 7126, using a consistent SQLite backup and private
+writable data. Klippy reached ready; twenty read requests succeeded; no
+components failed; the last print was complete and both heater targets were
+zero. The private probe was stopped before production installation.
