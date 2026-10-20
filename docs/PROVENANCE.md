@@ -179,3 +179,104 @@ harnesses. `zig fmt --check src/components/job_queue.zig` and `git diff --check`
 passed. The Debug standalone suite built with `zig build test-artifact
 -Doptimize=Debug` passed in 120.9 seconds: 1424 passed, 1 skipped, 0 failed,
 with 262 fuzz harnesses. Printer access and deployment were outside this change.
+
+## 2026-10-20: completed source review and aggregate verification
+
+Requested by the user: take over the interrupted whole-codebase Zig review,
+including its parallel work, and finish the fixes. The final source checkpoint
+is `6687e3bf999201d66347057d25160e4823de2ad6`. The integrated range
+`2ab11b8..6687e3b` contains 41 commits; the earlier 69-commit range is recorded
+above. Changes and their evidence include:
+
+- `src/json/params.zig` uses standard numeric, ASCII and slice helpers across
+  handlers. The input changes are listed above. Native JSON parsing already
+  preserves overflowing exponents as `number_string`; round-trip tests
+  disproved the proposed overflow defect, so no extra JSON validator was added.
+- `src/util/{process,socket_deadline,deadline_writer}.zig`,
+  `components/{klippy_connection,http_get,ws_client}.zig` and `transport/ws.zig`
+  use native cancellation, clocks and vectored writes. Process deadlines cover
+  final child completion, a WebSocket frame shares one absolute write deadline,
+  Klippy releases Core before blocking writes, and shutdown joins owned work.
+  Incomplete HTTP response cancellation no longer reaches the standard
+  client's `bodyErr().?` failure path. `docs/STDLIB.md` records checked native
+  APIs and the remaining platform adapters.
+- `src/{http_transport,jsonrpc}.zig` and `server/{connections,notify}.zig`
+  serialize borrowed results under Core, screen each batch item, preserve
+  upstream errors, replace subscriptions and filter requested fields.
+  Pending-auth clients cannot receive protected notifications.
+  `components/authorization.zig` rejects untrusted proxy identity, validates
+  persisted records, preserves credentials on failed persistence and revokes
+  named WebSocket sessions after logout or deletion. The earlier reference
+  `84a5609` was integrated as `b1cf22d`; regression tests exercise real local
+  WebSocket connections, revocation and reauthentication.
+- `src/app.zig`, `config/confighelper.zig`, `store/sqlite_store.zig` and
+  `components/{data_store,history,job_queue}.zig` reject invalid startup input,
+  keep backend defaults in one place, check SQLite bindings and preserve
+  migrated records during nested mutations. History failures propagate;
+  queue snapshots own their strings, saves serialize, and queue locks do not
+  depend on notification setup. Allocation and scheduling failures preserve
+  accepted queue state. Configuration globs use a bounded iterative matcher.
+- `components/file_manager.zig` follows safe directory links with recursion
+  bounds, keeps linked files read-only and unlocks files after Klippy shutdown.
+  Its metadata parser frees per-file scratch before returning owned results.
+  The eight-file fixture retained 3,355,620 bytes before the fix and less than
+  128 KiB afterward; this measures retained host allocations, not printer RSS.
+- `components/{mqtt,mqtt_proto,spoolman,notifier}.zig` bound transport shutdown
+  and request waits, validate wire topics, UTF-8 and persisted input, preserve
+  scalar payloads and report upstream errors. MQTT echo screening retains
+  bounded fingerprints instead of payload copies. Native big integers preserve
+  numeric equality without the direct wide-integer cast that failed ARM code
+  generation. Spoolman cancellation joins its request worker.
+- `components/{machine,update_manager,feather_updates}.zig` serialize Git work
+  outside Core, reject competing or printing-time mutations, isolate inherited
+  repository overrides and validate Git output. Service failures now reach
+  callers without changing reported state. Before-fix probes reproduced both
+  a successful response after a failed service command and timestamp overflow
+  from an enormous finite timeout; regressions cover both paths.
+- `components/{sensor_template,power,webcam,td1,announcements,rss}.zig` bound
+  template work, replacement sizes and scan time; honor worker stop requests;
+  retain batch results; escape URL credentials; stream UUID name hashing; and
+  validate external text before JSON serialization.
+- Fresh checkouts now contain the pinned SQLite amalgamation. The version,
+  source ID, checksums and absence of local patches are recorded in
+  `vendor/sqlite/README.md`; `sha256sum` matches both tracked sources. No binary
+  build artifact is tracked. Documentation distinguishes API registration
+  from behavior, and `TODO.md` lists remaining feature-sized gaps.
+
+Verification at the final source checkpoint:
+
+- Native Debug built with `zig build -Doptimize=Debug`; `zig-out/bin/phobos`
+  is again a static x86-64 Debug binary.
+- `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7
+  -Doptimize=ReleaseSafe --prefix .scratch/takeover/arm-final` passed. `file`
+  reports a stripped, statically linked ARM EABI5 executable.
+- A fresh local clone of `6687e3b` built native Debug with its tracked SQLite
+  sources, without a vendor symlink or the Moonraker reference checkout. Its
+  working tree stayed clean.
+- The native `--dump-api` passed `api_scanner coverage`: endpoints 123/123,
+  methods 130/130 and notifications 27/27. `api_scanner table --check` passed.
+  These are registered-name checks, not a claim of complete behavior parity.
+- The two scanner test directories and measurement-helper tests passed
+  together: 88 tests. The shell helper smoke test passed. ShellCheck, Ruff lint
+  and formatting, and strict mypy passed for the changed helpers. Python tests
+  used a project-local scratch base directory.
+- `zig fmt --check build.zig build.zig.zon src` and `git diff --check` passed.
+  Commit messages in the unpublished range passed the attribution-text check.
+
+Black was unavailable in the offline package cache. `graphify-out/graph.json`
+exists, but `graphify` is absent from PATH, so its update was skipped. No real
+load run, privileged profiler, new target memory measurement or physical
+printer validation was performed. The final gates use owned local fixtures;
+the earlier automatic USB-ID download is recorded above. The printer, its
+services, live database, configuration and golden images were untouched during
+this takeover. No QEMU, printer restart, deployment, release tag or push was
+performed. Hardware transport behavior remains unverified by these host tests;
+the remaining feature limitations are documented in `TODO.md`.
+
+Final host gate: `zig build test-artifact -Doptimize=Debug`, then only the newly
+built standalone artifact with `--cache-dir=./.zig-cache` under a 600-second
+timeout, passed at `6687e3b`: 1428 passed, 1 skipped, 0 failed; 262 bounded fuzz
+harnesses. The skip requires a real Klippy socket. This ran without a runtime
+test filter. Fuzz harness registration and deterministic execution are not a
+sustained fuzzing campaign. No source changed after this gate; the final commit
+only appends this verification record.
