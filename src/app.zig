@@ -53,6 +53,10 @@ const feather_component_name = [_][]const u8{"feather_updates"};
 
 fn featherPrinterIdle(ctx: *anyopaque) bool {
     const app: *App = @ptrCast(@alignCast(ctx));
+    return app.core.run(app.update_ctx.clock_io, featherPrinterIdleLocked, .{app});
+}
+
+fn featherPrinterIdleLocked(app: *App) bool {
     if (!app.info.klippy_connected) return false;
     if (!std.mem.eql(u8, app.info.klippy_state, "ready")) return false;
     return !app.job_state_ctx.isActive();
@@ -217,10 +221,10 @@ fn remoteWorker(app: *App, io: std.Io) void {
     while (app.remote_calls.getOne(io)) |req| runRemoteCall(app, io, req) else |_| {}
 }
 
-/// Run one queued request and free it. Feather methods run under Core; the
-/// rest go through the dispatcher, which takes Core per handler. Moonraker
+/// Run one queued request and free it. Feather commands run outside Core;
+/// the dispatcher takes Core per handler. Moonraker
 /// logs a failed remote method; Klipper gets no reply.
-fn runRemoteCall(app: *App, io: std.Io, req: []u8) void {
+fn runRemoteCall(app: *App, _: std.Io, req: []u8) void {
     defer app.alloc.free(req);
     var arena = std.heap.ArenaAllocator.init(app.alloc);
     defer arena.deinit();
@@ -229,7 +233,7 @@ fn runRemoteCall(app: *App, io: std.Io, req: []u8) void {
     const root = std.json.parseFromSliceLeaky(std.json.Value, a, req, .{}) catch return;
     const method = root.object.get("method").?.string;
     if (featherMethod(method)) {
-        app.core.run(io, feather_updates_component.onKlippyMethod, .{ &app.feather, app.alloc, method, root.object.get("params").? }) catch |err|
+        feather_updates_component.onKlippyMethod(&app.feather, app.alloc, method, root.object.get("params").?) catch |err|
             std.debug.print("phobos: warning: Klipper remote method {s} failed: {}\n", .{ method, err });
         return;
     }

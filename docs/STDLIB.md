@@ -143,6 +143,12 @@ Klipper's `notify` method resolves configured names through the notifier handler
 fails with `AppriseNotAvailable`; the transport and full template rendering are
 not implemented.
 
+Update, recovery, rollback and Feather Git commands serialize through an owned
+`std.Io.Mutex` outside Core. An atomic busy flag rejects competing mutations and
+refreshes; the printing flag blocks refresh and mutations. Status requests
+suppress requested refreshes while busy or printing and throttle them to one per
+minute. Notifications take Core only after releasing the command mutex.
+
 Base32, UUID layout and CIDR prefix matching remain small local codecs. The
 standard library has no matching complete API. Address comparison for trusted
 clients intentionally ignores ports; `IpAddress.eql` also compares the port.

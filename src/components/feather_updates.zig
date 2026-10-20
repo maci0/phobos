@@ -79,7 +79,8 @@ pub fn forgeXUpdateSnapshot(alloc: std.mem.Allocator, info: std.json.Value) !std
                 if (subject != .string) continue;
                 const trimmed = std.mem.trim(u8, subject.string, " \t\r\n");
                 if (trimmed.len == 0) continue;
-                const n = @min(trimmed.len, 160);
+                var n = @min(trimmed.len, 160);
+                while (!std.unicode.utf8ValidateSlice(trimmed[0..n])) n -= 1;
                 try changes.append(.{ .string = try alloc.dupe(u8, trimmed[0..n]) });
             }
         }
@@ -186,7 +187,11 @@ pub fn updateResponse(self: *FeatherCtx, alloc: std.mem.Allocator, expected_vers
 pub fn resetResponse(self: *FeatherCtx, alloc: std.mem.Allocator, token: i64) !std.json.Value {
     if (!self.printerIdle()) return failState(alloc, token, "Printer is not safely idle");
     const updates = self.updates orelse return failState(alloc, token, "Moonraker update status is unavailable");
-    if (updates.busy.load(.monotonic)) return failState(alloc, token, "Moonraker update manager is busy");
+    updates.beginMutation() catch return failState(alloc, token, "Moonraker update manager is busy");
+    defer updates.busy.store(false, .release);
+    try updates.commands.lock(updates.clock_io);
+    defer updates.commands.unlock(updates.clock_io);
+    if (updates.isPrinting()) return failState(alloc, token, "Printer is not safely idle");
     runCmd(self, alloc, &.{ "git", "reset", "--hard", "HEAD" }) catch {
         return failState(alloc, token, "git reset failed");
     };
@@ -273,9 +278,43 @@ test "forgeXUpdateSnapshot: available only when versions and revisions differ" {
     try std.testing.expectEqual(@as(i64, 2), snap.object.get("changes_total").?.integer);
     try std.testing.expectEqualStrings("fix heater", snap.object.get("changes").?.array.items[0].string);
 
+    var unicode_subject: [162]u8 = @splat('a');
+    @memcpy(unicode_subject[159..], "€");
+    try commits.items[0].object.put(arena, "subject", .{ .string = &unicode_subject });
+    const unicode_snap = try forgeXUpdateSnapshot(arena, .{ .object = info });
+    const subject = unicode_snap.object.get("changes").?.array.items[0].string;
+    try std.testing.expectEqual(@as(usize, 159), subject.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(subject));
+
     try info.put(arena, "remote_version", .{ .string = "1.4.2" });
     const same = try forgeXUpdateSnapshot(arena, .{ .object = info });
     try std.testing.expect(!same.object.get("available").?.bool);
+}
+
+test "fuzz Feather change summaries keep valid bounded UTF8" {
+    try std.testing.fuzz({}, struct {
+        fn check(_: void, smith: *std.testing.Smith) !void {
+            var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena_state.deinit();
+            const alloc = arena_state.allocator();
+            var bytes: [320]u8 = undefined;
+            smith.bytes(&bytes);
+            const size = smith.valueRangeAtMost(u16, 0, bytes.len);
+            var commit: std.json.ObjectMap = .empty;
+            try commit.put(alloc, "subject", .{ .string = bytes[0..size] });
+            var commits: std.json.Array = .init(alloc);
+            try commits.append(.{ .object = commit });
+            var info: std.json.ObjectMap = .empty;
+            try info.put(alloc, "version", .{ .string = "1" });
+            try info.put(alloc, "remote_version", .{ .string = "2" });
+            try info.put(alloc, "commits_behind", .{ .array = commits });
+            const result = try forgeXUpdateSnapshot(alloc, .{ .object = info });
+            for (result.object.get("changes").?.array.items) |entry| {
+                try std.testing.expect(entry.string.len <= 160);
+                try std.testing.expect(std.unicode.utf8ValidateSlice(entry.string));
+            }
+        }
+    }.check, .{});
 }
 
 const Recorder = struct {
@@ -566,4 +605,28 @@ test "updateResponse: refuses while the printer is not idle" {
     try std.testing.expectEqualStrings("Printer is not safely idle", res.object.get("message").?.string);
     const reset = try resetResponse(&ctx, alloc, 7);
     try std.testing.expectEqualStrings("failed", reset.object.get("state").?.string);
+}
+
+test "Feather reset keeps both commands inside one update operation" {
+    const Runner = struct {
+        updates: *update_manager.UpdateCtx,
+        calls: usize = 0,
+        fn run(raw: *anyopaque, _: std.mem.Allocator, _: []const []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(self.updates.busy.load(.acquire));
+            try std.testing.expect(!self.updates.commands.tryLock());
+            self.calls += 1;
+        }
+    };
+    var updates: update_manager.UpdateCtx = .{ .clock_io = std.testing.io, .gpa = std.testing.allocator, .sources = &.{}, .bus = null };
+    var runner: Runner = .{ .updates = &updates };
+    var feather: FeatherCtx = .{ .updates = &updates, .idle = idleYes, .idle_ctx = &runner, .cmd = Runner.run, .cmd_ctx = &runner };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const result = try resetResponse(&feather, arena_state.allocator(), 1);
+    try std.testing.expectEqualStrings("reset_complete", result.object.get("state").?.string);
+    try std.testing.expectEqual(@as(usize, 2), runner.calls);
+    try std.testing.expect(!updates.busy.load(.acquire));
+    try std.testing.expect(updates.commands.tryLock());
+    updates.commands.unlock(std.testing.io);
 }

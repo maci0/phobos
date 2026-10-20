@@ -39,9 +39,9 @@
 //! with `{ ...rate_limit_stats, version_info, busy }` (1-element params array).
 //! The update/recover/rollback handlers emit `notify_update_response` with
 //! `{ application, proc_id, message, complete }` (Moonraker's CommandHelper
-//! notification shape). Status and refresh run off Core, so git never blocks
-//! other handlers, and emit with `bus.emit`; the update handlers run under
-//! Core and use `bus.emitLocked`. io is wired after the event loop starts via
+//! notification shape). All command handlers run outside Core and serialize
+//! command stages with `commands`. Notifications use `bus.emit` after the
+//! command mutex is released. io is wired after the event loop starts via
 //! `setIo`; emission is a no-op until then (pure unit tests).
 
 const std = @import("std");
@@ -53,8 +53,10 @@ const notify = @import("../server/notify.zig");
 const config_helper = @import("../config/confighelper.zig");
 const DataStore = @import("../store/datastore.zig").DataStore;
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
+const process = @import("../util/process.zig");
 
 const Registry = registry.Registry;
+const status_refresh_interval_s = 60;
 
 // ---------------------------------------------------------------------------
 // Sources
@@ -266,13 +268,15 @@ pub const UpdateCtx = struct {
     /// Live io for notification emission. Set after the event loop starts (via
     /// setIo). Emission is a no-op while absent.
     io: ?std.Io = null,
-    /// Tracks whether an update is currently in progress (CommandHelper.busy).
-    /// Updates run under Core; the off-Core status handlers read it for the
-    /// `busy` field.
+    /// Git commands serialize outside Core; notifications take Core only after
+    /// releasing this mutex.
+    commands: std.Io.Mutex = .init,
+    last_status_refresh: ?std.Io.Clock.Timestamp = null,
+    /// Tracks whether an update or recovery is currently in progress.
     busy: std.atomic.Value(bool) = .init(false),
     /// Optional printing-state check. When it returns true, mutating update
     /// operations are refused (Moonraker: 503 "Update Refused: Klippy is
-    /// printing"). Wired by App to job_state.isActiveErased.
+    /// printing"). Must read an atomic flag without taking Core.
     printing_check: ?*const fn (*anyopaque) bool = null,
     printing_ctx: ?*anyopaque = null,
     /// Runs one shell command. System updates use Moonraker's apt-get lines;
@@ -311,9 +315,8 @@ pub const UpdateCtx = struct {
     /// Later checks refuse while printing, outside the window, or before
     /// `refresh_interval_hours` have passed.
     pub fn autoRefreshDue(self: *const UpdateCtx, hour: i64, printing: bool) bool {
-        if (!self.auto_refresh) return false;
+        if (!self.auto_refresh or printing or self.busy.load(.acquire)) return false;
         if (!self.initial_refresh_done) return true;
-        if (printing) return false;
         if (!inRefreshWindow(self.refresh_window_start, self.refresh_window_end, hour)) return false;
         const now = clock.wallSecondsInt(self.clock_io);
         const wait_s = self.refresh_interval_hours * 3600;
@@ -349,6 +352,11 @@ pub const UpdateCtx = struct {
 
     pub fn setIo(self: *UpdateCtx, io: std.Io) void {
         self.io = io;
+    }
+
+    pub fn beginMutation(self: *UpdateCtx) !void {
+        if (self.isPrinting()) return error.UpdateRefusedPrinting;
+        if (self.busy.swap(true, .acq_rel)) return error.UpdateBusy;
     }
 
     /// True if a print is currently in progress (via the wired callback).
@@ -392,8 +400,7 @@ fn autoRefreshThread(ctx: *UpdateCtx) void {
 
 /// Kill bound for a local git command, in seconds (Moonraker `_run_git_cmd`).
 const git_local_timeout_s = 20;
-/// Kill bound for `git fetch`, in seconds. Moonraker's 300 s is an idle
-/// timeout on a fetch outside its event loop; here the whole fetch holds Core.
+/// Kill bound for `git fetch`, in seconds; the command runs outside Core.
 pub const git_fetch_timeout_s = 60;
 /// Cap on the stdout and on the stderr bytes one git command may buffer.
 const git_output_limit = 512 * 1024;
@@ -404,7 +411,7 @@ const git_output_limit = 512 * 1024;
 pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64) !std.process.RunResult {
     const args = try std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv });
     defer alloc.free(args);
-    return std.process.run(alloc, io, .{
+    return process.run(alloc, io, .{
         .argv = args,
         .stdout_limit = .limited(git_output_limit),
         .stderr_limit = .limited(git_output_limit),
@@ -803,7 +810,7 @@ fn emitResponse(
     const io = ctx.io orelse return;
     var arr: std.json.Array = .init(alloc);
     arr.append(notification) catch return;
-    bus.emitLocked(io, notify.names.update_response, .{ .array = arr }) catch {};
+    bus.emit(io, notify.names.update_response, .{ .array = arr }) catch {};
 }
 
 /// Monotonic proc-id source (stands in for Moonraker's `id(web_request)`).
@@ -824,15 +831,23 @@ fn nextProcId() i64 {
 /// emits `notify_update_refreshed` so subscribers see the refresh completion.
 pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    const refresh = ((try webreq.optional(bool, params, "refresh")) orelse false);
-    if (refresh) {
-        for (ctx.sources) |src| {
-            if (src.type == .git_repo and src.repo_path.len > 0) {
-                _ = gitFetch(ctx.io, alloc, src.repo_path);
+    const requested_refresh = (try webreq.optional(bool, params, "refresh")) orelse false;
+    var refresh = false;
+    const payload = blk: {
+        try ctx.commands.lock(ctx.clock_io);
+        defer ctx.commands.unlock(ctx.clock_io);
+        const recent = if (ctx.last_status_refresh) |last| last.untilNow(ctx.clock_io).raw.toSeconds() < status_refresh_interval_s else false;
+        refresh = requested_refresh and !ctx.busy.load(.acquire) and !ctx.isPrinting() and !recent;
+        if (refresh) {
+            for (ctx.sources) |src| {
+                if (src.type == .git_repo and src.repo_path.len > 0) {
+                    _ = gitFetch(ctx.io, alloc, src.repo_path);
+                }
             }
+            ctx.last_status_refresh = .now(ctx.clock_io, .awake);
         }
-    }
-    const payload = try buildStatusPayload(ctx, alloc);
+        break :blk try buildStatusPayload(ctx, alloc);
+    };
     if (refresh) emitRefreshed(ctx, alloc, payload);
     return payload;
 }
@@ -853,13 +868,18 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     if (name) |n| {
         if (ctx.findSource(n) == null) return error.InvalidParams;
     }
-    // Fetch the named source, or every git_repo source, so the status
-    // reflects live remotes.
-    for (ctx.sources) |src| {
-        if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
-        if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path);
-    }
-    const payload = try buildStatusPayload(ctx, alloc);
+    if (ctx.busy.load(.acquire) or ctx.isPrinting()) return error.UpdateBusy;
+    const payload = blk: {
+        try ctx.commands.lock(ctx.clock_io);
+        defer ctx.commands.unlock(ctx.clock_io);
+        if (ctx.busy.load(.acquire) or ctx.isPrinting()) return error.UpdateBusy;
+        for (ctx.sources) |src| {
+            if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
+            if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path);
+        }
+        ctx.last_status_refresh = .now(ctx.clock_io, .awake);
+        break :blk try buildStatusPayload(ctx, alloc);
+    };
     emitRefreshed(ctx, alloc, payload);
     return payload;
 }
@@ -886,8 +906,8 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
     const src = ctx.findSource(app) orelse return error.NotFound;
     if ((src.type == .system or src.requirements.len > 0) and ctx.shell == null) return error.NoPackageProvider;
     const proc_id = nextProcId();
-    ctx.busy.store(true, .monotonic);
-    defer ctx.busy.store(false, .monotonic);
+    try ctx.beginMutation();
+    defer ctx.busy.store(false, .release);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Updating {s}...", .{app});
     updateSource(ctx, alloc, src) catch |err| {
@@ -900,6 +920,9 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
 
 /// The commands of one single-target update (see `runUpdate`).
 fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    try ctx.commands.lock(ctx.clock_io);
+    defer ctx.commands.unlock(ctx.clock_io);
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     if (src.type == .git_repo and src.repo_path.len > 0) {
         if (ctx.io) |io| {
             if (!gitFetch(io, alloc, src.repo_path)) return error.GitFailed;
@@ -970,22 +993,21 @@ pub fn handleUpgrade(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     return runUpdate(ctx, alloc, name);
 }
 
-/// Full update across every source: apt-get for the system source and pip for
-/// sources with `requirements`. Git sources only report progress lines; no
-/// git command runs. A failure sends "Error updating <source>: <err>".
+/// Full update across every source, with the same Git and package commands as
+/// a single-source update. A failure sends "Error updating <source>: <err>".
 fn runFullUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     for (ctx.sources) |src| {
         if ((src.type == .system or src.requirements.len > 0) and ctx.shell == null) return error.NoPackageProvider;
     }
     const proc_id = nextProcId();
-    ctx.busy.store(true, .monotonic);
-    defer ctx.busy.store(false, .monotonic);
+    try ctx.beginMutation();
+    defer ctx.busy.store(false, .release);
 
     notifyLine(ctx, alloc, "full", proc_id, false, "Preparing full software update...", .{});
     for (ctx.sources) |src| {
         notifyLine(ctx, alloc, "full", proc_id, false, "Updating {s}...", .{src.name});
-        updatePackages(ctx, alloc, src) catch |err| {
+        updateSource(ctx, alloc, src) catch |err| {
             notifyLine(ctx, alloc, "full", proc_id, true, "Error updating {s}: {s}", .{ src.name, @errorName(err) });
             return err;
         };
@@ -1019,13 +1041,13 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
     const proc_id = nextProcId();
-    ctx.busy.store(true, .monotonic);
-    defer ctx.busy.store(false, .monotonic);
+    try ctx.beginMutation();
+    defer ctx.busy.store(false, .release);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Recovering {s}...", .{app});
     // Git runs only when io and a repo path are set. Unit tests leave io null.
-    if (ctx.io) |io| {
-        if (src.repo_path.len > 0) recoverRepo(io, alloc, src, hard) catch |err| {
+    if (ctx.io != null) {
+        if (src.repo_path.len > 0) recoverRepo(ctx, alloc, src, hard) catch |err| {
             notifyLine(ctx, alloc, app, proc_id, false, "Error Recovering {s}", .{app});
             notifyLine(ctx, alloc, app, proc_id, true, "{s}", .{@errorName(err)});
             return err;
@@ -1035,7 +1057,11 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     return .{ .string = "ok" };
 }
 
-fn recoverRepo(io: std.Io, alloc: std.mem.Allocator, src: Source, hard: bool) !void {
+fn recoverRepo(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source, hard: bool) !void {
+    try ctx.commands.lock(ctx.clock_io);
+    defer ctx.commands.unlock(ctx.clock_io);
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+    const io = ctx.io orelse return;
     if (hard) {
         if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" })) return error.GitFailed;
         if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" })) return error.GitFailed;
@@ -1063,8 +1089,8 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     if (!src.isGit()) return error.InvalidParams; // "Updater <x> is not a Git Repo Type"
 
     const proc_id = nextProcId();
-    ctx.busy.store(true, .monotonic);
-    defer ctx.busy.store(false, .monotonic);
+    try ctx.beginMutation();
+    defer ctx.busy.store(false, .release);
 
     notifyLine(ctx, alloc, app, proc_id, false, "Rolling Back {s}...", .{app});
     if (src.rollback_ref.len == 0) {
@@ -1072,7 +1098,13 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
         return .{ .string = "ok" };
     }
     if (ctx.io) |io| {
-        if (src.repo_path.len > 0 and !gitReset(io, alloc, src.repo_path, src.rollback_ref)) {
+        const reset = blk: {
+            try ctx.commands.lock(ctx.clock_io);
+            defer ctx.commands.unlock(ctx.clock_io);
+            if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+            break :blk src.repo_path.len == 0 or gitReset(io, alloc, src.repo_path, src.rollback_ref);
+        };
+        if (!reset) {
             notifyLine(ctx, alloc, app, proc_id, false, "Error Rolling Back {s}", .{app});
             notifyLine(ctx, alloc, app, proc_id, true, "GitFailed", .{});
             return error.GitFailed;
@@ -1095,18 +1127,17 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
 pub fn registerUpdateManager(reg: *Registry, ctx: *UpdateCtx) !void {
     const c: *anyopaque = @ptrCast(ctx);
 
-    // Status and refresh run git without Core: they read only config-time
-    // sources, the thread-safe store and the atomic `busy`.
+    // Command state has its own mutex; subprocess waits never hold Core.
     try reg.registerEndpoint(.{ .path = "/machine/update/status", .methods = &.{.GET}, .off_core = true }, c, handleStatus);
     try reg.registerEndpoint(.{ .path = "/machine/update/refresh", .methods = &.{.POST}, .off_core = true }, c, handleRefresh);
-    try reg.registerEndpoint(.{ .path = "/machine/update/upgrade", .methods = &.{.POST} }, c, handleUpgrade);
-    try reg.registerEndpoint(.{ .path = "/machine/update/full", .methods = &.{.POST} }, c, handleFull);
-    try reg.registerEndpoint(.{ .path = "/machine/update/moonraker", .methods = &.{.POST} }, c, handleUpdateMoonraker);
-    try reg.registerEndpoint(.{ .path = "/machine/update/klipper", .methods = &.{.POST} }, c, handleUpdateKlipper);
-    try reg.registerEndpoint(.{ .path = "/machine/update/system", .methods = &.{.POST} }, c, handleUpdateSystem);
-    try reg.registerEndpoint(.{ .path = "/machine/update/client", .methods = &.{.POST} }, c, handleUpdateClient);
-    try reg.registerEndpoint(.{ .path = "/machine/update/recover", .methods = &.{.POST} }, c, handleRecover);
-    try reg.registerEndpoint(.{ .path = "/machine/update/rollback", .methods = &.{.POST} }, c, handleRollback);
+    try reg.registerEndpoint(.{ .path = "/machine/update/upgrade", .methods = &.{.POST}, .off_core = true }, c, handleUpgrade);
+    try reg.registerEndpoint(.{ .path = "/machine/update/full", .methods = &.{.POST}, .off_core = true }, c, handleFull);
+    try reg.registerEndpoint(.{ .path = "/machine/update/moonraker", .methods = &.{.POST}, .off_core = true }, c, handleUpdateMoonraker);
+    try reg.registerEndpoint(.{ .path = "/machine/update/klipper", .methods = &.{.POST}, .off_core = true }, c, handleUpdateKlipper);
+    try reg.registerEndpoint(.{ .path = "/machine/update/system", .methods = &.{.POST}, .off_core = true }, c, handleUpdateSystem);
+    try reg.registerEndpoint(.{ .path = "/machine/update/client", .methods = &.{.POST}, .off_core = true }, c, handleUpdateClient);
+    try reg.registerEndpoint(.{ .path = "/machine/update/recover", .methods = &.{.POST}, .off_core = true }, c, handleRecover);
+    try reg.registerEndpoint(.{ .path = "/machine/update/rollback", .methods = &.{.POST}, .off_core = true }, c, handleRollback);
 }
 
 // ===========================================================================
@@ -1518,7 +1549,7 @@ test "registerUpdateManager: wires expected routes and JSON-RPC methods" {
     // git status and fetch must not hold Core.
     try testing.expect(d.methods.get("machine.update.status").?.off_core);
     try testing.expect(d.methods.get("machine.update.refresh").?.off_core);
-    try testing.expect(!d.methods.get("machine.update.client").?.off_core);
+    try testing.expect(d.methods.get("machine.update.client").?.off_core);
 }
 
 // ---- git status with real io ----
@@ -1685,6 +1716,118 @@ test "handleStatus: refresh=true fetches before building payload" {
     try testing.expect(v.object.get("version_info") != null);
     try testing.expect(v.object.get("version_info").?.object.get("moonraker") != null);
     try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+}
+
+test "refresh refuses busy and printing states and status refresh is throttled" {
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    const sources = [_]Source{.{ .name = "fixture", .type = .git_repo, .repo_path = repo.path, .branch = "main" }};
+    var printing = true;
+    var ctx: UpdateCtx = .{
+        .clock_io = testing.io,
+        .gpa = testing.allocator,
+        .sources = &sources,
+        .bus = null,
+        .io = testing.io,
+        .printing_ctx = &printing,
+        .printing_check = struct {
+            fn check(raw: *anyopaque) bool {
+                return @as(*bool, @ptrCast(@alignCast(raw))).*;
+            }
+        }.check,
+    };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const refresh = try objParams(alloc, "{\"refresh\":true}");
+    try testing.expectError(error.UpdateBusy, handleRefresh(&ctx, .null, alloc));
+    _ = try handleStatus(&ctx, refresh, alloc);
+    try testing.expectEqual(null, ctx.last_status_refresh);
+    printing = false;
+    ctx.busy.store(true, .release);
+    try testing.expectError(error.UpdateBusy, handleRefresh(&ctx, .null, alloc));
+    _ = try handleStatus(&ctx, refresh, alloc);
+    try testing.expectEqual(null, ctx.last_status_refresh);
+    ctx.busy.store(false, .release);
+    _ = try handleStatus(&ctx, refresh, alloc);
+    try testing.expect(ctx.last_status_refresh != null);
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "update-ref", "-d", "refs/remotes/origin/main" }));
+    _ = try handleStatus(&ctx, refresh, alloc);
+    try testing.expect(!gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    _ = try handleRefresh(&ctx, .null, alloc);
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+}
+
+test "update dispatcher runs commands outside Core and serializes the operation" {
+    const Core = @import("../server/core.zig").Core;
+    const Runner = struct {
+        ctx: *UpdateCtx,
+        core: *Core,
+        calls: usize = 0,
+        fn run(raw: *anyopaque, _: std.mem.Allocator, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expect(self.core.mutex.tryLock());
+            self.core.unlock(testing.io);
+            try testing.expect(!self.ctx.commands.tryLock());
+            try testing.expect(self.ctx.busy.load(.acquire));
+            try testing.expectError(error.UpdateBusy, self.ctx.beginMutation());
+            self.calls += 1;
+        }
+    };
+    var core: Core = .init();
+    var ctx = testCtx();
+    var runner: Runner = .{ .ctx = &ctx, .core = &core };
+    ctx.shell = Runner.run;
+    ctx.shell_ctx = &runner;
+    var dispatcher = @import("../jsonrpc.zig").Dispatcher.init(testing.allocator);
+    defer dispatcher.deinit();
+    dispatcher.setRuntime(&core, testing.io);
+    var registry_instance = Registry.init(testing.allocator, &dispatcher);
+    defer registry_instance.deinit();
+    try registerUpdateManager(&registry_instance, &ctx);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
+    const reply = try dispatcher.handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"machine.update.system\"}", alloc);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, alloc, reply, .{});
+    try testing.expectEqualStrings("ok", parsed.object.get("result").?.string);
+    try testing.expect(runner.calls >= 2);
+    try testing.expect(!ctx.busy.load(.acquire));
+    try testing.expect(ctx.commands.tryLock());
+    ctx.commands.unlock(testing.io);
+}
+
+test "full update applies the Git source in a local fixture" {
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "original" });
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "add", "tracked" }));
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "tracked" }));
+    try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "modified" });
+    const sources = [_]Source{.{ .name = "fixture", .type = .git_repo, .repo_path = repo.path, .branch = "main" }};
+    var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &sources, .bus = null, .io = testing.io };
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectEqualStrings("ok", (try handleFull(&ctx, .null, arena_state.allocator())).string);
+    var bytes: [32]u8 = undefined;
+    const data = try repo.tmp.dir.readFile(testing.io, "tracked", &bytes);
+    try testing.expectEqualStrings("original", data);
+}
+
+test "fuzz update operation admission retains the current busy owner" {
+    try testing.fuzz({}, struct {
+        fn check(_: void, smith: *testing.Smith) !void {
+            const already_busy = smith.value(bool);
+            var ctx = testCtx();
+            ctx.busy.store(already_busy, .release);
+            if (already_busy) {
+                try testing.expectError(error.UpdateBusy, ctx.beginMutation());
+            } else {
+                try ctx.beginMutation();
+            }
+            try testing.expect(ctx.busy.load(.acquire));
+        }
+    }.check, .{});
 }
 
 // ---- fuzz ----
