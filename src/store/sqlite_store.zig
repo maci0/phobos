@@ -46,7 +46,9 @@ pub const SqliteStore = struct {
             var parent_dir = std.Io.Dir.cwd().createDirPathOpen(io, parent, .{}) catch return Error.BackendError;
             parent_dir.close(io);
         }
-        _ = c.sqlite3_initialize();
+        // Built with SQLITE_OMIT_AUTOINIT: opening after a failed initialize
+        // is undefined.
+        if (c.sqlite3_initialize() != c.SQLITE_OK) return Error.BackendError;
         var db: ?*c.sqlite3 = null;
         const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_FULLMUTEX;
         if (c.sqlite3_open_v2(path.ptr, &db, flags, null) != c.SQLITE_OK) {
@@ -155,9 +157,8 @@ pub const SqliteStore = struct {
             },
             's' => return .{ .string = arena.dupe(u8, bytes[1..]) catch return Error.BackendError },
             '[', '{' => return json.parseFromSliceLeaky(json.Value, arena, bytes, .{}) catch Error.BackendError,
-            // Unknown tag: fall back to the whole blob as a string (Moonraker does
-            // the same on a decode exception).
-            else => return .{ .string = arena.dupe(u8, bytes) catch return Error.BackendError },
+            // Moonraker `decode_record` raises on an unknown format byte.
+            else => return Error.BackendError,
         }
     }
 
@@ -267,7 +268,14 @@ pub const SqliteStore = struct {
         const segs = pk.slice();
         self.lockRmw();
         defer self.unlockRmw();
-        const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse return Error.KeyNotFound;
+        // A migrated `job_history` row is a whole history record; delete it
+        // with its key so it cannot reappear behind the removed KV record.
+        const table_job: ?json.Value = if (segs.len == 1 and std.mem.eql(u8, namespace, "history"))
+            try self.deleteHistoryRow(arena, segs[0])
+        else
+            null;
+        const raw = (try self.getRecordRaw(arena, namespace, segs[0])) orelse
+            return table_job orelse Error.KeyNotFound;
         const record = try decodeRecord(arena, raw);
         const res = try ds.deletePath(record, segs[1..]);
         if (res.record) |new_record| {
@@ -282,12 +290,14 @@ pub const SqliteStore = struct {
         const stmt = try self.prepare("SELECT DISTINCT namespace FROM namespace_store");
         defer _ = c.sqlite3_finalize(stmt);
         var out: std.ArrayList([]const u8) = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+        var rc = c.sqlite3_step(stmt);
+        while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(stmt)) {
             const n: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
             const txt = c.sqlite3_column_text(stmt, 0) orelse continue;
-            out.append(arena, arena.dupe(u8, txt[0..n]) catch return Error.BackendError) catch return Error.BackendError;
+            try out.append(arena, try arena.dupe(u8, txt[0..n]));
         }
-        return out.toOwnedSlice(arena) catch Error.BackendError;
+        if (rc != c.SQLITE_DONE) return Error.BackendError;
+        return out.toOwnedSlice(arena);
     }
 
     pub fn getNamespace(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8) Error!json.Value {
@@ -295,75 +305,104 @@ pub const SqliteStore = struct {
         defer _ = c.sqlite3_finalize(stmt);
         bindText(stmt, 1, namespace);
         var obj: json.ObjectMap = .empty;
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+        var rc = c.sqlite3_step(stmt);
+        while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(stmt)) {
             const kn: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
             const ktxt = c.sqlite3_column_text(stmt, 0) orelse continue;
-            const key = arena.dupe(u8, ktxt[0..kn]) catch return Error.BackendError;
+            const key = try arena.dupe(u8, ktxt[0..kn]);
             const vn: usize = @intCast(c.sqlite3_column_bytes(stmt, 1));
             const vptr = c.sqlite3_column_blob(stmt, 1);
             const vbytes = if (vptr) |p| @as([*]const u8, @ptrCast(p))[0..vn] else &[_]u8{};
-            const val = try decodeRecord(arena, vbytes);
-            obj.put(arena, key, val) catch return Error.BackendError;
+            try obj.put(arena, key, try decodeRecord(arena, vbytes));
         }
+        if (rc != c.SQLITE_DONE) return Error.BackendError;
         // Drop-in compatibility: a Moonraker `moonraker-sql.db` keeps job history
-        // in the dedicated `job_history`/`job_totals` tables, not in
-        // `namespace_store`. If the KV namespace is empty, fall back to those
-        // tables so phobos surfaces the user's existing history.
-        if (obj.count() == 0) {
-            if (std.mem.eql(u8, namespace, "history")) return self.historyFromTable(arena);
-            if (std.mem.eql(u8, namespace, "history_totals")) return self.totalsFromTable(arena);
-        }
+        // in the dedicated `job_history`/`job_totals` tables. History adds every
+        // table job whose id has no KV record (KV wins); totals come from the
+        // table until phobos saves its own.
+        if (std.mem.eql(u8, namespace, "history")) try self.mergeHistoryTable(arena, &obj);
+        if (obj.count() == 0 and std.mem.eql(u8, namespace, "history_totals")) return self.totalsFromTable(arena);
         return .{ .object = obj };
     }
 
-    /// Read Moonraker's `job_history` table into the `{job_id: job}` shape
-    /// phobos's history component expects. Returns an empty object if the table
-    /// is absent (a fresh phobos DB). Job ids are formatted as 6-hex like phobos.
-    fn historyFromTable(self: *SqliteStore, arena: std.mem.Allocator) Error!json.Value {
-        var obj: json.ObjectMap = .empty;
-        const sql = "SELECT job_id, user, filename, status, start_time, end_time, print_duration, total_duration, filament_used, metadata, auxiliary_data FROM job_history";
-        const stmt = self.prepare(sql) catch return .{ .object = obj }; // no table → empty
+    /// True when the database has a table named `name`. Distinguishes a fresh
+    /// phobos database from a failing read of a migrated Moonraker table.
+    fn hasTable(self: *SqliteStore, name: []const u8) Error!bool {
+        const stmt = try self.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
-            const row = try mapJobRow(arena, stmt);
-            obj.put(arena, row.key, row.value) catch return Error.BackendError;
+        bindText(stmt, 1, name);
+        return switch (c.sqlite3_step(stmt)) {
+            c.SQLITE_ROW => true,
+            c.SQLITE_DONE => false,
+            else => Error.BackendError,
+        };
+    }
+
+    /// Add each Moonraker `job_history` row to `obj` in the `{job_id: job}`
+    /// shape phobos's history component expects, unless `obj` already holds
+    /// that id.
+    fn mergeHistoryTable(self: *SqliteStore, arena: std.mem.Allocator, obj: *json.ObjectMap) Error!void {
+        if (!try self.hasTable("job_history")) return;
+        const stmt = try self.prepare(job_history_select);
+        defer _ = c.sqlite3_finalize(stmt);
+        var rc = c.sqlite3_step(stmt);
+        while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(stmt)) {
+            const row = (try mapJobRow(arena, stmt)) orelse continue;
+            const gop = try obj.getOrPut(arena, row.key);
+            if (!gop.found_existing) gop.value_ptr.* = row.value;
         }
-        return .{ .object = obj };
+        if (rc != c.SQLITE_DONE) return Error.BackendError;
     }
 
     /// Read a single job from Moonraker's `job_history` table by its hex
     /// `job_key` (phobos's 6-hex job id), using the table's PRIMARY KEY for an
-    /// indexed lookup. Returns null if the table is absent, the key is not
-    /// valid hex, or no such job exists.
+    /// indexed lookup. Returns null if the table is absent, the key is not a
+    /// hex job id, or no such job exists.
     fn historyJobFromTable(self: *SqliteStore, arena: std.mem.Allocator, job_key: []const u8) Error!?json.Value {
-        const jid = std.fmt.parseInt(u64, job_key, 16) catch return null;
-        const sql = "SELECT job_id, user, filename, status, start_time, end_time, print_duration, total_duration, filament_used, metadata, auxiliary_data FROM job_history WHERE job_id=?1";
-        const stmt = self.prepare(sql) catch return null; // no table → not found
+        const jid = jobRowId(job_key) orelse return null;
+        if (!try self.hasTable("job_history")) return null;
+        const stmt = try self.prepare(job_history_select ++ " WHERE job_id=?1");
         defer _ = c.sqlite3_finalize(stmt);
-        _ = c.sqlite3_bind_int64(stmt, 1, @intCast(jid));
-        if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return null;
-        return (try mapJobRow(arena, stmt)).value;
+        _ = c.sqlite3_bind_int64(stmt, 1, jid);
+        return switch (c.sqlite3_step(stmt)) {
+            c.SQLITE_ROW => if (try mapJobRow(arena, stmt)) |row| row.value else null,
+            c.SQLITE_DONE => null,
+            else => Error.BackendError,
+        };
+    }
+
+    /// Delete one `job_history` row, returning the job it held; null when the
+    /// table or row is absent.
+    fn deleteHistoryRow(self: *SqliteStore, arena: std.mem.Allocator, job_key: []const u8) Error!?json.Value {
+        const job = (try self.historyJobFromTable(arena, job_key)) orelse return null;
+        const stmt = try self.prepare("DELETE FROM job_history WHERE job_id=?1");
+        defer _ = c.sqlite3_finalize(stmt);
+        _ = c.sqlite3_bind_int64(stmt, 1, jobRowId(job_key).?);
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return Error.BackendError;
+        return job;
     }
 
     /// Read Moonraker's `job_totals` table (provider `history`) into the
     /// `{totals: {job_totals, auxiliary_totals}}` shape phobos expects.
     fn totalsFromTable(self: *SqliteStore, arena: std.mem.Allocator) Error!json.Value {
+        if (!try self.hasTable("job_totals")) return .{ .object = .empty };
         var jt: json.ObjectMap = .empty;
-        const sql = "SELECT field, maximum, total FROM job_totals WHERE provider='history'";
-        const stmt = self.prepare(sql) catch return .{ .object = .empty };
+        const stmt = try self.prepare("SELECT field, maximum, total FROM job_totals WHERE provider='history'");
         defer _ = c.sqlite3_finalize(stmt);
-        while (c.sqlite3_step(stmt) == c.SQLITE_ROW) {
+        var rc = c.sqlite3_step(stmt);
+        while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(stmt)) {
             const field = colTextRaw(stmt, 0) orelse continue;
             // longest_* track a maximum; the rest are running totals.
             const is_max = std.mem.startsWith(u8, field, "longest");
             const v = if (is_max) c.sqlite3_column_double(stmt, 1) else c.sqlite3_column_double(stmt, 2);
-            putF(arena, &jt, field, v);
+            try jt.put(arena, try arena.dupe(u8, field), .{ .float = v });
         }
-        if (jt.count() == 0) return .{ .object = .empty }; // no table/rows
+        if (rc != c.SQLITE_DONE) return Error.BackendError;
+        if (jt.count() == 0) return .{ .object = .empty };
         // phobos stores the `totals` key as the FLAT job_totals fields;
         // handleTotals wraps them under "job_totals" itself.
         var top: json.ObjectMap = .empty;
-        top.put(arena, "totals", .{ .object = jt }) catch return Error.BackendError;
+        try top.put(arena, "totals", .{ .object = jt });
         return .{ .object = top };
     }
 
@@ -402,27 +441,22 @@ pub const SqliteStore = struct {
     }
 };
 
-// ===========================================================================
-// Tests
-// ===========================================================================
+// --- Moonraker job_history table mapping ------------------------------------
 
-// --- small column/JSON helpers for the history table mapping ----------------
+/// Column order is fixed: `mapJobRow` reads by index.
+const job_history_select = "SELECT job_id, user, filename, status, start_time, end_time, print_duration, total_duration, filament_used, metadata, auxiliary_data FROM job_history";
 
-fn putKV(arena: std.mem.Allocator, obj: *json.ObjectMap, key: []const u8, val: json.Value) void {
-    const k = arena.dupe(u8, key) catch return;
-    obj.put(arena, k, val) catch {};
+/// `job_history.job_id` for a hex job key. A sign or a value above the
+/// INTEGER range names no row.
+fn jobRowId(job_key: []const u8) ?i64 {
+    return std.fmt.parseUnsigned(u63, job_key, 16) catch null;
 }
-fn put(arena: std.mem.Allocator, obj: *json.ObjectMap, key: []const u8, s: []const u8) void {
-    putKV(arena, obj, key, .{ .string = s });
-}
-fn putF(arena: std.mem.Allocator, obj: *json.ObjectMap, key: []const u8, f: f64) void {
-    putKV(arena, obj, key, .{ .float = f });
-}
+
 /// Column text duped into `arena` ("" if NULL).
-fn colText(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int) []const u8 {
+fn colText(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int) Error![]const u8 {
     const n: usize = @intCast(c.sqlite3_column_bytes(stmt, idx));
     const t = c.sqlite3_column_text(stmt, idx) orelse return "";
-    return arena.dupe(u8, t[0..n]) catch "";
+    return arena.dupe(u8, t[0..n]);
 }
 /// Column text as a transient slice into SQLite memory (valid until next step).
 fn colTextRaw(stmt: *c.sqlite3_stmt, idx: c_int) ?[]const u8 {
@@ -431,11 +465,14 @@ fn colTextRaw(stmt: *c.sqlite3_stmt, idx: c_int) ?[]const u8 {
     return t[0..n];
 }
 /// Parse a JSON-text column into a Value, or `default` if NULL/empty/invalid.
-fn colJson(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int, default: json.Value) json.Value {
+fn colJson(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int, default: json.Value) Error!json.Value {
     const t = c.sqlite3_column_text(stmt, idx) orelse return default;
     const n: usize = @intCast(c.sqlite3_column_bytes(stmt, idx));
     if (n == 0) return default;
-    return json.parseFromSliceLeaky(json.Value, arena, t[0..n], .{}) catch default;
+    return json.parseFromSliceLeaky(json.Value, arena, t[0..n], .{}) catch |err| switch (err) {
+        error.OutOfMemory => Error.OutOfMemory,
+        else => default,
+    };
 }
 
 /// A `job_history` row mapped to phobos's `{job_id: job}` shape. `key` (the
@@ -443,27 +480,30 @@ fn colJson(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int, default:
 /// the same arena-owned string.
 const MappedJob = struct { key: []const u8, value: json.Value };
 
-/// Map the current `job_history` result row (column order per the SELECT in
-/// `historyFromTable`/`historyJobFromTable`) into a job object.
-fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!MappedJob {
+/// Map the current `job_history_select` row into a job object. A negative
+/// job_id has no phobos key and maps to null.
+fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!?MappedJob {
+    // Unsigned 6-hex like phobos's own keys; signed formatting would emit a sign.
+    const jid = std.math.cast(u64, c.sqlite3_column_int64(stmt, 0)) orelse return null;
     var job: json.ObjectMap = .empty;
-    // job_id is a positive INTEGER; format as unsigned 6-hex (matching phobos's
-    // own key format). Signed formatting would emit a `+` sign.
-    const jid: u64 = @intCast(c.sqlite3_column_int64(stmt, 0));
-    put(arena, &job, "filename", colText(arena, stmt, 2));
-    put(arena, &job, "status", colText(arena, stmt, 3));
-    put(arena, &job, "user", colText(arena, stmt, 1));
-    putF(arena, &job, "start_time", c.sqlite3_column_double(stmt, 4));
-    putF(arena, &job, "end_time", c.sqlite3_column_double(stmt, 5));
-    putF(arena, &job, "print_duration", c.sqlite3_column_double(stmt, 6));
-    putF(arena, &job, "total_duration", c.sqlite3_column_double(stmt, 7));
-    putF(arena, &job, "filament_used", c.sqlite3_column_double(stmt, 8));
-    job.put(arena, "metadata", colJson(arena, stmt, 9, .{ .object = .empty })) catch return Error.BackendError;
-    job.put(arena, "auxiliary_data", colJson(arena, stmt, 10, .{ .array = .init(arena) })) catch return Error.BackendError;
-    const key = std.fmt.allocPrint(arena, "{X:0>6}", .{jid}) catch return Error.BackendError;
-    job.put(arena, "job_id", .{ .string = key }) catch return Error.BackendError;
+    try job.put(arena, "filename", .{ .string = try colText(arena, stmt, 2) });
+    try job.put(arena, "status", .{ .string = try colText(arena, stmt, 3) });
+    try job.put(arena, "user", .{ .string = try colText(arena, stmt, 1) });
+    try job.put(arena, "start_time", .{ .float = c.sqlite3_column_double(stmt, 4) });
+    try job.put(arena, "end_time", .{ .float = c.sqlite3_column_double(stmt, 5) });
+    try job.put(arena, "print_duration", .{ .float = c.sqlite3_column_double(stmt, 6) });
+    try job.put(arena, "total_duration", .{ .float = c.sqlite3_column_double(stmt, 7) });
+    try job.put(arena, "filament_used", .{ .float = c.sqlite3_column_double(stmt, 8) });
+    try job.put(arena, "metadata", try colJson(arena, stmt, 9, .{ .object = .empty }));
+    try job.put(arena, "auxiliary_data", try colJson(arena, stmt, 10, .{ .array = .init(arena) }));
+    const key = try std.fmt.allocPrint(arena, "{X:0>6}", .{jid});
+    try job.put(arena, "job_id", .{ .string = key });
     return .{ .key = key, .value = .{ .object = job } };
 }
+
+// ===========================================================================
+// Tests
+// ===========================================================================
 
 const testing = std.testing;
 
@@ -535,6 +575,87 @@ test "SqliteStore: record encode/decode round-trips every type" {
     try testing.expectEqualSlices(u8, &[_]u8{0}, try SqliteStore.encodeRecord(a, .null));
     try testing.expectEqual(@as(u8, 'q'), (try SqliteStore.encodeRecord(a, .{ .integer = 1 }))[0]);
     try testing.expectEqual(@as(u8, 's'), (try SqliteStore.encodeRecord(a, .{ .string = "x" }))[0]);
+    // Moonraker decode_record raises on an unknown format byte.
+    try testing.expectError(Error.BackendError, SqliteStore.decodeRecord(a, "zzz"));
+}
+
+/// Moonraker's `job_history` schema with rows 1, 2 and a foreign negative id.
+fn createJobHistory(s: *SqliteStore) !void {
+    try s.execSql(
+        \\CREATE TABLE job_history (job_id INTEGER PRIMARY KEY ASC, user TEXT NOT NULL,
+        \\ filename TEXT, status TEXT NOT NULL, start_time REAL NOT NULL, end_time REAL,
+        \\ print_duration REAL NOT NULL, total_duration REAL NOT NULL, filament_used REAL NOT NULL,
+        \\ metadata pyjson, auxiliary_data pyjson NOT NULL, instance_id TEXT NOT NULL);
+        \\INSERT INTO job_history VALUES
+        \\ (1,'me','a.gcode','completed',100.0,200.0,90.0,100.0,42.5,'{"layers":3}','[]','default'),
+        \\ (2,'me','b.gcode','cancelled',300.0,350.0,40.0,50.0,10.0,NULL,'[]','default'),
+        \\ (-5,'me','c.gcode','completed',1.0,2.0,1.0,1.0,0.0,NULL,'[]','default');
+    );
+}
+
+test "SqliteStore: migrated job_history stays visible beside new KV jobs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+
+    // A job id above the INTEGER range or a negative row id names no job.
+    try testing.expect((try s.getItem(a, "history", "FFFFFFFFFFFFFFFF")) == null);
+    try testing.expectEqual(@as(usize, 2), (try s.getNamespace(a, "history")).object.count());
+
+    // The first new phobos job must not hide the migrated rows; KV wins on a
+    // shared id.
+    try s.insertItem(a, "history", "000003", .{ .string = "new" });
+    try s.insertItem(a, "history", "000001", .{ .string = "kv" });
+    const merged = (try s.getNamespace(a, "history")).object;
+    try testing.expectEqual(@as(usize, 3), merged.count());
+    try testing.expectEqualStrings("kv", merged.get("000001").?.string);
+    try testing.expectEqualStrings("b.gcode", merged.get("000002").?.object.get("filename").?.string);
+
+    // Deleting a table-only job removes the row; deleting a shadowed job
+    // removes both copies.
+    const removed = try s.deleteItem(a, "history", "000002");
+    try testing.expectEqualStrings("b.gcode", removed.object.get("filename").?.string);
+    try testing.expectEqualStrings("kv", (try s.deleteItem(a, "history", "000001")).string);
+    try testing.expect((try s.getItem(a, "history", "000001")) == null);
+    try testing.expectError(Error.KeyNotFound, s.deleteItem(a, "history", "000002"));
+    try testing.expectEqual(@as(usize, 1), (try s.getNamespace(a, "history")).object.count());
+}
+
+test "SqliteStore: an unreadable job_history table is an error, not an empty history" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var s = try SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    defer s.deinit();
+    try testing.expectEqual(@as(usize, 0), (try s.getNamespace(a, "history")).object.count());
+    try s.execSql("CREATE TABLE job_history (unrelated TEXT);");
+    try testing.expectError(Error.BackendError, s.getNamespace(a, "history"));
+    try testing.expectError(Error.BackendError, s.getItem(a, "history", "000001"));
+}
+
+test "fuzz SqliteStore history keys: arbitrary job keys never panic" {
+    var s = try SqliteStore.open(testing.allocator, testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    try testing.fuzz(&s, struct {
+        fn run(store: *SqliteStore, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var kbuf: [20]u8 = undefined;
+            const kn = smith.valueRangeAtMostWithHash(u32, 0, 20, 0);
+            smith.bytesWithHash(kbuf[0..kn], 1);
+            const key = kbuf[0..kn];
+            if (jobRowId(key)) |id| try testing.expect(id >= 0);
+            _ = store.getItem(a, "history", key) catch |err| switch (err) {
+                Error.InvalidKey => {},
+                else => return err,
+            };
+        }
+    }.run, .{});
 }
 
 test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
