@@ -3,7 +3,12 @@
 //! Matches Moonraker's `confighelper.py` / Python `configparser` semantics:
 //!
 //!  * Sections:   [section name]  — names may contain spaces.
-//!  * Options:    key: value  OR  key = value  (both separators).
+//!  * Options:    key: value  OR  key = value  (both separators). Option
+//!                names are ASCII case-insensitive (configparser
+//!                `optionxform`); section names are case-sensitive. An
+//!                option before any section header, a line without a
+//!                separator, or a repeated option within one section of one
+//!                file is a ParseError, as in Moonraker.
 //!  * Comments:   lines whose first non-whitespace char is `#` or `;` are
 //!                skipped entirely.  Moonraker's FileSourceWrapper ALSO
 //!                strips inline comments preceded by at least one space
@@ -13,7 +18,9 @@
 //!                indented than the option key line (configparser semantics).
 //!  * Includes:   [include <glob>] — resolved relative to the config-file
 //!                dir; later writes override earlier ones (last-write wins).
-//!                Recursive includes are detected and rejected.
+//!                A file reached twice (a cycle or a repeated include) is
+//!                rejected; files are matched by inode because
+//!                `std.Io.File.Stat` has no device field.
 //!  * Duplicate sections across files are allowed (merged); duplicate
 //!                sections within the same file raise ParseError (matching
 //!                Moonraker's FileSourceWrapper._parse_file).
@@ -25,6 +32,7 @@ const std = @import("std");
 const backend = @import("backend.zig");
 
 pub const ConfigError = backend.Error;
+const parseBool = backend.parseBool;
 
 // ---------------------------------------------------------------------------
 // Internal data model
@@ -93,12 +101,7 @@ pub const ConfigParser = struct {
         io: std.Io,
         file_path: []const u8,
     ) ConfigError!void {
-        const data = std.Io.Dir.cwd().readFileAlloc(
-            io,
-            file_path,
-            self.alloc,
-            .unlimited,
-        ) catch return ConfigError.ParseError;
+        const data = try self.readFile(io, file_path);
         defer self.alloc.free(data);
 
         var visited: std.ArrayList(u64) = .empty;
@@ -146,6 +149,13 @@ pub const ConfigParser = struct {
             while (ki.next()) |k| self.alloc.free(k.*);
             file_sections.deinit();
         }
+        // Lowercased option names seen since the current section header
+        // (Moonraker rejects a duplicate option within one file).
+        var section_options: std.StringHashMapUnmanaged(void) = .empty;
+        defer {
+            freeKeys(self.alloc, &section_options);
+            section_options.deinit(self.alloc);
+        }
 
         var lines = std.mem.splitScalar(u8, source, '\n');
         while (lines.next()) |raw_line| {
@@ -154,7 +164,7 @@ pub const ConfigParser = struct {
             // config value is never silently truncated (worst case 4× on tabs).
             var tab_stack: [4096]u8 = undefined;
             const tab_heap: ?[]u8 = if (raw_line.len * 4 + 1 > tab_stack.len)
-                (self.alloc.alloc(u8, raw_line.len * 4 + 1) catch null)
+                self.alloc.alloc(u8, raw_line.len * 4 + 1) catch return ConfigError.OutOfMemory
             else
                 null;
             defer if (tab_heap) |h| self.alloc.free(h);
@@ -167,7 +177,7 @@ pub const ConfigParser = struct {
             // Strip inline comments and unescape escaped comment chars.
             var icom_stack: [4096]u8 = undefined;
             const icom_heap: ?[]u8 = if (line_exp.len + 1 > icom_stack.len)
-                (self.alloc.alloc(u8, line_exp.len + 1) catch null)
+                self.alloc.alloc(u8, line_exp.len + 1) catch return ConfigError.OutOfMemory
             else
                 null;
             defer if (icom_heap) |h| self.alloc.free(h);
@@ -226,29 +236,28 @@ pub const ConfigParser = struct {
 
                 current_section = try self.getOrCreateSection(sec_name);
                 current_indent = 0;
+                freeKeys(self.alloc, &section_options);
+                section_options.clearRetainingCapacity();
                 continue;
             }
 
-            // Option line.
-            if (current_section == null) continue; // option before any section — skip
+            // Option line. configparser raises MissingSectionHeaderError for
+            // an option before any header (also after an include) and
+            // ParsingError for a line without a separator.
+            if (current_section == null) return ConfigError.ParseError;
+            const sep_idx = findSeparator(stripped) orelse return ConfigError.ParseError;
+            const key = std.mem.trim(u8, stripped[0..sep_idx], &std.ascii.whitespace);
+            if (key.len == 0) return ConfigError.ParseError;
+            const val = std.mem.trim(u8, stripped[sep_idx + 1 ..], &std.ascii.whitespace);
 
-            const sep_idx = findSeparator(stripped);
-            if (sep_idx == null) {
-                // Bare key (no separator) — treat as key = "".
-                const key = std.mem.trim(u8, stripped, &std.ascii.whitespace);
-                current_key = self.alloc.dupe(u8, key) catch return ConfigError.OutOfMemory;
-                current_indent = line_indent;
-                const empty = self.alloc.dupe(u8, "") catch return ConfigError.OutOfMemory;
-                value_parts.append(self.alloc, empty) catch {
-                    self.alloc.free(empty);
-                    return ConfigError.OutOfMemory;
-                };
-                continue;
-            }
-            const key = std.mem.trim(u8, stripped[0..sep_idx.?], &std.ascii.whitespace);
-            const val = std.mem.trim(u8, stripped[sep_idx.? + 1 ..], &std.ascii.whitespace);
-
-            current_key = self.alloc.dupe(u8, key) catch return ConfigError.OutOfMemory;
+            const owned_key = self.alloc.dupe(u8, key) catch return ConfigError.OutOfMemory;
+            current_key = std.ascii.lowerString(owned_key, owned_key);
+            const gop = section_options.getOrPut(self.alloc, current_key.?) catch return ConfigError.OutOfMemory;
+            if (gop.found_existing) return ConfigError.ParseError;
+            gop.key_ptr.* = self.alloc.dupe(u8, current_key.?) catch {
+                _ = section_options.remove(current_key.?);
+                return ConfigError.OutOfMemory;
+            };
             current_indent = line_indent;
             const val_duped = self.alloc.dupe(u8, val) catch return ConfigError.OutOfMemory;
             value_parts.append(self.alloc, val_duped) catch {
@@ -313,7 +322,10 @@ pub const ConfigParser = struct {
         else
             std.fmt.bufPrint(&base_path_buf, "{s}/{s}", .{ dir_path, glob_pat }) catch return ConfigError.ParseError;
 
-        var paths = globExpandIo(self.alloc, io, base_path) catch return ConfigError.ParseError;
+        var paths = globExpandIo(self.alloc, io, base_path) catch |err| return switch (err) {
+            error.OutOfMemory => ConfigError.OutOfMemory,
+            else => ConfigError.ParseError,
+        };
         defer {
             for (paths.items) |p| self.alloc.free(p);
             paths.deinit(self.alloc);
@@ -322,28 +334,40 @@ pub const ConfigParser = struct {
         if (paths.items.len == 0) return ConfigError.ParseError;
 
         for (paths.items) |inc_path| {
-            // Cycle detection via inode.
+            // Moonraker never forgets a visited file: a cycle or a second
+            // include of the same file is an error.
             const st = std.Io.Dir.cwd().statFile(io, inc_path, .{}) catch return ConfigError.ParseError;
             const inode: u64 = st.inode;
             for (visited.items) |v| {
                 if (v == inode) return ConfigError.ParseError;
             }
             visited.append(self.alloc, inode) catch return ConfigError.OutOfMemory;
-            defer _ = visited.pop();
 
-            const data = std.Io.Dir.cwd().readFileAlloc(io, inc_path, self.alloc, .unlimited) catch return ConfigError.ParseError;
+            const data = try self.readFile(io, inc_path);
             defer self.alloc.free(data);
             try self.parseInner(io, data, inc_path, inc_path, visited);
         }
+    }
+
+    /// Whole config file, owned by the caller. A missing or unreadable file
+    /// is a ParseError; allocation failure stays OutOfMemory.
+    fn readFile(self: *ConfigParser, io: std.Io, path: []const u8) ConfigError![]u8 {
+        return std.Io.Dir.cwd().readFileAlloc(io, path, self.alloc, .unlimited) catch |err| switch (err) {
+            error.OutOfMemory => ConfigError.OutOfMemory,
+            else => ConfigError.ParseError,
+        };
     }
 
     // -----------------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------------
 
+    /// Option names match ASCII case-insensitively (configparser
+    /// `optionxform`); names longer than `max_lookup_option` match exactly.
     pub fn get(self: *const ConfigParser, section: []const u8, option: []const u8) ?[]const u8 {
         const sec = self.sections_map.get(section) orelse return null;
-        return sec.options.get(option);
+        var buf: [max_lookup_option]u8 = undefined;
+        return sec.options.get(lookupKey(&buf, option));
     }
 
     pub fn hasSection(self: *const ConfigParser, section: []const u8) bool {
@@ -351,8 +375,7 @@ pub const ConfigParser = struct {
     }
 
     pub fn hasOption(self: *const ConfigParser, section: []const u8, option: []const u8) bool {
-        const sec = self.sections_map.get(section) orelse return false;
-        return sec.options.contains(option);
+        return self.get(section, option) != null;
     }
 
     pub fn getInt(self: *const ConfigParser, section: []const u8, option: []const u8) ConfigError!i64 {
@@ -369,7 +392,7 @@ pub const ConfigParser = struct {
 
     pub fn getBoolean(self: *const ConfigParser, section: []const u8, option: []const u8) ConfigError!bool {
         const raw = self.get(section, option) orelse return ConfigError.NoOption;
-        return backend.parseBool(raw) orelse ConfigError.InvalidValue;
+        return parseBool(raw) orelse ConfigError.InvalidValue;
     }
 
     /// Caller owns the returned slice but NOT the strings (parser-owned).
@@ -389,49 +412,25 @@ pub const ConfigParser = struct {
         }
         return out;
     }
-
-    // -----------------------------------------------------------------------
-    // ConfigBackend vtable
-    // -----------------------------------------------------------------------
-
-    const vtable_impl = backend.VTable{
-        .get = vtGet,
-        .hasSection = vtHasSection,
-        .hasOption = vtHasOption,
-        .sections = vtSections,
-        .options = vtOptions,
-        .freeSections = vtFreeSlice,
-        .freeOptions = vtFreeSlice,
-    };
-
-    pub fn asBackend(self: *ConfigParser) backend.ConfigBackend {
-        return .{ .ptr = self, .vtable = &vtable_impl };
-    }
-
-    fn vtGet(ptr: *anyopaque, sec: []const u8, opt: []const u8) ?[]const u8 {
-        return (@as(*ConfigParser, @ptrCast(@alignCast(ptr)))).get(sec, opt);
-    }
-    fn vtHasSection(ptr: *anyopaque, sec: []const u8) bool {
-        return (@as(*ConfigParser, @ptrCast(@alignCast(ptr)))).hasSection(sec);
-    }
-    fn vtHasOption(ptr: *anyopaque, sec: []const u8, opt: []const u8) bool {
-        return (@as(*ConfigParser, @ptrCast(@alignCast(ptr)))).hasOption(sec, opt);
-    }
-    fn vtSections(ptr: *anyopaque, alloc: std.mem.Allocator) backend.Error!backend.SectionList {
-        return (@as(*ConfigParser, @ptrCast(@alignCast(ptr)))).sectionNames(alloc);
-    }
-    fn vtOptions(ptr: *anyopaque, sec: []const u8, alloc: std.mem.Allocator) backend.Error!backend.OptionList {
-        return (@as(*ConfigParser, @ptrCast(@alignCast(ptr)))).optionNames(sec, alloc);
-    }
-    fn vtFreeSlice(ptr: *anyopaque, alloc: std.mem.Allocator, list: [][]const u8) void {
-        _ = ptr;
-        alloc.free(list);
-    }
 };
 
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Longest option name `get` lowercases on the stack.
+const max_lookup_option = 128;
+
+/// `option` lowercased into `buf`, or unchanged when it does not fit.
+fn lookupKey(buf: *[max_lookup_option]u8, option: []const u8) []const u8 {
+    if (option.len > buf.len) return option;
+    return std.ascii.lowerString(buf[0..option.len], option);
+}
+
+fn freeKeys(alloc: std.mem.Allocator, set: *std.StringHashMapUnmanaged(void)) void {
+    var it = set.keyIterator();
+    while (it.next()) |k| alloc.free(k.*);
+}
 
 fn expandTabs(src: []const u8, buf: []u8, tab_size: usize) []const u8 {
     var out_len: usize = 0;
@@ -506,6 +505,10 @@ fn globExpandIo(
     pattern: []const u8,
 ) !std.ArrayList([]const u8) {
     var result: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (result.items) |p| alloc.free(p);
+        result.deinit(alloc);
+    }
 
     const dir_part = std.fs.path.dirname(pattern) orelse ".";
     const file_pat = std.fs.path.basename(pattern);
@@ -514,37 +517,26 @@ fn globExpandIo(
     if (!has_wildcard) {
         // Single file: verify it exists.
         std.Io.Dir.cwd().access(io, pattern, .{}) catch return result;
-        const owned = try alloc.dupe(u8, pattern);
-        try result.append(alloc, owned);
+        try result.ensureUnusedCapacity(alloc, 1);
+        result.appendAssumeCapacity(try alloc.dupe(u8, pattern));
         return result;
     }
 
     var dir = std.Io.Dir.cwd().openDir(io, dir_part, .{ .iterate = true }) catch return result;
     defer dir.close(io);
 
-    var entries: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (entries.items) |e| alloc.free(e);
-        entries.deinit(alloc);
-    }
-
     var it = dir.iterateAssumeFirstIteration();
     while (try it.next(io)) |entry| {
-        if (globMatch(file_pat, entry.name)) {
-            const full = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_part, entry.name });
-            try entries.append(alloc, full);
-        }
+        if (!globMatch(file_pat, entry.name)) continue;
+        try result.ensureUnusedCapacity(alloc, 1);
+        result.appendAssumeCapacity(try std.fmt.allocPrint(alloc, "{s}/{s}", .{ dir_part, entry.name }));
     }
 
-    std.mem.sort([]const u8, entries.items, {}, struct {
+    std.mem.sort([]const u8, result.items, {}, struct {
         fn lt(_: void, a: []const u8, b: []const u8) bool {
             return std.mem.lessThan(u8, a, b);
         }
     }.lt);
-
-    for (entries.items) |e| try result.append(alloc, e);
-    entries.items.len = 0; // avoid double-free
-
     return result;
 }
 
@@ -891,47 +883,74 @@ test "parse: include missing file returns ParseError" {
     try std.testing.expectError(ConfigError.ParseError, p.parseFile(io, main_path));
 }
 
-test "backend interface: dispatches to ConfigParser" {
+test "parse: option names are case-insensitive, section names are not" {
     var p = ConfigParser.init(std.testing.allocator);
     defer p.deinit();
-    try p.parseString("[s]\nkey: 42\nbool_opt: yes\nfloat_opt: 1.5\n", "");
-    const b = p.asBackend();
-    try std.testing.expectEqualStrings("42", b.get("s", "key").?);
-    try std.testing.expectEqual(@as(i64, 42), try b.getInt("s", "key"));
-    try std.testing.expectApproxEqAbs(@as(f64, 1.5), try b.getFloat("s", "float_opt"), 1e-9);
-    try std.testing.expect(try b.getBoolean("s", "bool_opt") == true);
-    try std.testing.expect(b.hasSection("s"));
-    try std.testing.expect(b.hasOption("s", "key"));
-    const secs = try b.sections(std.testing.allocator);
-    defer b.freeSections(std.testing.allocator, secs);
-    try std.testing.expectEqual(@as(usize, 1), secs.len);
-    const opts = try b.options("s", std.testing.allocator);
-    defer b.freeOptions("s", std.testing.allocator, opts);
-    try std.testing.expectEqual(@as(usize, 3), opts.len);
+    try p.parseString("[Server]\nPort: 8080\n", "");
+    try std.testing.expectEqualStrings("8080", p.get("Server", "port").?);
+    try std.testing.expectEqualStrings("8080", p.get("Server", "PORT").?);
+    try std.testing.expect(p.hasOption("Server", "pOrT"));
+    try std.testing.expect(p.get("server", "port") == null);
+    const names = try p.optionNames("Server", std.testing.allocator);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqualStrings("port", names[0]);
 }
 
-test "backend: getInt missing returns NoOption" {
+test "parse: rejects what Moonraker's parser rejects" {
+    const bad = [_][]const u8{
+        "port: 1\n[server]\n", // option before any section
+        "[server]\nport\n", // no separator
+        "[server]\n: 1\n", // empty option name
+        "[server]\nport: 1\nPort: 2\n", // duplicate option in one file
+        "[a]\n[include x.conf]\nport: 1\n", // option after an include, before a section
+    };
+    for (bad) |src| {
+        var p = ConfigParser.init(std.testing.allocator);
+        defer p.deinit();
+        try std.testing.expectError(ConfigError.ParseError, p.parseString(src, ""));
+    }
+    // The same option in different sections is fine.
     var p = ConfigParser.init(std.testing.allocator);
     defer p.deinit();
-    try p.parseString("[s]\n", "");
-    const b = p.asBackend();
-    try std.testing.expectError(backend.Error.NoOption, b.getInt("s", "missing"));
+    try p.parseString("[a]\nport: 1\n[b]\nport: 2\n", "");
+    try std.testing.expectEqualStrings("2", p.get("b", "port").?);
 }
 
-test "backend: getFloat invalid returns InvalidValue" {
+test "parse: a later file overrides an option; one file included twice is rejected" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "over.conf", .data = "[server]\nPORT: 2\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.conf", .data = "[server]\nport: 1\n[include over.conf]\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "twice.conf", .data = "[include over.conf]\n[include over.conf]\n" });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+
     var p = ConfigParser.init(std.testing.allocator);
     defer p.deinit();
-    try p.parseString("[s]\nv: bad\n", "");
-    const b = p.asBackend();
-    try std.testing.expectError(backend.Error.InvalidValue, b.getFloat("s", "v"));
+    try p.parseFile(io, path_buf[0..try tmp.dir.realPathFile(io, "main.conf", &path_buf)]);
+    try std.testing.expectEqualStrings("2", p.get("server", "port").?);
+
+    var twice = ConfigParser.init(std.testing.allocator);
+    defer twice.deinit();
+    try std.testing.expectError(ConfigError.ParseError, twice.parseFile(io, path_buf[0..try tmp.dir.realPathFile(io, "twice.conf", &path_buf)]));
 }
 
-test "backend: getBoolean invalid returns InvalidValue" {
-    var p = ConfigParser.init(std.testing.allocator);
-    defer p.deinit();
-    try p.parseString("[s]\nv: nope\n", "");
-    const b = p.asBackend();
-    try std.testing.expectError(backend.Error.InvalidValue, b.getBoolean("s", "v"));
+test "parseFile: include glob frees every path on allocation failure" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.inc", .data = "[a]\nv: 1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.inc", .data = "[b]\nv: 2\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.conf", .data = "[include *.inc]\n" });
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const main_path = path_buf[0..try tmp.dir.realPathFile(io, "main.conf", &path_buf)];
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn parse(alloc: std.mem.Allocator, path: []const u8) !void {
+            var p = ConfigParser.init(alloc);
+            defer p.deinit();
+            try p.parseFile(std.testing.io, path);
+        }
+    }.parse, .{main_path});
 }
 
 test "globMatch: patterns" {
@@ -1043,13 +1062,12 @@ test "parse: value longer than the line stack buffer is not truncated" {
     try std.testing.expectEqualStrings(&big, p.get("s", "key").?);
 }
 
-test "float options reject non-finite values through both interfaces" {
+test "float options reject non-finite values" {
     for ([_][]const u8{ "nan", "inf", "-inf", "1e999" }) |raw| {
         var parser = ConfigParser.init(std.testing.allocator);
         defer parser.deinit();
         var buf: [80]u8 = undefined;
         try parser.parseString(try std.fmt.bufPrint(&buf, "[s]\nv: {s}\n", .{raw}), "test");
         try std.testing.expectError(ConfigError.InvalidValue, parser.getFloat("s", "v"));
-        try std.testing.expectError(backend.Error.InvalidValue, parser.asBackend().getFloat("s", "v"));
     }
 }
