@@ -907,32 +907,10 @@ pub const App = struct {
             self.job_queue_ctx.setQueueOptions(automatic, load_on_start);
         }
 
-        // Wire MQTT broker config from [mqtt] section.
-        if (cfg.hasSection("mqtt")) {
-            const host = cfg.get("mqtt", "host") orelse "localhost";
-            const port: u16 = clampInt(u16, cfg.getInt("mqtt", "port") catch 1883, 1883);
-            const username = cfg.get("mqtt", "username");
-            const password = cfg.get("mqtt", "password");
-            self.mqtt_ctx.setConfig(host, port, username, password) catch |err|
-                std.debug.print("phobos: warning: failed to apply [mqtt] config: {} — MQTT disabled\n", .{err});
-            if (cfg.get("mqtt", "instance_name")) |iname| {
-                self.mqtt_ctx.setInstanceName(iname) catch {};
-            }
-            if (cfg.get("mqtt", "client_id")) |cid| {
-                self.mqtt_ctx.setClientId(cid) catch {};
-            }
-            if (cfg.get("mqtt", "default_qos")) |qos_str| {
-                const qos: u8 = clampInt(u8, std.fmt.parseInt(i64, qos_str, 10) catch 0, 0);
-                self.mqtt_ctx.setDefaultQos(qos);
-            }
-            if (cfg.getBoolean("mqtt", "enable_moonraker_api")) |ena| {
-                self.mqtt_ctx.setApiEnabled(ena);
-            } else |_| {}
-            if (cfg.get("mqtt", "api_qos")) |aqos_str| {
-                const aqos: i64 = std.fmt.parseInt(i64, aqos_str, 10) catch @as(i64, 0);
-                self.mqtt_ctx.setApiQos(aqos);
-            }
-        }
+        // [mqtt] (mqtt.py MQTTClient). Moonraker fails the component on a bad
+        // option; phobos warns and leaves MQTT unconfigured.
+        if (cfg.hasSection("mqtt")) self.applyMqttConfig(aio, cfg) catch |err|
+            std.debug.print("phobos: warning: invalid [mqtt] config: {}, MQTT disabled\n", .{err});
 
         // Wire power devices from [power <name>] sections.
         var power_sects: std.ArrayList([]const u8) = .empty;
@@ -1447,6 +1425,50 @@ pub const App = struct {
         self.syncRegisteredDirectories();
     }
 
+    /// Read `[mqtt]` like mqtt.py: `address` is required, `instance_name`
+    /// defaults to the host name and `api_qos` to `default_qos`. phobos speaks
+    /// MQTT 3.1.1 only; another `mqtt_protocol` is reported and ignored.
+    fn applyMqttConfig(self: *App, aio: std.Io, cfg: *const config_helper.ConfigParser) !void {
+        const address = cfg.get("mqtt", "address") orelse return error.MissingAddress;
+        const port = cfg.getInt("mqtt", "port") catch |err| switch (err) {
+            error.NoOption => 1883,
+            else => return err,
+        };
+        const default_qos = cfg.getInt("mqtt", "default_qos") catch |err| switch (err) {
+            error.NoOption => 0,
+            else => return err,
+        };
+        const api_qos: ?i64 = cfg.getInt("mqtt", "api_qos") catch |err| switch (err) {
+            error.NoOption => null,
+            else => return err,
+        };
+        const enable_api = cfg.getBoolean("mqtt", "enable_moonraker_api") catch |err| switch (err) {
+            error.NoOption => true,
+            else => return err,
+        };
+        const enable_tls = cfg.getBoolean("mqtt", "enable_tls") catch |err| switch (err) {
+            error.NoOption => false,
+            else => return err,
+        };
+        if (cfg.get("mqtt", "mqtt_protocol")) |protocol| if (!std.mem.eql(u8, protocol, "v3.1.1"))
+            std.debug.print("phobos: warning: [mqtt] mqtt_protocol {s} unsupported, using v3.1.1\n", .{protocol});
+        var host_buf: [64]u8 = undefined; // HOST_NAME_MAX
+        const instance_name = cfg.get("mqtt", "instance_name") orelse
+            std.mem.trim(u8, try std.Io.Dir.cwd().readFile(aio, "/proc/sys/kernel/hostname", &host_buf), &std.ascii.whitespace);
+        try self.mqtt_ctx.setConfig(.{
+            .address = address,
+            .port = std.math.cast(u16, port) orelse return error.InvalidPort,
+            .username = cfg.get("mqtt", "username"),
+            .password = cfg.get("mqtt", "password"),
+            .client_id = cfg.get("mqtt", "client_id") orelse "",
+            .instance_name = instance_name,
+            .default_qos = default_qos,
+            .api_qos = api_qos,
+            .enable_moonraker_api = enable_api,
+            .enable_tls = enable_tls,
+        });
+    }
+
     fn applyAnalysisConfig(self: *App, cfg: *const config_helper.ConfigParser) void {
         const configured = cfg.get("analysis", "platform") orelse "auto";
         const plat: []const u8 = if (std.mem.eql(u8, configured, "linux") or std.mem.eql(u8, configured, "rpi") or std.mem.eql(u8, configured, "osx"))
@@ -1544,23 +1566,19 @@ pub const App = struct {
         self.klippy_ctx.setIo(io);
         // Wire io into MQTT and, when a broker is configured, connect to it in
         // the background (a slow/unreachable broker must not stall startup).
-        self.mqtt_ctx.setIo(io);
+        self.mqtt_ctx.io = io;
         // Bridge inbound MQTT messages → sensors (under the Core lock) and
         // subscribe sensor topics on connect.
         self.sensor_mqtt_bridge = .{ .app = self };
         self.mqtt_ctx.on_message = SensorMqttBridge.onMessage;
         self.mqtt_ctx.on_message_ctx = &self.sensor_mqtt_bridge;
         // JSON-RPC-over-MQTT bridge: dispatch api_request frames through the
-        // shared dispatcher (under the Core lock) and publish the response.
+        // shared dispatcher and publish the response.
         self.mqtt_ctx.api_dispatch = mqttApiDispatch;
         self.mqtt_ctx.api_dispatch_ctx = self;
         self.mqtt_ctx.on_connected = SensorMqttBridge.onConnected;
         self.mqtt_ctx.on_connected_ctx = &self.sensor_mqtt_bridge;
-        if (self.mqtt_ctx.isConfigured()) {
-            // Cancel and join the connection task before freeing component state.
-            self.mqtt_ctx.reader_stop.reset();
-            self.mqtt_ctx.connect_thread = io.concurrent(MqttCtx.connectBrokerBg, .{self.mqtt_ctx}) catch null;
-        }
+        self.mqtt_ctx.start();
         // Wire connections and io into ServerInfo so server.info reports live
         // websocket_count.
         self.info.conns = self.conns;
@@ -1588,19 +1606,13 @@ fn wsStubHandler(_: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerro
     return error.WsOnlyMethod;
 }
 
-/// Glue between the MQTT client (background reader thread) and the sensor
-/// component. Inbound messages are dispatched into the sensor store under the
-/// Core lock so they serialize with JSON-RPC handlers and notifications.
-/// Dispatch an inbound MQTT api_request payload through the JSON-RPC dispatcher
-/// under the Core lock (the mqtt reader thread does not hold it), returning the
-/// response bytes. Wired into MqttCtx.api_dispatch.
-fn mqttApiDispatch(ctx: *anyopaque, payload: []const u8, alloc: std.mem.Allocator) anyerror![]u8 {
+/// Dispatch a parsed MQTT API request through the JSON-RPC dispatcher and
+/// return the response bytes. Wired into MqttCtx.api_dispatch; runs on the MQTT
+/// reader thread, which does not hold Core. The dispatcher takes Core per
+/// method, so wrapping this in core.run would deadlock.
+fn mqttApiDispatch(ctx: *anyopaque, request: std.json.Value, alloc: std.mem.Allocator) anyerror![]u8 {
     const app: *App = @ptrCast(@alignCast(ctx));
-    _ = app.mqtt_ctx.io orelse return error.NotReady;
-    // Dispatcher.handle takes the Core lock itself, per-method (skipping it for
-    // off_core reads). Wrapping it in core.run here would double-lock the
-    // non-reentrant Core mutex and freeze the server.
-    return app.dispatcher.handle(payload, alloc);
+    return app.dispatcher.handleParsedRoot(request, alloc);
 }
 
 /// Spoolman WS spool-deletion hook: clear the active spool (if it was the
@@ -1611,6 +1623,9 @@ fn spoolmanSpoolDeleted(ctx: *anyopaque, spool_id: i64) void {
     app.core.run(io, SpoolmanCtx.handleSpoolDeletedLocked, .{ app.spoolman_ctx, spool_id });
 }
 
+/// Glue between the MQTT reader thread and the sensor component. Inbound
+/// messages enter the sensor store under the Core lock so they serialize with
+/// JSON-RPC handlers and notifications.
 pub const SensorMqttBridge = struct {
     app: *App = undefined,
 
@@ -1629,7 +1644,7 @@ pub const SensorMqttBridge = struct {
         const self: *SensorMqttBridge = @ptrCast(@alignCast(ctx));
         var it = self.app.sensor_ctx.sensors.valueIterator();
         while (it.next()) |s| {
-            if (s.state_topic) |topic| self.app.mqtt_ctx.subscribeTopicLive(topic);
+            if (s.state_topic) |topic| self.app.mqtt_ctx.subscribeTopicLive(topic, null);
         }
     }
 };
@@ -2221,6 +2236,41 @@ test "setConfig loads an analysis platform and a notifier record" {
     var params: std.json.ObjectMap = .empty;
     try params.put(a, "name", .{ .string = "desk" });
     try std.testing.expectError(error.AppriseNotAvailable, notifier_component.handleNotifierTest(@ptrCast(app.notifier_ctx), .{ .object = params }, a));
+}
+
+test "setConfig reads Moonraker's [mqtt] address and defaults" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data =
+        \\[mqtt]
+        \\address: broker.lan
+        \\default_qos: 1
+        \\enable_tls: true
+        \\
+    });
+    var app = try testApp(alloc, io, &tmp);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    const mqtt = app.mqtt_ctx.config.?;
+    try std.testing.expectEqualStrings("broker.lan", mqtt.address);
+    try std.testing.expectEqual(@as(u16, 1883), mqtt.port);
+    try std.testing.expectEqual(@as(u2, 1), mqtt.api_qos);
+    try std.testing.expect(mqtt.enable_tls and mqtt.enable_moonraker_api);
+    try std.testing.expect(mqtt.instance_name.len > 0);
+    try std.testing.expect(std.mem.endsWith(u8, mqtt.status_topic, "/moonraker/status"));
+
+    // Without `address` MQTT stays unconfigured.
+    var app2 = try testApp(alloc, io, &tmp);
+    defer app2.deinit(io);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[mqtt]\nhost: broker.lan\n" });
+    app2.setConfig(io, cfg_path);
+    try std.testing.expect(app2.mqtt_ctx.config == null);
 }
 
 test "canonicalPath follows a directory symlink" {

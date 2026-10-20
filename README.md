@@ -60,8 +60,8 @@ hashing compatible with Moonraker's formats), machine info / proc stats / servic
 peripherals, update manager, power / WLED / device control, spoolman, sensors, webcams,
 notifiers, analysis, extensions, OctoPrint-compat, and the `printer.*` proxy surface.
 
-Many formerly-stubbed subsystems now do real I/O: a real MQTT 3.1.1 client with TLS and
-automatic reconnect/backoff, a Spoolman WebSocket, sysfs GPIO power, WLED/TD-1 serial with
+Many formerly-stubbed subsystems now do real I/O: an MQTT 3.1.1 client (optional TLS,
+keepalive, reconnect/backoff, the JSON-RPC API topics; no Klipper status topics), a Spoolman WebSocket, sysfs GPIO power, WLED/TD-1 serial with
 USB auto-discovery, MQTT sensors with `state_response_template` (an in-tree Jinja subset),
 `git fetch/reset` update paths, RSS fetch with ETag conditional GET, and a live Klippy bridge.
 The remaining gaps need external tools (klipper_estimator binary, apprise) or are host-mutating

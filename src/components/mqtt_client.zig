@@ -1,11 +1,12 @@
 //! MQTT 3.1.1 TCP client over `std.Io.net`.
 //!
 //! A thin, synchronous client: connect → CONNACK, publish, subscribe, ping,
-//! and a `readOne` step that decodes a single inbound packet and dispatches
-//! PUBLISH frames to a callback (auto-replying to PINGREQ and PUBLISH-QoS1).
+//! and a `readOne` step that decodes a single inbound packet, dispatches
+//! PUBLISH frames to a callback and answers the QoS 1 and QoS 2 handshakes.
 //! The owning component (`mqtt.zig`) drives `readOne` from a background task and
-//! issues periodic `ping`s for keepalive. No raw socket syscalls — everything is
-//! `std.Io.net`. Packet wire format lives in `mqtt_proto.zig`.
+//! sends `ping` every half keepalive interval. Writes are serialized on
+//! `write_mtx`, so a reader-thread acknowledgement never interleaves with a
+//! foreground publish. Packet wire format lives in `mqtt_proto.zig`.
 
 const std = @import("std");
 const proto = @import("mqtt_proto.zig");
@@ -35,26 +36,19 @@ pub const MqttClient = struct {
     rdr: net.Stream.Reader,
     /// Reusable inbound packet-body buffer — grown to the largest packet seen and
     /// reused, so steady inbound traffic does not alloc/free per packet. The body
-    /// returned by readRawPacket borrows this; valid only until the next read.
+    /// returned by readPacket borrows this; valid only until the next read.
     body_scratch: std.ArrayList(u8) = .empty,
-    /// Packet-id source. Atomic so a foreground publish/subscribe and any future
+    /// Packet-id source. Atomic so a foreground publish/subscribe and any
     /// concurrent caller never race the increment. Never yields 0 (invalid id).
     next_id: std.atomic.Value(u16) = std.atomic.Value(u16).init(1),
-    connected: bool = false,
     /// When set, all I/O is routed through this TLS layer instead of the raw
     /// stream. Heap-owned (must not move); freed in deinit.
     tls: ?*TlsState = null,
     on_publish: ?PublishHandler = null,
     on_publish_ctx: ?*anyopaque = null,
-    /// Serializes writes so a background reader's auto-replies cannot interleave
-    /// with a foreground publish.
+    /// Serializes writes so a background reader's acknowledgements cannot
+    /// interleave with a foreground publish.
     write_mtx: Io.Mutex = .init,
-
-    pub const ConnectError = error{
-        ConnectionRefused,
-        ConnackTimeout,
-        ConnectionRejected,
-    } || std.mem.Allocator.Error;
 
     /// Connect to `host:port`, send CONNECT, await an accepted CONNACK.
     /// Accepts IPv4, IPv6, or a DNS hostname.
@@ -116,24 +110,22 @@ pub const MqttClient = struct {
         }
         errdefer if (self.tls) |t| tls_transport.deinit(gpa, t);
 
-        // Send CONNECT.
         const connect_pkt = try proto.encodeConnect(gpa, opts);
         defer gpa.free(connect_pkt);
         try self.writeAll(connect_pkt);
 
         // Await CONNACK (body borrows body_scratch; consumed before next read).
-        const owned = try self.readRawPacket();
-        const pkt = proto.Packet{ .ptype = owned.ptype(), .flags = owned.flags(), .body = owned.body, .total = 0 };
+        const pkt = try self.readPacket();
         if (pkt.ptype != .connack) return error.ConnectionRejected;
-        const code = try proto.parseConnack(pkt);
-        if (code != .accepted) return error.ConnectionRejected;
-        self.connected = true;
+        if (try proto.parseConnack(pkt) != .accepted) return error.ConnectionRejected;
         return self;
     }
 
+    /// Close the socket and free the client's buffers. Callers that want a
+    /// clean broker-side close call `disconnect` first.
     pub fn deinit(self: *MqttClient) void {
-        self.disconnect();
         if (self.tls) |t| tls_transport.deinit(self.gpa, t);
+        self.stream.close(self.io);
         self.body_scratch.deinit(self.gpa);
         self.gpa.free(self.reader_buf);
         self.* = undefined;
@@ -153,6 +145,12 @@ pub const MqttClient = struct {
         try w.interface.flush();
     }
 
+    fn writeLocked(self: *MqttClient, bytes: []const u8) !void {
+        try self.write_mtx.lock(self.io);
+        defer self.write_mtx.unlock(self.io);
+        try self.writeAll(bytes);
+    }
+
     /// The inbound byte stream: the decrypted TLS reader when TLS is active, else
     /// the raw socket reader.
     fn inIface(self: *MqttClient) *std.Io.Reader {
@@ -160,53 +158,36 @@ pub const MqttClient = struct {
         return &self.rdr.interface;
     }
 
-    /// Encode + send a PUBLISH. QoS 1 allocates a packet id; the matching PUBACK
-    /// is consumed by the read loop (fire-and-forget at this layer).
+    /// Encode + send a PUBLISH. QoS 1 and 2 allocate a packet id; the broker's
+    /// PUBACK/PUBREC is handled by the read loop.
     pub fn publish(self: *MqttClient, topic: []const u8, payload: []const u8, qos: u2, retain: bool) !void {
-        if (!self.connected) return error.NotConnected;
         const id = if (qos > 0) self.nextId() else 0;
         const pkt = try proto.encodePublish(self.gpa, topic, payload, qos, retain, id);
         defer self.gpa.free(pkt);
-        try self.write_mtx.lock(self.io);
-        defer self.write_mtx.unlock(self.io);
-        try self.writeAll(pkt);
+        try self.writeLocked(pkt);
     }
 
     pub fn subscribe(self: *MqttClient, topic_filter: []const u8, qos: u2) !void {
-        if (!self.connected) return error.NotConnected;
         const pkt = try proto.encodeSubscribe(self.gpa, self.nextId(), topic_filter, qos);
         defer self.gpa.free(pkt);
-        try self.write_mtx.lock(self.io);
-        defer self.write_mtx.unlock(self.io);
-        try self.writeAll(pkt);
+        try self.writeLocked(pkt);
     }
 
     pub fn ping(self: *MqttClient) !void {
-        if (!self.connected) return error.NotConnected;
-        const pkt = try proto.encodePingreq(self.gpa);
-        defer self.gpa.free(pkt);
-        try self.write_mtx.lock(self.io);
-        defer self.write_mtx.unlock(self.io);
-        try self.writeAll(pkt);
+        try self.writeLocked(&proto.pingreq);
     }
 
-    /// Interrupt transport reads and writes before joining the worker.
-    /// Call this before joining the reader thread.
+    /// Send DISCONNECT so the broker discards the Last Will. Best effort: a
+    /// failed write leaves the will armed, which is the right outcome for a
+    /// broken connection.
+    pub fn disconnect(self: *MqttClient) void {
+        self.writeLocked(&proto.disconnect) catch {};
+    }
+
+    /// Interrupt transport reads and writes from another thread. Call this
+    /// before joining the reader thread.
     pub fn shutdownRecv(self: *MqttClient) void {
         self.stream.shutdown(self.io, .both) catch {};
-    }
-
-    pub fn disconnect(self: *MqttClient) void {
-        if (!self.connected) return;
-        const pkt = proto.encodeDisconnect(self.gpa) catch {
-            self.connected = false;
-            self.stream.close(self.io);
-            return;
-        };
-        defer self.gpa.free(pkt);
-        self.writeAll(pkt) catch {};
-        self.connected = false;
-        self.stream.close(self.io);
     }
 
     fn nextId(self: *MqttClient) u16 {
@@ -217,61 +198,33 @@ pub const MqttClient = struct {
         }
     }
 
-    const RawPacket = struct {
-        b0: u8,
-        body: []u8, // borrows client.body_scratch; valid until the next read
-        fn ptype(self: RawPacket) proto.PacketType {
-            return @fromBackingInt(@intCast(@as(u4, @intCast(self.b0 >> 4))));
-        }
-        fn flags(self: RawPacket) u4 {
-            return @intCast(self.b0 & 0x0F);
-        }
-    };
-
     /// Read exactly one packet off the wire (blocking). The returned body
     /// borrows `body_scratch` and is valid only until the next read.
-    fn readRawPacket(self: *MqttClient) !RawPacket {
-        const r = self.inIface();
-        const b0 = try r.takeByte();
-        const rl = try proto.readVarInt(r);
-        // Bound the allocation: a malformed/hostile broker frame can encode up to
-        // ~256 MB in the remaining-length field. Reject oversized packets rather
-        // than allocate attacker-controlled memory.
-        if (rl > max_packet_len) return error.PacketTooLarge;
-        try self.body_scratch.ensureTotalCapacity(self.gpa, rl);
-        self.body_scratch.items.len = rl;
-        const body = self.body_scratch.items[0..rl];
-        if (rl > 0) try r.readSliceAll(body);
-        return .{ .b0 = b0, .body = body };
+    fn readPacket(self: *MqttClient) !proto.Packet {
+        return proto.readPacket(self.inIface(), self.gpa, &self.body_scratch, max_packet_len);
     }
 
-    /// Read and dispatch one inbound packet. PUBLISH → on_publish (+ PUBACK for
-    /// QoS 1). PINGREQ → PINGRESP. Other control packets (CONNACK already
-    /// consumed, SUBACK, PUBACK, PINGRESP) are accepted and ignored. Returns the
-    /// packet type handled.
+    /// Read and dispatch one inbound packet. PUBLISH → on_publish, then PUBACK
+    /// (QoS 1) or PUBREC (QoS 2). PUBREL → PUBCOMP and PUBREC → PUBREL complete
+    /// the QoS 2 flows. Other control packets (SUBACK, PUBACK, PUBCOMP,
+    /// PINGRESP) are accepted and ignored. Returns the packet type handled.
     pub fn readOne(self: *MqttClient) !proto.PacketType {
-        const raw = try self.readRawPacket();
-        const pkt = proto.Packet{ .ptype = raw.ptype(), .flags = raw.flags(), .body = raw.body, .total = 0 };
+        const pkt = try self.readPacket();
         switch (pkt.ptype) {
             .publish => {
                 const view = try proto.parsePublish(pkt);
                 if (self.on_publish) |cb| {
                     if (self.on_publish_ctx) |c| cb(c, view.topic, view.payload);
                 }
-                if (view.qos == 1) {
-                    const ack = try proto.encodePuback(self.gpa, view.packet_id);
-                    defer self.gpa.free(ack);
-                    try self.write_mtx.lock(self.io);
-                    defer self.write_mtx.unlock(self.io);
-                    try self.writeAll(ack);
+                switch (view.qos) {
+                    0 => {},
+                    1 => try self.writeLocked(&proto.ack(.puback, view.packet_id)),
+                    2 => try self.writeLocked(&proto.ack(.pubrec, view.packet_id)),
+                    3 => unreachable, // parsePublish rejects QoS 3
                 }
             },
-            .pingreq => {
-                const rr: [2]u8 = .{ 0xD0, 0x00 };
-                try self.write_mtx.lock(self.io);
-                defer self.write_mtx.unlock(self.io);
-                try self.writeAll(&rr);
-            },
+            .pubrec => try self.writeLocked(&proto.ack(.pubrel, try pkt.packetId())),
+            .pubrel => try self.writeLocked(&proto.ack(.pubcomp, try pkt.packetId())),
             else => {},
         }
         return pkt.ptype;
@@ -285,19 +238,29 @@ pub const MqttClient = struct {
 const testing = std.testing;
 
 /// Minimal MQTT broker for tests: accepts one connection, completes the
-/// CONNECT/CONNACK handshake, then services SUBSCRIBE (SUBACK) and records the
-/// first PUBLISH it receives. Can inject a PUBLISH to the client.
+/// CONNECT/CONNACK handshake, then services SUBSCRIBE (SUBACK), counts
+/// SUBSCRIBE, PUBLISH and PINGREQ packets and records the last PUBLISH and
+/// SUBSCRIBE it receives. Can inject a PUBLISH to the client.
 pub const TestBroker = struct {
     alloc: std.mem.Allocator = std.heap.smp_allocator,
     io: Io,
     server: net.Server,
     stream: ?net.Stream = null,
     rbuf: [4096]u8 = undefined,
+    body: std.ArrayList(u8) = .empty,
+    /// CONNECT body copy, so tests can check the client id and the will.
+    connect: [256]u8 = undefined,
+    connect_len: usize = 0,
     got_topic: [256]u8 = undefined,
     got_topic_len: usize = 0,
     got_payload: [256]u8 = undefined,
     got_payload_len: usize = 0,
-    saw_subscribe: bool = false,
+    got_retain: bool = false,
+    last_subscribe: [128]u8 = undefined,
+    last_subscribe_len: usize = 0,
+    publishes: std.atomic.Value(u32) = .init(0),
+    subscribes: std.atomic.Value(u32) = .init(0),
+    pings: std.atomic.Value(u32) = .init(0),
 
     pub fn bind(io: Io) !TestBroker {
         var ip = try net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -309,21 +272,17 @@ pub const TestBroker = struct {
         return self.server.socket.address.getPort();
     }
 
-    pub fn readRaw(alloc: std.mem.Allocator, r: *std.Io.Reader) !struct { b0: u8, body: []u8 } {
-        const b0 = try r.takeByte();
-        const rl = try proto.readVarInt(r);
-        if (rl > max_packet_len) return error.PacketTooLarge;
-        const body = try alloc.alloc(u8, rl);
-        errdefer alloc.free(body);
-        if (rl > 0) try r.readSliceAll(body);
-        return .{ .b0 = b0, .body = body };
-    }
-
     fn writeAll(self: *TestBroker, stream: net.Stream, bytes: []const u8) !void {
         var wbuf: [256]u8 = undefined;
         var w = stream.writer(self.io, &wbuf);
         try w.interface.writeAll(bytes);
         try w.interface.flush();
+    }
+
+    fn copy(dest: []u8, len: *usize, src: []const u8) void {
+        const n = @min(dest.len, src.len);
+        @memcpy(dest[0..n], src[0..n]);
+        len.* = n;
     }
 
     /// Accept + handshake + service `nframes` client packets.
@@ -333,30 +292,30 @@ pub const TestBroker = struct {
         var r = stream.reader(self.io, &self.rbuf);
 
         // CONNECT → CONNACK accepted.
-        const c = readRaw(self.alloc, &r.interface) catch return;
-        self.alloc.free(c.body);
+        const c = proto.readPacket(&r.interface, self.alloc, &self.body, max_packet_len) catch return;
+        copy(&self.connect, &self.connect_len, c.body);
         self.writeAll(stream, &.{ 0x20, 0x02, 0x00, 0x00 }) catch return;
 
         var handled: usize = 0;
         while (handled < nframes) : (handled += 1) {
-            const raw = readRaw(self.alloc, &r.interface) catch return;
-            defer self.alloc.free(raw.body);
-            const ptype: proto.PacketType = @fromBackingInt(@intCast(@as(u4, @intCast(raw.b0 >> 4))));
-            switch (ptype) {
+            const pkt = proto.readPacket(&r.interface, self.alloc, &self.body, max_packet_len) catch return;
+            switch (pkt.ptype) {
                 .subscribe => {
-                    self.saw_subscribe = true;
-                    const pid = std.mem.readInt(u16, raw.body[0..2], .big);
+                    const pid = pkt.packetId() catch return;
+                    // Body: id(2) + filter length(2) + filter + requested qos(1).
+                    if (pkt.body.len >= 5) copy(&self.last_subscribe, &self.last_subscribe_len, pkt.body[4 .. pkt.body.len - 1]);
+                    _ = self.subscribes.fetchAdd(1, .release);
                     // SUBACK: packet id + granted qos 0.
                     self.writeAll(stream, &.{ 0x90, 0x03, @intCast(pid >> 8), @intCast(pid & 0xFF), 0x00 }) catch return;
                 },
                 .publish => {
-                    const pkt = proto.Packet{ .ptype = .publish, .flags = @intCast(raw.b0 & 0x0F), .body = raw.body, .total = 0 };
                     const v = proto.parsePublish(pkt) catch continue;
-                    @memcpy(self.got_topic[0..v.topic.len], v.topic);
-                    self.got_topic_len = v.topic.len;
-                    @memcpy(self.got_payload[0..v.payload.len], v.payload);
-                    self.got_payload_len = v.payload.len;
+                    copy(&self.got_topic, &self.got_topic_len, v.topic);
+                    copy(&self.got_payload, &self.got_payload_len, v.payload);
+                    self.got_retain = v.retain;
+                    _ = self.publishes.fetchAdd(1, .release);
                 },
+                .pingreq => _ = self.pings.fetchAdd(1, .release),
                 else => {},
             }
         }
@@ -371,6 +330,7 @@ pub const TestBroker = struct {
     pub fn deinit(self: *TestBroker) void {
         if (self.stream) |s| s.close(self.io);
         self.server.deinit(self.io);
+        self.body.deinit(self.alloc);
     }
 };
 
@@ -402,7 +362,6 @@ test "client connects, CONNACK accepted, publishes to broker" {
 
     var client = try MqttClient.connect(testing.allocator, io, "127.0.0.1", p, .{ .client_id = "phobos-test" });
     defer client.deinit();
-    try testing.expect(client.connected);
 
     try client.publish("phobos/instance/test", "hello-broker", 0, false);
     bf.await(io);
@@ -472,7 +431,6 @@ test "client connects over TLS (socat OpenSSL proxy → plaintext broker)" {
     const c = if (client) |*cl| cl else return error.TlsConnectFailed;
     defer c.deinit();
 
-    try testing.expect(c.connected);
     try c.publish("phobos/tls", "secure-hi", 0, false);
     bf.await(io);
     try testing.expectEqualStrings("phobos/tls", broker.got_topic[0..broker.got_topic_len]);
@@ -509,25 +467,7 @@ test "client subscribes and receives an injected publish" {
     }
     try testing.expectEqualStrings("phobos/status", cap.topic[0..cap.topic_len]);
     try testing.expectEqualStrings("{\"x\":1}", cap.payload[0..cap.payload_len]);
-    try testing.expect(broker.saw_subscribe);
-}
-
-test "fuzz client publish: arbitrary topics/payloads never crash the encoder path" {
-    // No socket: exercises the encode path the client uses, under fuzzed input.
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [64]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            const split = @as(usize, buf[0]) % buf.len;
-            const topic = buf[1..@max(1, split)];
-            const payload = buf[@max(1, split)..];
-            const qos: u2 = @intCast(buf[0] % 3);
-            const pkt = proto.encodePublish(testing.allocator, topic, payload, qos, buf[0] & 1 == 1, 1) catch return;
-            defer testing.allocator.free(pkt);
-            const dec = proto.decode(pkt) catch return;
-            if (dec) |d| _ = proto.parsePublish(d) catch {};
-        }
-    }.run, .{});
+    try testing.expectEqualStrings("phobos/#", broker.last_subscribe[0..broker.last_subscribe_len]);
 }
 
 test "TLS setup frees every partial buffer allocation" {
@@ -553,8 +493,9 @@ test "connect preserves PUBLISH buffered with CONNACK when the client moves" {
             defer stream.close(aio);
             var rbuf: [512]u8 = undefined;
             var reader = stream.reader(aio, &rbuf);
-            const request = try TestBroker.readRaw(std.heap.smp_allocator, &reader.interface);
-            defer std.heap.smp_allocator.free(request.body);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(std.heap.smp_allocator);
+            _ = try proto.readPacket(&reader.interface, std.heap.smp_allocator, &body, max_packet_len);
             var wbuf: [512]u8 = undefined;
             var writer = stream.writer(aio, &wbuf);
             try writer.interface.writeAll(&.{ 0x20, 2, 0, 0, 0x30, 4, 0, 1, 't', 'v' });
@@ -576,9 +517,82 @@ test "connect preserves PUBLISH buffered with CONNACK when the client moves" {
     try future.await(io);
 }
 
-test "test broker bounds remaining lengths and frees truncated bodies" {
-    var short: std.Io.Reader = .fixed(&.{ 0x30, 4, 0, 1, 't' });
-    try testing.expectError(error.EndOfStream, TestBroker.readRaw(testing.allocator, &short));
-    var malformed: std.Io.Reader = .fixed(&.{ 0x30, 0x80, 0x80, 0x80, 0x80, 0 });
-    try testing.expectError(error.MalformedVarInt, TestBroker.readRaw(testing.allocator, &malformed));
+test "readOne completes QoS 2 handshakes; ping and disconnect reach the broker" {
+    const io = testing.io;
+    var server = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    const Broker = struct {
+        fn run(s: *net.Server, aio: Io, replies: *[16]u8) !void {
+            const stream = try s.accept(aio);
+            defer stream.close(aio);
+            var rbuf: [512]u8 = undefined;
+            var reader = stream.reader(aio, &rbuf);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(std.heap.smp_allocator);
+            _ = try proto.readPacket(&reader.interface, std.heap.smp_allocator, &body, max_packet_len);
+            var wbuf: [512]u8 = undefined;
+            var writer = stream.writer(aio, &wbuf);
+            // CONNACK, inbound QoS 2 PUBLISH id 7, PUBREL id 7, PUBREC id 9.
+            try writer.interface.writeAll(&.{ 0x20, 2, 0, 0, 0x34, 6, 0, 1, 't', 0, 7, 'v' });
+            try writer.interface.writeAll(&(proto.ack(.pubrel, 7) ++ proto.ack(.pubrec, 9)));
+            try writer.interface.flush();
+            // PUBREC 7, PUBCOMP 7, PUBREL 9, PINGREQ, DISCONNECT.
+            try reader.interface.readSliceAll(replies);
+        }
+    };
+    var replies: [16]u8 = undefined;
+    var future = try io.concurrent(Broker.run, .{ &server, io, &replies });
+    defer future.cancel(io) catch {};
+    var client = try MqttClient.connect(testing.allocator, io, "127.0.0.1", server.socket.address.getPort(), .{ .client_id = "qos2" });
+    defer client.deinit();
+    var captured: Captured = .{};
+    client.on_publish = Captured.cb;
+    client.on_publish_ctx = &captured;
+    try testing.expectEqual(proto.PacketType.publish, try client.readOne());
+    try testing.expectEqual(proto.PacketType.pubrel, try client.readOne());
+    try testing.expectEqual(proto.PacketType.pubrec, try client.readOne());
+    try client.ping();
+    client.disconnect();
+    try future.await(io);
+    try testing.expectEqualStrings("v", captured.payload[0..captured.payload_len]);
+    const expected = proto.ack(.pubrec, 7) ++ proto.ack(.pubcomp, 7) ++ proto.ack(.pubrel, 9) ++ proto.pingreq ++ proto.disconnect;
+    try testing.expectEqualSlices(u8, &expected, &replies);
+}
+
+test "fuzz readOne: arbitrary broker bytes after CONNACK never crash the client" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const io = testing.io;
+            var bytes: [48]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var server = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+            defer server.deinit(io);
+            const Broker = struct {
+                fn serve(s: *net.Server, aio: Io, data: []const u8) !void {
+                    const stream = try s.accept(aio);
+                    defer stream.close(aio);
+                    var rbuf: [512]u8 = undefined;
+                    var reader = stream.reader(aio, &rbuf);
+                    var body: std.ArrayList(u8) = .empty;
+                    defer body.deinit(std.heap.smp_allocator);
+                    _ = try proto.readPacket(&reader.interface, std.heap.smp_allocator, &body, max_packet_len);
+                    var wbuf: [128]u8 = undefined;
+                    var writer = stream.writer(aio, &wbuf);
+                    try writer.interface.writeAll(&.{ 0x20, 2, 0, 0 });
+                    try writer.interface.writeAll(data);
+                    try writer.interface.flush();
+                    // End the stream so the client's last readOne fails, then
+                    // drain its acknowledgements until it closes.
+                    try stream.shutdown(aio, .send);
+                    while (true) _ = reader.interface.takeByte() catch break;
+                }
+            };
+            var future = try io.concurrent(Broker.serve, .{ &server, io, @as([]const u8, &bytes) });
+            defer future.cancel(io) catch {};
+            var client = try MqttClient.connect(testing.allocator, io, "127.0.0.1", server.socket.address.getPort(), .{ .client_id = "fuzz" });
+            defer client.deinit();
+            // The fixed input ends, so the stream closes and readOne errors.
+            while (true) _ = client.readOne() catch break;
+        }
+    }.run, .{});
 }

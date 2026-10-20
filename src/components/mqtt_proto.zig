@@ -1,9 +1,9 @@
-//! MQTT 3.1.1 control-packet codec (encode/decode).
+//! MQTT 3.1.1 control-packet codec.
 //!
-//! Pure, allocation-explicit, transport-agnostic. The client (`mqtt_client.zig`)
-//! and the in-tree test broker double both build on this. Implements the subset
-//! Moonraker needs: CONNECT/CONNACK, PUBLISH/PUBACK (QoS 0/1), SUBSCRIBE/SUBACK,
-//! PINGREQ/PINGRESP, DISCONNECT.
+//! Transport-agnostic. The client (`mqtt_client.zig`) and its test broker
+//! double build on this. Implements the subset Moonraker needs: CONNECT/CONNACK,
+//! PUBLISH with the QoS 1 and QoS 2 acknowledgements, SUBSCRIBE/SUBACK,
+//! PINGREQ/PINGRESP and DISCONNECT.
 //!
 //! Reference: MQTT Version 3.1.1, OASIS Standard (protocol level 0x04).
 
@@ -15,8 +15,11 @@ pub const PacketType = enum(u4) {
     connack = 2,
     publish = 3,
     puback = 4,
-    suback = 9,
+    pubrec = 5,
+    pubrel = 6,
+    pubcomp = 7,
     subscribe = 8,
+    suback = 9,
     unsubscribe = 10,
     unsuback = 11,
     pingreq = 12,
@@ -38,6 +41,10 @@ pub const ConnackCode = enum(u8) {
 
 pub const max_remaining_length: u32 = 268_435_455; // 0xFF,0xFF,0xFF,0x7F
 
+/// Fixed two-byte packets (MQTT 3.12 and 3.14).
+pub const pingreq = [2]u8{ 0xC0, 0x00 };
+pub const disconnect = [2]u8{ 0xE0, 0x00 };
+
 // ===========================================================================
 // Remaining-length varint (MQTT 1.5.5)
 // ===========================================================================
@@ -48,20 +55,6 @@ pub fn encodeVarInt(value: u32, buf: []u8) ![]const u8 {
     var writer: std.Io.Writer = .fixed(buf);
     writer.writeLeb128(@as(u28, @intCast(value))) catch return error.NoSpaceLeft;
     return writer.buffered();
-}
-
-pub const VarIntResult = struct { value: u32, len: usize };
-
-/// Decode a remaining-length varint from the front of `data`. Returns null when
-/// `data` does not yet hold a complete varint (needs more bytes), errors when
-/// the varint is malformed (more than 4 bytes).
-pub fn decodeVarInt(data: []const u8) !?VarIntResult {
-    var reader: std.Io.Reader = .fixed(data);
-    const value = readVarInt(&reader) catch |err| switch (err) {
-        error.EndOfStream => return null,
-        else => return err,
-    };
-    return .{ .value = value, .len = reader.seek };
 }
 
 /// Read MQTT's four-byte unsigned LEB128 length without consuming packet data.
@@ -95,10 +88,10 @@ fn appendStr(list: *std.ArrayList(u8), alloc: std.mem.Allocator, s: []const u8) 
 /// Read a 2-byte-length-prefixed string at `data[off..]`. Returns the string and
 /// the offset past it.
 fn readStr(data: []const u8, off: usize) !struct { s: []const u8, next: usize } {
-    if (off + 2 > data.len) return error.Truncated;
+    if (data.len - @min(off, data.len) < 2) return error.Truncated;
     const len: usize = std.mem.readInt(u16, data[off..][0..2], .big);
     const start = off + 2;
-    if (start + len > data.len) return error.Truncated;
+    if (data.len - start < len) return error.Truncated;
     return .{ .s = data[start .. start + len], .next = start + len };
 }
 
@@ -109,6 +102,7 @@ fn readStr(data: []const u8, off: usize) !struct { s: []const u8, next: usize } 
 /// Prepend the fixed header (type|flags + remaining length) to `body`, returning
 /// a fresh owned packet. Frees nothing.
 fn frame(alloc: std.mem.Allocator, ptype: PacketType, flags: u4, body: []const u8) ![]u8 {
+    if (body.len > max_remaining_length) return error.ValueTooLarge;
     var rl_buf: [4]u8 = undefined;
     const rl = try encodeVarInt(@intCast(body.len), &rl_buf);
     var out = try alloc.alloc(u8, 1 + rl.len + body.len);
@@ -141,8 +135,7 @@ pub fn encodeConnect(alloc: std.mem.Allocator, opts: ConnectOptions) ![]u8 {
 
     var flags: u8 = 0;
     if (opts.clean_session) flags |= 0x02;
-    const has_will = opts.will_topic != null and opts.will_payload != null;
-    if (has_will) {
+    if (opts.will_topic != null and opts.will_payload != null) {
         flags |= 0x04;
         flags |= (@as(u8, opts.will_qos) << 3);
         if (opts.will_retain) flags |= 0x20;
@@ -154,10 +147,10 @@ pub fn encodeConnect(alloc: std.mem.Allocator, opts: ConnectOptions) ![]u8 {
 
     // Payload: client id, [will topic, will payload], [username], [password].
     try appendStr(&body, alloc, opts.client_id);
-    if (has_will) {
-        try appendStr(&body, alloc, opts.will_topic.?);
-        try appendStr(&body, alloc, opts.will_payload.?);
-    }
+    if (opts.will_topic) |topic| if (opts.will_payload) |payload| {
+        try appendStr(&body, alloc, topic);
+        try appendStr(&body, alloc, payload);
+    };
     if (opts.username) |u| try appendStr(&body, alloc, u);
     if (opts.password) |p| try appendStr(&body, alloc, p);
 
@@ -204,19 +197,13 @@ pub fn encodeSubscribe(
     return frame(alloc, .subscribe, 0b0010, body.items);
 }
 
-/// Encode a PUBACK packet (QoS 1 acknowledgement).
-pub fn encodePuback(alloc: std.mem.Allocator, packet_id: u16) ![]u8 {
-    var body: [2]u8 = undefined;
-    std.mem.writeInt(u16, &body, packet_id, .big);
-    return frame(alloc, .puback, 0, &body);
-}
-
-pub fn encodePingreq(alloc: std.mem.Allocator) ![]u8 {
-    return frame(alloc, .pingreq, 0, &.{});
-}
-
-pub fn encodeDisconnect(alloc: std.mem.Allocator) ![]u8 {
-    return frame(alloc, .disconnect, 0, &.{});
+/// A four-byte acknowledgement (PUBACK, PUBREC, PUBREL or PUBCOMP) for
+/// `packet_id`. PUBREL carries the reserved flags 0b0010 (MQTT 3.6.1).
+pub fn ack(ptype: PacketType, packet_id: u16) [4]u8 {
+    const flags: u8 = if (ptype == .pubrel) 0b0010 else 0;
+    var out: [4]u8 = .{ (@as(u8, @backingInt(ptype)) << 4) | flags, 2, 0, 0 };
+    std.mem.writeInt(u16, out[2..4], packet_id, .big);
+    return out;
 }
 
 // ===========================================================================
@@ -229,28 +216,30 @@ pub const Packet = struct {
     /// The variable-header + payload bytes (everything after the fixed header).
     /// Borrows from the input buffer — copy if it must outlive it.
     body: []const u8,
-    /// Total bytes consumed from the input (fixed header + body).
-    total: usize,
+
+    /// Split the fixed-header first byte into type and flags.
+    pub fn init(b0: u8, body: []const u8) Packet {
+        return .{ .ptype = @fromBackingInt(@as(u4, @intCast(b0 >> 4))), .flags = @truncate(b0), .body = body };
+    }
+
+    /// The packet identifier of a PUBACK/PUBREC/PUBREL/PUBCOMP/SUBACK.
+    pub fn packetId(self: Packet) !u16 {
+        if (self.body.len < 2) return error.Truncated;
+        return std.mem.readInt(u16, self.body[0..2], .big);
+    }
 };
 
-/// Try to decode one packet from the front of `data`. Returns null when `data`
-/// holds an incomplete packet (need more bytes). Errors on malformed input.
-pub fn decode(data: []const u8) !?Packet {
-    if (data.len < 1) return null;
-    const b0 = data[0];
-    const ptype: PacketType = @fromBackingInt(@intCast(@as(u4, @intCast(b0 >> 4))));
-    const flags: u4 = @intCast(b0 & 0x0F);
-
-    const vi = (try decodeVarInt(data[1..])) orelse return null;
-    const header_len = 1 + vi.len;
-    const total = header_len + vi.value;
-    if (data.len < total) return null; // incomplete body
-    return Packet{
-        .ptype = ptype,
-        .flags = flags,
-        .body = data[header_len..total],
-        .total = total,
-    };
+/// Read one packet from `reader` (blocking). The body is stored in `body`,
+/// which is grown with `gpa` and reused across calls; the returned packet
+/// borrows it until the next read. Bodies over `max_len` are rejected before
+/// any allocation.
+pub fn readPacket(reader: *std.Io.Reader, gpa: std.mem.Allocator, body: *std.ArrayList(u8), max_len: u32) !Packet {
+    const b0 = try reader.takeByte();
+    const len = try readVarInt(reader);
+    if (len > max_len) return error.PacketTooLarge;
+    try body.resize(gpa, len);
+    try reader.readSliceAll(body.items);
+    return .init(b0, body.items);
 }
 
 pub const PublishView = struct {
@@ -261,16 +250,18 @@ pub const PublishView = struct {
     packet_id: u16, // 0 when qos == 0
 };
 
-/// Interpret a decoded PUBLISH packet's body + flags.
+/// Interpret a decoded PUBLISH packet's body + flags. QoS 3 is reserved and
+/// makes the packet malformed (MQTT 3.3.1.2).
 pub fn parsePublish(pkt: Packet) !PublishView {
     if (pkt.ptype != .publish) return error.NotPublish;
     const qos: u2 = @intCast((pkt.flags >> 1) & 0x3);
+    if (qos == 3) return error.MalformedPacket;
     const retain = (pkt.flags & 0x1) != 0;
     const t = try readStr(pkt.body, 0);
     var off = t.next;
     var packet_id: u16 = 0;
     if (qos > 0) {
-        if (off + 2 > pkt.body.len) return error.Truncated;
+        if (pkt.body.len - off < 2) return error.Truncated;
         packet_id = std.mem.readInt(u16, pkt.body[off..][0..2], .big);
         off += 2;
     }
@@ -287,13 +278,7 @@ pub fn parsePublish(pkt: Packet) !PublishView {
 pub fn parseConnack(pkt: Packet) !ConnackCode {
     if (pkt.ptype != .connack) return error.NotConnack;
     if (pkt.body.len < 2) return error.Truncated;
-    return @fromBackingInt(@intCast(pkt.body[1]));
-}
-
-/// Extract the packet id from a PUBACK / SUBACK packet (first two body bytes).
-pub fn parsePacketId(pkt: Packet) !u16 {
-    if (pkt.body.len < 2) return error.Truncated;
-    return std.mem.readInt(u16, pkt.body[0..2], .big);
+    return @fromBackingInt(pkt.body[1]);
 }
 
 // ===========================================================================
@@ -302,14 +287,20 @@ pub fn parsePacketId(pkt: Packet) !u16 {
 
 const testing = std.testing;
 
-test "encodeVarInt/decodeVarInt: boundary values round-trip" {
+/// Decode a complete packet held in `bytes` (test inputs only).
+fn decodeAll(bytes: []const u8, body: *std.ArrayList(u8)) !Packet {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return readPacket(&reader, testing.allocator, body, max_remaining_length);
+}
+
+test "encodeVarInt/readVarInt: boundary values round-trip" {
     const cases = [_]u32{ 0, 1, 127, 128, 16383, 16384, 2097151, 2097152, max_remaining_length };
     for (cases) |v| {
         var buf: [4]u8 = undefined;
         const enc = try encodeVarInt(v, &buf);
-        const dec = (try decodeVarInt(enc)).?;
-        try testing.expectEqual(v, dec.value);
-        try testing.expectEqual(enc.len, dec.len);
+        var reader: std.Io.Reader = .fixed(enc);
+        try testing.expectEqual(v, try readVarInt(&reader));
+        try testing.expectEqual(enc.len, reader.seek);
     }
 }
 
@@ -318,26 +309,22 @@ test "encodeVarInt: rejects oversized value" {
     try testing.expectError(error.ValueTooLarge, encodeVarInt(max_remaining_length + 1, &buf));
 }
 
-test "decodeVarInt: incomplete returns null, malformed errors" {
-    try testing.expectEqual(@as(?VarIntResult, null), try decodeVarInt(&.{0x80}));
-    try testing.expectError(error.MalformedVarInt, decodeVarInt(&.{ 0x80, 0x80, 0x80, 0x80 }));
-}
-
 test "encodeConnect: minimal clean session" {
     const pkt = try encodeConnect(testing.allocator, .{ .client_id = "phobos" });
     defer testing.allocator.free(pkt);
-    const dec = (try decode(pkt)).?;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const dec = try decodeAll(pkt, &body);
     try testing.expectEqual(PacketType.connect, dec.ptype);
     // Protocol name "MQTT", level 4, flags 0x02 (clean), keepalive 60.
     try testing.expectEqualSlices(u8, &.{ 0, 4, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0, 60 }, dec.body[0..10]);
-    // Client id.
     const cid = try readStr(dec.body, 10);
     try testing.expectEqualStrings("phobos", cid.s);
 }
 
-test "encodeConnect: with will + credentials sets flags" {
+test "encodeConnect: with will + credentials sets flags and payload order" {
     const pkt = try encodeConnect(testing.allocator, .{
-        .client_id = "c",
+        .client_id = "",
         .username = "u",
         .password = "p",
         .will_topic = "w/t",
@@ -346,15 +333,25 @@ test "encodeConnect: with will + credentials sets flags" {
         .will_retain = true,
     });
     defer testing.allocator.free(pkt);
-    const dec = (try decode(pkt)).?;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const dec = try decodeAll(pkt, &body);
     // Flags byte at body offset 7: clean(0x02)|will(0x04)|willqos1(0x08)|willretain(0x20)|user(0x80)|pass(0x40)
     try testing.expectEqual(@as(u8, 0x02 | 0x04 | 0x08 | 0x20 | 0x80 | 0x40), dec.body[7]);
+    const cid = try readStr(dec.body, 10);
+    try testing.expectEqualStrings("", cid.s);
+    const topic = try readStr(dec.body, cid.next);
+    try testing.expectEqualStrings("w/t", topic.s);
+    const payload = try readStr(dec.body, topic.next);
+    try testing.expectEqualStrings("off", payload.s);
 }
 
 test "encodePublish/parsePublish: qos0 round-trips" {
     const pkt = try encodePublish(testing.allocator, "a/b", "hello", 0, false, 0);
     defer testing.allocator.free(pkt);
-    const view = try parsePublish((try decode(pkt)).?);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const view = try parsePublish(try decodeAll(pkt, &body));
     try testing.expectEqualStrings("a/b", view.topic);
     try testing.expectEqualStrings("hello", view.payload);
     try testing.expectEqual(@as(u2, 0), view.qos);
@@ -364,112 +361,69 @@ test "encodePublish/parsePublish: qos0 round-trips" {
 test "encodePublish/parsePublish: qos1 carries packet id + retain" {
     const pkt = try encodePublish(testing.allocator, "t", "p", 1, true, 0x1234);
     defer testing.allocator.free(pkt);
-    const view = try parsePublish((try decode(pkt)).?);
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const view = try parsePublish(try decodeAll(pkt, &body));
     try testing.expectEqual(@as(u2, 1), view.qos);
     try testing.expect(view.retain);
     try testing.expectEqual(@as(u16, 0x1234), view.packet_id);
     try testing.expectEqualStrings("p", view.payload);
 }
 
+test "parsePublish rejects reserved QoS 3 and truncated bodies" {
+    try testing.expectError(error.MalformedPacket, parsePublish(.init(0x36, &.{ 0, 1, 't', 0, 7 })));
+    try testing.expectError(error.Truncated, parsePublish(.init(0x32, &.{ 0, 1, 't', 0 })));
+    try testing.expectError(error.Truncated, parsePublish(.init(0x30, &.{0})));
+    try testing.expectError(error.NotPublish, parsePublish(.init(0x40, &.{ 0, 1 })));
+}
+
 test "encodeSubscribe: flags are 0b0010 and body holds id+filter+qos" {
     const pkt = try encodeSubscribe(testing.allocator, 7, "x/#", 1);
     defer testing.allocator.free(pkt);
-    const dec = (try decode(pkt)).?;
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    const dec = try decodeAll(pkt, &body);
     try testing.expectEqual(PacketType.subscribe, dec.ptype);
     try testing.expectEqual(@as(u4, 0b0010), dec.flags);
-    try testing.expectEqual(@as(u16, 7), try parsePacketId(dec));
+    try testing.expectEqual(@as(u16, 7), try dec.packetId());
     const f = try readStr(dec.body, 2);
     try testing.expectEqualStrings("x/#", f.s);
     try testing.expectEqual(@as(u8, 1), dec.body[f.next]);
 }
 
-test "encodePuback/encodePingreq/encodeDisconnect shapes" {
-    const pa = try encodePuback(testing.allocator, 0x0102);
-    defer testing.allocator.free(pa);
-    try testing.expectEqualSlices(u8, &.{ 0x40, 0x02, 0x01, 0x02 }, pa);
-    const pr = try encodePingreq(testing.allocator);
-    defer testing.allocator.free(pr);
-    try testing.expectEqualSlices(u8, &.{ 0xC0, 0x00 }, pr);
-    const dc = try encodeDisconnect(testing.allocator);
-    defer testing.allocator.free(dc);
-    try testing.expectEqualSlices(u8, &.{ 0xE0, 0x00 }, dc);
+test "ack, pingreq and disconnect wire bytes" {
+    try testing.expectEqualSlices(u8, &.{ 0x40, 0x02, 0x01, 0x02 }, &ack(.puback, 0x0102));
+    try testing.expectEqualSlices(u8, &.{ 0x50, 0x02, 0x00, 0x09 }, &ack(.pubrec, 9));
+    try testing.expectEqualSlices(u8, &.{ 0x62, 0x02, 0x00, 0x09 }, &ack(.pubrel, 9));
+    try testing.expectEqualSlices(u8, &.{ 0x70, 0x02, 0x00, 0x09 }, &ack(.pubcomp, 9));
+    try testing.expectEqualSlices(u8, &.{ 0xC0, 0x00 }, &pingreq);
+    try testing.expectEqualSlices(u8, &.{ 0xE0, 0x00 }, &disconnect);
 }
 
 test "parseConnack: accepted and rejected codes" {
-    const ok = try frame(testing.allocator, .connack, 0, &.{ 0, 0 });
-    defer testing.allocator.free(ok);
-    try testing.expectEqual(ConnackCode.accepted, try parseConnack((try decode(ok)).?));
-    const bad = try frame(testing.allocator, .connack, 0, &.{ 0, 5 });
-    defer testing.allocator.free(bad);
-    try testing.expectEqual(ConnackCode.not_authorized, try parseConnack((try decode(bad)).?));
+    try testing.expectEqual(ConnackCode.accepted, try parseConnack(.init(0x20, &.{ 0, 0 })));
+    try testing.expectEqual(ConnackCode.not_authorized, try parseConnack(.init(0x20, &.{ 0, 5 })));
+    try testing.expectError(error.Truncated, parseConnack(.init(0x20, &.{0})));
 }
 
-test "decode: incomplete packet returns null" {
-    // Fixed header says remaining length 10 but only 3 bytes follow.
-    try testing.expectEqual(@as(?Packet, null), try decode(&.{ 0x30, 0x0A, 0x00, 0x01 }));
-    try testing.expectEqual(@as(?Packet, null), try decode(&.{}));
-}
+test "readPacket: truncated, oversized and pipelined input" {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    var short: std.Io.Reader = .fixed(&.{ 0x30, 0x0A, 0x00, 0x01 });
+    try testing.expectError(error.EndOfStream, readPacket(&short, testing.allocator, &body, 64));
+    var big: std.Io.Reader = .fixed(&.{ 0x30, 0x41 });
+    try testing.expectError(error.PacketTooLarge, readPacket(&big, testing.allocator, &body, 64));
+    var malformed: std.Io.Reader = .fixed(&.{ 0x30, 0x80, 0x80, 0x80, 0x80, 0 });
+    try testing.expectError(error.MalformedVarInt, readPacket(&malformed, testing.allocator, &body, 64));
+    var empty: std.Io.Reader = .fixed(&.{});
+    try testing.expectError(error.EndOfStream, readPacket(&empty, testing.allocator, &body, 64));
 
-test "decode: multiple packets — total advances correctly" {
-    const a = try encodePingreq(testing.allocator);
-    defer testing.allocator.free(a);
-    const b = try encodePuback(testing.allocator, 9);
-    defer testing.allocator.free(b);
-    var both = try testing.allocator.alloc(u8, a.len + b.len);
-    defer testing.allocator.free(both);
-    @memcpy(both[0..a.len], a);
-    @memcpy(both[a.len..], b);
-
-    const p1 = (try decode(both)).?;
-    try testing.expectEqual(PacketType.pingreq, p1.ptype);
-    const p2 = (try decode(both[p1.total..])).?;
-    try testing.expectEqual(PacketType.puback, p2.ptype);
-    try testing.expectEqual(@as(u16, 9), try parsePacketId(p2));
-}
-
-// --- Fuzz tests ---
-
-test "fuzz decode: arbitrary bytes never crash" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [64]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            const n = @as(usize, buf[0]) % buf.len;
-            const data = buf[1 .. 1 + @min(n, buf.len - 1)];
-            const pkt = decode(data) catch return;
-            if (pkt) |p| {
-                if (p.ptype == .publish) _ = parsePublish(p) catch {};
-                if (p.ptype == .connack) _ = parseConnack(p) catch {};
-                _ = parsePacketId(p) catch {};
-            }
-        }
-    }.run, .{});
-}
-
-test "fuzz decodeVarInt: never crashes" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [8]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            _ = decodeVarInt(&buf) catch {};
-        }
-    }.run, .{});
-}
-
-test "fuzz encodeConnect: arbitrary ids/creds never crash" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [48]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            const split = @as(usize, buf[0]) % buf.len;
-            const pkt = encodeConnect(testing.allocator, .{
-                .client_id = buf[1..@max(1, split)],
-                .username = buf[@max(1, split)..],
-            }) catch return;
-            defer testing.allocator.free(pkt);
-            _ = decode(pkt) catch {};
-        }
-    }.run, .{});
+    const both = pingreq ++ ack(.puback, 9);
+    var reader: std.Io.Reader = .fixed(&both);
+    try testing.expectEqual(PacketType.pingreq, (try readPacket(&reader, testing.allocator, &body, 64)).ptype);
+    const second = try readPacket(&reader, testing.allocator, &body, 64);
+    try testing.expectEqual(PacketType.puback, second.ptype);
+    try testing.expectEqual(@as(u16, 9), try second.packetId());
 }
 
 test "readVarInt stops before packet data and enforces MQTT's four-byte bound" {
@@ -485,6 +439,28 @@ test "readVarInt stops before packet data and enforces MQTT's four-byte bound" {
     try testing.expectError(error.NoSpaceLeft, encodeVarInt(0, &empty));
 }
 
+// --- Fuzz tests ---
+
+test "fuzz readPacket: arbitrary bytes never crash the decoders" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const n = @as(usize, buf[0]) % buf.len;
+            var reader: std.Io.Reader = .fixed(buf[1 .. 1 + @min(n, buf.len - 1)]);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(testing.allocator);
+            const pkt = readPacket(&reader, testing.allocator, &body, 64) catch return;
+            if (pkt.ptype == .publish) {
+                const view = parsePublish(pkt) catch return;
+                try testing.expect(view.qos != 3);
+            }
+            if (pkt.ptype == .connack) _ = parseConnack(pkt) catch {};
+            _ = pkt.packetId() catch {};
+        }
+    }.run, .{});
+}
+
 test "fuzz readVarInt consumes at most four bytes" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) !void {
@@ -497,6 +473,59 @@ test "fuzz readVarInt consumes at most four bytes" {
             };
             try testing.expect(result <= max_remaining_length);
             try testing.expect(reader.seek <= 4);
+        }
+    }.run, .{});
+}
+
+test "fuzz encodeConnect: arbitrary ids/creds round-trip the client id" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [48]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const split = @max(1, @as(usize, buf[0]) % buf.len);
+            const pkt = try encodeConnect(testing.allocator, .{ .client_id = buf[1..split], .username = buf[split..] });
+            defer testing.allocator.free(pkt);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(testing.allocator);
+            const dec = try decodeAll(pkt, &body);
+            try testing.expectEqualSlices(u8, buf[1..split], (try readStr(dec.body, 10)).s);
+        }
+    }.run, .{});
+}
+
+test "fuzz encodePublish/ack: round-trip topic, payload and packet id" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const split = @max(1, @as(usize, buf[0]) % buf.len);
+            const qos: u2 = @intCast(buf[0] % 3);
+            const id = std.mem.readInt(u16, buf[1..3], .big);
+            const pkt = try encodePublish(testing.allocator, buf[1..split], buf[split..], qos, buf[0] & 1 == 1, id);
+            defer testing.allocator.free(pkt);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(testing.allocator);
+            const view = try parsePublish(try decodeAll(pkt, &body));
+            try testing.expectEqualSlices(u8, buf[1..split], view.topic);
+            try testing.expectEqualSlices(u8, buf[split..], view.payload);
+            try testing.expectEqual(if (qos > 0) id else 0, view.packet_id);
+            const reply = ack(.pubrec, id);
+            try testing.expectEqual(id, try Packet.init(reply[0], reply[2..]).packetId());
+        }
+    }.run, .{});
+}
+
+test "fuzz encodeSubscribe: filter round-trips" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [40]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const pkt = try encodeSubscribe(testing.allocator, 1, buf[1..], @intCast(buf[0] % 3));
+            defer testing.allocator.free(pkt);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(testing.allocator);
+            const dec = try decodeAll(pkt, &body);
+            try testing.expectEqualSlices(u8, buf[1..], (try readStr(dec.body, 2)).s);
         }
     }.run, .{});
 }

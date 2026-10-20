@@ -19,7 +19,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   deltas. Memory footprint: `docs/MEMORY.md` (~3.7 MB idle RSS, 1.2 MB binary).
   > NOTE: the "Recent depth improvements" log below is **historical** — many
   > components have advanced well past the percentages quoted in it (e.g. power,
-  > sensor, mqtt, machine are all done now; MQTT TLS+reconnect, Spoolman WS, TD-1
+  > sensor and machine are done now; MQTT TLS/keepalive/reconnect, Spoolman WS, TD-1
   > discovery, the sensor Jinja engine, and machine init-system providers all
   > landed). Trust `API_COVERAGE.md` / the heatmap for current status, not this log.
   **Recent depth improvements (historical log):**
@@ -316,16 +316,7 @@ _norm_structure_compare array item masking (Python).
 - **power/wled/td1** — power: state tracked, device URLs stored,
   real GPIO/network control stubbed. wled: real HTTP POST to WLED JSON API
   for address-based strips; serial-only strips stubbed. td1: UART stubbed.
-- **mqtt** — in-memory message store + subscription tracking; pub API
-  (`publishTopic`, `subscribeTopic`, `unsubscribe`, `close`, setters) exposed,
-  `retain`/`timeout` parsed, `server.mqtt.publish_mqtt_topic` remote method
-  registered. Status caching with sub-field merge, status_objects filtering,
-  timed flush thread, moonraker_status publication on state change.
-  Connection state tracking (disconnected→connecting→connected→disconnecting).
-  handlePublishPrefixed handler with full test suite (prefix/prefixed param).
-  Real MQTT 3.1.1 broker client is DONE (mqtt_client.zig: live TCP connect,
-  publish/subscribe, background reader, LWT); only TLS + auto-reconnect/backoff +
-  JSON-RPC-over-MQTT dispatch remain P3.
+- **mqtt** — see P3 below and "Known Moonraker gaps".
 - **spoolman/announcements** — announcements: real RSS fetch from Moonlight
   (arksine.github.io/moonlight) via refreshFeeds using rss.zig parser,
   prefix pruning removes stale entries, notify_announcement_update on changes,
@@ -372,18 +363,13 @@ _norm_structure_compare array item masking (Python).
   announcements (4), power (1), extensions (1). Total: ~1012 tests (~174 fuzz).
 
 ### P3 — remaining depth gaps (non-blocking, requires hardware/external services)
-- **mqtt** — DONE incl. P3: live TCP connect, publish/subscribe, background reader,
-  LWT, **TLS** (connectTls over std.crypto.tls), **automatic reconnect/backoff**
-  (supervisor), and JSON-RPC-over-MQTT request dispatch. The HTTP endpoints also
-  keep an in-memory message store + subscription tracking for the no-broker case.
-  Pub API complete: `publishTopic`, `subscribeTopic`, `unsubscribe`, `close`,
-  `setInstanceName`/`setClientId`/`setDefaultQos`, `storeMessage`/`getMessage`/
-  `addSubscription` exposed. `retain`/`timeout` params parsed. Remote method
-  `server.mqtt.publish_mqtt_topic` registered. Status caching with sub-field merge
-  (`sendStatus`), `status_objects` filtering, timed flush background thread,
-  `moonraker_status` publication on klippy state change. Connection state tracking
-  (disconnected→connecting→connected→disconnecting). handlePublishPrefixed handler
-  with full test suite (prefix/prefixed param). 58 tests (9 fuzz).
+- **mqtt** — `[mqtt]` options as in mqtt.py (`address`, `port`, credentials,
+  `client_id`, `instance_name`, `default_qos`, `api_qos`, `enable_moonraker_api`,
+  `enable_tls`); reconnect supervisor with backoff, PINGREQ every half keepalive,
+  retained `{"server":"online"}` status and `{"server":"offline"}` Last Will;
+  `server.mqtt.publish` sends to the broker; `server.mqtt.subscribe` waits for
+  the first broker message; QoS 1 and 2 handshakes; JSON-RPC over the API
+  topics with `mqtt_timestamp` duplicate screening. Gaps are listed below.
 - **power/wled/td1** — DONE: power HTTP-URL devices send real GET, `type: gpio`
   drives the sysfs line (gpio_sysfs.zig); td1 reads CSV over UART (serial.zig);
   wled drives serial strips and HTTP strips via `std.http.Client`. Remaining:
@@ -445,3 +431,8 @@ Keep the coverage gate at 100% and the full suite green after every step.
 - Sensors append to history and notify per MQTT message and merge `last_measurements`; Moonraker replaces `last_measurements` per message, samples history and notifies from a 1 Hz timer, and sets `error_state` "MQTT Disconnected" on disconnect (`src/components/sensor.zig` `ingestMqttMessage`).
 - `/server/webcams/test` resolves relative URLs against `http://127.0.0.1`; Moonraker uses the machine's public IP once known and `convert_local` rewrites local addresses (`src/components/webcam.zig` `resolveUrl`).
 - Errors Moonraker raises as a plain 400 ServerError (unknown sensor, unstored feed, unknown announcement entry) surface as `error.InvalidParams`, which JSON-RPC reports as -32602, not 400 (`src/jsonrpc.zig`).
+- MQTT Klipper status publishing (`status_objects`, `status_interval`, `publish_split_status`, `{instance}/klipper/status`, `{instance}/klipper/state/...`) is not implemented; the options are ignored. It needs a Klippy status hook in `src/components/klippy_connection.zig` (`src/components/mqtt.zig`).
+- MQTT speaks 3.1.1 only; `mqtt_protocol: v3.1` or `v5` logs a warning and connects with 3.1.1. `username`/`password` are used verbatim (no Jinja rendering) and `password_file` is not read (`src/app.zig` `applyMqttConfig`).
+- `server.mqtt.publish` replies after the socket write, not after PUBACK/PUBCOMP, so `timeout` has no effect; `server.mqtt.subscribe` does not UNSUBSCRIBE when it returns (`src/components/mqtt.zig`).
+- `server.mqtt.subscribe` timeout returns `error.MqttTimeout`; `src/jsonrpc.zig` and `src/http_transport.zig` do not map it to Moonraker's 504 "MQTT Subscribe Timed Out" yet, so it surfaces as 500.
+- Klipper remote methods `publish_mqtt_topic` and `spoolman_set_active_spool` exist only as JSON-RPC methods (`server.mqtt.publish_mqtt_topic`, `spoolman_set_active_spool`); they are not registered with Klippy, whose `remote_handler` serves Feather only (`src/components/klippy_connection.zig`, `src/app.zig`).
