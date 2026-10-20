@@ -48,7 +48,7 @@ pub const Template = struct {
     }
 
     /// Execute with `payload` + `set_result`, recording measurements into
-    /// `out` (name → .integer/.float). Only result keys enter `arena`; temporary
+    /// `out` (name → .integer/.float). Only results enter `arena`; temporary
     /// evaluation uses at most `max_render_bytes` and `max_render_steps`.
     pub fn render(self: *const Template, arena: std.mem.Allocator, payload: []const u8, out: *std.json.ObjectMap) RenderError!void {
         var storage: [max_render_bytes]u8 = undefined;
@@ -756,6 +756,11 @@ fn applyNamedFilter(arena: std.mem.Allocator, name: []const u8, v: Value, arg: ?
         const from = try toString(arena, arg orelse return error.EvalError);
         const to = try toString(arena, arg2 orelse return error.EvalError);
         if (from.len == 0) return .{ .string = s };
+        // The standard replacement-size calculator uses unchecked usize sums.
+        if (to.len > from.len) {
+            const growth = std.math.mul(usize, std.mem.count(u8, s, from), to.len - from.len) catch return error.OutOfMemory;
+            _ = std.math.add(usize, s.len, growth) catch return error.OutOfMemory;
+        }
         const out = std.mem.replaceOwned(u8, arena, s, from, to) catch return error.OutOfMemory;
         return .{ .string = out };
     } else if (std.mem.eql(u8, name, "length") or std.mem.eql(u8, name, "count")) {
@@ -1012,6 +1017,20 @@ test "Template render bounds repeated string expansion" {
     try testing.expectEqual(@as(usize, 0), out.count());
 }
 
+test "Template render rejects replacement growth beyond 32-bit address space" {
+    var input: [64 * 1024]u8 = @splat('x');
+    var replacement: [64 * 1024]u8 = @splat('y');
+    const source = try std.mem.concat(testing.allocator, u8, &.{ "{ set_result(\"x\", payload|replace(\"x\", \"", &replacement, "\")|length) }" });
+    defer testing.allocator.free(source);
+    var template = try Template.init(testing.allocator, source);
+    defer template.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.json.ObjectMap = .empty;
+    try testing.expectError(error.OutOfMemory, template.render(arena.allocator(), &input, &out));
+    try testing.expectEqual(@as(usize, 0), out.count());
+}
+
 test "Template execution shares its step budget across nested loops" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1056,6 +1075,29 @@ test "fuzz Template render bounds expanding strings and owns successful results"
                 return testing.expectEqual(@as(usize, 0), out.count());
             };
             try testing.expectEqual(@as(i64, 1) << count, out.get("length").?.integer);
+        }
+    }.run, .{});
+}
+
+test "fuzz Template replacement returns exact lengths or hits its memory bound" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var input: [512]u8 = @splat('x');
+            var replacement: [512]u8 = @splat('y');
+            const input_len = smith.valueRangeAtMostWithHash(u16, 0, input.len, 0);
+            const replacement_len = smith.valueRangeAtMostWithHash(u16, 0, replacement.len, 1);
+            const source = try std.mem.concat(testing.allocator, u8, &.{ "{ set_result(\"length\", payload|replace(\"x\", \"", replacement[0..replacement_len], "\")|length) }" });
+            defer testing.allocator.free(source);
+            var template = try Template.init(testing.allocator, source);
+            defer template.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var out: std.json.ObjectMap = .empty;
+            template.render(arena.allocator(), input[0..input_len], &out) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                return testing.expectEqual(@as(usize, 0), out.count());
+            };
+            try testing.expectEqual(@as(i64, input_len) * replacement_len, out.get("length").?.integer);
         }
     }.run, .{});
 }

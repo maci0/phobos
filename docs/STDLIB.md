@@ -118,6 +118,8 @@ uses at most 64 KiB on the handler stack, and nested execution shares a
 partial measurements. Only successful numeric results and their copied keys
 enter the caller's arena. Power batch responses copy each device's state before
 the next device request can release Core and change that state.
+Template replacements check size growth with `std.math` before
+`std.mem.replaceOwned`, whose size calculation can overflow on 32-bit targets.
 
 TD-1 scans use `std.Io.Clock` to share one serial-timeout budget across reads;
 their final in-flight read can add at most one further serial timeout. Polling
