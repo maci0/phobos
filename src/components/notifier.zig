@@ -6,14 +6,12 @@
 //!   GET  /server/notifiers/list   → server.notifiers.list
 //!   POST /debug/notifiers/test    → debug.notifiers.test (debug only)
 //!
-//! Without configured notifiers the list is always empty, which is the
-//! correct faithful shape. No apprise integration is implemented.
+//! `[notifier <name>]` sections fill the list. Sending needs apprise, which
+//! phobos does not link: the test endpoint fails with `AppriseNotAvailable`
+//! for a configured name and 404 for an unknown one.
 //!
-//! Notifier record shape (NotifierInstance.as_dict):
-//!   name, url, title, body, body_format, events, attach
-//!
-//! POST /debug/notifiers/test params: name (str)
-//! Response: {"status": "success", "stats": {...}}
+//! Notifier record shape (NotifierInstance.as_dict): name, url, title, body,
+//! body_format (null when unset), events (the configured list), attach (null).
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
@@ -21,80 +19,68 @@ const registry = @import("../server/registry.zig");
 const Registry = registry.Registry;
 
 // ---------------------------------------------------------------------------
-// Context (no configured notifiers)
+// Context
 // ---------------------------------------------------------------------------
+
+/// One `[notifier <name>]` section as read from the config. Slices are borrowed.
+pub const Config = struct {
+    name: []const u8,
+    url: []const u8,
+    title: ?[]const u8 = null,
+    body: ?[]const u8 = null,
+    body_format: ?[]const u8 = null,
+    /// The raw `events` option: a comma-separated list.
+    events: []const u8,
+};
 
 pub const Notifier = struct {
     name: []const u8,
-    url: []const u8 = "",
-    title: []const u8 = "",
-    body: []const u8 = "",
-    body_format: []const u8 = "text",
+    url: []const u8,
+    title: ?[]const u8,
+    body: ?[]const u8,
+    body_format: ?[]const u8,
+    events: []const []const u8,
 };
 
 pub const NotifierCtx = struct {
-    /// Configured notifier names. Sending still needs apprise, which phobos
-    /// does not link; a known name fails with `AppriseNotAvailable`.
-    names: []const []const u8 = &.{},
-    /// Full records for `server.notifiers.list`. Empty falls back to `names`.
+    /// Configured records; every slice lives in `arena`.
     notifiers: []const Notifier = &.{},
-    /// True when `notifiers` and its strings were allocated by `addNotifier`.
-    owned: bool = false,
+    arena: std.heap.ArenaAllocator.State = .{},
 
     pub fn deinit(self: *NotifierCtx, alloc: std.mem.Allocator) void {
-        if (!self.owned) return;
-        for (self.notifiers) |n| {
-            alloc.free(n.name);
-            alloc.free(n.url);
-            alloc.free(n.title);
-            alloc.free(n.body);
-            alloc.free(n.body_format);
-        }
-        alloc.free(self.notifiers);
-        self.notifiers = &.{};
-        self.owned = false;
+        self.arena.promote(alloc).deinit();
+        self.* = .{};
     }
 
-    /// Append one config record. Strings are copied. The first call allocates
-    /// the list; later calls grow it.
-    pub fn addNotifier(self: *NotifierCtx, alloc: std.mem.Allocator, src: Notifier) !void {
-        const name = try alloc.dupe(u8, src.name);
-        errdefer alloc.free(name);
-        const url = try alloc.dupe(u8, src.url);
-        errdefer alloc.free(url);
-        const title = try alloc.dupe(u8, src.title);
-        errdefer alloc.free(title);
-        const body = try alloc.dupe(u8, src.body);
-        errdefer alloc.free(body);
-        const body_format = try alloc.dupe(u8, if (src.body_format.len == 0) "text" else src.body_format);
-        errdefer alloc.free(body_format);
-        const next_len = self.notifiers.len + 1;
-        const grown: []Notifier = if (self.owned and self.notifiers.len > 0)
-            try alloc.realloc(@constCast(self.notifiers), next_len)
-        else
-            try alloc.alloc(Notifier, next_len);
-        grown[next_len - 1] = .{
-            .name = name,
-            .url = url,
-            .title = title,
-            .body = body,
-            .body_format = body_format,
+    /// Append one config record, copying its strings. `events` splits like
+    /// Moonraker's `getlist(separator=",")`: items are trimmed and empty ones
+    /// dropped. On error the list is unchanged.
+    pub fn addNotifier(self: *NotifierCtx, alloc: std.mem.Allocator, src: Config) !void {
+        var arena = self.arena.promote(alloc);
+        defer self.arena = arena.state;
+        const a = arena.allocator();
+        var events: std.ArrayList([]const u8) = .empty;
+        var it = std.mem.splitScalar(u8, src.events, ',');
+        while (it.next()) |raw| {
+            const event = std.mem.trim(u8, raw, &std.ascii.whitespace);
+            if (event.len > 0) try events.append(a, try a.dupe(u8, event));
+        }
+        const grown = try a.alloc(Notifier, self.notifiers.len + 1);
+        @memcpy(grown[0..self.notifiers.len], self.notifiers);
+        grown[self.notifiers.len] = .{
+            .name = try a.dupe(u8, src.name),
+            .url = try a.dupe(u8, src.url),
+            .title = if (src.title) |s| try a.dupe(u8, s) else null,
+            .body = if (src.body) |s| try a.dupe(u8, s) else null,
+            .body_format = if (src.body_format) |s| try a.dupe(u8, s) else null,
+            .events = events.items,
         };
         self.notifiers = grown;
-        self.owned = true;
     }
 };
 
-fn putNotifier(alloc: std.mem.Allocator, arr: *std.json.Array, name: []const u8, url: []const u8, title: []const u8, body: []const u8, body_format: []const u8) !void {
-    var obj: std.json.ObjectMap = .empty;
-    try obj.put(alloc, "name", .{ .string = name });
-    try obj.put(alloc, "url", .{ .string = url });
-    try obj.put(alloc, "title", .{ .string = title });
-    try obj.put(alloc, "body", .{ .string = body });
-    try obj.put(alloc, "body_format", .{ .string = body_format });
-    try obj.put(alloc, "events", .{ .array = .init(alloc) });
-    try obj.put(alloc, "attach", .null);
-    try arr.append(.{ .object = obj });
+fn optString(s: ?[]const u8) std.json.Value {
+    return if (s) |v| .{ .string = v } else .null;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,27 +88,30 @@ fn putNotifier(alloc: std.mem.Allocator, arr: *std.json.Array, name: []const u8,
 // ---------------------------------------------------------------------------
 
 /// GET /server/notifiers/list → {"notifiers": [...]}
-/// Without configured notifiers the list is always empty (correct shape).
 pub fn handleNotifierList(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *NotifierCtx = @ptrCast(@alignCast(ctx_ptr));
     var arr: std.json.Array = .init(alloc);
-    if (ctx.notifiers.len > 0) {
-        for (ctx.notifiers) |n| {
-            try putNotifier(alloc, &arr, n.name, n.url, n.title, n.body, n.body_format);
-        }
-    } else {
-        for (ctx.names) |n| {
-            try putNotifier(alloc, &arr, n, "", "", "", "text");
-        }
+    for (ctx.notifiers) |n| {
+        var events: std.json.Array = .init(alloc);
+        for (n.events) |e| try events.append(.{ .string = e });
+        var obj: std.json.ObjectMap = .empty;
+        try obj.put(alloc, "name", .{ .string = n.name });
+        try obj.put(alloc, "url", .{ .string = n.url });
+        try obj.put(alloc, "title", optString(n.title));
+        try obj.put(alloc, "body", optString(n.body));
+        try obj.put(alloc, "body_format", optString(n.body_format));
+        try obj.put(alloc, "events", .{ .array = events });
+        try obj.put(alloc, "attach", .null);
+        try arr.append(.{ .object = obj });
     }
     var result: std.json.ObjectMap = .empty;
     try result.put(alloc, "notifiers", .{ .array = arr });
     return .{ .object = result };
 }
 
-/// POST /debug/notifiers/test → {"status": "success", "stats": {}}
-/// Stub: no actual notifier to test; returns the success shape.
-/// In production Moonraker sends a test notification via apprise.
+/// POST /debug/notifiers/test. Moonraker sends a test notification through
+/// apprise; phobos returns `AppriseNotAvailable` for a configured name and
+/// `NotFound` (404) otherwise.
 pub fn handleNotifierTest(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     _ = alloc;
     const ctx: *NotifierCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -137,9 +126,6 @@ pub fn handleNotifierTest(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
         },
         else => return error.InvalidParams,
     };
-    for (ctx.names) |n| {
-        if (std.mem.eql(u8, n, name)) return error.AppriseNotAvailable;
-    }
     for (ctx.notifiers) |n| {
         if (std.mem.eql(u8, n.name, name)) return error.AppriseNotAvailable;
     }
@@ -179,27 +165,52 @@ fn mkParams(alloc: std.mem.Allocator, json_str: []const u8) !std.json.Value {
     return p.value;
 }
 
-test "handleNotifierList: a configured record keeps url, title, and body" {
+test "handleNotifierList: records keep strings, null unset options and the events list" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const one = [_]Notifier{.{
+    var ctx = NotifierCtx{};
+    defer ctx.deinit(testing.allocator);
+    try ctx.addNotifier(testing.allocator, .{
         .name = "desk",
         .url = "tgram://token/chat",
         .title = "hi",
         .body = "there",
-        .body_format = "text",
-    }};
-    var ctx = NotifierCtx{ .notifiers = &one };
+        .body_format = "markdown",
+        .events = " complete, error ,, ",
+    });
+    try ctx.addNotifier(testing.allocator, .{ .name = "bare", .url = "json://h", .events = "*" });
     const result = try handleNotifierList(@ptrCast(&ctx), .null, arena.allocator());
     const items = result.object.get("notifiers").?.array.items;
-    try testing.expectEqual(@as(usize, 1), items.len);
-    try testing.expectEqualStrings("desk", items[0].object.get("name").?.string);
-    try testing.expectEqualStrings("tgram://token/chat", items[0].object.get("url").?.string);
-    try testing.expectEqualStrings("hi", items[0].object.get("title").?.string);
-    try testing.expectEqualStrings("there", items[0].object.get("body").?.string);
-    try testing.expect(items[0].object.get("attach").? == .null);
-    const params = try mkParams(arena.allocator(), "{\"name\":\"desk\"}");
-    try testing.expectError(error.AppriseNotAvailable, handleNotifierTest(@ptrCast(&ctx), params, arena.allocator()));
+    try testing.expectEqual(@as(usize, 2), items.len);
+    const desk = items[0].object;
+    try testing.expectEqualStrings("desk", desk.get("name").?.string);
+    try testing.expectEqualStrings("tgram://token/chat", desk.get("url").?.string);
+    try testing.expectEqualStrings("hi", desk.get("title").?.string);
+    try testing.expectEqualStrings("there", desk.get("body").?.string);
+    try testing.expectEqualStrings("markdown", desk.get("body_format").?.string);
+    const events = desk.get("events").?.array.items;
+    try testing.expectEqual(@as(usize, 2), events.len);
+    try testing.expectEqualStrings("complete", events[0].string);
+    try testing.expectEqualStrings("error", events[1].string);
+    try testing.expect(desk.get("attach").? == .null);
+    const bare = items[1].object;
+    try testing.expect(bare.get("title").? == .null);
+    try testing.expect(bare.get("body").? == .null);
+    try testing.expect(bare.get("body_format").? == .null);
+    try testing.expectEqualStrings("*", bare.get("events").?.array.items[0].string);
+}
+
+test "fuzz addNotifier: arbitrary events never leak and never keep empty items" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [32]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var ctx = NotifierCtx{};
+            defer ctx.deinit(testing.allocator);
+            try ctx.addNotifier(testing.allocator, .{ .name = "n", .url = "u", .events = &buf });
+            for (ctx.notifiers[0].events) |e| try testing.expect(e.len > 0);
+        }
+    }.run, .{});
 }
 
 test "handleNotifierList: returns empty notifiers array" {
@@ -226,8 +237,9 @@ test "handleNotifierTest: configured notifier cannot send without apprise" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const names = [_][]const u8{"telegram"};
-    var ctx = NotifierCtx{ .names = &names };
+    var ctx = NotifierCtx{};
+    defer ctx.deinit(testing.allocator);
+    try ctx.addNotifier(testing.allocator, .{ .name = "telegram", .url = "tgram://t/c", .events = "complete" });
     const params = try mkParams(a, "{\"name\":\"telegram\"}");
     try testing.expectError(error.AppriseNotAvailable, handleNotifierTest(@ptrCast(&ctx), params, a));
     const missing = try mkParams(a, "{\"name\":\"other\"}");

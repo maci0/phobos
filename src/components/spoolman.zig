@@ -16,12 +16,18 @@
 //! requires a live io; call setIo() after the App event loop starts. emitLocked
 //! is used because the POST handler runs under the held Core lock.
 //!
-//! phobos has both an HTTP proxy client (handleProxy → server_url via std.http)
-//! and a persistent WebSocket supervisor (ws_client.zig) to ws://host/api/v1/spool:
-//! ws_connected reflects the real socket state, and spool-deletion pushes clear
-//! the active spool (handleSpoolDeletedLocked). When no server_url is configured
-//! the proxy returns the v2 "not connected" shape (use_v2_response=true) or a 503,
-//! exactly as Moonraker does.
+//! `[spoolman] server` is normalized like `_get_spoolman_urls`: an optional
+//! http(s) scheme (default http), trailing slashes dropped, `/api` appended.
+//! A WebSocket supervisor (ws_client.zig) keeps ws(s)://<host>/api/v1/spool
+//! open; `spoolman_connected` is that socket's state, and spool-deletion pushes
+//! clear the active spool (handleSpoolDeletedLocked). The proxy forwards to
+//! <api url><path> off the Core lock and, while the socket is down, returns
+//! the v2 "not available" shape (use_v2_response=true) or a 503, as Moonraker
+//! does.
+//!
+//! Not implemented (TODO.md "Known Moonraker gaps"): filament-use reporting
+//! (`sync_rate`, `pending_reports` is always empty) and the active-spool check
+//! on connect.
 
 const std = @import("std");
 const jv = @import("../json/value.zig");
@@ -30,6 +36,7 @@ const registry = @import("../server/registry.zig");
 const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 const ws_client_mod = @import("ws_client.zig");
+const http_get = @import("http_get.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -41,6 +48,18 @@ const NotifyBus = notify.NotifyBus;
 
 const db_namespace: [:0]const u8 = "moonraker";
 const active_spool_key = "spoolman.spool_id";
+
+/// Largest proxied Spoolman response body; larger replies are 503.
+const max_proxy_response_len = 4 * 1024 * 1024;
+
+/// Methods the proxy forwards (spoolman.py `_proxy_spoolman_request`).
+const proxy_methods = std.StaticStringMap(std.http.Method).initComptime(.{
+    .{ "GET", .GET },
+    .{ "POST", .POST },
+    .{ "PUT", .PUT },
+    .{ "PATCH", .PATCH },
+    .{ "DELETE", .DELETE },
+});
 
 // ---------------------------------------------------------------------------
 // Context
@@ -55,24 +74,19 @@ pub const SpoolmanCtx = struct {
     io: ?std.Io,
     /// Allocator for arena-scoped notification payloads.
     gpa: std.mem.Allocator,
-    /// Spoolman server URL (e.g. "http://localhost:7912"). When non-null,
-    /// handleProxy forwards requests to this server; when null, proxy
-    /// returns the "not connected" error shape.
-    server_url: ?[]const u8,
-    /// Live WebSocket connection state (Moonraker's real spoolman_connected),
+    /// Spoolman API base, "<scheme>://<host>/api" (gpa-owned; null until
+    /// `setServerUrl`). The proxy appends the request path.
+    api_url: ?[]const u8 = null,
+    /// Live WebSocket connection state (Moonraker's spoolman_connected),
     /// maintained by the WS supervisor thread.
     ws_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ws_thread: ?std.Io.Future(void) = null,
-    /// Atomic mirror of "a WS supervisor is running", read by `connected()` from
-    /// request-handler / supervisor threads while `ws_thread` is written only by
-    /// the control thread (start/stop). Reading `ws_thread` cross-thread would be
-    /// a data race on a non-atomic optional, so this flag is the discriminator.
-    ws_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ws_stop: std.Io.Event = .unset,
     ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
     ws: ?*ws_client_mod.WsClient = null,
+    /// WebSocket target derived from `api_url` (gpa-owned host and path).
     ws_host: ?[]const u8 = null,
-    ws_port: u16 = 7912,
+    ws_port: u16 = 0,
     ws_path: ?[]const u8 = null,
     ws_tls: bool = false,
     /// Callback invoked off the Core lock on a spool-deletion push; App wires it
@@ -80,15 +94,19 @@ pub const SpoolmanCtx = struct {
     on_spool_deleted: ?*const fn (ctx: *anyopaque, spool_id: i64) void = null,
     on_spool_deleted_ctx: ?*anyopaque = null,
 
-    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus, server_url: ?[]const u8) SpoolmanCtx {
-        const ctx = SpoolmanCtx{
-            .store = store,
-            .bus = bus,
-            .io = null,
-            .gpa = alloc,
-            .server_url = server_url,
-        };
-        return ctx;
+    pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) SpoolmanCtx {
+        return .{ .store = store, .bus = bus, .io = null, .gpa = alloc };
+    }
+
+    /// Stop the WebSocket supervisor and free the server target.
+    pub fn deinit(self: *SpoolmanCtx) void {
+        self.stopWs();
+        if (self.api_url) |u| self.gpa.free(u);
+        if (self.ws_host) |h| self.gpa.free(h);
+        if (self.ws_path) |p| self.gpa.free(p);
+        self.api_url = null;
+        self.ws_host = null;
+        self.ws_path = null;
     }
 
     /// Supply a live io so notifications can be emitted. Called after the
@@ -99,19 +117,30 @@ pub const SpoolmanCtx = struct {
         self.emitSpoolmanStatusChanged();
     }
 
-    /// Set the spoolman server URL. Called when the config file is parsed
-    /// (setConfig) so that handleProxy can forward requests.
-    /// Emits notify_spoolman_status_changed when io is live.
-    pub fn setServerUrl(self: *SpoolmanCtx, url: ?[]const u8) void {
-        self.server_url = url;
-        self.emitSpoolmanStatusChanged();
+    /// Apply `[spoolman] server` like spoolman.py `_get_spoolman_urls`: an
+    /// optional case-insensitive http:// or https:// prefix (default http),
+    /// trailing slashes removed, `/api` appended. Keeps the previous target on
+    /// failure. Call before `startWs`.
+    pub fn setServerUrl(self: *SpoolmanCtx, url: []const u8) !void {
+        const https = std.ascii.startsWithIgnoreCase(url, "https://");
+        const rest = if (https)
+            url["https://".len..]
+        else if (std.ascii.startsWithIgnoreCase(url, "http://"))
+            url["http://".len..]
+        else
+            url;
+        const host = std.mem.trimEnd(u8, rest, "/");
+        if (host.len == 0) return error.InvalidUrl;
+        const api_url = try std.fmt.allocPrint(self.gpa, "{s}://{s}/api", .{ if (https) "https" else "http", host });
+        errdefer self.gpa.free(api_url);
+        try self.parseWsTarget(api_url);
+        if (self.api_url) |old| self.gpa.free(old);
+        self.api_url = api_url;
     }
 
-    /// True if Spoolman is connected: the live WS state when a WS supervisor is
-    /// running, else (HTTP-only) whether a server_url is configured.
+    /// Moonraker `connected()`: the WebSocket state.
     pub fn connected(self: *const SpoolmanCtx) bool {
-        if (self.ws_running.load(.acquire)) return self.ws_connected.load(.acquire);
-        return self.server_url != null;
+        return self.ws_connected.load(.acquire);
     }
 
     /// Emit notify_spoolman_status_changed. `locked` selects emitLocked (caller
@@ -144,22 +173,23 @@ pub const SpoolmanCtx = struct {
         if (self.io) |io| self.ws_mutex.unlock(io);
     }
 
-    /// Parse and own the WebSocket host and path without changing a valid target on failure.
-    fn parseWsTarget(self: *SpoolmanCtx, url: []const u8) !void {
-        const uri = try std.Uri.parse(url);
-        const secure = std.ascii.eqlIgnoreCase(uri.scheme, "https") or std.ascii.eqlIgnoreCase(uri.scheme, "wss");
-        if (!secure and !std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return error.InvalidUrl;
+    /// Derive and own the WebSocket target of `api_url` ("http(s)://host/api"):
+    /// the same host, the URL's port or the scheme default, TLS for https, and
+    /// path <api path>/v1/spool. Keeps a valid target on failure.
+    fn parseWsTarget(self: *SpoolmanCtx, api_url: []const u8) !void {
+        const uri = try std.Uri.parse(api_url);
+        const secure = std.mem.eql(u8, uri.scheme, "https");
         if (uri.user != null or uri.password != null or uri.query != null or uri.fragment != null) return error.InvalidUrl;
         var buf: [512]u8 = undefined;
         var host = try (uri.host orelse return error.InvalidUrl).toRaw(&buf);
         if (std.mem.startsWith(u8, host, "[") and std.mem.endsWith(u8, host, "]")) host = host[1 .. host.len - 1];
-        const port = uri.port orelse if (secure) @as(u16, 443) else @as(u16, 7912);
+        const port = uri.port orelse if (secure) @as(u16, 443) else @as(u16, 80);
         if (std.Io.net.IpAddress.parse(host, port)) |_| {} else |_| {
             _ = try std.Io.net.HostName.init(host);
         }
         const owned_host = try self.gpa.dupe(u8, host);
         errdefer self.gpa.free(owned_host);
-        const path = try std.fmt.allocPrint(self.gpa, "{s}/api/v1/spool", .{std.mem.trimEnd(u8, uri.path.percent_encoded, "/")});
+        const path = try std.fmt.allocPrint(self.gpa, "{s}/v1/spool", .{uri.path.percent_encoded});
         if (self.ws_host) |old| self.gpa.free(old);
         if (self.ws_path) |old| self.gpa.free(old);
         self.ws_host = owned_host;
@@ -168,20 +198,19 @@ pub const SpoolmanCtx = struct {
         self.ws_tls = secure;
     }
 
-    /// Start the Spoolman WebSocket supervisor (no-op without server_url/io or if
-    /// already running).
+    /// Start the Spoolman WebSocket supervisor (no-op without a server, io, or
+    /// if already running).
     pub fn startWs(self: *SpoolmanCtx) void {
-        if (self.ws_thread != null) return;
-        const url = self.server_url orelse return;
-        if (self.io == null) return;
-        self.parseWsTarget(url) catch return;
+        if (self.ws_thread != null or self.ws_host == null) return;
+        const io = self.io orelse return;
         self.ws_stop.reset();
-        self.ws_thread = self.io.?.concurrent(wsSupervisor, .{self}) catch null;
-        if (self.ws_thread != null) self.ws_running.store(true, .release);
+        self.ws_thread = io.concurrent(wsSupervisor, .{self}) catch |err| {
+            std.debug.print("phobos: warning: Spoolman worker not started: {}\n", .{err});
+            return;
+        };
     }
 
     pub fn stopWs(self: *SpoolmanCtx) void {
-        self.ws_running.store(false, .release);
         if (self.io) |stop_io| self.ws_stop.set(stop_io) else self.ws_stop = .is_set;
         self.wsLock();
         if (self.ws) |w| w.shutdownRecv();
@@ -189,14 +218,6 @@ pub const SpoolmanCtx = struct {
         if (self.ws_thread) |*t| {
             t.cancel(self.io.?);
             self.ws_thread = null;
-        }
-        if (self.ws_path) |path| {
-            self.gpa.free(path);
-            self.ws_path = null;
-        }
-        if (self.ws_host) |h| {
-            self.gpa.free(h);
-            self.ws_host = null;
         }
     }
 
@@ -376,7 +397,8 @@ fn getOptInt(params: std.json.Value, field: []const u8) ?i64 {
 // ---------------------------------------------------------------------------
 
 /// GET /server/spoolman/status → spoolman connection status
-/// Shape: {"spoolman_connected": false, "pending_reports": [], "spool_id": <id|null>}
+/// Shape: {"spoolman_connected": <bool>, "pending_reports": [], "spool_id": <id|null>}.
+/// `pending_reports` is always empty: filament-use reporting is not implemented.
 pub fn handleStatus(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
     var obj: std.json.ObjectMap = .empty;
@@ -431,133 +453,117 @@ fn errNotAvailable(alloc: std.mem.Allocator, use_v2: bool) anyerror!std.json.Val
     return error.ServiceUnavailable;
 }
 
-/// POST /server/spoolman/proxy → proxy request to Spoolman service.
+/// POST /server/spoolman/proxy → proxy a request to Spoolman (spoolman.py
+/// `_proxy_spoolman_request`). Runs off the Core lock.
 ///
-/// When server_url is configured, forwards the request to the external
-/// Spoolman HTTP service and returns the response. When server_url is null
-/// (no [spoolman] server in config), returns the Moonraker-shaped
-/// "not connected" error.
-///
-/// Supported params (mirrors spoolman.py):
-///   request_method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" (required)
-///   path: "/v1/..." (required, must start with /v1/)
-///   query: "key=val&..." (optional, appended as ?query to the URL)
-///   body: JSON object (optional, becomes the JSON request body)
-///   use_v2_response: bool (optional, wraps in {response, error, response_headers})
+/// Params: request_method (GET/POST/PUT/PATCH/DELETE), path ("/v1/..."),
+/// query (appended as ?query), body (JSON request body; not with GET),
+/// use_v2_response. While the WebSocket is down the reply is the 503 shape.
+/// v1 returns the decoded Spoolman response; v2 wraps it as {"response",
+/// "response_headers", "error"} and reports Spoolman HTTP errors in "error".
 pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const c: *SpoolmanCtx = @ptrCast(@alignCast(ctx));
-
-    // Validate required params (mirrors spoolman.py param extraction).
-    const request_method_str = getStr(params, "request_method") catch return error.InvalidParams;
-    const path = getStr(params, "path") catch return error.InvalidParams;
-
-    // Validate path starts with /v1/
-    if (path.len < 4 or !std.mem.startsWith(u8, path, "/v1/")) {
-        return error.InvalidParams;
-    }
-
-    const use_v2 = getOptBool(params, "use_v2_response", false);
-
-    // No server configured → return "not connected" error.
-    const server_url = c.server_url orelse return errNotAvailable(alloc, use_v2);
-
-    // Parse HTTP method from the request_method string.
-    const method = std.meta.stringToEnum(std.http.Method, request_method_str) orelse return error.InvalidParams;
-
-    // Reject GET requests with body before io check (parameter validation).
-    if (method == .GET) {
-        if (params == .object) {
-            if (params.object.get("body")) |body_val| {
-                if (body_val != .null) return error.InvalidParams;
-            }
-        }
-    }
-
-    // Need a live io for the HTTP client; absent during tests / dump-api.
-    const io = c.io orelse return errNotAvailable(alloc, use_v2);
-
-    // Extract optional query string (mirrors spoolman.py).
+    const method = proxy_methods.get(try getStr(params, "request_method")) orelse return error.InvalidParams;
+    const path = try getStr(params, "path");
     const query = getOptStr(params, "query");
+    const body: ?std.json.Value = if (params == .object) switch (params.object.get("body") orelse .null) {
+        .null => null,
+        else => |b| b,
+    } else null;
+    const use_v2 = getOptBool(params, "use_v2_response", false);
+    if (body != null and method == .GET) return error.InvalidParams;
+    if (!std.mem.startsWith(u8, path, "/v1/")) return error.InvalidParams;
+    if (body) |b| if (jv.exceedsDepth(b, jv.max_value_depth)) return error.InvalidParams;
 
-    // Build the full URL from server_url + path [+ ?query].
-    var url_buf: [2048]u8 = undefined;
-    const full_url = if (query) |q|
-        std.fmt.bufPrint(&url_buf, "{s}{s}?{s}", .{ server_url, path, q }) catch return errNotAvailable(alloc, use_v2)
-    else
-        std.fmt.bufPrint(&url_buf, "{s}{s}", .{ server_url, path }) catch return errNotAvailable(alloc, use_v2);
+    if (!c.connected()) return errNotAvailable(alloc, use_v2);
+    const api_url = c.api_url orelse return errNotAvailable(alloc, use_v2);
+    const io = c.io orelse return errNotAvailable(alloc, use_v2);
+    const url = try std.fmt.allocPrint(alloc, "{s}{s}{s}{s}", .{ api_url, path, if (query != null) "?" else "", query orelse "" });
+    const payload: ?[]const u8 = if (body) |b| try std.json.Stringify.valueAlloc(alloc, b, .{}) else null;
+    const response = proxyRequest(c.gpa, io, method, url, payload, alloc) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return errNotAvailable(alloc, use_v2),
+    };
 
-    // Serialize the body parameter to JSON if present.
-    var body_json_buf: [4096]u8 = undefined;
-    var body_slice: ?[]const u8 = null;
-    if (params == .object) {
-        if (params.object.get("body")) |body_val| {
-            if (body_val != .null) {
-                var w: std.Io.Writer = .fixed(&body_json_buf);
-                var jw: std.json.Stringify = .{ .writer = &w };
-                jw.write(body_val) catch return errNotAvailable(alloc, use_v2);
-                body_slice = w.buffered();
-            }
-        }
-    }
-
-    // Use an arena for temporary allocations during the HTTP round-trip.
-    var arena = std.heap.ArenaAllocator.init(c.gpa);
-    defer arena.deinit();
-    const aa = arena.allocator();
-
-    var client: std.http.Client = .{ .allocator = aa, .io = io };
-    defer client.deinit();
-
-    var aw: std.Io.Writer.Allocating = .init(aa);
-    defer aw.deinit();
-
-    const result = client.fetch(.{
-        .location = .{ .url = full_url },
-        .method = method,
-        .payload = body_slice,
-        .response_writer = &aw.writer,
-    }) catch return errNotAvailable(alloc, use_v2);
-
-    // Check for non-success HTTP status.
-    if (result.status != .ok and result.status != .created and result.status != .no_content) {
-        if (use_v2) {
-            // Surface Spoolman's own {"message": ...} from the error body when present.
-            const msg = extractSpoolmanMessage(alloc, aw.written()) orelse "Spoolman request failed";
-            var err_obj: std.json.ObjectMap = .empty;
-            try err_obj.put(alloc, "status_code", .{ .integer = @backingInt(result.status) });
-            try err_obj.put(alloc, "message", .{ .string = msg });
-            var obj: std.json.ObjectMap = .empty;
-            try obj.put(alloc, "response", .null);
-            try obj.put(alloc, "error", .{ .object = err_obj });
-            return .{ .object = obj };
-        }
-        return error.ServiceUnavailable;
-    }
-
-    const response_body = aw.toOwnedSlice() catch return errNotAvailable(alloc, use_v2);
-
-    // Parse the response as JSON (spoolman returns JSON).
-    var response_val: std.json.Value = .null;
-    if (response_body.len > 0) {
-        const parsed = std.json.parseFromSlice(std.json.Value, alloc, response_body, .{}) catch {
-            // Fallback: return the raw body as a string.
-            return .{ .string = try alloc.dupe(u8, response_body) };
-        };
-        response_val = parsed.value;
-    }
-
-    if (use_v2) {
+    if (response.status >= 400) {
+        if (!use_v2) return error.ServiceUnavailable;
+        // Surface Spoolman's own {"message": ...} from the error body when present.
+        const msg = extractSpoolmanMessage(alloc, response.body) orelse "Spoolman request failed";
+        var err_obj: std.json.ObjectMap = .empty;
+        try err_obj.put(alloc, "status_code", .{ .integer = response.status });
+        try err_obj.put(alloc, "message", .{ .string = msg });
         var obj: std.json.ObjectMap = .empty;
-        try obj.put(alloc, "response", response_val);
-        try obj.put(alloc, "error", .null);
-        // response_headers: use empty map (fetch API doesn't expose headers).
-        // The Python reference includes dict(resp.headers.items()); a future
-        // switch to client.request() would enable full header capture.
-        try obj.put(alloc, "response_headers", .{ .object = .empty });
+        try obj.put(alloc, "response", .null);
+        try obj.put(alloc, "error", .{ .object = err_obj });
         return .{ .object = obj };
     }
 
-    return response_val;
+    var response_val: std.json.Value = .null;
+    if (response.body.len > 0) {
+        response_val = std.json.parseFromSliceLeaky(std.json.Value, alloc, response.body, .{}) catch
+            .{ .string = response.body };
+    }
+    if (!use_v2) return response_val;
+    var obj: std.json.ObjectMap = .empty;
+    try obj.put(alloc, "response", response_val);
+    try obj.put(alloc, "response_headers", .{ .object = response.headers });
+    try obj.put(alloc, "error", .null);
+    return .{ .object = obj };
+}
+
+const ProxyResponse = struct {
+    status: u16,
+    headers: std.json.ObjectMap,
+    body: []const u8,
+};
+
+/// One HTTP round trip to Spoolman. The client lives in a gpa arena freed on
+/// return; status, headers and body are copied into `out`. The body must be
+/// uncompressed and at most `max_proxy_response_len` bytes.
+fn proxyRequest(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    method: std.http.Method,
+    url: []const u8,
+    payload: ?[]const u8,
+    out: std.mem.Allocator,
+) !ProxyResponse {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var client: std.http.Client = .{ .allocator = arena.allocator(), .io = io };
+    defer client.deinit();
+
+    var headers = http_get.identity_headers;
+    if (payload != null) headers.content_type = .{ .override = "application/json" };
+    var req = try client.request(method, try std.Uri.parse(url), .{
+        .headers = headers,
+        .keep_alive = false,
+        .redirect_behavior = if (payload == null) @fromBackingInt(@intCast(3)) else .unhandled,
+    });
+    defer req.deinit();
+    req.accept_encoding = http_get.identity_only;
+    if (payload) |p| {
+        req.transfer_encoding = .{ .content_length = p.len };
+        var body = try req.sendBodyUnflushed(&.{});
+        try body.writer.writeAll(p);
+        try body.end();
+        try req.connection.?.flush();
+    } else {
+        try req.sendBodiless();
+    }
+
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(if (payload == null) &redirect_buf else &.{});
+    var headers_out: std.json.ObjectMap = .empty;
+    var it = response.head.iterateHeaders();
+    while (it.next()) |h| try headers_out.put(out, try out.dupe(u8, h.name), .{ .string = try out.dupe(u8, h.value) });
+    var transfer_buf: [4096]u8 = undefined;
+    const reader = response.reader(&transfer_buf);
+    const body = reader.allocRemaining(out, .limited(max_proxy_response_len)) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        else => |e| return e,
+    };
+    return .{ .status = @backingInt(response.head.status), .headers = headers_out, .body = body };
 }
 
 // ---------------------------------------------------------------------------
@@ -593,9 +599,11 @@ pub fn registerSpoolman(reg: *Registry, ctx: *SpoolmanCtx) !void {
         handleSpoolId,
     );
 
-    // /server/spoolman/proxy — POST only → "server.spoolman.proxy"
+    // /server/spoolman/proxy — POST only → "server.spoolman.proxy". Off Core:
+    // the HTTP round trip blocks, and the handler reads only config set before
+    // serving plus the atomic WebSocket state.
     try reg.registerEndpoint(
-        .{ .path = "/server/spoolman/proxy", .methods = &.{.POST} },
+        .{ .path = "/server/spoolman/proxy", .methods = &.{.POST}, .off_core = true },
         c,
         handleProxy,
     );
@@ -715,7 +723,7 @@ const MemStore = struct {
 };
 
 fn makeCtx(alloc: std.mem.Allocator, mem: *MemStore, nb: *NullBus) SpoolmanCtx {
-    return SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus, null);
+    return SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
 }
 
 var ws_captured_id: i64 = -1;
@@ -762,20 +770,31 @@ test "spoolman WS: deletion clears the active spool only when it matches" {
     try testing.expect(ctx.getSpoolId() == null);
 }
 
-test "spoolman parseWsTarget: host + port (default 7912)" {
+test "setServerUrl normalizes like _get_spoolman_urls and stays disconnected" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const a = arena.allocator();
-    var mem = MemStore.init(a);
+    var mem = MemStore.init(arena.allocator());
     defer mem.deinit();
-    var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
-    try ctx.parseWsTarget("http://192.168.1.9:7913/api");
+    var nb = NullBus.init(arena.allocator());
+    var ctx = makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    // Scheme-less values default to http; the HTTP and WS ports agree.
+    try ctx.setServerUrl("192.168.1.9:7913");
+    try testing.expectEqualStrings("http://192.168.1.9:7913/api", ctx.api_url.?);
     try testing.expectEqualStrings("192.168.1.9", ctx.ws_host.?);
     try testing.expectEqual(@as(u16, 7913), ctx.ws_port);
-    try ctx.parseWsTarget("http://localhost");
-    try testing.expectEqualStrings("localhost", ctx.ws_host.?);
-    try testing.expectEqual(@as(u16, 7912), ctx.ws_port);
+    try testing.expectEqualStrings("/api/v1/spool", ctx.ws_path.?);
+    try ctx.setServerUrl("HTTP://localhost/");
+    try testing.expectEqualStrings("http://localhost/api", ctx.api_url.?);
+    try testing.expectEqual(@as(u16, 80), ctx.ws_port);
+    try testing.expect(!ctx.ws_tls);
+    try testing.expectError(error.InvalidUrl, ctx.setServerUrl("http://"));
+    try testing.expectEqualStrings("http://localhost/api", ctx.api_url.?);
+    // Configuration alone is not a connection (Moonraker reports ws_connected).
+    var status_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer status_arena.deinit();
+    const status = try handleStatus(@ptrCast(&ctx), .null, status_arena.allocator());
+    try testing.expectEqual(false, status.object.get("spoolman_connected").?.bool);
 }
 
 var ws_sup_deleted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -822,10 +841,10 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
     var conns = connections_mod.Connections.init(alloc, &core);
     defer conns.deinit(io);
     var bus = NotifyBus.init(&core, &conns);
-    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &bus, null);
-    defer ctx.stopWs();
+    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &bus);
+    defer ctx.deinit();
     var url_buf: [64]u8 = undefined;
-    ctx.setServerUrl(try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{port}));
+    try ctx.setServerUrl(try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}", .{port}));
     ctx.io = io;
     var dummy: u8 = 0;
     ctx.on_spool_deleted = wsSupFlag;
@@ -842,8 +861,7 @@ test "spoolman WS supervisor: connects, receives a deletion push, shuts down cle
 
     ctx.stopWs();
     sf.await(io);
-    // After stop the WS is down; connected() falls back to HTTP (server_url set).
-    try testing.expect(!ctx.ws_connected.load(.acquire));
+    try testing.expect(!ctx.connected());
     try testing.expect(ctx.ws_thread == null);
 }
 
@@ -1048,7 +1066,7 @@ test "spoolman active-spool persistence round-trip: set then reload" {
     ctx.setSpoolId(77);
 
     // Create a new context from the same datastore (simulates restart)
-    var ctx2 = SpoolmanCtx.init(a, mem.dataStore(), &nb.bus, null);
+    var ctx2 = SpoolmanCtx.init(a, mem.dataStore(), &nb.bus);
     try testing.expectEqual(@as(?i64, 77), ctx2.getSpoolId());
 }
 
@@ -1064,14 +1082,14 @@ test "registerSpoolman: wires expected routes and JSON-RPC methods" {
     var mem = MemStore.init(alloc);
     defer mem.deinit();
     var nb = NullBus.init(alloc);
-    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus, null);
+    var ctx = SpoolmanCtx.init(alloc, mem.dataStore(), &nb.bus);
 
     try registerSpoolman(&reg, &ctx);
 
     // HTTP routes
     try testing.expect(reg.lookup(.GET, "/server/spoolman/spool_id") != null);
     try testing.expect(reg.lookup(.POST, "/server/spoolman/spool_id") != null);
-    try testing.expect(reg.lookup(.POST, "/server/spoolman/proxy") != null);
+    try testing.expect(reg.lookup(.POST, "/server/spoolman/proxy").?.off_core);
     try testing.expect(reg.lookup(.GET, "/server/spoolman/status") != null);
 
     // JSON-RPC methods
@@ -1095,7 +1113,7 @@ test "handleProxy: query parameter is accepted (not-connected path)" {
     var ctx = makeCtx(a, &mem, &nb);
 
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"query\": \"key=value\"}");
-    // No server_url → returns ServiceUnavailable, but query param is valid.
+    // Not connected → ServiceUnavailable, but the query param is valid.
     try testing.expectError(error.ServiceUnavailable, handleProxy(@ptrCast(&ctx), params, a));
 }
 
@@ -1109,11 +1127,15 @@ test "handleProxy: GET with body returns InvalidParams" {
     var nb = NullBus.init(a);
     var ctx = makeCtx(a, &mem, &nb);
 
-    // Set server_url so we get past the "not connected" check and hit the GET+body check.
-    ctx.setServerUrl("http://localhost:7912");
-
+    // Parameter checks run before the connection check, as in spoolman.py.
     const params = try mkParams(a, "{\"request_method\": \"GET\", \"path\": \"/v1/spool\", \"body\": {\"key\": 1}}");
     try testing.expectError(error.InvalidParams, handleProxy(@ptrCast(&ctx), params, a));
+    // Only GET/POST/PUT/PATCH/DELETE are forwarded.
+    for ([_][]const u8{ "HEAD", "OPTIONS", "TRACE", "CONNECT", "get" }) |verb| {
+        var buf: [96]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buf, "{{\"request_method\": \"{s}\", \"path\": \"/v1/spool\"}}", .{verb});
+        try testing.expectError(error.InvalidParams, handleProxy(@ptrCast(&ctx), try mkParams(a, json), a));
+    }
 }
 
 test "handleProxy: v2 error shape includes response and error keys" {
@@ -1149,43 +1171,82 @@ test "handleProxy: query with special characters is accepted" {
     try testing.expectError(error.ServiceUnavailable, handleProxy(@ptrCast(&ctx), params, a));
 }
 
-test "setServerUrl: updates status and does not crash without io" {
+test "handleProxy forwards to <server>/api with JSON body, headers and Spoolman errors" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-
     var mem = MemStore.init(a);
     defer mem.deinit();
     var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    const io = testing.io;
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
 
-    // Verify state tracks server_url.
-    try testing.expect(ctx.server_url == null);
-    ctx.setServerUrl("http://localhost:7912");
-    try testing.expectEqualStrings("http://localhost:7912", ctx.server_url.?);
-    try testing.expect(ctx.server_url != null);
+    const Peer = struct {
+        target: [128]u8 = undefined,
+        target_len: usize = 0,
+        content_type: [64]u8 = undefined,
+        content_type_len: usize = 0,
+        body: [64]u8 = undefined,
+        body_len: usize = 0,
 
-    // Status handler reflects the change.
-    const status = try handleStatus(@ptrCast(&ctx), .null, a);
-    try testing.expectEqual(true, status.object.get("spoolman_connected").?.bool);
-}
+        /// Serve one request, recording the request target, content type and body.
+        fn serve(self: *@This(), s: *std.Io.net.Server, aio: std.Io, reply: []const u8) void {
+            const stream = s.accept(aio) catch return;
+            defer stream.close(aio);
+            var rbuf: [2048]u8 = undefined;
+            var r = stream.reader(aio, &rbuf);
+            const request_line = r.interface.takeDelimiterInclusive('\n') catch return;
+            var parts = std.mem.tokenizeScalar(u8, request_line, ' ');
+            _ = parts.next();
+            const target = parts.next() orelse return;
+            @memcpy(self.target[0..target.len], target);
+            self.target_len = target.len;
+            var length: usize = 0;
+            while (true) {
+                const line = r.interface.takeDelimiterInclusive('\n') catch return;
+                if (line.len <= 2) break;
+                const value = std.mem.trim(u8, line[(std.mem.indexOfScalar(u8, line, ':') orelse continue) + 1 ..], " \r\n");
+                if (std.ascii.startsWithIgnoreCase(line, "content-type:")) {
+                    @memcpy(self.content_type[0..value.len], value);
+                    self.content_type_len = value.len;
+                }
+                if (std.ascii.startsWithIgnoreCase(line, "content-length:")) length = std.fmt.parseInt(usize, value, 10) catch return;
+            }
+            r.interface.readSliceAll(self.body[0..length]) catch return;
+            self.body_len = length;
+            var wbuf: [512]u8 = undefined;
+            var w = stream.writer(aio, &wbuf);
+            w.interface.writeAll(reply) catch return;
+            w.interface.flush() catch return;
+        }
+    };
 
-test "setServerUrl: clearing url marks disconnected" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    var ctx = makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    var url: [64]u8 = undefined;
+    try ctx.setServerUrl(try std.fmt.bufPrint(&url, "127.0.0.1:{d}/", .{server.socket.address.getPort()}));
+    ctx.io = io;
+    ctx.ws_connected.store(true, .release);
 
-    var mem = MemStore.init(a);
-    defer mem.deinit();
-    var nb = NullBus.init(a);
-    var ctx = makeCtx(a, &mem, &nb);
+    var peer: Peer = .{};
+    var task = io.async(Peer.serve, .{ &peer, &server, io, @as([]const u8, "HTTP/1.1 201 Created\r\nX-Test: yes\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{\"id\":3}") });
+    const ok = try handleProxy(@ptrCast(&ctx), try mkParams(a, "{\"request_method\":\"POST\",\"path\":\"/v1/spool\",\"query\":\"a=1\",\"body\":{\"x\":1},\"use_v2_response\":true}"), a);
+    task.await(io);
+    try testing.expectEqualStrings("/api/v1/spool?a=1", peer.target[0..peer.target_len]);
+    try testing.expectEqualStrings("application/json", peer.content_type[0..peer.content_type_len]);
+    try testing.expectEqualStrings("{\"x\":1}", peer.body[0..peer.body_len]);
+    try testing.expectEqual(@as(i64, 3), ok.object.get("response").?.object.get("id").?.integer);
+    try testing.expectEqualStrings("yes", ok.object.get("response_headers").?.object.get("X-Test").?.string);
+    try testing.expect(ok.object.get("error").? == .null);
 
-    ctx.setServerUrl("http://localhost:7912");
-    ctx.setServerUrl(null);
-    try testing.expect(ctx.server_url == null);
-
-    const status = try handleStatus(@ptrCast(&ctx), .null, a);
-    try testing.expectEqual(false, status.object.get("spoolman_connected").?.bool);
+    peer = .{};
+    task = io.async(Peer.serve, .{ &peer, &server, io, @as([]const u8, "HTTP/1.1 404 Not Found\r\nContent-Length: 27\r\nConnection: close\r\n\r\n{\"message\":\"No such spool\"}") });
+    const missing = try handleProxy(@ptrCast(&ctx), try mkParams(a, "{\"request_method\":\"GET\",\"path\":\"/v1/spool/9\",\"use_v2_response\":true}"), a);
+    task.await(io);
+    const err = missing.object.get("error").?.object;
+    try testing.expectEqual(@as(i64, 404), err.get("status_code").?.integer);
+    try testing.expectEqualStrings("No such spool", err.get("message").?.string);
 }
 
 test "fuzz handleSpoolId: never panics on arbitrary params" {
@@ -1291,10 +1352,10 @@ test "stopWs cancels a peer stalled before the upgrade response" {
     };
     var peer = try aio.concurrent(Peer.run, .{ &server, &accepted, aio });
     defer peer.cancel(aio);
-    var ctx = SpoolmanCtx.init(std.heap.smp_allocator, mem.dataStore(), &nb.bus, null);
-    defer ctx.stopWs();
+    var ctx = SpoolmanCtx.init(testing.allocator, mem.dataStore(), &nb.bus);
+    defer ctx.deinit();
     var url: [80]u8 = undefined;
-    ctx.server_url = try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}", .{server.socket.address.getPort()});
+    try ctx.setServerUrl(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}", .{server.socket.address.getPort()}));
     ctx.io = aio;
     ctx.startWs();
     try accepted.wait(aio);
@@ -1311,22 +1372,23 @@ test "Spoolman URI parsing preserves IPv6, TLS, and reverse-proxy paths" {
     defer mem.deinit();
     var nb = NullBus.init(arena.allocator());
     var ctx = makeCtx(testing.allocator, &mem, &nb);
-    defer ctx.stopWs();
-    try ctx.parseWsTarget("https://[::1]:7443/spools/");
+    defer ctx.deinit();
+    try ctx.setServerUrl("https://[::1]:7443/spools/");
+    try testing.expectEqualStrings("https://[::1]:7443/spools/api", ctx.api_url.?);
     try testing.expectEqualStrings("::1", ctx.ws_host.?);
     try testing.expectEqualStrings("/spools/api/v1/spool", ctx.ws_path.?);
     try testing.expectEqual(@as(u16, 7443), ctx.ws_port);
     try testing.expect(ctx.ws_tls);
-    try testing.expectError(error.InvalidPort, ctx.parseWsTarget("http://localhost:bad"));
-    try testing.expectError(error.InvalidUrl, ctx.parseWsTarget("ftp://localhost"));
-    try testing.expectError(error.InvalidUrl, ctx.parseWsTarget("https://localhost?token=x"));
+    try testing.expectError(error.InvalidPort, ctx.setServerUrl("http://localhost:bad"));
+    try testing.expectError(error.InvalidUrl, ctx.setServerUrl("https://localhost?token=x"));
     try testing.expectEqualStrings("::1", ctx.ws_host.?);
-    for (0..2) |index| {
+    for (0..3) |index| {
         var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
         ctx.gpa = failing.allocator();
-        try testing.expectError(error.OutOfMemory, ctx.parseWsTarget("http://newhost:7912/new"));
-        try testing.expectEqualStrings("::1", ctx.ws_host.?);
+        try testing.expectError(error.OutOfMemory, ctx.setServerUrl("http://newhost:7912/new"));
         ctx.gpa = testing.allocator;
+        try testing.expectEqualStrings("::1", ctx.ws_host.?);
+        try testing.expectEqualStrings("https://[::1]:7443/spools/api", ctx.api_url.?);
     }
 }
 
@@ -1339,10 +1401,12 @@ test "fuzz Spoolman URI parser rejects malformed bounded targets" {
             defer mem.deinit();
             var nb = NullBus.init(arena.allocator());
             var ctx = makeCtx(testing.allocator, &mem, &nb);
-            defer ctx.stopWs();
+            defer ctx.deinit();
             var raw: [96]u8 = undefined;
             smith.bytesWithHash(&raw, 0);
-            ctx.parseWsTarget(&raw) catch {};
+            ctx.setServerUrl(&raw) catch return;
+            try testing.expect(std.mem.endsWith(u8, ctx.api_url.?, "/api"));
+            try testing.expect(std.mem.endsWith(u8, ctx.ws_path.?, "/api/v1/spool"));
         }
     }.run, .{});
 }

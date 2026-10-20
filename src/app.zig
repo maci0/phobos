@@ -469,10 +469,10 @@ pub const App = struct {
         // --- Spoolman context (spool_id persistence + proxy stubs) ---
         // io is not stored here; setIo() is called after the event loop starts
         // (see httpServer). Notifications are suppressed until then.
-        // server_url is set later in setConfig when the config file is parsed.
+        // The server URL is set later in setConfig when the config file is parsed.
         const spoolman_ctx = try alloc.create(SpoolmanCtx);
         errdefer alloc.destroy(spoolman_ctx);
-        spoolman_ctx.* = SpoolmanCtx.init(alloc, db_ctx.store, bus, null);
+        spoolman_ctx.* = SpoolmanCtx.init(alloc, db_ctx.store, bus);
 
         // --- MQTT context (no broker; faithful endpoint shapes) ---
         const mqtt_ctx = try alloc.create(MqttCtx);
@@ -711,9 +711,10 @@ pub const App = struct {
         self.analysis_ctx.io = aio;
         if (cfg.hasSection("analysis")) self.applyAnalysisConfig(cfg);
 
-        // Wire spoolman server URL from [spoolman] server key.
+        // [spoolman] server (spoolman.py _get_spoolman_urls).
         if (cfg.get("spoolman", "server")) |url| {
-            self.spoolman_ctx.setServerUrl(url);
+            self.spoolman_ctx.setServerUrl(url) catch |err|
+                std.debug.print("phobos: warning: invalid [spoolman] server {s}: {}, Spoolman disabled\n", .{ url, err });
         }
 
         // System provider for machine.services.* ([machine] provider): selects
@@ -1007,13 +1008,20 @@ pub const App = struct {
                 if (std.mem.startsWith(u8, sect, "notifier ")) {
                     const nname = sect["notifier ".len..];
                     if (nname.len == 0) continue;
-                    const url = cfg.get(sect, "url") orelse continue;
+                    // `url` and `events` are required (notifier.py NotifierInstance).
+                    const url = cfg.get(sect, "url");
+                    const events = cfg.get(sect, "events");
+                    if (url == null or events == null) {
+                        std.debug.print("phobos: warning: [{s}] needs url and events, notifier skipped\n", .{sect});
+                        continue;
+                    }
                     self.notifier_ctx.addNotifier(self.alloc, .{
                         .name = nname,
-                        .url = url,
-                        .title = cfg.get(sect, "title") orelse "",
-                        .body = cfg.get(sect, "body") orelse "",
-                        .body_format = cfg.get(sect, "body_format") orelse "text",
+                        .url = url.?,
+                        .title = cfg.get(sect, "title"),
+                        .body = cfg.get(sect, "body"),
+                        .body_format = cfg.get(sect, "body_format"),
+                        .events = events.?,
                     }) catch |err| {
                         std.debug.print("phobos: warning: failed to add notifier '{s}': {}\n", .{ nname, err });
                     };
@@ -1125,7 +1133,7 @@ pub const App = struct {
         self.mqtt_ctx.deinit();
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
         // Stop the Spoolman WS supervisor (uses io) before io/conns teardown.
-        self.spoolman_ctx.stopWs();
+        self.spoolman_ctx.deinit();
         // Stop the TD-1 discovery/poll thread (uses io + core) before teardown.
         self.td1_ctx.stopPolling();
         // Stop the machine proc_stat timer thread before tearing down
@@ -2211,6 +2219,7 @@ test "setConfig loads an analysis platform and a notifier record" {
         \\title: hi
         \\body: there
         \\body_format: text
+        \\events: complete, error
         \\
     });
 
@@ -2233,6 +2242,7 @@ test "setConfig loads an analysis platform and a notifier record" {
     try std.testing.expectEqual(@as(usize, 1), items.len);
     try std.testing.expectEqualStrings("desk", items[0].object.get("name").?.string);
     try std.testing.expectEqualStrings("tgram://token/chat", items[0].object.get("url").?.string);
+    try std.testing.expectEqual(@as(usize, 2), items[0].object.get("events").?.array.items.len);
     var params: std.json.ObjectMap = .empty;
     try params.put(a, "name", .{ .string = "desk" });
     try std.testing.expectError(error.AppriseNotAvailable, notifier_component.handleNotifierTest(@ptrCast(app.notifier_ctx), .{ .object = params }, a));
