@@ -56,7 +56,7 @@ pub const Result = struct {
     status: u16,
     /// Response body (gpa-owned). Empty on 304.
     body: []u8,
-    /// Value of the response `ETag` header (gpa-owned), if present.
+    /// UTF-8 response ETag (gpa-owned). Opaque non-UTF-8 values are omitted.
     etag: ?[]u8,
     /// True when the server returned 304 Not Modified.
     not_modified: bool,
@@ -104,7 +104,7 @@ pub fn getConditional(
     var it = response.head.iterateHeaders();
     while (it.next()) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "etag")) {
-            etag_out = try gpa.dupe(u8, h.value);
+            if (std.unicode.utf8ValidateSlice(h.value)) etag_out = try gpa.dupe(u8, h.value);
             break;
         }
     }
@@ -132,6 +132,7 @@ const net = std.Io.net;
 const EtagServer = struct {
     io: Io,
     server: net.Server,
+    etag: []const u8 = "\"v1\"",
 
     fn bind(io: Io) !EtagServer {
         var ip = try net.IpAddress.parseIp4("127.0.0.1", 0);
@@ -164,9 +165,9 @@ const EtagServer = struct {
         var wbuf: [512]u8 = undefined;
         var w = stream.writer(self.io, &wbuf);
         if (has_inm) {
-            w.interface.writeAll("HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 0\r\n\r\n") catch return;
+            w.interface.print("HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nContent-Length: 0\r\n\r\n", .{self.etag}) catch return;
         } else {
-            w.interface.writeAll("HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello") catch return;
+            w.interface.print("HTTP/1.1 200 OK\r\nETag: {s}\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", .{self.etag}) catch return;
         }
         w.interface.flush() catch return;
     }
@@ -203,6 +204,34 @@ test "getConditional: 200 returns body + ETag; conditional re-fetch returns 304"
     try testing.expectEqual(@as(u16, 304), r2.status);
     try testing.expect(r2.not_modified);
     try testing.expectEqual(@as(usize, 0), r2.body.len);
+}
+
+test "getConditional omits opaque ETag bytes that cannot be stored as JSON text" {
+    const Task = struct {
+        fn run(alloc: std.mem.Allocator, aio: Io, url: []const u8, done: *Io.Event) !Result {
+            defer done.set(aio);
+            return getConditional(alloc, aio, url, null);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var server = try EtagServer.bind(aio);
+    defer server.deinit();
+    server.etag = "\"\xff\"";
+    var serving = try aio.concurrent(EtagServer.serveOne, .{&server});
+    defer serving.cancel(aio);
+    var url_buf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.port()});
+    var done: Io.Event = .unset;
+    var fetching = try aio.concurrent(Task.run, .{ arena.allocator(), aio, url, &done });
+    defer _ = fetching.cancel(aio) catch {};
+    try done.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const result = try fetching.await(aio);
+    try testing.expect(result.etag == null);
+    try testing.expectEqualStrings("hello", result.body);
 }
 
 test "getConditional asks for identity and rejects a gzip body" {
@@ -246,20 +275,16 @@ test "getConditional asks for identity and rejects a gzip body" {
     try testing.expectEqualStrings("identity", accept[0..accept_len]);
 }
 
-test "fuzz getConditional url parsing: never crashes on arbitrary urls" {
+test "fuzz getConditional validates unsupported URLs without network access" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
-            // Fuzz only the target after a fixed loopback authority so no
-            // input can resolve or connect to another host.
-            const prefix = "http://127.0.0.1:9/";
+            // An unsupported scheme exercises parsing without DNS or sockets.
+            const prefix = "unsupported://127.0.0.1/";
             var buf: [prefix.len + 48]u8 = undefined;
             @memcpy(buf[0..prefix.len], prefix);
             smith.bytesWithHash(buf[prefix.len..], 0);
             // Bad/unreachable URLs must return an error, never crash.
-            var result = getConditional(testing.allocator, io, &buf, null) catch return;
+            var result = getConditional(testing.allocator, testing.io, &buf, null) catch return;
             defer result.deinit(testing.allocator);
         }
     }.run, .{});

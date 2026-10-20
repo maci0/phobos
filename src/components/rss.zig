@@ -140,8 +140,9 @@ const item_fields = std.StaticStringMap(Field).initComptime(.{
     .{ "description", .description }, .{ "category", .category }, .{ "pubdate", .pubdate },
 });
 
-/// Parse RSS 2.0 XML. Caller owns the result (free with `Feed.deinit`).
+/// Parse UTF-8 RSS 2.0 XML. Caller owns the result (free with `Feed.deinit`).
 pub fn parse(alloc: std.mem.Allocator, xml: []const u8) !Feed {
+    if (!std.unicode.utf8ValidateSlice(xml)) return error.InvalidUtf8;
     var tok = Tokenizer.init(xml);
 
     var depth: u8 = 0; // 0=root, 1=in channel, 2=in item
@@ -373,6 +374,19 @@ fn unixFromFields(year: epoch.Year, month: epoch.Month, day: u32, hour: u32, min
 
 const testing = std.testing;
 
+test "RSS rejects non-UTF-8 title and item text before producing JSON strings" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{
+        "<rss><channel><title>\xff</title></channel></rss>",
+        "<rss><channel><item><guid>x</guid><description>\xc3</description></item></channel></rss>",
+        "<rss><channel><item><guid>\xff</guid></item></channel></rss>",
+    }) |xml| try testing.expectError(error.InvalidUtf8, parse(a, xml));
+    const valid = try parse(a, "<rss><channel><title>caf\u{e9}</title></channel></rss>");
+    try testing.expectEqualStrings("caf\u{e9}", valid.title);
+}
+
 test "parse: basic RSS 2.0 feed" {
     const xml =
         \\<?xml version="1.0"?>
@@ -573,8 +587,23 @@ test "fuzz parse: random bytes never crash" {
             var buf: [256]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
             const len = smith.valueRangeAtMostWithHash(u16, 0, buf.len, 1);
-            const feed = parse(testing.allocator, buf[0..len]) catch return;
-            feed.deinit(testing.allocator);
+            const input = buf[0..len];
+            for (0..2) |pass| {
+                if (pass == 1) for (input) |*byte| {
+                    byte.* &= 0x7f;
+                };
+                if (!std.unicode.utf8ValidateSlice(input)) {
+                    try testing.expectError(error.InvalidUtf8, parse(testing.allocator, input));
+                    continue;
+                }
+                const feed = try parse(testing.allocator, input);
+                defer feed.deinit(testing.allocator);
+                try testing.expect(std.unicode.utf8ValidateSlice(feed.title));
+                for (feed.items) |item| inline for (comptime std.meta.fieldNames(RssItem)) |field| {
+                    if (@TypeOf(@field(item, field)) == []const u8)
+                        try testing.expect(std.unicode.utf8ValidateSlice(@field(item, field)));
+                };
+            }
         }
     }.run, .{});
 }

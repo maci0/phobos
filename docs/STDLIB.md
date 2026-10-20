@@ -136,6 +136,9 @@ configuration, RSS/XML and RFC 2822 syntax, G-code comments, multipart
 separators, PanelDue checksums, the supported template language, and MQTT packet
 fields. Use standard tokenizers, numeric parsers, searches, writers and calendar
 rules inside those grammars.
+RSS input must be valid UTF-8 before any feed fields are captured. Opaque ETag
+bytes that are not UTF-8 are omitted from the JSON-backed cache; their response
+body remains usable and later requests fetch without that conditional tag.
 
 Configuration globs support `*` and `?` through a local matcher; `std.Io.Dir`
 provides iteration but no glob operation. Template title casing keeps its own
