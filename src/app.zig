@@ -498,6 +498,7 @@ pub const App = struct {
         const file_ctx = try alloc.create(FileCtx);
         errdefer alloc.destroy(file_ctx);
         file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus };
+        analysis_ctx.files = file_ctx;
 
         // --- Machine context (machine.* + machine.proc_stats) ---
         // io is wired later via httpServer/setIo so /proc & /sys reads work.
@@ -696,7 +697,7 @@ pub const App = struct {
         }
 
         // [analysis] points at klipper_estimator under the datadir. The binary
-        // is not downloaded. Status reports it missing until the file exists.
+        // is neither downloaded nor run; status reports the paths.
         self.analysis_ctx.io = aio;
         if (cfg.hasSection("analysis")) self.applyAnalysisConfig(cfg);
 
