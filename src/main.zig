@@ -243,10 +243,7 @@ fn run(init: std.process.Init) !void {
             if (i >= args.len) return usageError(a, " requires a <path> value");
             config_path = args[i];
         } else if (std.mem.eql(u8, a, "-d") or std.mem.eql(u8, a, "--data-path")) {
-            // Moonraker-compatible datadir flag. Backs the file_manager roots
-            // (gcodes/config/logs). Without it phobos uses a temp dir under /tmp
-            // and deletes it at exit; /tmp is tmpfs on embedded targets, never
-            // for real data.
+            // File roots and datastore defaults resolve beneath this datadir.
             i += 1;
             if (i >= args.len) return usageError(a, " requires a <path> value");
             data_path = args[i];

@@ -39,9 +39,9 @@ current checkout. The latest release is [v0.1.4](docs/releases/v0.1.4.md).
 Networking is `std.Io.net` on the `std.Io.Threaded` backend, the only standard I/O backend
 available on 32-bit ARM. The listener spawns a task per connection, and `std.http` handles
 HTTP and WebSocket on those streams. Every transport feeds one JSON-RPC dispatcher backed by
-a runtime method table. A serialized core (one mutex and a monotonic sequence) runs every
-handler and notification fan-out, so clients see the same ordering as Moonraker's single
-asyncio loop. Persistence defaults to a vendored SQLite database in Moonraker's
+a runtime method table. The Core mutex serializes shared state and notification fan-out.
+Blocking network and process work runs outside Core; concurrent read paths use component
+locks. Persistence defaults to a vendored SQLite database in Moonraker's
 `moonraker-sql.db` format; a pure-Zig file backend is selectable with
 `[database] backend`. See [`DEVELOPMENT.md`](DEVELOPMENT.md).
 

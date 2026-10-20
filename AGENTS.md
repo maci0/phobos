@@ -7,8 +7,7 @@ The append-only change and verification ledger is `docs/PROVENANCE.md`.
 ## Project goals (weigh every change against these)
 
 - **Low memory use is a primary goal.** Target: a static musl binary on 32-bit
-  ARM (Cortex-A7). Measured idle on a real armv7 printer (`docs/MEMORY.md`):
-  historical measurements are in `docs/MEMORY.md`; they are not a current
+  ARM (Cortex-A7). Historical measurements are in `docs/MEMORY.md`; they are not a current
   performance guarantee. Reproduce with `scripts/measure-memory.sh`. Rules:
     - prefer fixed, stack, and caller-provided buffers; use `std.heap`
       allocators only when a fixed buffer cannot bound the size
@@ -176,8 +175,6 @@ primitives are gone, so use `std.Io.Mutex`.
       `App.init` takes the datadir; Unix sockets use the relative
       `.zig-cache/tmp/<sub_path>/...` path to fit the 108-byte `sun_path`.
       Every wait in a test has a time deadline.
-    - update tests fetch only local temporary repositories. Never use the
-      checkout's `origin` or a real deployment for refresh/recovery tests.
     - the Klippy sim (`src/testutil/klippy_sim.zig`) does not reproduce a real
       Klippy's continuous status flood or backpressure, so it hides bridge
       concurrency and protocol bugs (a proxy deadlock and a wrong
@@ -202,8 +199,9 @@ primitives are gone, so use `std.Io.Mutex`.
 ## Build / test quick reference
 
 - DataStore backend: `[database] backend` (`sqlite` | `file`). SQLite (default)
-  compiles the amalgamation from `vendor/sqlite/` (gitignored, not in the
-  repo); the file backend is pure Zig with no C dependency.
+  compiles the tracked amalgamation from `vendor/sqlite/`; its revision and
+  checksums are in `vendor/sqlite/README.md`. The file backend stores JSON
+  through Zig I/O; the binary still links SQLite.
 - Test binary without the build runner's `--listen=-` hang:
   `zig build test-artifact -Doptimize=Debug`, then run the newest standalone
   `.zig-cache/o/<hash>/test --cache-dir=./.zig-cache` under a timeout. Do not pass
