@@ -201,7 +201,7 @@ pub fn handleRequest(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.All
     {
         bus.core.unlock(io);
         defer bus.core.lock(io);
-        try bus.conns.writeFrame(io, conn, frame);
+        bus.conns.writeFrame(io, conn, frame) catch return error.AgentDisconnected;
         waiter.ready.waitTimeout(io, deadline) catch |err| switch (err) {
             error.Timeout => return error.AgentRequestTimedOut,
             error.Canceled => return error.Canceled,
@@ -322,6 +322,16 @@ test "agent registration and dynamic method ownership survive allocation failure
             try std.testing.expectEqual(conn.id, klippy.agent_methods.get("agent_method").?);
             try std.testing.expectError(error.AgentMethodDuplicate, handleRegisterRemoteMethod(&ctx, .{ .object = params }, a));
             try std.testing.expectEqual(@as(usize, 1), (try handleList(&ctx, .null, a)).object.get("agents").?.array.items.len);
+            try params.put(a, "agent", .{ .string = "worker" });
+            try params.put(a, "method", .{ .string = "unreachable" });
+            conn.dead = true;
+            if (handleRequest(&ctx, .{ .object = params }, a)) |_| {
+                return error.ExpectedDisconnectedAgent;
+            } else |err| {
+                if (err == error.OutOfMemory) return err;
+                try std.testing.expectEqual(error.AgentDisconnected, err);
+            }
+            try std.testing.expectEqual(@as(u32, 0), ctx.pending.count());
             try ctx.removeAgent(conn);
             try std.testing.expectEqual(@as(usize, 0), ctx.agents.count());
             try std.testing.expectEqual(@as(usize, 0), ctx.methods.count());

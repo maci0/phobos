@@ -330,6 +330,18 @@ test "WS agents register, list, emit events, forward Klippy methods and clean up
     const reserved = try agent.call(alloc, "connection.send_event", "{\"event\":\"connected\"}");
     defer alloc.free(reserved);
     try std.testing.expect(std.mem.indexOf(u8, reserved, "Event 'connected' is reserved") != null);
+    {
+        ts.app.core.lock(ts.io);
+        defer ts.app.core.unlock(ts.io);
+        const target = try ts.conns.pin(ts.io, ts.app.extensions_ctx.agents.get("worker").?);
+        defer ts.conns.unpin(ts.io, target);
+        target.write_mutex.lockUncancelable(ts.io);
+        defer target.write_mutex.unlock(ts.io);
+        target.dead = true;
+    }
+    const dead_target = try ts.postJson(alloc, "/server/extensions/request", "{\"agent\":\"worker\",\"method\":\"unreachable\"}");
+    defer alloc.free(dead_target);
+    try std.testing.expectEqualStrings("{\"error\":{\"code\":500,\"message\":\"Client Socket Disconnected\"}}", dead_target);
     agent.close();
     agent_closed = true;
     const disconnected = try nextDataFrame(observer);
