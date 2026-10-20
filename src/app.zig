@@ -413,7 +413,7 @@ pub const App = struct {
     use_xheaders: bool = true,
     /// `[server] max_websocket_connections`, Moonraker default 50.
     max_websocket_connections: usize = http_transport.default_max_websocket_connections,
-    /// PanelDue line parser. No serial device is opened, so only tests feed it.
+    /// Optional PanelDue serial device and protocol state.
     paneldue: paneldue_component.PanelDue = .{},
     /// Forge-X Feather update adapter. Enabled when `[feather_updates]` exists.
     feather: feather_updates_component.FeatherCtx = .{},
@@ -864,13 +864,8 @@ pub const App = struct {
             }
         }
 
-        // [paneldue] enable_checksum defaults true, matching Moonraker. A
-        // malformed value is reported and leaves the default.
         if (cfg.hasSection("paneldue")) {
-            self.paneldue.enable_checksum = cfg.getBoolean("paneldue", "enable_checksum") catch |err| blk: {
-                if (err != error.NoOption) std.debug.print("phobos: warning: [paneldue] enable_checksum: {}\n", .{err});
-                break :blk true;
-            };
+            try self.paneldue.configure(cfg);
         }
 
         // [analysis] points at klipper_estimator under the datadir. The binary
@@ -1231,6 +1226,7 @@ pub const App = struct {
     pub fn deinit(self: *App, io: std.Io) void {
         self.power_ctx.stopTimerWorker();
         self.button_ctx.stop();
+        self.paneldue.deinit();
         self.remote_calls.close(io);
         if (self.remote_worker) |*w| {
             // Cancel and join the worker's calls before component teardown.
@@ -1687,6 +1683,8 @@ pub const App = struct {
         self.webcam_ctx.setIo(io);
         // Wire io into the klippy connection so it can connect and handshake.
         self.klippy_ctx.setIo(io);
+        self.paneldue.bind(io, self.alloc, self.core, self.klippy_ctx, self.file_ctx);
+        self.paneldue.start() catch |err| std.debug.print("phobos: PanelDue startup: {}\n", .{err});
         // Wire io into MQTT and, when a broker is configured, connect to it in
         // the background (a slow/unreachable broker must not stall startup).
         self.mqtt_ctx.io = io;
@@ -2436,7 +2434,7 @@ test "setConfig [paneldue] processPanelDueLine strips checksummed file commands"
     defer tmp.cleanup();
     var cfg_buf: [64]u8 = undefined;
     const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nenable_checksum: true\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nserial: paneldue-fixture\nenable_checksum: true\n" });
 
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
@@ -2474,11 +2472,27 @@ test "setConfig [paneldue] keeps checksums on for a malformed enable_checksum" {
     defer tmp.cleanup();
     var cfg_buf: [64]u8 = undefined;
     const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nenable_checksum: maybe\n" });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nserial: paneldue-fixture\nenable_checksum: maybe\n" });
     var app = try testApp(alloc, io, &tmp);
     defer app.deinit(io);
     try app.setConfig(io, cfg_path);
     try std.testing.expect(app.paneldue.enable_checksum);
+}
+
+test "setConfig rejects a bad PanelDue baud without retaining freed config" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nserial: paneldue-fixture\nbaud: 123456\n" });
+    var app = try testApp(alloc, io, &tmp);
+    defer app.deinit(io);
+    try std.testing.expectError(error.UnsupportedBaud, app.setConfig(io, cfg_path));
+    try std.testing.expect(app.cfg == null);
+    try std.testing.expect(app.info.cfg == null);
+    try std.testing.expect(app.info.config_file_path == null);
 }
 
 test "setConfig loads an analysis platform and a notifier record" {
