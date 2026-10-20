@@ -162,6 +162,10 @@ pub const Connections = struct {
     /// then re-take the mutex to drop the refs and perform any deferred free.
     /// `targets` is built in `alloc` (the caller's per-broadcast arena).
     pub fn broadcast(self: *Connections, io: Io, alloc: std.mem.Allocator, frame: []const u8, topic: ?[]const u8, status: ?StatusMessage) void {
+        self.broadcastExcept(io, alloc, frame, topic, status, null);
+    }
+
+    pub fn broadcastExcept(self: *Connections, io: Io, alloc: std.mem.Allocator, frame: []const u8, topic: ?[]const u8, status: ?StatusMessage, exclude: ?u64) void {
         const Target = struct { conn: *Connection, frame: []const u8 };
         var targets: std.ArrayList(Target) = .empty;
         defer targets.deinit(alloc);
@@ -174,6 +178,7 @@ pub const Connections = struct {
             // growing it by doubling on every broadcast.
             targets.ensureTotalCapacity(alloc, self.list.items.len) catch {};
             for (self.list.items) |conn| {
+                if (exclude == conn.id) continue;
                 if (conn.need_auth.load(.acquire)) continue;
                 var message = frame;
                 if (topic) |t| {
@@ -304,6 +309,24 @@ pub const Connections = struct {
         defer self.mutex.unlock(io);
         for (self.list.items) |c| if (c.id == id) return true;
         return false;
+    }
+
+    /// Keep a live connection allocated across a socket write outside Core.
+    pub fn pin(self: *Connections, io: Io, id: u64) !*Connection {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (self.list.items) |conn| if (conn.id == id) {
+            conn.refs += 1;
+            return conn;
+        };
+        return error.AgentDisconnected;
+    }
+
+    pub fn unpin(self: *Connections, io: Io, conn: *Connection) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        conn.refs -= 1;
+        if (conn.refs == 0 and conn.pending_free) self.freeConn(conn);
     }
 
     /// Record the authenticated user (copied) and clear `need_auth`. Called

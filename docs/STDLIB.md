@@ -255,3 +255,10 @@ buffer capped at 10 MiB. The announced length is checked before allocation;
 consuming a large message restores the original small buffer when the remaining
 buffered input fits. Pongs are discarded before checking the following frame's
 capacity because the native reader otherwise skips them internally.
+
+Agent RPC waits use native semaphores with absolute deadlines outside Core.
+Connection ids carry no pointers; registry pins keep a selected connection alive
+across a write. Response correlation checks the owning connection and copies the
+frame before waking its waiter. Owned WebSocket task groups cancel and join before
+the session's writer and registry entry are removed. Dynamic Klippy registrations
+use a separately locked map and are replayed by the normal handshake.

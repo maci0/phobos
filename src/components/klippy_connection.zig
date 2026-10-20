@@ -294,6 +294,8 @@ pub const KlippyCtx = struct {
     on_gcode: ?*const fn (*anyopaque, std.Io, std.json.Value) void = null,
     /// Registered with Klippy once it is ready.
     remote_methods: []const []const u8 = &.{},
+    agent_methods: std.StringHashMapUnmanaged(u64) = .empty,
+    agent_methods_mutex: std.Io.Mutex = .init,
 
     /// Set by stop() to signal the background klippyTask to exit.
     stopping: std.Io.Event = .unset,
@@ -319,6 +321,9 @@ pub const KlippyCtx = struct {
 
     pub fn deinit(self: *KlippyCtx) void {
         if (self.io) |io| self.stop(io);
+        var agent_names = self.agent_methods.keyIterator();
+        while (agent_names.next()) |name| self.gpa.free(name.*);
+        self.agent_methods.deinit(self.gpa);
         var sit = self.extra_sub_objects.keyIterator();
         while (sit.next()) |k| self.gpa.free(k.*);
         self.extra_sub_objects.deinit(self.gpa);
@@ -488,10 +493,31 @@ pub const KlippyCtx = struct {
                 self.gpa.free(try self.handshakeRequest(io, "register_remote_method", params));
             }
         }
-        {
-            self.pending_mutex.lockUncancelable(io);
-            defer self.pending_mutex.unlock(io);
-            self.connected.store(true, .release);
+        // Publish connected while holding the dynamic-method mutex: a method
+        // added concurrently is registered here or by addAgentMethod.
+        var registered: std.StringHashMapUnmanaged(void) = .empty;
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        while (true) {
+            var names: std.ArrayList([]const u8) = .empty;
+            {
+                self.agent_methods_mutex.lockUncancelable(io);
+                defer self.agent_methods_mutex.unlock(io);
+                var it = self.agent_methods.keyIterator();
+                while (it.next()) |name| if (!registered.contains(name.*)) try names.append(alloc, try alloc.dupe(u8, name.*));
+                if (names.items.len == 0 or self.state != .ready) {
+                    self.pending_mutex.lockUncancelable(io);
+                    self.connected.store(true, .release);
+                    self.pending_mutex.unlock(io);
+                    break;
+                }
+            }
+            for (names.items) |name| {
+                const params = try std.json.Stringify.valueAlloc(alloc, .{ .response_template = .{ .method = name }, .remote_method = name }, .{});
+                self.gpa.free(try self.handshakeRequest(io, "register_remote_method", params));
+                try registered.put(alloc, name, {});
+            }
         }
         self.bus.core.run(io, handshakeCompleteLocked, .{ self, io });
     }
@@ -844,6 +870,35 @@ pub const KlippyCtx = struct {
         const params_json = try serializeParams(alloc, params);
         defer if (params_json.len > 0) alloc.free(params_json);
         return self.call(method, params_json, self.bus.core, .none, alloc);
+    }
+
+    /// Agent registration runs under Core and drops it for the Klippy RPC.
+    pub fn addAgentMethod(self: *KlippyCtx, io: std.Io, name: []const u8, owner: u64, alloc: std.mem.Allocator) !void {
+        for (self.remote_methods) |builtin| if (std.mem.eql(u8, name, builtin)) return error.AgentMethodDuplicate;
+        if (std.mem.eql(u8, name, "process_status_update") or std.mem.eql(u8, name, "process_gcode_response")) return error.AgentMethodDuplicate;
+        const connected = blk: {
+            self.agent_methods_mutex.lockUncancelable(io);
+            defer self.agent_methods_mutex.unlock(io);
+            if (self.agent_methods.contains(name)) return error.AgentMethodDuplicate;
+            const owned = try self.gpa.dupe(u8, name);
+            errdefer self.gpa.free(owned);
+            try self.agent_methods.put(self.gpa, owned, owner);
+            break :blk self.connected.load(.acquire);
+        };
+        if (!connected) return;
+        errdefer self.removeAgentMethod(io, name, owner);
+        const params = try std.json.Stringify.valueAlloc(alloc, .{ .response_template = .{ .method = name }, .remote_method = name }, .{});
+        defer alloc.free(params);
+        _ = try self.call("register_remote_method", params, self.bus.core, .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } }, alloc);
+    }
+
+    pub fn removeAgentMethod(self: *KlippyCtx, io: std.Io, name: []const u8, owner: u64) void {
+        self.agent_methods_mutex.lockUncancelable(io);
+        defer self.agent_methods_mutex.unlock(io);
+        if (self.agent_methods.get(name)) |id| if (id == owner) {
+            const removed = self.agent_methods.fetchRemove(name).?;
+            self.gpa.free(removed.key);
+        };
     }
 
     /// `request` for callers that do NOT hold Core (off-Core proxies, the job
@@ -1591,6 +1646,76 @@ test "request releases Core before a socket write needs the reader to drain" {
     if (result) |_| {} else |_| ctx.stream.?.shutdown(io, .both) catch {};
     peer_task.cancel(io);
     try std.testing.expectEqualStrings("ok", (try result).string);
+}
+
+test "agent methods register during handshake and on the active Klippy connection" {
+    const io = std.testing.io;
+    const nb = try NullBus.init(std.testing.allocator);
+    defer nb.deinit(std.testing.allocator);
+    var ctx = try KlippyCtx.init(std.heap.smp_allocator, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.remote_methods = &.{"builtin"};
+    var listener = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer listener.deinit(io);
+    ctx.stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    ctx.reader = ctx.stream.?.reader(io, &ctx.read_buffer);
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    nb.core.lock(io);
+    const initial = ctx.addAgentMethod(io, "before", 1, a);
+    nb.core.unlock(io);
+    try initial;
+    var task = try io.concurrent(struct {
+        fn run(k: *KlippyCtx, stream: net.Stream) !u32 {
+            const aio = k.io.?;
+            var deadline: SocketDeadline = .{ .base_io = aio, .timeout = .{ .deadline = .fromNow(aio, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+            var read_buffer: [1024]u8 = undefined;
+            var reader = stream.reader(deadline.io(), &read_buffer);
+            var writer = stream.writer(deadline.io(), &.{});
+            var seen: u32 = 0;
+            while (true) {
+                const payload = try framing.read(std.heap.smp_allocator, &reader.interface);
+                defer std.heap.smp_allocator.free(payload);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.smp_allocator, payload, .{});
+                defer parsed.deinit();
+                const request = parsed.value.object;
+                const method = request.get("method").?.string;
+                const id = request.get("id").?.string;
+                var frame: [256]u8 = undefined;
+                const response = if (std.mem.eql(u8, method, "info"))
+                    try std.fmt.bufPrint(&frame, "{{\"id\":\"{s}\",\"result\":{{\"state\":\"ready\"}}}}", .{id})
+                else
+                    try std.fmt.bufPrint(&frame, "{{\"id\":\"{s}\",\"result\":{{}}}}", .{id});
+                if (std.mem.eql(u8, method, "register_remote_method")) {
+                    const name = request.get("params").?.object.get("remote_method").?.string;
+                    if (std.mem.eql(u8, name, "before")) seen |= 1;
+                    if (std.mem.eql(u8, name, "after")) {
+                        try std.testing.expect(k.bus.core.mutex.tryLock());
+                        k.bus.core.unlock(aio);
+                        try k.dispatchFrame(aio, response);
+                        return seen | 2;
+                    }
+                }
+                try framing.write(&writer.interface, response);
+                try writer.interface.flush();
+            }
+        }
+    }.run, .{ &ctx, peer });
+    defer _ = task.cancel(io) catch {};
+    try ctx.handshake(io);
+    nb.core.lock(io);
+    const active = ctx.addAgentMethod(io, "after", 2, a);
+    nb.core.unlock(io);
+    try active;
+    try std.testing.expectEqual(@as(u32, 3), try task.await(io));
+    ctx.removeAgentMethod(io, "after", 1);
+    try std.testing.expectEqual(@as(u64, 2), ctx.agent_methods.get("after").?);
+    ctx.removeAgentMethod(io, "after", 2);
+    try std.testing.expect(!ctx.agent_methods.contains("after"));
 }
 
 test "subscribe returns requested fields and replaces the aggregate client set" {

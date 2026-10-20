@@ -30,6 +30,7 @@ pub const HandlerFn = *const fn (ctx: *anyopaque, params: std.json.Value, alloc:
 pub const method_key = "_method";
 pub const current_user_key = "_current_user";
 pub const current_ip_key = "_remote_ip";
+pub const connection_key = "_connection_id";
 
 pub const Entry = struct {
     ctx: *anyopaque,
@@ -51,6 +52,7 @@ pub const Caller = struct {
     remote_ip: ?[]const u8 = null,
     /// No authenticated user: `auth_required` methods answer "Unauthorized".
     need_auth: bool = false,
+    connection_id: ?u64 = null,
     screen: ?Screen = null,
 };
 
@@ -75,6 +77,7 @@ pub const ErrorReply = struct {
     /// -32602; any other ServerError, including a bad argument (400), keeps
     /// its status. -32602 "Invalid params:" is only for non-object params.
     rpc_code: i64,
+    data: ?std.json.Value = null,
 };
 
 /// Map a handler error to its HTTP status, JSON-RPC code and message. The
@@ -86,7 +89,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
             const code = slot.object.get("status") orelse .null;
             const message = slot.object.get("message") orelse .null;
             if (code == .integer and code.integer >= 400 and code.integer <= 599 and message == .string) {
-                return .{ .status = @fromBackingInt(@intCast(code.integer)), .message = message.string, .rpc_code = switch (code.integer) {
+                return .{ .status = @fromBackingInt(@intCast(code.integer)), .message = message.string, .data = slot.object.get("data"), .rpc_code = switch (code.integer) {
                     404 => -32601,
                     401 => -32602,
                     else => code.integer,
@@ -135,8 +138,17 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.SelectNotGcodes => .{ .bad_request, "File must be located in the 'gcodes' root" },
         error.FileDoesNotExist => .{ .bad_request, "File does not exist" },
         error.Conflict => .{ .conflict, "Conflict" },
-        error.AgentNotConnected => .{ .bad_request, "Agent not connected" },
-        error.ReservedEvent => .{ .bad_request, "Reserved event name" },
+        error.AgentNotConnected => .{ .bad_request, try std.fmt.allocPrint(alloc, "Agent {s} not connected", .{paramStr(params, "agent")}) },
+        error.ReservedEvent => .{ .bad_request, try std.fmt.allocPrint(alloc, "Event '{s}' is reserved", .{paramStr(params, "event")}) },
+        error.NoAgentConnection => .{ .bad_request, "No connection detected" },
+        error.AgentEventsOnly => .{ .bad_request, "Only connections of the 'agent' type can send events" },
+        error.AgentMethodsOnly => .{ .bad_request, "Only connections of the 'agent' type can register methods" },
+        error.AgentArgumentsInvalid => .{ .bad_request, "The 'arguments' field must contain an object or a list" },
+        error.AgentDuplicate => .{ .bad_request, try std.fmt.allocPrint(alloc, "Agent '{s}' already registered and connected'", .{paramStr(params, "client_name")}) },
+        error.AgentMethodDuplicate => .{ .bad_request, try std.fmt.allocPrint(alloc, "Remote method ({s}) already registered", .{paramStr(params, "method_name")}) },
+        error.AgentDisconnected => .{ .internal_server_error, "Client Socket Disconnected" },
+        error.AgentRequestTimedOut => .{ .internal_server_error, "Agent request timed out" },
+        error.AgentCapacity => .{ .service_unavailable, "Too many pending agent requests" },
         error.EstimatorNotAvailable => .{ .bad_request, "Estimator not available" },
         // Klippy rejected the command (bad gcode, unknown mcu command): a
         // client error, as in Moonraker.
@@ -187,15 +199,16 @@ pub fn requestParams(
 ) error{OutOfMemory}!std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     if (src) |s| {
-        try obj.ensureTotalCapacity(alloc, s.count() + 3);
+        try obj.ensureTotalCapacity(alloc, s.count() + 4);
         var it = s.iterator();
         while (it.next()) |e| {
             const k = e.key_ptr.*;
-            if (std.mem.eql(u8, k, method_key) or std.mem.eql(u8, k, current_user_key) or std.mem.eql(u8, k, current_ip_key)) continue;
+            if (std.mem.eql(u8, k, method_key) or std.mem.eql(u8, k, current_user_key) or std.mem.eql(u8, k, current_ip_key) or std.mem.eql(u8, k, connection_key)) continue;
             obj.putAssumeCapacity(k, e.value_ptr.*);
         }
     }
     try obj.put(alloc, method_key, .{ .string = @tagName(verb) });
+    if (caller.transport == .WEBSOCKET) if (caller.connection_id) |id| try obj.put(alloc, connection_key, .{ .integer = @intCast(id) });
     if (identity) {
         if (caller.user) |u| try obj.put(alloc, current_user_key, .{ .string = u });
         if (caller.remote_ip) |ip| try obj.put(alloc, current_ip_key, .{ .string = ip });
@@ -314,10 +327,12 @@ pub const Dispatcher = struct {
         };
         if (caller.need_auth and entry.auth_required) return try jv.errorResponse(alloc, id, -32602, "Unauthorized");
 
-        var params = try requestParams(handler_alloc, src, entry.verb, caller, std.mem.startsWith(u8, method, "access."));
+        var scoped_caller = caller;
+        if (!std.mem.startsWith(u8, method, "connection.")) scoped_caller.connection_id = null;
+        var params = try requestParams(handler_alloc, src, entry.verb, scoped_caller, std.mem.startsWith(u8, method, "access."));
         if (caller.screen) |screen| screen.run(screen.ctx, &params, handler_alloc) catch |err| {
             const reply = try errorReply(err, params, handler_alloc);
-            return try jv.errorResponse(alloc, id, reply.rpc_code, reply.message);
+            return try formatError(alloc, id, reply);
         };
 
         // REST and JSON-RPC agree: off_core methods skip the Core lock, the
@@ -326,12 +341,21 @@ pub const Dispatcher = struct {
         defer if (!entry.off_core) if (self.core) |core| core.unlock(self.io.?);
         const result = entry.handler(entry.ctx, params, handler_alloc) catch |err| {
             const reply = try errorReply(err, params, handler_alloc);
-            return try jv.errorResponse(alloc, id, reply.rpc_code, reply.message);
+            return try formatError(alloc, id, reply);
         };
         if (id == .null) return null;
         return try jv.successResponse(alloc, id, result);
     }
 };
+
+pub fn formatError(alloc: std.mem.Allocator, id: std.json.Value, reply: ErrorReply) error{OutOfMemory}![]u8 {
+    if (reply.data) |data| return std.json.Stringify.valueAlloc(alloc, .{
+        .jsonrpc = "2.0",
+        .@"error" = .{ .code = reply.rpc_code, .message = reply.message, .data = data },
+        .id = id,
+    }, .{});
+    return jv.errorResponse(alloc, id, reply.rpc_code, reply.message);
+}
 
 // =============================================================================
 // Tests
@@ -837,18 +861,23 @@ test "fuzz requestParams never keeps a client-supplied transport key" {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
-            const keys = [_][]const u8{ method_key, current_user_key, current_ip_key, "x", "" };
+            const keys = [_][]const u8{ method_key, current_user_key, current_ip_key, connection_key, "x", "" };
             var src: std.json.ObjectMap = .empty;
             for (0..smith.valueRangeAtMostWithHash(u8, 0, 8, 0)) |i| {
                 const k = keys[smith.valueRangeAtMostWithHash(u8, 0, keys.len - 1, @intCast(i + 1))];
                 try src.put(a, k, .{ .string = "client" });
             }
             const identity = smith.valueRangeAtMostWithHash(u8, 0, 1, 99) == 1;
-            const params = try requestParams(a, src, .GET, .{ .user = "u" }, identity);
+            const kinds = std.enums.values(TransportType);
+            const kind = kinds[smith.valueRangeAtMostWithHash(u8, 0, kinds.len - 1, 98)];
+            const params = try requestParams(a, src, .GET, .{ .user = "u", .transport = kind, .connection_id = 7 }, identity);
             const o = params.object;
             try std.testing.expectEqualStrings("GET", o.get(method_key).?.string);
             if (o.get(current_user_key)) |u| try std.testing.expectEqualStrings("u", u.string);
             try std.testing.expect(o.get(current_ip_key) == null);
+            if (kind == .WEBSOCKET) {
+                try std.testing.expectEqual(@as(i64, 7), o.get(connection_key).?.integer);
+            } else try std.testing.expect(o.get(connection_key) == null);
             try std.testing.expectEqual(identity, o.get(current_user_key) != null);
         }
     }.run, .{});

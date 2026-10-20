@@ -281,6 +281,199 @@ test "WS: rejects an announced message above ten MiB without reading its payload
     return error.ExpectedClosedSocket;
 }
 
+test "WS agents register, list, emit events, forward Klippy methods and clean up on close" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const observer = try connect(ts, alloc);
+    defer observer.close();
+    alloc.free(try observer.call(alloc, "server.websocket.id", null));
+    const agent = try connect(ts, alloc);
+    var agent_closed = false;
+    defer if (!agent_closed) agent.close();
+    const identify = "{\"client_name\":\"worker\",\"version\":\"1\",\"type\":\"agent\",\"url\":\"local\"}";
+    const identified = try agent.call(alloc, "server.connection.identify", identify);
+    defer alloc.free(identified);
+    try std.testing.expect(std.mem.indexOf(u8, identified, "connection_id") != null);
+    const connected = try nextDataFrame(observer);
+    defer alloc.free(connected.data);
+    try std.testing.expect(std.mem.indexOf(u8, connected.data, "notify_agent_event") != null);
+    try std.testing.expect(std.mem.indexOf(u8, connected.data, "\"event\":\"connected\"") != null);
+    const list = try ts.get(alloc, "/server/extensions/list");
+    defer alloc.free(list);
+    const parsed_list = try std.json.parseFromSlice(std.json.Value, alloc, list, .{});
+    defer parsed_list.deinit();
+    const agents = parsed_list.value.object.get("result").?.object.get("agents").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), agents.len);
+    try std.testing.expectEqualStrings("worker", agents[0].object.get("name").?.string);
+    const duplicate = try connect(ts, alloc);
+    defer duplicate.close();
+    const duplicate_response = try duplicate.call(alloc, "server.connection.identify", identify);
+    defer alloc.free(duplicate_response);
+    try std.testing.expect(std.mem.indexOf(u8, duplicate_response, "already registered and connected") != null);
+    const forbidden = try observer.call(alloc, "connection.register_remote_method", "{\"method_name\":\"worker_method\"}");
+    defer alloc.free(forbidden);
+    try std.testing.expect(std.mem.indexOf(u8, forbidden, "Only connections") != null);
+    const registered = try agent.call(alloc, "connection.register_remote_method", "{\"method_name\":\"worker_method\"}");
+    defer alloc.free(registered);
+    try std.testing.expect(std.mem.indexOf(u8, registered, "\"result\":\"ok\"") != null);
+    try ts.app.klippy_ctx.dispatchFrame(ts.io, "{\"method\":\"worker_method\",\"params\":{\"value\":7}}");
+    const forwarded = try nextDataFrame(agent);
+    defer alloc.free(forwarded.data);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"method\":\"worker_method\",\"params\":{\"value\":7}}", forwarded.data);
+    const sent = try agent.call(alloc, "connection.send_event", "{\"event\":\"changed\",\"data\":{\"value\":9}}");
+    defer alloc.free(sent);
+    const event = try nextDataFrame(observer);
+    defer alloc.free(event.data);
+    try std.testing.expect(std.mem.indexOf(u8, event.data, "\"event\":\"changed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, event.data, "\"value\":9") != null);
+    const reserved = try agent.call(alloc, "connection.send_event", "{\"event\":\"connected\"}");
+    defer alloc.free(reserved);
+    try std.testing.expect(std.mem.indexOf(u8, reserved, "Event 'connected' is reserved") != null);
+    agent.close();
+    agent_closed = true;
+    const disconnected = try nextDataFrame(observer);
+    defer alloc.free(disconnected.data);
+    try std.testing.expect(std.mem.indexOf(u8, disconnected.data, "\"event\":\"disconnected\"") != null);
+    const empty = try ts.get(alloc, "/server/extensions/list");
+    defer alloc.free(empty);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "\"agents\":[]") != null);
+    ts.app.core.lock(ts.io);
+    defer ts.app.core.unlock(ts.io);
+    try std.testing.expectEqual(@as(usize, 0), ts.app.extensions_ctx.methods.count());
+    try std.testing.expectEqual(@as(usize, 0), ts.app.klippy_ctx.agent_methods.count());
+}
+
+test "WS agents answer requests including self calls, propagate errors and bound silent calls" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const agent = try connect(ts, alloc);
+    defer agent.close();
+    alloc.free(try agent.call(alloc, "server.connection.identify", "{\"client_name\":\"worker\",\"version\":\"1\",\"type\":\"agent\",\"url\":\"local\"}"));
+    const caller = try connect(ts, alloc);
+    defer caller.close();
+    try caller.sendFrame(.text, "{\"jsonrpc\":\"2.0\",\"method\":\"server.extensions.request\",\"params\":{\"agent\":\"worker\",\"method\":\"echo\",\"arguments\":[1,2]},\"id\":33}");
+    const outbound = try nextDataFrame(agent);
+    defer alloc.free(outbound.data);
+    const request = try std.json.parseFromSlice(std.json.Value, alloc, outbound.data, .{});
+    defer request.deinit();
+    try std.testing.expectEqualStrings("echo", request.value.object.get("method").?.string);
+    try std.testing.expectEqual(@as(usize, 2), request.value.object.get("params").?.array.items.len);
+    const id = request.value.object.get("id").?.integer;
+    const spoof = try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .result = "forged", .id = id }, .{});
+    defer alloc.free(spoof);
+    try caller.sendFrame(.text, spoof);
+    const answer = try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .result = .{ .value = 9 }, .id = id }, .{});
+    defer alloc.free(answer);
+    try agent.sendFrame(.text, answer);
+    const result = try nextDataFrame(caller);
+    defer alloc.free(result.data);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"result\":{\"value\":9},\"id\":33}", result.data);
+
+    try agent.sendFrame(.text, "{\"jsonrpc\":\"2.0\",\"method\":\"server.extensions.request\",\"params\":{\"agent\":\"worker\",\"method\":\"self\"},\"id\":44}");
+    const self_frame = try nextDataFrame(agent);
+    defer alloc.free(self_frame.data);
+    const self_request = try std.json.parseFromSlice(std.json.Value, alloc, self_frame.data, .{});
+    defer self_request.deinit();
+    try std.testing.expectEqualStrings("self", self_request.value.object.get("method").?.string);
+    const self_answer = try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .result = true, .id = self_request.value.object.get("id").?.integer }, .{});
+    defer alloc.free(self_answer);
+    try agent.sendFrame(.text, self_answer);
+    const self_result = try nextDataFrame(agent);
+    defer alloc.free(self_result.data);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"result\":true,\"id\":44}", self_result.data);
+
+    try caller.sendFrame(.text, "{\"jsonrpc\":\"2.0\",\"method\":\"server.extensions.request\",\"params\":{\"agent\":\"worker\",\"method\":\"rpc_fail\"},\"id\":77}");
+    const rpc_failed_frame = try nextDataFrame(agent);
+    defer alloc.free(rpc_failed_frame.data);
+    const rpc_failed_request = try std.json.parseFromSlice(std.json.Value, alloc, rpc_failed_frame.data, .{});
+    defer rpc_failed_request.deinit();
+    const rpc_failed_answer = try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .@"error" = .{ .code = -1, .message = "refused" }, .id = rpc_failed_request.value.object.get("id").?.integer }, .{});
+    defer alloc.free(rpc_failed_answer);
+    try agent.sendFrame(.text, rpc_failed_answer);
+    const rpc_failed_result = try nextDataFrame(caller);
+    defer alloc.free(rpc_failed_result.data);
+    const rpc_error = try std.json.parseFromSlice(std.json.Value, alloc, rpc_failed_result.data, .{});
+    defer rpc_error.deinit();
+    try std.testing.expectEqual(@as(i64, 424), rpc_error.value.object.get("error").?.object.get("code").?.integer);
+    try std.testing.expectEqualStrings("refused", rpc_error.value.object.get("error").?.object.get("data").?.object.get("message").?.string);
+
+    var http_call = try ts.io.concurrent(struct {
+        fn run(server: *TestServer) ![]u8 {
+            return server.postJson(std.heap.smp_allocator, "/server/extensions/request", "{\"agent\":\"worker\",\"method\":\"fail\"}");
+        }
+    }.run, .{ts});
+    var http_awaited = false;
+    defer if (!http_awaited) {
+        if (http_call.cancel(ts.io)) |value| std.heap.smp_allocator.free(value) else |_| {}
+    };
+    const failed_frame = try nextDataFrame(agent);
+    defer alloc.free(failed_frame.data);
+    const failed_request = try std.json.parseFromSlice(std.json.Value, alloc, failed_frame.data, .{});
+    defer failed_request.deinit();
+    const failed_answer = try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .@"error" = .{ .code = -1, .message = "refused" }, .id = failed_request.value.object.get("id").?.integer }, .{});
+    defer alloc.free(failed_answer);
+    try agent.sendFrame(.text, failed_answer);
+    const http_result = try http_call.await(ts.io);
+    http_awaited = true;
+    defer std.heap.smp_allocator.free(http_result);
+    const http_parsed = try std.json.parseFromSlice(std.json.Value, alloc, http_result, .{});
+    defer http_parsed.deinit();
+    const error_result = http_parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 424), error_result.get("code").?.integer);
+    try std.testing.expectEqualStrings("refused", error_result.get("data").?.object.get("message").?.string);
+
+    ts.app.core.lock(ts.io);
+    ts.app.extensions_ctx.timeout = .fromMilliseconds(20);
+    ts.app.core.unlock(ts.io);
+    const timeout = try caller.call(alloc, "server.extensions.request", "{\"agent\":\"worker\",\"method\":\"silent\"}");
+    defer alloc.free(timeout);
+    try std.testing.expect(std.mem.indexOf(u8, timeout, "Agent request timed out") != null);
+    ts.app.extensions_ctx.pending_mutex.lockUncancelable(ts.io);
+    defer ts.app.extensions_ctx.pending_mutex.unlock(ts.io);
+    try std.testing.expectEqual(@as(usize, 0), ts.app.extensions_ctx.pending.count());
+}
+
+test "WS agent disconnect wakes pending callers and cancels its own outstanding work" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const caller = try connect(ts, alloc);
+    defer caller.close();
+    alloc.free(try caller.call(alloc, "server.websocket.id", null));
+    const agent = try connect(ts, alloc);
+    var closed = false;
+    defer if (!closed) agent.close();
+    alloc.free(try agent.call(alloc, "server.connection.identify", "{\"client_name\":\"worker\",\"version\":\"1\",\"type\":\"agent\",\"url\":\"local\"}"));
+    const connected = try nextDataFrame(caller);
+    alloc.free(connected.data);
+    try caller.sendFrame(.text, "{\"jsonrpc\":\"2.0\",\"method\":\"server.extensions.request\",\"params\":{\"agent\":\"worker\",\"method\":\"pending\"},\"id\":55}");
+    const outbound = try nextDataFrame(agent);
+    alloc.free(outbound.data);
+    try agent.sendFrame(.text, "{\"jsonrpc\":\"2.0\",\"method\":\"server.extensions.request\",\"params\":{\"agent\":\"worker\",\"method\":\"self_pending\"},\"id\":66}");
+    const self_pending = try nextDataFrame(agent);
+    alloc.free(self_pending.data);
+    agent.close();
+    closed = true;
+    var found = false;
+    for (0..3) |_| {
+        const frame = try nextDataFrame(caller);
+        defer alloc.free(frame.data);
+        if (std.mem.indexOf(u8, frame.data, "Client Socket Disconnected") != null) {
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
+    const list = try ts.get(alloc, "/server/extensions/list");
+    defer alloc.free(list);
+    try std.testing.expect(std.mem.indexOf(u8, list, "\"agents\":[]") != null);
+    ts.app.extensions_ctx.pending_mutex.lockUncancelable(ts.io);
+    defer ts.app.extensions_ctx.pending_mutex.unlock(ts.io);
+    try std.testing.expectEqual(@as(usize, 0), ts.app.extensions_ctx.pending.count());
+}
+
 test "WS upgrade times out on silent and incomplete response headers" {
     const ts = try TestServer.init(std.testing.allocator);
     defer ts.stop();

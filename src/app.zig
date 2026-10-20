@@ -161,8 +161,8 @@ const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]c
 /// Klippy `RemoteHandler`, run on the Klippy reader under Core. Queues the
 /// call for `remoteWorker`.
 fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror!void {
-    _ = alloc;
     const app: *App = @ptrCast(@alignCast(ctx));
+    if (try app.extensions_ctx.forwardRemote(method, params, alloc)) return;
     const io = app.klippy_ctx.io orelse return;
     const req = (try remoteMethodRequest(app.alloc, method, params)) orelse return;
     const queued = app.remote_calls.put(io, &.{req}, 0) catch 0;
@@ -590,10 +590,11 @@ pub const App = struct {
         errdefer alloc.destroy(mqtt_ctx);
         mqtt_ctx.* = MqttCtx.init(alloc);
 
-        // --- Extensions context (stateless, no agent connections) ---
+        // --- Extension agents ---
         const extensions_ctx = try alloc.create(ExtensionsCtx);
         errdefer alloc.destroy(extensions_ctx);
-        extensions_ctx.* = .{};
+        extensions_ctx.* = .{ .alloc = alloc, .io = aio, .bus = bus };
+        errdefer extensions_ctx.deinit();
 
         // --- Analysis context (klipper_estimator stubs) ---
         const analysis_ctx = try alloc.create(AnalysisCtx);
@@ -693,6 +694,7 @@ pub const App = struct {
         klippy_ctx.server_info = info;
         klippy_ctx.job_state = job_state_ctx;
         klippy_ctx.history = history_ctx;
+        extensions_ctx.klippy = klippy_ctx;
 
         // Wire the Klippy connection into the printer context so handlers
         // (print.start, pause, resume, cancel, restart, firmware_restart)
@@ -1271,6 +1273,7 @@ pub const App = struct {
         // users to the DataStore).
         self.auth_ctx.deinit();
         self.alloc.destroy(self.auth_ctx);
+        self.extensions_ctx.deinit();
         self.alloc.destroy(self.extensions_ctx);
         for (self.file_roots) |r| self.alloc.free(r.path);
         self.alloc.free(self.file_roots);
@@ -1721,6 +1724,7 @@ pub const App = struct {
             .file_ctx = self.file_ctx,
             .datadir = self.datadir,
             .klippy_ctx = self.klippy_ctx,
+            .extensions_ctx = self.extensions_ctx,
             .cors_domains = self.cors_domains,
             .use_xheaders = self.use_xheaders,
             .max_websocket_connections = self.max_websocket_connections,

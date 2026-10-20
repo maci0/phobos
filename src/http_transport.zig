@@ -27,6 +27,7 @@ const authz = @import("components/authorization.zig");
 const file_manager = @import("components/file_manager.zig");
 const klippy_connection = @import("components/klippy_connection.zig");
 const DeadlineWriter = @import("util/deadline_writer.zig").DeadlineWriter;
+const ExtensionsCtx = @import("components/extensions.zig").ExtensionsCtx;
 const SocketDeadline = @import("util/socket_deadline.zig").SocketDeadline;
 
 const Registry = registry.Registry;
@@ -97,6 +98,7 @@ pub const Server = struct {
     /// Klippy Unix-socket bridge context. When set, /klippysocket WebSocket
     /// connections relay frames to/from the live Klippy process.
     klippy_ctx: ?*klippy_connection.KlippyCtx = null,
+    extensions_ctx: ?*ExtensionsCtx = null,
     /// Allowed CORS origins from `[authorization] cors_domains`. An entry of `*`
     /// matches any origin; `*.example.com` matches subdomains; otherwise an exact
     /// match. A nonempty list also permits trusted Origin IPs. Empty = no CORS.
@@ -329,6 +331,7 @@ pub fn handleParsed(
     defer if (!route.off_core) srv.core.unlock(srv.io);
     const result = callHandler(route.handler, route.ctx, params, alloc) catch |err| {
         const reply = try jsonrpc.errorReply(err, params, alloc);
+        if (reply.data) |data| return .{ .status = reply.status, .body = try std.json.Stringify.valueAlloc(alloc, .{ .@"error" = .{ .code = @backingInt(reply.status), .message = reply.message, .data = data } }, .{}) };
         return errorResponse(alloc, reply.status, reply.message);
     };
 
@@ -526,6 +529,7 @@ fn serveUpgrade(
         .klippy = srv.klippy_ctx,
         .auth = srv.auth,
         .writer = &out,
+        .extensions = srv.extensions_ctx,
     };
     ws.serveWebSocket(&ws_srv, &web_socket, conn);
 }

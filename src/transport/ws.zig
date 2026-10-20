@@ -26,12 +26,15 @@ const std = @import("std");
 const Io = std.Io;
 
 const jsonrpc = @import("../jsonrpc.zig");
+const webreq = @import("../json/params.zig");
 const jv = @import("../json/value.zig");
 const connections = @import("../server/connections.zig");
 const klippy_connection = @import("../components/klippy_connection.zig");
 const authz = @import("../components/authorization.zig");
 const DeadlineWriter = @import("../util/deadline_writer.zig").DeadlineWriter;
 const MessageBuffer = @import("../util/ws_message.zig").MessageBuffer;
+const ExtensionsCtx = @import("../components/extensions.zig").ExtensionsCtx;
+const max_agent_request_tasks = 16;
 
 const Connections = connections.Connections;
 const Connection = connections.Connection;
@@ -62,7 +65,7 @@ fn idResult(alloc: std.mem.Allocator, key: []const u8, id: u64) !std.json.Value 
 /// The dispatcher's view of a connection's sender.
 fn callerOf(conn: *const Connection) jsonrpc.Caller {
     const need_auth = conn.need_auth.load(.acquire);
-    return .{ .transport = .WEBSOCKET, .user = if (need_auth) null else conn.user, .remote_ip = conn.remote_ip, .need_auth = need_auth };
+    return .{ .transport = .WEBSOCKET, .user = if (need_auth) null else conn.user, .remote_ip = conn.remote_ip, .need_auth = need_auth, .connection_id = conn.id };
 }
 
 /// Core WS request handling, independent of sockets so it is unit- and
@@ -87,7 +90,14 @@ pub fn dispatchMessage(
 }
 
 fn dispatchParsedRoot(srv: *WsServer, conn: *Connection, root: std.json.Value, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
-    const caller = callerOf(conn);
+    const caller = blk: {
+        srv.conns.mutex.lockUncancelable(srv.io);
+        defer srv.conns.mutex.unlock(srv.io);
+        var snapshot = callerOf(conn);
+        if (snapshot.user) |user| snapshot.user = try alloc.dupe(u8, user);
+        break :blk snapshot;
+    };
+    defer if (caller.user) |user| alloc.free(user);
     // The dispatcher refuses over-deep input before any id is echoed.
     if (jv.exceedsDepth(root, jv.max_value_depth)) return srv.dispatcher.handleParsedRoot(caller, root, alloc);
     if (root == .array) {
@@ -155,6 +165,7 @@ fn handleIdentify(srv: *WsServer, conn: *Connection, params: std.json.Value, all
     // Logout cannot run between credential validation and identity publication.
     srv.conns.core.lock(srv.io);
     defer srv.conns.core.unlock(srv.io);
+    if (std.mem.eql(u8, conn.client.type, "agent") and conn.identified) return error.AgentDuplicate;
     if (srv.auth) |auth| {
         const token = params.object.get("access_token");
         const api_key = params.object.get("api_key");
@@ -167,12 +178,21 @@ fn handleIdentify(srv: *WsServer, conn: *Connection, params: std.json.Value, all
             try srv.conns.setUser(srv.io, conn, authz.api_user);
         } else if (conn.need_auth.load(.acquire)) return error.Unauthorized;
     }
+    const client_type = try std.ascii.allocLowerString(alloc, getStr(params, "type"));
+    defer alloc.free(client_type);
+    if (std.mem.eql(u8, client_type, "agent")) if (srv.extensions) |extensions| {
+        _ = try webreq.required([]const u8, params, "client_name");
+        _ = try webreq.required([]const u8, params, "version");
+        _ = try webreq.required([]const u8, params, "url");
+        if (extensions.agents.contains(getStr(params, "client_name"))) return error.AgentDuplicate;
+    };
     try srv.conns.identify(srv.io, conn, .{
         .name = getStr(params, "client_name"),
         .version = getStr(params, "version"),
-        .type = getStr(params, "type"),
+        .type = client_type,
         .url = getStr(params, "url"),
     });
+    if (std.mem.eql(u8, client_type, "agent")) if (srv.extensions) |extensions| try extensions.registerAgent(conn, alloc);
     return idResult(alloc, "connection_id", conn.id);
 }
 
@@ -189,6 +209,7 @@ pub const WsServer = struct {
     auth: ?*authz.AuthCtx = null,
     /// Socket frame deadline. Null for in-memory codec tests.
     writer: ?*DeadlineWriter = null,
+    extensions: ?*ExtensionsCtx = null,
 };
 
 /// Serve an upgraded connection prepared by the HTTP transport. The caller
@@ -204,6 +225,10 @@ pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Con
     var fw = FrameWriter{ .ws = ws, .writer = srv.writer };
     srv.conns.attachWriter(srv.io, conn, &fw, FrameWriter.write);
     defer srv.conns.detachWriter(srv.io, conn);
+    defer if (srv.extensions) |extensions| {
+        srv.conns.core.run(srv.io, ExtensionsCtx.removeAgent, .{ extensions, conn }) catch |err|
+            std.debug.print("phobos: agent disconnect notification failed: {}\n", .{err});
+    };
 
     serveLoop(srv, ws, conn);
 }
@@ -226,6 +251,9 @@ const FrameWriter = struct {
 fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) void {
     var input = MessageBuffer.init(std.heap.smp_allocator, ws.input);
     defer input.deinit();
+    var tasks: Io.Group = .init;
+    defer tasks.cancel(srv.io);
+    var active_tasks: std.atomic.Value(u32) = .init(0);
     while (true) {
         const msg = input.read(ws) catch return;
         switch (msg.opcode) {
@@ -240,7 +268,27 @@ fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) 
             .text, .binary => {
                 var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
                 defer arena.deinit();
-                const resp = dispatchMessage(srv, conn, msg.data, arena.allocator()) catch return;
+                var parsed = std.json.parseFromSlice(std.json.Value, std.heap.smp_allocator, msg.data, .{ .allocate = .alloc_always }) catch {
+                    const response = jv.errorResponse(arena.allocator(), .null, -32700, "Parse error") catch return;
+                    srv.conns.writeFrame(srv.io, conn, response) catch return;
+                    continue;
+                };
+                if (srv.extensions) |extensions| consumeResponses(extensions, conn, parsed.value);
+                if (needsAgentTask(parsed.value)) {
+                    if (active_tasks.fetchAdd(1, .acq_rel) >= max_agent_request_tasks) {
+                        _ = active_tasks.fetchSub(1, .acq_rel);
+                        parsed.deinit();
+                        return;
+                    }
+                    tasks.concurrent(srv.io, runAgentRequest, .{ srv, conn, parsed, &active_tasks }) catch {
+                        _ = active_tasks.fetchSub(1, .acq_rel);
+                        parsed.deinit();
+                        return;
+                    };
+                    continue;
+                }
+                defer parsed.deinit();
+                const resp = dispatchParsedRoot(srv, conn, parsed.value, arena.allocator()) catch return;
                 if (resp.len == 0) continue;
                 // Responses go through the per-connection write mutex so a
                 // concurrently emitted notification cannot interleave.
@@ -250,6 +298,32 @@ fn serveLoop(srv: *WsServer, ws: *std.http.Server.WebSocket, conn: *Connection) 
             else => return,
         }
     }
+}
+
+fn consumeResponses(extensions: *ExtensionsCtx, conn: *Connection, root: std.json.Value) void {
+    if (root == .array) {
+        for (root.array.items) |item| if (item == .object) extensions.resolveResponse(conn, item);
+    } else extensions.resolveResponse(conn, root);
+}
+
+fn needsAgentTask(root: std.json.Value) bool {
+    if (root == .array) {
+        for (root.array.items) |item| if (item == .object and needsAgentTask(item)) return true;
+        return false;
+    }
+    if (root != .object) return false;
+    const method = root.object.get("method") orelse return false;
+    return method == .string and std.mem.eql(u8, method.string, "server.extensions.request");
+}
+
+fn runAgentRequest(srv: *WsServer, conn: *Connection, request: std.json.Parsed(std.json.Value), active: *std.atomic.Value(u32)) void {
+    var owned = request;
+    defer owned.deinit();
+    defer _ = active.fetchSub(1, .acq_rel);
+    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    defer arena.deinit();
+    const response = dispatchParsedRoot(srv, conn, owned.value, arena.allocator()) catch return;
+    if (response.len != 0) srv.conns.writeFrame(srv.io, conn, response) catch return;
 }
 
 // --- tests ---------------------------------------------------------------

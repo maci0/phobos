@@ -256,3 +256,17 @@ Queue snapshots own their filename/id strings; snapshot and persistence share a
 save mutex so concurrent changes cannot commit an older snapshot last. Callers
 release the jobs mutex before saving, and backend I/O holds only the save mutex.
 Configuration text, including every included file, must be valid UTF-8.
+
+HTTP headers have a fresh absolute one-hour idle deadline per request, matching
+Tornado's default. Bodies and upgraded sockets use their own I/O policy. CORS
+falls back to trusted IPv4 Origin hosts only when `cors_domains` is nonempty.
+
+Extension agents identify over WebSocket and own their registered Klippy methods
+until disconnect. Agent events exclude their originating connection. Transport
+code replaces `_connection_id` and injects the actual connection only into
+`connection.*` calls. Agent replies correlate on both request and connection id;
+response handling remains available while an extension request waits outside
+Core. Requests have a twenty-second total deadline, at most 32 global waiters and
+16 owned request tasks per WebSocket. Disconnect cancels and joins those tasks,
+wakes external callers and removes the agent's methods. Agent/method names are
+bounded to 256 bytes, with 256 agents and 256 dynamic methods at most.
