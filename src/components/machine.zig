@@ -313,6 +313,12 @@ pub const MachineCtx = struct {
         self.run_cmd_ctx = ctx;
     }
 
+    /// The live io when host processes may be spawned directly; null when a
+    /// mock command runner is installed or io is absent.
+    fn hostIo(self: *const MachineCtx) ?std.Io {
+        return if (self.run_cmd_fn == null) self.io else null;
+    }
+
     /// Run a command via the mock (when set) or std.process.run.
     fn runCmd(self: *MachineCtx, alloc: std.mem.Allocator, argv: []const []const u8) !RunCmdResult {
         if (self.run_cmd_fn) |f| {
@@ -1150,7 +1156,6 @@ fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
     // Only the systemd provider queries systemctl. `simple` and `none` must
     // not spawn it; a GET of system_info would otherwise hit the host.
     if (providerKind(ctx.provider_name) != .systemd) return;
-    const io = ctx.io orelse return;
 
     // Build argv: systemctl show -p ActiveState,SubState --value <svc1> <svc2> ...
     var argv: [5 + available_services.len][]const u8 = undefined;
@@ -1164,9 +1169,7 @@ fn refreshServiceStates(ctx: *MachineCtx, alloc: std.mem.Allocator) void {
         argv[5 + i] = svc;
     }
 
-    const result = std.process.run(alloc, io, .{
-        .argv = &argv,
-    }) catch return;
+    const result = ctx.runCmd(alloc, &argv) catch return;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
@@ -1541,7 +1544,6 @@ fn uptimeSeconds(io: std.Io) f64 {
 /// runs those commands. Doing so reboots the machine that runs the tests.
 /// `sudo systemctl reboot` already rebooted the developer host once.
 /// The "ok" string is Moonraker's response shape and nothing else.
-/// `runSudoCmd` is intentionally not called from here.
 pub fn handleReboot(ctx_ptr: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
     _ = ctx_ptr;
     return .{ .string = "ok" };
@@ -1784,8 +1786,8 @@ pub fn handleSudoInfo(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
         }
         if (check) {
             // Run a fresh sudo check on demand (matching Moonraker).
-            if (ctx.io) |io| {
-                const valid = runSudoCheck(io, alloc, pwd);
+            if (ctx.hostIo()) |io| {
+                const valid = runPasswordCheck(io, &sudo_list_argv, pwd);
                 ctx.sudo_validated = valid;
                 if (valid) |v| sudo_access = .{ .bool = v };
             }
@@ -1844,9 +1846,9 @@ pub fn handleSudoPassword(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     ctx.sudo_password = try ctx.gpa.dupe(u8, pwd);
     ctx.sudo_validated = null;
 
-    // Validate the password via sudo -S -l (only if io is available).
-    if (ctx.io) |io| {
-        const valid = runSudoCheck(io, alloc, pwd);
+    // Validate the password via sudo -S -l when host processes may run.
+    if (ctx.hostIo()) |io| {
+        const valid = runPasswordCheck(io, &sudo_list_argv, pwd);
         ctx.sudo_validated = valid;
         if (valid == false) {
             // Clear the stored password on invalid, matching Moonraker's behaviour.
@@ -1865,72 +1867,43 @@ pub fn handleSudoPassword(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
     return .{ .object = obj };
 }
 
-/// Run a command via sudo (with password if set). Swallows all errors —
-/// reboot/shutdown are fire-and-forget; the server is unlikely to survive
-/// long enough to report failures.
-fn runSudoCmd(io: std.Io, password: ?[]const u8, cmd: []const u8) ?bool {
+const sudo_list_argv = [_][]const u8{ "sudo", "-S", "-l" };
+
+/// Run `argv` with `password` and a newline on stdin. Returns true when it
+/// exits 0 with output, false on a non-zero exit, and null when the command
+/// cannot run or the result is undetermined. Production passes
+/// `sudo_list_argv`; the password never reaches argv.
+fn runPasswordCheck(io: std.Io, argv: []const []const u8, password: []const u8) ?bool {
     var child = std.process.spawn(io, .{
-        .argv = &.{ "sudo", "-S", cmd },
+        .argv = argv,
         .stdin = .pipe,
         .stdout = .pipe,
-        .stderr = .pipe,
+        .stderr = .ignore,
     }) catch return null;
     defer child.kill(io);
 
-    if (child.stdin) |sin| {
-        if (password) |pw| {
-            var wbuf: [128]u8 = undefined;
-            var writer = sin.writer(io, &wbuf);
-            writer.interface.writeAll(pw) catch {};
-            writer.interface.writeAll("\n") catch {};
-            _ = writer.interface.flush() catch {};
-        }
-        sin.close(io);
-        child.stdin = null;
-    }
-
-    const term = child.wait(io) catch return null;
-    return term == .exited and term.exited == 0;
-}
-
-/// Run `sudo -S -l` with the given password to determine if the password
-/// grants sudo access. Returns null if sudo is unavailable or cannot be
-/// determined; true if access is valid; false if the password is wrong.
-fn runSudoCheck(io: std.Io, gpa: std.mem.Allocator, password: []const u8) ?bool {
-    var child = std.process.spawn(io, .{
-        .argv = &.{ "sudo", "-S", "-l" },
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    }) catch return null;
-    defer child.kill(io);
-
-    // Write the password + newline to stdin, then close it so sudo reads EOF.
+    // Write the password + newline to stdin, then close it so the command reads EOF.
     if (child.stdin) |sin| {
         var wbuf: [128]u8 = undefined;
         var writer = sin.writer(io, &wbuf);
         writer.interface.writeAll(password) catch {};
         writer.interface.writeAll("\n") catch {};
-        _ = writer.interface.flush() catch {};
+        writer.interface.flush() catch {};
         sin.close(io);
         child.stdin = null;
     }
 
-    // Read stdout into a buffer (we only need to know if it's non-empty on success).
-    var stdout_buf: std.ArrayList(u8) = .empty;
-    defer stdout_buf.deinit(gpa);
+    // Only whether stdout was non-empty matters.
+    var out_len: usize = 0;
     if (child.stdout) |sout| {
         var rbuf: [256]u8 = undefined;
         var reader = sout.reader(io, &rbuf);
-        while (reader.interface.takeDelimiter('\n')) |opt_line| {
-            const line = opt_line orelse break;
-            stdout_buf.appendSlice(gpa, line) catch {};
-        } else |_| {}
+        out_len = reader.interface.discardRemaining() catch 0;
     }
 
     const term = child.wait(io) catch return null;
 
-    if (term == .exited and term.exited == 0 and stdout_buf.items.len > 0) {
+    if (term == .exited and term.exited == 0 and out_len > 0) {
         return true;
     }
     if (term == .exited and term.exited != 0) {
@@ -3468,109 +3441,32 @@ test "fuzz_hexParse: malformed hex never crashes" {
     }.run, .{});
 }
 
-test "runSudoCheck: returns a valid ?bool, never crashes" {
-    // Create a real Io handle so runSudoCheck can spawn a child process.
+test "runPasswordCheck: exit status and output decide the result" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
-    // With a garbage password, this should never hang or crash.
-    // It returns null (sudo unavailable), true, or false — all valid.
-    const result = runSudoCheck(io, testing.allocator, "wrong_password_123");
-    _ = result; // verify it's a ?bool (compiler-enforced)
-
-    // Empty password is also safe.
-    const result2 = runSudoCheck(io, testing.allocator, "");
-    _ = result2;
-
-    // Long password with special chars.
-    const long_pw: [4096]u8 = @splat('a');
-    const result3 = runSudoCheck(io, testing.allocator, &long_pw);
-    _ = result3;
+    // `cat` echoes the password and exits 0; `false` exits 1 without output.
+    try testing.expectEqual(@as(?bool, true), runPasswordCheck(io, &.{"cat"}, "pwd; rm -rf /"));
+    try testing.expectEqual(@as(?bool, false), runPasswordCheck(io, &.{"false"}, "x"));
+    try testing.expectEqual(@as(?bool, null), runPasswordCheck(io, &.{"/nonexistent/phobos-check"}, "x"));
 }
 
-test "runSudoCheck: null bytes and special chars safe" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // Special shell characters should not cause issues (stdin, not argv).
-    const result = runSudoCheck(io, testing.allocator, "pwd; rm -rf /");
-    _ = result;
-
-    const result2 = runSudoCheck(io, testing.allocator, "\x00\x01\x02\x03");
-    _ = result2;
-
-    const result3 = runSudoCheck(io, testing.allocator, "\"quoted\" 'text'");
-    _ = result3;
-}
-
-test "fuzz_runSudoCheck: random passwords never crash" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
-
-            var buf: [256]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            const n = @min(buf.len, @as(usize, @intCast(smith.valueRangeAtMostWithHash(u8, 0, 128, 1))));
-            const pwd = buf[0..n];
-
-            _ = runSudoCheck(io, a, pwd);
+test "sudo handlers never spawn when a command runner is installed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Mock = struct {
+        fn run(_: *anyopaque, _: std.mem.Allocator, _: []const []const u8) anyerror!MachineCtx.RunCmdResult {
+            return error.Unexpected;
         }
-    }.run, .{});
-}
-
-test "runSudoCmd: returns null with null password and no sudo access" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    // In test environment without sudo, this returns null (spawn succeeds but
-    // exit is non-zero). Verify no crash.
-    const result = runSudoCmd(io, null, "echo ok");
-    _ = result;
-}
-
-test "runSudoCmd: null bytes and special chars safe" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    // Special characters in command and password should not crash.
-    _ = runSudoCmd(io, "pass\x00word with null", "echo 'hello'");
-    _ = runSudoCmd(io, "pass\nword", "echo 'hello'");
-    _ = runSudoCmd(io, "pass\"word", "echo 'hello'");
-    _ = runSudoCmd(io, null, "echo 'hello'");
-}
-
-test "fuzz_runSudoCmd: random passwords and commands never crash" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
-
-            var buf: [256]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            const pw_n = @min(buf.len, @as(usize, @intCast(smith.valueRangeAtMostWithHash(u8, 0, 64, 1))));
-
-            var cmd_buf: [64]u8 = undefined;
-            smith.bytesWithHash(&cmd_buf, 1);
-            const cmd_n = @min(cmd_buf.len, @as(usize, @intCast(smith.valueRangeAtMostWithHash(u8, 0, 32, 2))));
-
-            const pwd: ?[]const u8 = if (pw_n > 0) buf[0..pw_n] else null;
-            const cmd = cmd_buf[0..cmd_n];
-
-            _ = runSudoCmd(io, pwd, cmd);
-        }
-    }.run, .{});
+    };
+    var dummy: u8 = 0;
+    var c = MachineCtx{ .clock_io = testing.io, .gpa = a, .io = testing.io };
+    c.setRunCmdFn(Mock.run, @ptrCast(&dummy));
+    _ = try handleSudoPassword(@ptrCast(&c), try objParams(a, "{\"password\":\"x\"}"), a);
+    try testing.expectEqual(@as(?bool, null), c.sudo_validated);
+    const info = try handleSudoInfo(@ptrCast(&c), try objParams(a, "{\"check_access\":true}"), a);
+    try testing.expect(info.object.get("sudo_access").? == .null);
 }
 
 test "hex decoding frees invalid inputs and uses standard byte decoding" {

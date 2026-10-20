@@ -1411,6 +1411,7 @@ test "notifyUpdate: locked=true uses emitLocked" {
     var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.io = io;
+    ctx.dev_mode = true;
 
     // locked=true → emitLocked. With entries present, should not crash.
     try insertEntry(&mem, a, "000001",
@@ -1420,6 +1421,7 @@ test "notifyUpdate: locked=true uses emitLocked" {
     var ctx2 = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx2.deinit();
     ctx2.io = io;
+    ctx2.dev_mode = true;
 
     // notifyUpdate is private; test via updateAllFeeds which calls it when
     // changed. Since there's no network, fetchAndUpdateFeed returns false,
@@ -1451,6 +1453,7 @@ test "notifyUpdate: locked=false uses emit" {
     var ctx = try AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus);
     defer ctx.deinit();
     ctx.io = io;
+    ctx.dev_mode = true;
 
     // locked=false → emit(). Same as above, verify no crash.
     const changed = try ctx.updateAllFeeds(a, false);
@@ -1569,6 +1572,7 @@ test "fuzz notifyUpdate: locked=true/false never panics" {
             var ctx = AnnouncementsCtx.init(a, std.testing.io, mem.dataStore(), &bus) catch return;
             defer ctx.deinit();
             ctx.io = io;
+            ctx.dev_mode = true;
 
             var buf: [8]u8 = undefined;
             smith.bytesWithHash(&buf, 0);

@@ -163,8 +163,12 @@ test "fuzz getConditional url parsing: never crashes on arbitrary urls" {
             var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
             defer threaded.deinit();
             const io = threaded.io();
-            var buf: [48]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
+            // Fuzz only the target after a fixed loopback authority so no
+            // input can resolve or connect to another host.
+            const prefix = "http://127.0.0.1:9/";
+            var buf: [prefix.len + 48]u8 = undefined;
+            @memcpy(buf[0..prefix.len], prefix);
+            smith.bytesWithHash(buf[prefix.len..], 0);
             // Bad/unreachable URLs must return an error, never crash.
             _ = getConditional(testing.allocator, io, &buf, null) catch return;
         }
