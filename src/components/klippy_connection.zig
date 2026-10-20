@@ -1,8 +1,10 @@
 //! Klippy Unix-socket bridge.
 //!
-//! Connects to a Klippy process via its Unix-domain socket (default
-//! `/tmp/klippy_uds`), performs the identification/subscription handshake, and
-//! relays method calls and status updates between Klippy and phobos transports.
+//! Connects to Klippy's Unix socket (default `/tmp/klippy_uds`), performs the
+//! identify/subscribe handshake, then runs one persistent reader that drains
+//! the socket, dispatches Klippy's pushes under `Core` and routes responses to
+//! per-id waiters. Each `/klippysocket` client gets its own Unix connection
+//! (`serveBridge`), as Moonraker's `BridgeSocket` does.
 //!
 //! Wire protocol: JSON-RPC 2.0 messages delimited by `\x03` (ASCII ETX).
 //! Klippy's `register_remote_method` stores `response_template` (the method
@@ -10,7 +12,8 @@
 //! merged with `params` and no id. Status and gcode pushes are the same shape.
 //!
 //! References:
-//!   vendor/moonraker/moonraker/components/klippy_connection.py (853 lines)
+//!   vendor/moonraker/moonraker/components/klippy_connection.py
+//!   vendor/moonraker/moonraker/components/websockets.py (BridgeSocket)
 //!   https://www.klipper3d.org/API_Server.html
 
 const std = @import("std");
@@ -22,118 +25,72 @@ const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
 
-/// One in-flight `request()` awaiting its response. The persistent reader routes
-/// a matching response frame here and posts the semaphore. Static-init only.
+/// One in-flight request awaiting its response. The persistent reader routes
+/// a matching response frame here and posts the semaphore.
 const Waiter = struct {
     sem: std.Io.Semaphore = .{},
-    /// gpa-owned response frame, set by the reader before posting; null = not yet.
+    /// gpa-owned response frame, set by the reader before posting.
     payload: ?[]u8 = null,
-    /// Set when the connection drops while waiting, so request() returns an error.
+    /// Set when the connection drops while waiting.
     failed: bool = false,
 };
-
-// ---------------------------------------------------------------------------
-// Framing: \x03-delimited JSON-RPC over a Unix stream
-// ---------------------------------------------------------------------------
-
-const FrameEnd = framing.delimiter;
 
 // ---------------------------------------------------------------------------
 // Klippy connection state
 // ---------------------------------------------------------------------------
 
+/// Moonraker's `KlippyState`, reported as `server.info` `klippy_state`.
 pub const State = enum {
     disconnected,
-    connecting,
-    startup, // Klippy identified, polling info until state != startup
+    startup,
     ready,
+    @"error",
     shutdown,
 };
 
-/// Comptime perfect-hash map of Klippy `klippy_state` strings → State. Built
-/// entirely at compile time (no runtime/heap cost); unknown → .disconnected.
+/// Klippy `state` strings (`info` results and `webhooks.state`).
 const klippy_state_map = std.StaticStringMap(State).initComptime(.{
-    .{ "ready", .ready },
-    .{ "shutdown", .shutdown },
     .{ "startup", .startup },
+    .{ "ready", .ready },
+    .{ "error", .@"error" },
+    .{ "shutdown", .shutdown },
 });
 
-/// Parsed result from a Klippy `server.info` response.
-pub const KlippyInfo = struct {
-    state: State,
-    state_message: []const u8,
-    version: []const u8,
-    hostname: []const u8,
-};
+/// Request params sent during the handshake.
+const identify_params = "{\"client_info\":{\"program\":\"phobos\",\"version\":\"1.0.0\"}}";
+const heaters_query_params = "{\"objects\":{\"heaters\":null}}";
+const gcode_subscribe_params = "{\"response_template\":{\"method\":\"process_gcode_response\"}}";
+/// Objects phobos always subscribes for its own state tracking.
+const base_sub_objects = [_][]const u8{ "webhooks", "toolhead", "print_stats" };
+/// Bounds on the client-extended subscription set.
+const max_sub_objects = 256;
+const max_sub_object_name_len = 256;
+/// `info` polls while Klippy reports `startup`, and the delay between them.
+const startup_polls = 100;
+const startup_poll_delay: std.Io.Duration = .fromMilliseconds(250);
+const reconnect_delay: std.Io.Duration = .fromSeconds(1);
+/// Frames read while waiting for one handshake response.
+const handshake_max_frames = 40;
+/// WebSocket close sent to `/klippysocket` clients (BridgeSocket.close_socket).
+const bridge_close_code = 1001;
+const bridge_close_reason = "Klippy Disconnected";
 
-// ---------------------------------------------------------------------------
-// JSON-RPC message construction (pure, testable)
-// ---------------------------------------------------------------------------
-
-/// Build a JSON-RPC 2.0 request into `buf`. Returns the formatted slice.
-/// Caller must ensure `buf` is large enough (~256 bytes per request).
-pub fn buildJsonRpcRequest(
-    method: []const u8,
-    id: []const u8,
-    params_json: ?[]const u8,
-    buf: []u8,
-) ![]const u8 {
-    if (params_json) |p| {
-        if (p.len > 0) {
-            return std.fmt.bufPrint(
-                buf,
-                "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"id\":\"{s}\",\"params\":{s}}}",
-                .{ method, id, p },
-            );
-        }
-    }
-    return std.fmt.bufPrint(
-        buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"id\":\"{s}\"}}",
-        .{ method, id },
-    );
+/// Klippy state from an `info` result; null when `state` is absent or unknown.
+pub fn parseKlippyState(result: std.json.Value) ?State {
+    if (result != .object) return null;
+    const s = result.object.get("state") orelse return null;
+    if (s != .string) return null;
+    return klippy_state_map.get(s.string);
 }
 
-/// Build the Klippy `info` request — the real handshake/identify step.
-///
-/// Klippy has no `server.connection.identify`; the Moonraker host identifies
-/// itself by sending the `info` endpoint with a `client_info` object (see
-/// klippy_apis.get_klippy_info, send_id=True). `id` is the request id; pass
-/// `send_id=true` for the first (identifying) call and `false` for subsequent
-/// state polls (which omit `client_info`).
-pub fn buildInfoRequest(
-    program: []const u8,
-    version: []const u8,
-    id: []const u8,
-    send_id: bool,
-    buf: []u8,
-) ![]const u8 {
-    if (send_id) {
-        return std.fmt.bufPrint(
-            buf,
-            \\{{"jsonrpc":"2.0","method":"info","id":"{s}","params":{{"client_info":{{"program":"{s}","version":"{s}"}}}}}}
-        ,
-            .{ id, program, version },
-        );
-    }
-    return std.fmt.bufPrint(
-        buf,
-        \\{{"jsonrpc":"2.0","method":"info","id":"{s}","params":{{}}}}
-    ,
-        .{id},
-    );
-}
-
-/// Build an `objects/subscribe` request. Includes the `response_template`
-/// naming the remote method (`process_status_update`) Klippy invokes on each
-/// status update for this connection — without it Klippy returns the initial
-/// status only and pushes no further updates (klippy_connection.py:644).
-pub fn buildSubscribeRequest(objects: []const u8, id: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(
-        buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"{s}\",\"params\":{{\"objects\":{s},\"response_template\":{{\"method\":\"process_status_update\"}}}}}}",
-        .{ id, objects },
-    );
+/// A JSON-RPC request frame with the string id waiters are keyed by.
+/// `method` is a phobos constant; `params_json` is serialized JSON, "" for `{}`.
+fn formatRequest(alloc: std.mem.Allocator, method: []const u8, id: u64, params_json: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"method\":\"{s}\",\"id\":\"{d}\",\"params\":{s}}}", .{
+        method,
+        id,
+        if (params_json.len == 0) "{}" else params_json,
+    });
 }
 
 /// Copy `heaters.<field>` strings out of an `objects/query` result.
@@ -160,45 +117,11 @@ fn collectHeaterNames(result: std.json.Value, field: []const u8, alloc: std.mem.
     }
 }
 
-fn frameIdMatches(payload: []const u8, id: []const u8) bool {
-    var buf: [64]u8 = undefined;
-    const quoted = std.fmt.bufPrint(&buf, "\"id\":\"{s}\"", .{id}) catch return false;
+/// Handshake-only match of phobos's own string id in a raw frame.
+fn frameIdMatches(payload: []const u8, id: u64) bool {
+    var buf: [32]u8 = undefined;
+    const quoted = std.fmt.bufPrint(&buf, "\"id\":\"{d}\"", .{id}) catch return false;
     return std.mem.indexOf(u8, payload, quoted) != null;
-}
-
-fn appendJsonNullField(w: *std.Io.Writer, name: []const u8) !void {
-    try w.writeAll("\"");
-    for (name) |ch| switch (ch) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        else => try w.writeByte(ch),
-    };
-    try w.writeAll("\":null");
-}
-
-test "collectHeaterNames reads sensors and ignores null monitors" {
-    const alloc = std.testing.allocator;
-    const raw =
-        \\{"eventtime":1,"status":{"heaters":{"available_sensors":["extruder","heater_bed","temperature_sensor weightValue"],"available_monitors":null}}}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
-    defer parsed.deinit();
-    var sensors: std.ArrayList([]const u8) = .empty;
-    defer sensors.deinit(alloc);
-    var monitors: std.ArrayList([]const u8) = .empty;
-    defer monitors.deinit(alloc);
-    try collectHeaterNames(parsed.value, "available_sensors", alloc, &sensors);
-    try collectHeaterNames(parsed.value, "available_monitors", alloc, &monitors);
-    try std.testing.expectEqual(@as(usize, 3), sensors.items.len);
-    try std.testing.expectEqualStrings("temperature_sensor weightValue", sensors.items[2]);
-    try std.testing.expectEqual(@as(usize, 0), monitors.items.len);
-}
-
-test "frameIdMatches does not accept a longer id" {
-    try std.testing.expect(frameIdMatches("{\"id\":\"12\",\"result\":1}", "12"));
-    try std.testing.expect(!frameIdMatches("{\"id\":\"12\",\"result\":1}", "1"));
 }
 
 /// A JSON number (int or float) as f64; null for absent/non-numeric.
@@ -211,216 +134,133 @@ fn numField(obj: std.json.ObjectMap, key: []const u8) ?f64 {
     };
 }
 
-/// Coerce a JSON value to f64 (0 for non-numeric).
-fn asF64(v: std.json.Value) f64 {
-    return switch (v) {
-        .float => |f| f,
-        .integer => |i| @floatFromInt(i),
-        else => 0,
-    };
+/// Serialize client `params` to JSON in `alloc` ("" for null), rejecting
+/// values nested deeper than std.json.Stringify's fixed 256-level stack.
+fn serializeParams(alloc: std.mem.Allocator, params: std.json.Value) ![]const u8 {
+    if (params == .null) return "";
+    if (jv.exceedsDepth(params, jv.max_value_depth)) return error.InvalidParams;
+    var aw: std.Io.Writer.Allocating = .init(alloc);
+    defer aw.deinit();
+    var jw: std.json.Stringify = .{ .writer = &aw.writer };
+    try jw.write(params);
+    return aw.toOwnedSlice();
 }
 
-/// Build a `gcode/subscribe_output` request. Carries the `response_template`
-/// naming `process_gcode_response` (klippy_apis.subscribe_gcode_output).
-pub fn buildSubscribeGcodeRequest(id: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(
-        buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"gcode/subscribe_output\",\"id\":\"{s}\",\"params\":{{\"response_template\":{{\"method\":\"process_gcode_response\"}}}}}}",
-        .{id},
-    );
+/// Parse a Klippy response payload and extract `result`. `.alloc_always`
+/// copies every string into `alloc`, so the result outlives `payload`.
+fn parseKlippyResult(alloc: std.mem.Allocator, payload: []const u8) !std.json.Value {
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .allocate = .alloc_always });
+    if (root != .object) return error.KlippyRequestFailed;
+    if (root.object.get("error")) |_| return error.KlippyRequestFailed;
+    return root.object.get("result") orelse .null;
 }
 
-/// Build a `register_remote_method` request.
-/// Klippy requires `response_template.method` (klippy_apis.register_method).
-/// `call_remote_method` copies that template onto an id-less frame.
-pub fn buildRegisterMethodRequest(method_name: []const u8, id: []const u8, buf: []u8) ![]const u8 {
-    return std.fmt.bufPrint(
-        buf,
-        "{{\"jsonrpc\":\"2.0\",\"method\":\"register_remote_method\",\"id\":\"{s}\",\"params\":{{\"response_template\":{{\"method\":\"{s}\"}},\"remote_method\":\"{s}\"}}}}",
-        .{ id, method_name, method_name },
-    );
+/// Close a `/klippysocket` WebSocket with 1001 "Klippy Disconnected".
+fn closeBridge(ws: *std.http.Server.WebSocket) void {
+    var payload: [2 + bridge_close_reason.len]u8 = undefined;
+    std.mem.writeInt(u16, payload[0..2], bridge_close_code, .big);
+    @memcpy(payload[2..], bridge_close_reason);
+    ws.writeMessage(&payload, .connection_close) catch {};
 }
 
-// ---------------------------------------------------------------------------
-// Response parsing (pure, testable)
-// ---------------------------------------------------------------------------
+/// One `/klippysocket` session: a WebSocket client and its own Klippy
+/// connection.
+const Bridge = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    ws: *std.http.Server.WebSocket,
+    stream: net.Stream,
+    /// Serializes WebSocket writes (relayed frames, pongs, close).
+    ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
-/// Extract Klippy state from a `server.info` JSON-RPC response result.
-/// Returns null if the result doesn't contain the expected fields.
-pub fn parseKlippyInfoResponse(result: std.json.Value) ?KlippyInfo {
-    switch (result) {
-        .object => |obj| {
-            const state_str = if (obj.get("state")) |s| switch (s) {
-                .string => |str| str,
-                else => return null,
-            } else return null;
-            const state_message = if (obj.get("state_message")) |s| switch (s) {
-                .string => |str| str,
-                else => "",
-            } else "";
-            // Real Klippy reports `software_version`; the sim historically used
-            // `version`. Accept either.
-            const version = if (obj.get("software_version") orelse obj.get("version")) |s| switch (s) {
-                .string => |str| str,
-                else => "",
-            } else "";
-            const hostname = if (obj.get("hostname")) |s| switch (s) {
-                .string => |str| str,
-                else => "",
-            } else "";
-
-            const state: State = klippy_state_map.get(state_str) orelse .disconnected;
-
-            return .{
-                .state = state,
-                .state_message = state_message,
-                .version = version,
-                .hostname = hostname,
-            };
-        },
-        else => return null,
+    fn writeWs(self: *Bridge, data: []const u8, op: std.http.Server.WebSocket.Opcode) !void {
+        self.ws_mutex.lockUncancelable(self.io);
+        defer self.ws_mutex.unlock(self.io);
+        try self.ws.writeMessage(data, op);
     }
-}
 
-/// Check if a JSON-RPC response contains an error; return the error message.
-pub fn getJsonRpcError(response: std.json.Value) ?[]const u8 {
-    switch (response) {
-        .object => |obj| {
-            if (obj.get("error")) |err| {
-                switch (err) {
-                    .object => |err_obj| {
-                        if (err_obj.get("message")) |msg| {
-                            switch (msg) {
-                                .string => |s| return s,
-                                else => return "unknown error",
-                            }
-                        }
-                        return "unknown error";
-                    },
-                    else => return "unknown error",
-                }
+    /// Klippy to client. On EOF, a read error or cancellation, closes the
+    /// WebSocket with 1001.
+    fn relayKlippy(self: *Bridge) void {
+        var buf: [4096]u8 = undefined;
+        var reader = self.stream.reader(self.io, &buf);
+        while (true) {
+            const payload = framing.read(self.gpa, &reader.interface) catch break;
+            defer self.gpa.free(payload);
+            self.writeWs(payload, .text) catch break;
+        }
+        self.ws_mutex.lockUncancelable(self.io);
+        defer self.ws_mutex.unlock(self.io);
+        closeBridge(self.ws);
+    }
+
+    /// Client to Klippy, on the calling task. Returns when the client closes
+    /// or either socket fails.
+    fn relayClient(self: *Bridge) void {
+        var buf: [4096]u8 = undefined;
+        var writer = self.stream.writer(self.io, &buf);
+        while (true) {
+            const msg = self.ws.readSmallMessage() catch return;
+            switch (msg.opcode) {
+                .text, .binary => {
+                    framing.write(&writer.interface, msg.data) catch return;
+                    writer.interface.flush() catch return;
+                },
+                .ping => self.writeWs(msg.data, .pong) catch return,
+                else => return,
             }
-            return null;
-        },
-        else => return null,
+        }
     }
-}
-
-/// Check if a JSON-RPC frame is a notification (has method, no id or null id).
-pub fn isNotification(frame: std.json.Value) bool {
-    switch (frame) {
-        .object => |obj| {
-            if (obj.get("method") != null) {
-                if (obj.get("id")) |id| {
-                    return id == .null;
-                }
-                return true;
-            }
-            return false;
-        },
-        else => return false,
-    }
-}
+};
 
 // ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
 
-/// Callback signature for a /klippysocket bridge to receive raw frames from
-/// Klippy. The function must serialize its own access to the target WebSocket.
-pub const BridgeWriteFn = *const fn (ctx: *anyopaque, payload: []const u8) anyerror!void;
-
-/// A registered bridge client. KlippyCtx forwards every received frame to all
-/// bridges so that /klippysocket WS clients see the raw Klippy stream.
 /// Feather and other components handle Klippy remote methods through this.
 pub const RemoteHandler = *const fn (*anyopaque, std.mem.Allocator, []const u8, std.json.Value) anyerror!void;
-
-pub const Bridge = struct {
-    ctx: *anyopaque,
-    write_fn: BridgeWriteFn,
-};
 
 pub const KlippyCtx = struct {
     gpa: std.mem.Allocator,
     io: ?std.Io = null,
+    /// Its `core` serializes dispatch and is released by `request` waits.
     bus: *notify.NotifyBus,
 
-    /// Back-pointer to the server.info state block so that server.info
-    /// responses reflect live Klippy connection state.
+    /// `server.info` state block mirrored by `setState`.
     server_info: ?*methods.ServerInfo = null,
 
     /// Path to the Klippy Unix socket. Default: /tmp/klippy_uds.
     uds_path: []const u8,
 
+    /// Touched only by the Klippy task (status pushes run there under Core).
     state: State = .disconnected,
-    /// The last parsed KlippyInfo, if identified.
-    klippy_info: ?KlippyInfo = null,
+    /// True from handshake completion until the reader fails, in any Klippy
+    /// state. Changed under `pending_mutex`, so a waiter can never register
+    /// after `failAllWaiters`.
+    connected: std.atomic.Value(bool) = .init(false),
 
-    /// True once the identify handshake has completed.
-    klippy_identified: bool = false,
-    /// True once Klippy has exited the startup state.
-    klippy_started: bool = false,
-
-    /// Monotonic request id counter. Guarded by `next_id_mutex` because off-Core
-    /// callers (requestOffCore, subscribeAggregate) increment it without the
-    /// serialization the Core lock gives the in-Core callers.
     next_id: u64 = 0,
     next_id_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
-    /// Core serialization lock. When wired (production / App), request() runs the
-    /// concurrent path: a persistent reader continuously drains the socket (so
-    /// Klippy never backpressures on its status pushes) and routes responses to
-    /// waiters, while request() releases the Core lock during the round-trip so
-    /// the reader can dispatch notifications without deadlocking. When null (bare
-    /// unit tests with no reader), request() uses the legacy inline-drain path.
-    core: ?*server_core.Core = null,
     /// In-flight request waiters keyed by request id; the reader routes responses.
     pending: std.AutoHashMapUnmanaged(u64, *Waiter) = .empty,
-    /// Guards `pending`.
+    /// Guards `pending` and transitions of `connected`.
     pending_mutex: std.Io.Mutex = std.Io.Mutex.init,
-    /// Serializes socket WRITES (request sends + reader acks) in the concurrent
-    /// path. Reads happen only in the persistent reader, so they need no lock.
+    /// Guards `stream` and serializes socket writes. Only the Klippy task reads.
     write_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
     read_buffer: [4096]u8 = undefined,
     reader: ?net.Stream.Reader = null,
-
     /// Active Unix socket stream; null when disconnected.
     stream: ?net.Stream = null,
 
-    /// Mutex serialising access to the Unix socket. Held during writes and
-    /// reads so that the background read-loop and handler request() calls do
-    /// not interleave. Never held while emitting notifications (avoids
-    /// deadlock with the Core lock: handler holds Core → acquires stream_mutex;
-    /// background holds stream_mutex → releases → acquires Core for emit).
-    stream_mutex: std.Io.Mutex = std.Io.Mutex.init,
-
-    /// Registered /klippysocket bridge WebSocket connections. Every frame
-    /// received from Klippy is forwarded to every registered bridge writer.
-    bridges: std.ArrayList(Bridge) = .empty,
-    /// Guards `bridges` — mutated from /klippysocket WS threads (add/remove) and
-    /// read from the frame-forwarding path. Locked via `self.io`; the
-    /// `if (self.io)` guard is sound (not a mixed-state hazard) because every
-    /// bridge access happens AFTER `setIo`: `addBridge`/`removeBridge` run only
-    /// for live WS sessions (ws.serveBridge) and `forwardToBridges` runs from the
-    /// request/dispatch paths — all post-setIo. `setIo` is called once at startup
-    /// before any thread starts, so io never transitions while a caller races.
-    /// The null branch is the single-threaded pre-serve / unit-test path.
-    bridges_mutex: std.Io.Mutex = std.Io.Mutex.init,
-
-    /// Job state component (set by App after init). Called on status updates
-    /// to detect print state transitions.
+    /// Job state component (set by App). Fed print_stats; failed on disconnect.
     job_state: ?*@import("job_state.zig").JobStateCtx = null,
-
-    /// History component (set by App after init). Called on disconnect/shutdown
-    /// to finish the current job with the appropriate status.
+    /// History component (set by App). Finishes the job on disconnect/shutdown.
     history: ?*@import("history.zig").HistoryCtx = null,
-
-    /// OctoPrint compat component (set by App after init). Called on status
-    /// updates and Klippy state changes for /api/ state reporting.
+    /// OctoPrint compat component (set by App). Fed print_stats.
     octoprint: ?*@import("octoprint_compat.zig").OctoPrintCtx = null,
-    /// Temperature store (set by App after init). Fed a sample per temperature
-    /// object on each status update, for server.temperature_store.
+    /// Temperature store (set by App). Fed a sample per temperature object.
     temp_store: ?*@import("data_store.zig").DataStoreCtx = null,
 
     /// Optional handler for remote methods other than status and gcode.
@@ -430,50 +270,19 @@ pub const KlippyCtx = struct {
     /// The slice is borrowed; the handler must copy it before returning.
     on_klipper_path: ?*const fn (*anyopaque, []const u8) void = null,
     on_klipper_path_ctx: ?*anyopaque = null,
-    /// Registered with Klippy after the handshake when non-empty.
+    /// Registered with Klippy once it is ready.
     remote_methods: []const []const u8 = &.{},
 
     /// Set by stop() to signal the background klippyTask to exit.
     stopping: std.Io.Event = .unset,
     task: ?std.Io.Future(void) = null,
 
-    /// Extra Klipper object names that other components want subscribed (e.g. the
-    /// MQTT bridge's status_objects: heaters, fans...). Merged with the base set
-    /// at handshake. Keys are gpa-owned. Mirrors Moonraker's merged
-    /// `host_subscription`.
+    /// Objects clients and Klippy's heater list add to the base subscription.
+    /// Keys are gpa-owned; bounded by `max_sub_objects`. Guarded by `sub_mutex`.
     extra_sub_objects: std.StringHashMapUnmanaged(void) = .empty,
+    sub_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
-    /// Register a Klipper object to include in the objects/subscribe set. Safe to
-    /// call before connect; the merged set is sent at the next handshake.
-    pub fn addSubscriptionObject(self: *KlippyCtx, name: []const u8) !void {
-        if (self.extra_sub_objects.contains(name)) return;
-        const k = try self.gpa.dupe(u8, name);
-        errdefer self.gpa.free(k);
-        try self.extra_sub_objects.put(self.gpa, k, {});
-    }
-
-    /// Build the objects/subscribe JSON value: the base objects (webhooks,
-    /// toolhead, print_stats) plus any registered extras, each mapped to null.
-    fn buildSubObjectsJson(self: *const KlippyCtx, alloc: std.mem.Allocator) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(alloc);
-        defer aw.deinit();
-        const w = &aw.writer;
-        try w.writeAll("{\"webhooks\":null,\"toolhead\":null,\"print_stats\":null");
-        var it = self.extra_sub_objects.keyIterator();
-        while (it.next()) |k| {
-            const name = k.*;
-            if (std.mem.eql(u8, name, "webhooks") or std.mem.eql(u8, name, "toolhead") or std.mem.eql(u8, name, "print_stats")) continue;
-            // Klipper object names contain no JSON-special chars; quote directly.
-            try w.print(",\"{s}\":null", .{name});
-        }
-        try w.writeAll("}");
-        return aw.toOwnedSlice();
-    }
-
-    pub fn init(
-        gpa: std.mem.Allocator,
-        bus: *notify.NotifyBus,
-    ) !KlippyCtx {
+    pub fn init(gpa: std.mem.Allocator, bus: *notify.NotifyBus) !KlippyCtx {
         return KlippyCtx{
             .gpa = gpa,
             .bus = bus,
@@ -491,62 +300,60 @@ pub const KlippyCtx = struct {
         while (sit.next()) |k| self.gpa.free(k.*);
         self.extra_sub_objects.deinit(self.gpa);
         self.pending.deinit(self.gpa);
-        self.state = .disconnected;
-        self.klippy_info = null;
-        // Null out cross-component pointers so any late emitDisconnected
-        // calls from a still-running task become no-ops.
-        self.octoprint = null;
-        self.job_state = null;
-        self.history = null;
     }
 
-    /// True when Klippy is connected and ready for requests.
+    /// True once the handshake completed on the live connection, in any
+    /// Klippy state (`printer.firmware_restart` must work after a shutdown).
     pub fn isConnected(self: *const KlippyCtx) bool {
-        return self.state == .ready;
+        return self.connected.load(.acquire);
     }
 
-    /// Register a bridge client that will receive every frame from Klippy.
-    /// The caller owns `ctx` and must ensure it outlives the registration.
-    pub fn addBridge(self: *KlippyCtx, bridge: Bridge) !void {
-        if (self.io) |io| self.bridges_mutex.lockUncancelable(io);
-        defer if (self.io) |io| self.bridges_mutex.unlock(io);
-        try self.bridges.append(self.gpa, bridge);
+    /// Add a Klipper object to the aggregate `objects/subscribe` set, sent at
+    /// the next subscribe. Requires `setIo`.
+    pub fn addSubscriptionObject(self: *KlippyCtx, name: []const u8) !void {
+        if (name.len > max_sub_object_name_len) return error.InvalidParams;
+        for (base_sub_objects) |base| if (std.mem.eql(u8, base, name)) return;
+        const io = self.io orelse return error.NotReady;
+        self.sub_mutex.lockUncancelable(io);
+        defer self.sub_mutex.unlock(io);
+        if (self.extra_sub_objects.contains(name)) return;
+        if (self.extra_sub_objects.count() >= max_sub_objects) return error.TooManyObjects;
+        const k = try self.gpa.dupe(u8, name);
+        errdefer self.gpa.free(k);
+        try self.extra_sub_objects.put(self.gpa, k, {});
     }
 
-    /// Remove a previously registered bridge client.
-    pub fn removeBridge(self: *KlippyCtx, bridge: Bridge) void {
-        if (self.io) |io| self.bridges_mutex.lockUncancelable(io);
-        defer if (self.io) |io| self.bridges_mutex.unlock(io);
-        for (self.bridges.items, 0..) |b, i| {
-            if (b.ctx == bridge.ctx and b.write_fn == bridge.write_fn) {
-                _ = self.bridges.swapRemove(i);
-                return;
+    /// `objects/subscribe` params: the base objects plus every registered
+    /// extra, and the `response_template` without which Klippy pushes no
+    /// updates (klippy_connection.py:644).
+    fn buildSubscribeParams(self: *KlippyCtx, io: std.Io, alloc: std.mem.Allocator) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(alloc);
+        defer aw.deinit();
+        var jw: std.json.Stringify = .{ .writer = &aw.writer };
+        try jw.beginObject();
+        try jw.objectField("objects");
+        try jw.beginObject();
+        for (base_sub_objects) |name| {
+            try jw.objectField(name);
+            try jw.write(null);
+        }
+        {
+            self.sub_mutex.lockUncancelable(io);
+            defer self.sub_mutex.unlock(io);
+            var it = self.extra_sub_objects.keyIterator();
+            while (it.next()) |k| {
+                try jw.objectField(k.*);
+                try jw.write(null);
             }
         }
-    }
-
-    /// Forward a raw frame (without the \\x03 delimiter) to every registered bridge.
-    fn forwardToBridges(self: *KlippyCtx, raw_payload: []const u8) void {
-        if (self.io) |io| self.bridges_mutex.lockUncancelable(io);
-        defer if (self.io) |io| self.bridges_mutex.unlock(io);
-        for (self.bridges.items) |b| {
-            b.write_fn(b.ctx, raw_payload) catch {};
-        }
-    }
-
-    /// Send a raw payload (without \\x03 framing) to the Klippy Unix socket.
-    /// Acquires stream_mutex for the duration. For use by /klippysocket bridges.
-    pub fn sendRaw(self: *KlippyCtx, payload: []const u8) !void {
-        if (!self.isConnected()) return error.KlippyDisconnected;
-        const io = self.io.?;
-        try self.stream_mutex.lock(io);
-        defer self.stream_mutex.unlock(io);
-        try self.writeFrame(io, payload);
+        try jw.endObject();
+        try jw.objectField("response_template");
+        try jw.write(.{ .method = "process_status_update" });
+        try jw.endObject();
+        return aw.toOwnedSlice();
     }
 
     /// Start the background Klippy connection task. Must be called after setIo().
-    /// Spawns a task on the thread pool that connects, handshakes, and enters
-    /// the read loop, with automatic reconnection on failure.
     pub fn start(self: *KlippyCtx) !void {
         if (self.task != null) return;
         const io = self.io orelse return error.NotReady;
@@ -555,6 +362,7 @@ pub const KlippyCtx = struct {
     }
 
     /// Cancel and join the owned task before closing its stream. Idempotent.
+    /// The task takes Core while exiting, so the caller must not hold it.
     pub fn stop(self: *KlippyCtx, io: std.Io) void {
         self.stopping.set(io);
         if (self.task) |*task| {
@@ -564,89 +372,163 @@ pub const KlippyCtx = struct {
         self.closeStream(io);
     }
 
+    /// Serve one `/klippysocket` client (Moonraker `BridgeSocket`) on its own
+    /// Klippy Unix connection, relaying ETX-framed payloads both ways until
+    /// either side closes. Klippy keeps one subscription per connection, so a
+    /// bridge client never replaces phobos's. Refused with close 1001 while
+    /// phobos itself is not connected.
+    pub fn serveBridge(self: *KlippyCtx, io: std.Io, ws: *std.http.Server.WebSocket) void {
+        if (!self.isConnected()) return closeBridge(ws);
+        const addr = net.UnixAddress.init(self.uds_path) catch return closeBridge(ws);
+        const stream = addr.connect(io) catch return closeBridge(ws);
+        defer stream.close(io);
+        // Send the upgrade response: Klippy says nothing until the client does.
+        ws.flush() catch return;
+        var bridge: Bridge = .{ .gpa = self.gpa, .io = io, .ws = ws, .stream = stream };
+        var klippy_side = io.concurrent(Bridge.relayKlippy, .{&bridge}) catch return closeBridge(ws);
+        bridge.relayClient();
+        klippy_side.cancel(io);
+    }
+
     // -----------------------------------------------------------------------
-    // Background task: connect → handshake → read loop → reconnect
+    // Background task: connect, handshake, read, reconnect
     // -----------------------------------------------------------------------
 
     fn klippyTask(self: *KlippyCtx) void {
         const io = self.io.?;
         while (!self.stopping.isSet()) {
-            _ = self.setState(.connecting);
-            self.connectAndHandshake() catch {
+            if (self.openStream(io)) |_| {
+                if (self.handshake(io)) |_| {
+                    // Any error here means the connection ended.
+                    self.readerLoop(io) catch {};
+                } else |_| {}
+                self.failAllWaiters(io);
                 _ = self.setState(.disconnected);
-                self.emitDisconnected(io);
                 self.closeStream(io);
-                // Check stopping before reconnect sleep.
-                if (self.stopping.isSet()) break;
-                // Sleep ~1s between reconnect attempts (monotonic, so a wall-clock
-                // adjustment can't lengthen/shorten the backoff).
-                if (sleep.untilStopped(io, .fromSeconds(1), &self.stopping)) break;
-                if (self.stopping.isSet()) break;
-                continue;
-            };
-            // Handshake succeeded — the connection is ready for request().
-            if (self.core == null) {
-                // Legacy path (bare unit tests, no Core wired): no persistent
-                // reader; request() drains spontaneous notifications inline.
-                return;
-            }
-            // Concurrent path: run the persistent reader. It continuously drains
-            // the socket — so Klippy never backpressures on its status pushes,
-            // the bug that wedged request() against a real (sparsely-pushing)
-            // Klippy — and routes responses to request() waiters. Returns when
-            // the connection drops; fail in-flight waiters, then reconnect.
-            self.readerLoop() catch {};
-            self.failAllWaiters(io);
-            _ = self.setState(.disconnected);
-            self.emitDisconnected(io);
-            self.closeStream(io);
-            if (self.stopping.isSet()) break;
-            if (sleep.untilStopped(io, .fromSeconds(1), &self.stopping)) break;
-            if (self.stopping.isSet()) break;
-            continue;
+                self.bus.core.run(io, disconnectedLocked, .{ self, io });
+            } else |_| {}
+            if (sleep.untilStopped(io, reconnect_delay, &self.stopping)) break;
         }
     }
 
+    fn openStream(self: *KlippyCtx, io: std.Io) !void {
+        const addr = try net.UnixAddress.init(self.uds_path);
+        const s = try addr.connect(io);
+        self.write_mutex.lockUncancelable(io);
+        self.stream = s;
+        self.write_mutex.unlock(io);
+        self.reader = s.reader(io, &self.read_buffer);
+        _ = self.setState(.startup);
+    }
+
+    /// Null the stream under `write_mutex` (no write can be in flight on it),
+    /// then close it. Only the caller that observes non-null closes.
     fn closeStream(self: *KlippyCtx, io: std.Io) void {
-        // Take the stream under the mutex, null it, release, THEN close — so we
-        // never close the fd out from under an in-flight `request()` that holds
-        // `stream_mutex` (use-after-close), and two concurrent closeStream calls
-        // (stop() + the reconnect error path) can't double-close (only the one
-        // that observes non-null closes). stop() cancels and joins the reader
-        // before this teardown.
-        // lockUncancelable: a teardown path must not skip the lock on
-        // cancellation (which `lock(io) catch {}` would, then mutate + unlock
-        // without holding it).
-        self.stream_mutex.lockUncancelable(io);
+        self.write_mutex.lockUncancelable(io);
         const s = self.stream;
         self.stream = null;
-        self.stream_mutex.unlock(io);
-        if (s) |sock| {
-            var local = sock;
-            local.close(io);
-        }
+        self.write_mutex.unlock(io);
+        if (s) |sock| sock.close(io);
     }
 
     // -----------------------------------------------------------------------
-    // Connect + handshake
+    // Handshake
     // -----------------------------------------------------------------------
+
+    /// Klippy handshake after the socket opens (Moonraker `_check_ready`):
+    ///   1. `info` with `client_info` identifies phobos; poll `info` while
+    ///      Klippy reports `startup`.
+    ///   2. `objects/subscribe` with `response_template` for status pushes.
+    ///   3. When ready: heater sensors for the temperature store.
+    ///   4. `gcode/subscribe_output` for gcode responses.
+    ///   5. When ready: register remote methods, then `notify_klippy_ready`.
+    /// `shutdown` and `error` keep the connection, as in Moonraker. A Klippy
+    /// error result does not abort the handshake; a socket error does.
+    fn handshake(self: *KlippyCtx, io: std.Io) !void {
+        try self.pollInfo(io);
+        {
+            const params = try self.buildSubscribeParams(io, self.gpa);
+            defer self.gpa.free(params);
+            const resp = try self.handshakeRequest(io, "objects/subscribe", params);
+            defer self.gpa.free(resp);
+            self.seedSubscribedStatus(io, resp);
+        }
+        if (self.state == .ready) try self.subscribeTemperatureSensors(io);
+        self.gpa.free(try self.handshakeRequest(io, "gcode/subscribe_output", gcode_subscribe_params));
+        if (self.state == .ready) {
+            for (self.remote_methods) |name| {
+                const params = try std.json.Stringify.valueAlloc(self.gpa, .{
+                    .response_template = .{ .method = name },
+                    .remote_method = name,
+                }, .{});
+                defer self.gpa.free(params);
+                self.gpa.free(try self.handshakeRequest(io, "register_remote_method", params));
+            }
+        }
+        {
+            self.pending_mutex.lockUncancelable(io);
+            defer self.pending_mutex.unlock(io);
+            self.connected.store(true, .release);
+        }
+        if (self.state == .ready) self.bus.emit(io, notify.names.klippy_ready, .null) catch {};
+    }
+
+    /// Send `info` until Klippy leaves `startup`. The first successful
+    /// response identifies phobos; later polls omit `client_info`.
+    fn pollInfo(self: *KlippyCtx, io: std.Io) !void {
+        var params: []const u8 = identify_params;
+        for (0..startup_polls) |_| {
+            const payload = try self.handshakeRequest(io, "info", params);
+            defer self.gpa.free(payload);
+            var arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer arena.deinit();
+            if (parseKlippyResult(arena.allocator(), payload)) |result| {
+                params = "{}";
+                self.reportKlipperPath(result);
+                const state = parseKlippyState(result) orelse return error.IdentifyFailed;
+                _ = self.setState(state);
+                if (state != .startup) return;
+            } else |err| switch (err) {
+                // Moonraker logs an info error and polls again.
+                error.KlippyRequestFailed => {},
+                else => |e| return e,
+            }
+            try std.Io.sleep(io, startup_poll_delay, .awake);
+        }
+        return error.KlippyStartupTimeout;
+    }
+
+    fn reportKlipperPath(self: *KlippyCtx, result: std.json.Value) void {
+        if (result != .object) return;
+        const kp = result.object.get("klipper_path") orelse return;
+        if (kp != .string or kp.string.len == 0) return;
+        const cb = self.on_klipper_path orelse return;
+        cb(self.on_klipper_path_ctx orelse return, kp.string);
+    }
+
+    /// Send `method` and read until its response, dispatching frames in
+    /// between. Handshake only: the persistent reader is not running yet.
+    /// Returns the gpa-owned response frame.
+    fn handshakeRequest(self: *KlippyCtx, io: std.Io, method: []const u8, params_json: []const u8) ![]u8 {
+        const id = self.nextId(io);
+        const frame = try formatRequest(self.gpa, method, id, params_json);
+        defer self.gpa.free(frame);
+        try self.writeFrame(io, frame);
+        for (0..handshake_max_frames) |_| {
+            const payload = try self.readFrame();
+            if (frameIdMatches(payload, id)) return payload;
+            defer self.gpa.free(payload);
+            self.dispatchFrame(io, payload) catch {};
+        }
+        return error.KlippyRequestFailed;
+    }
 
     /// `objects/query` `heaters`, then subscribe `available_sensors` and
     /// `available_monitors`. Moonraker does this on `klippy_ready` so
     /// `server.temperature_store` has the same keys. A Klippy error result is
-    /// ignored (the frame was consumed). A socket error is returned so the
-    /// handshake reconnects instead of reading the next frame out of order.
+    /// ignored (the frame was consumed).
     fn subscribeTemperatureSensors(self: *KlippyCtx, io: std.Io) !void {
-        var rid_buf: [32]u8 = undefined;
-        var qbuf: [320]u8 = undefined;
-        const qid = self.nextReqId(&rid_buf);
-        const qframe = try std.fmt.bufPrint(
-            &qbuf,
-            "{{\"jsonrpc\":\"2.0\",\"method\":\"objects/query\",\"id\":\"{s}\",\"params\":{{\"objects\":{{\"heaters\":null}}}}}}",
-            .{qid},
-        );
-        try self.writeFrame(io, qframe);
-        const qresp = try self.readResponse(io, qid);
+        const qresp = try self.handshakeRequest(io, "objects/query", heaters_query_params);
         defer self.gpa.free(qresp);
 
         var arena = std.heap.ArenaAllocator.init(self.gpa);
@@ -661,48 +543,31 @@ pub const KlippyCtx = struct {
         try collectHeaterNames(result, "available_monitors", self.gpa, &monitors);
         if (sensors.items.len == 0 and monitors.items.len == 0) return;
 
-        for (sensors.items) |name| try self.addSubscriptionObject(name);
-        for (monitors.items) |name| try self.addSubscriptionObject(name);
-        const objs = try self.buildSubObjectsJson(self.gpa);
-        defer self.gpa.free(objs);
-
-        const fbuf = try self.gpa.alloc(u8, objs.len + 256);
-        defer self.gpa.free(fbuf);
-        const sid = self.nextReqId(&rid_buf);
-        const sub = buildSubscribeRequest(objs, sid, fbuf) catch return;
-        try self.writeFrame(io, sub);
-        const sresp = try self.readResponse(io, sid);
+        for ([_][]const []const u8{ sensors.items, monitors.items }) |names| {
+            for (names) |name| self.addSubscriptionObject(name) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                // A full set or an oversized name skips that sensor.
+                else => {},
+            };
+        }
+        const params = try self.buildSubscribeParams(io, self.gpa);
+        defer self.gpa.free(params);
+        const sresp = try self.handshakeRequest(io, "objects/subscribe", params);
         defer self.gpa.free(sresp);
 
         if (self.temp_store) |ts| {
             for (monitors.items) |n| ts.markTempMonitor(io, n);
         }
-        const sresult = parseKlippyResult(arena.allocator(), sresp) catch return;
-        self.seedSubscribedStatus(io, sresult);
+        self.seedSubscribedStatus(io, sresp);
     }
 
-    /// Read until the JSON-RPC response with this string id. Klippy may push
-    /// `process_status_update` between the request and the response; those
-    /// frames are dispatched and do not count as the reply.
-    fn readResponse(self: *KlippyCtx, io: std.Io, id: []const u8) ![]const u8 {
-        var n: u8 = 0;
-        while (n < 40) : (n += 1) {
-            const payload = try self.readFrame();
-            if (frameIdMatches(payload, id)) return payload;
-            if (std.mem.indexOf(u8, payload, "\"method\"") != null) {
-                self.dispatchFrame(io, payload) catch {};
-            }
-            self.gpa.free(payload);
-        }
-        return error.KlippyRequestFailed;
-    }
-
-    /// Seed the temperature store from an `objects/subscribe` result
-    /// (`result.status`, `result.eventtime`). Later pushes arrive as
-    /// `process_status_update` and take the same path in the reader.
-    fn seedSubscribedStatus(self: *KlippyCtx, io: std.Io, result: std.json.Value) void {
-        if (self.core) |core| return core.run(io, seedSubscribedStatusLocked, .{ self, io, result });
-        self.seedSubscribedStatusLocked(io, result);
+    /// Seed job state, OctoPrint state and the temperature store from an
+    /// `objects/subscribe` response frame. Later pushes take the reader path.
+    fn seedSubscribedStatus(self: *KlippyCtx, io: std.Io, payload: []const u8) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+        const result = parseKlippyResult(arena.allocator(), payload) catch return;
+        self.bus.core.run(io, seedSubscribedStatusLocked, .{ self, io, result });
     }
 
     fn seedSubscribedStatusLocked(self: *KlippyCtx, io: std.Io, result: std.json.Value) void {
@@ -724,209 +589,49 @@ pub const KlippyCtx = struct {
         }
     }
 
-    /// Open the Unix socket and perform the real Klippy handshake:
-    ///   1. `info` (with client_info) to identify, then poll `info` until
-    ///      Klippy leaves the `startup` state (mirrors Moonraker's _check_ready).
-    ///   2. `objects/subscribe` (with response_template) for status updates.
-    ///   3. `gcode/subscribe_output` (with response_template) for gcode output.
-    /// Klippy has NO `server.connection.identify` — the `info` request is the
-    /// identify step. Status/gcode pushes arrive as `process_status_update` /
-    /// `process_gcode_response` remote-method calls named in the templates.
-    fn connectAndHandshake(self: *KlippyCtx) !void {
-        const io = self.io.?;
-        const addr = try net.UnixAddress.init(self.uds_path);
-        const s = try addr.connect(io);
-        self.stream = s;
-        self.reader = s.reader(io, &self.read_buffer);
-
-        // Phase 1: identify + poll `info` until Klippy is out of startup.
-        _ = self.setState(.connecting);
-        try self.pollServerInfo(io);
-        self.klippy_identified = true;
-
-        // Phase 2: subscribe to printer objects for status updates. Tolerate a
-        // subscribe error (Moonraker logs and continues) so a missing object on
-        // a bare config never aborts the handshake.
-        var sub_buf: [512]u8 = undefined;
-        var rid_buf: [32]u8 = undefined;
-        {
-            // Merge base objects with any extras registered by other components.
-            const objs = try self.buildSubObjectsJson(self.gpa);
-            defer self.gpa.free(objs);
-            const fbuf = try self.gpa.alloc(u8, objs.len + 256);
-            defer self.gpa.free(fbuf);
-            const sub_id = self.nextReqId(&rid_buf);
-            const sub_frame = try buildSubscribeRequest(objs, sub_id, fbuf);
-            try self.writeFrame(io, sub_frame);
-            const sub_resp = try self.readResponse(io, sub_id);
-            defer self.gpa.free(sub_resp);
-            var snapshot_arena = std.heap.ArenaAllocator.init(self.gpa);
-            defer snapshot_arena.deinit();
-            if (parseKlippyResult(snapshot_arena.allocator(), sub_resp)) |result| self.seedSubscribedStatus(io, result) else |_| {}
-        }
-
-        // Phase 2b: temperature sensors. The base subscription does not include
-        // heaters, so the store stays empty until this query+subscribe.
-        try self.subscribeTemperatureSensors(io);
-
-        // Phase 3: subscribe to gcode output.
-        {
-            const gc_id = self.nextReqId(&rid_buf);
-            const gc_frame = try buildSubscribeGcodeRequest(gc_id, &sub_buf);
-            try self.writeFrame(io, gc_frame);
-            const gc_resp = try self.readResponse(io, gc_id);
-            self.gpa.free(gc_resp);
-        }
-
-        // Phase 4: register component remote methods (Feather update callbacks).
-        // A Klippy that rejects one does not abort the handshake.
-        for (self.remote_methods) |name| {
-            var reg_buf: [512]u8 = undefined;
-            const reg_id = self.nextReqId(&rid_buf);
-            const reg_frame = buildRegisterMethodRequest(name, reg_id, &reg_buf) catch continue;
-            self.writeFrame(io, reg_frame) catch continue;
-            const reg_resp = self.readResponse(io, reg_id) catch continue;
-            self.gpa.free(reg_resp);
-        }
-
-        // Handshake fully complete — mark ready so isConnected() gates open.
-        _ = self.setState(.ready);
-    }
-
-    /// Poll the Klippy `info` endpoint every 250ms up to 100 times until Klippy
-    /// exits the startup state. The first request carries `client_info`
-    /// (identify); subsequent polls omit it.
-    fn pollServerInfo(self: *KlippyCtx, io: std.Io) !void {
-        var poll_count: u8 = 0;
-        while (poll_count < 100) : (poll_count += 1) {
-            var info_buf: [256]u8 = undefined;
-            var rid: [32]u8 = undefined;
-            const info_id = self.nextReqId(&rid);
-            const info_frame = try buildInfoRequest("phobos", "1.0.0", info_id, poll_count == 0, &info_buf);
-            try self.writeFrame(io, info_frame);
-
-            const info_payload = try self.readFrame();
-            defer self.gpa.free(info_payload);
-            const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, info_payload, .{});
-            defer parsed.deinit();
-
-            const result = parsed.value.object.get("result") orelse return error.IdentifyFailed;
-            if (result == .object) {
-                if (result.object.get("klipper_path")) |kp| switch (kp) {
-                    .string => |p| if (p.len > 0) {
-                        if (self.on_klipper_path) |cb| {
-                            if (self.on_klipper_path_ctx) |c| cb(c, p);
-                        }
-                    },
-                    else => {},
-                };
-            }
-            if (parseKlippyInfoResponse(result)) |info| {
-                self.klippy_info = info;
-                switch (info.state) {
-                    .ready => {
-                        self.klippy_started = true;
-                        return;
-                    },
-                    .shutdown => {
-                        _ = self.setState(.shutdown);
-                        self.emitShutdown(io);
-                        return error.KlippyShutdown;
-                    },
-                    .startup => {
-                        _ = self.setState(.startup);
-                        // Sleep 250ms before next poll.
-                        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(250), .real) catch {};
-                        continue;
-                    },
-                    else => return error.KlippyDisconnected,
-                }
-            }
-            return error.IdentifyFailed;
-        }
-        return error.KlippyStartupTimeout;
-    }
-
     // -----------------------------------------------------------------------
-    // Read loop
+    // Read loop and dispatch
     // -----------------------------------------------------------------------
 
-    /// Dispatch a received JSON-RPC frame from the persistent reader.
-    /// Handles three kinds of frames:
-    /// 1. Id-less method frames: Klippy `call_remote_method` and status/gcode
-    ///    pushes. No ack. Component handlers run from here.
-    /// 2. Remote-method calls (method + id): same handlers, then an ack.
-    /// 3. Responses (result/error + id, no method) — consumed by `request()`,
-    ///    which holds `stream_mutex`; they never reach here.
+    /// Handle one frame from Klippy. Method frames (status and gcode pushes,
+    /// `call_remote_method`) run under Core; Moonraker sends no reply to them.
+    /// Responses go to the waiter registered under their string id.
     pub fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
         const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
         defer parsed.deinit();
 
         const frame = parsed.value;
         if (frame != .object) return error.InvalidFrame;
-
-        // Remote-method call: has both method AND a non-null id.
-        if (frame.object.get("method")) |method_val| {
-            if (method_val != .string) return error.InvalidFrame;
-            const method_str = method_val.string;
-            const has_id = if (frame.object.get("id")) |id_val| id_val != .null else false;
-
-            if (has_id) {
-                // Klippy is calling a remote method on us. Dispatch and ack.
-                const id = frame.object.get("id").?;
-                if (self.core) |core|
-                    try core.run(io, dispatchInlineLocked, .{ self, io, method_str, frame })
-                else
-                    try self.dispatchRemoteMethod(io, method_str, frame);
-                try self.sendAck(io, id);
-            } else {
-                // Notification — no id or null id.
-                if (self.core) |core|
-                    try core.run(io, dispatchInlineLocked, .{ self, io, method_str, frame })
-                else
-                    try self.dispatchNotification(io, method_str, frame);
-            }
-            self.forwardToBridges(payload);
-            return;
+        if (frame.object.get("method")) |method| {
+            if (method != .string) return error.InvalidFrame;
+            return self.bus.core.run(io, dispatchRemoteMethod, .{ self, io, method.string, frame });
         }
-
-        // Response frame (result/error + id, no method): route to the waiting
-        // request() by id. The reader owns this payload; hand the waiter a copy.
-        if (frame.object.get("id")) |id_val| {
-            if (id_val == .string) {
-                if (std.fmt.parseInt(u64, id_val.string, 10)) |id_num| {
-                    self.pending_mutex.lockUncancelable(io);
-                    if (self.pending.get(id_num)) |waiter| {
-                        waiter.payload = self.gpa.dupe(u8, payload) catch null;
-                        waiter.sem.post(io);
-                    }
-                    self.pending_mutex.unlock(io);
-                } else |_| {}
-            }
-        }
-        self.forwardToBridges(payload);
+        const id = frame.object.get("id") orelse return;
+        if (id != .string) return;
+        const id_num = std.fmt.parseInt(u64, id.string, 10) catch return;
+        self.pending_mutex.lockUncancelable(io);
+        defer self.pending_mutex.unlock(io);
+        const waiter = self.pending.get(id_num) orelse return;
+        // On OOM the waiter wakes without a payload and reports it.
+        waiter.payload = self.gpa.dupe(u8, payload) catch null;
+        waiter.sem.post(io);
     }
 
-    /// The persistent reader (concurrent path): the SOLE socket reader. Drains
-    /// frames continuously so Klippy never backpressures, dispatching
-    /// notifications + acking remote-method calls and routing responses to
-    /// waiters. Returns on connection drop (readFrame error).
-    fn readerLoop(self: *KlippyCtx) !void {
-        const io = self.io.?;
+    /// The sole reader once the handshake completes. Returns when the socket
+    /// fails; a malformed frame is skipped, as Moonraker does.
+    fn readerLoop(self: *KlippyCtx, io: std.Io) !void {
         while (!self.stopping.isSet()) {
             const payload = try self.readFrame();
             defer self.gpa.free(payload);
-            // Tolerate a single malformed/oversized frame without dropping the
-            // connection (matches Moonraker resilience).
             self.dispatchFrame(io, payload) catch {};
         }
     }
 
-    /// Fail every in-flight waiter (connection dropped). Wakes blocked request()
-    /// calls so they return an error instead of hanging forever.
+    /// Close waiter registration and fail every in-flight waiter.
     fn failAllWaiters(self: *KlippyCtx, io: std.Io) void {
         self.pending_mutex.lockUncancelable(io);
         defer self.pending_mutex.unlock(io);
+        self.connected.store(false, .release);
         var it = self.pending.valueIterator();
         while (it.next()) |wp| {
             wp.*.failed = true;
@@ -934,116 +639,42 @@ pub const KlippyCtx = struct {
         }
     }
 
-    /// Send an empty acknowledgment response for a remote-method call.
-    fn sendAck(self: *KlippyCtx, io: std.Io, id: std.json.Value) !void {
-        var ack_buf: [128]u8 = undefined;
-        const id_str = if (id == .string) id.string else "0";
-        const ack = try std.fmt.bufPrint(&ack_buf, "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}", .{id_str});
-        try self.writeFrame(io, ack);
-    }
-
-    /// Dispatch a Klippy-initiated remote method call (has both method and id).
+    /// Run one Klippy method frame. Caller holds Core.
     pub fn dispatchRemoteMethod(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
-        if (std.mem.eql(u8, method, "process_status_update")) {
-            try self.processStatusUpdate(io, frame);
-        } else if (std.mem.eql(u8, method, "process_gcode_response")) {
-            try self.processGcodeResponse(io, frame);
-        } else if (self.remote_handler) |handler| {
-            const params = if (frame == .object) frame.object.get("params") orelse .null else .null;
-            try handler(self.remote_handler_ctx orelse return, std.heap.smp_allocator, method, params);
-        }
-    }
-
-    /// Dispatch a notification frame from the background read loop.
-    /// Uses `emit` (acquires Core lock) since the background task does not
-    /// hold the Core lock.
-    fn dispatchNotification(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
-        // Klippy pushes status/gcode via the response_template method names
-        // (process_status_update / process_gcode_response) — usually WITHOUT an
-        // id, so they arrive here as notifications. Handle those too (not just the
-        // notify_* aliases), else live status pushes are silently dropped.
+        const params: std.json.Value = if (frame == .object) frame.object.get("params") orelse .null else .null;
         if (std.mem.eql(u8, method, "process_status_update") or std.mem.eql(u8, method, "notify_status_update")) {
-            try self.processStatusUpdate(io, frame);
+            try self.processStatusUpdate(io, params);
         } else if (std.mem.eql(u8, method, "process_gcode_response") or std.mem.eql(u8, method, "notify_gcode_response")) {
-            try self.processGcodeResponse(io, frame);
+            try self.emitGcodeResponse(io, params);
         } else if (self.remote_handler) |handler| {
-            // Id-less `call_remote_method` frame: `{method, params}` and no id.
-            const params = if (frame == .object) frame.object.get("params") orelse .null else .null;
             try handler(self.remote_handler_ctx orelse return, std.heap.smp_allocator, method, params);
         }
     }
 
-    /// Dispatch a remote-method call or notification from within a `request()`
-    /// call that already holds the Core lock. Uses `emitLocked` variants.
-    fn dispatchInlineLocked(self: *KlippyCtx, io: std.Io, method: []const u8, frame: std.json.Value) !void {
-        if (std.mem.eql(u8, method, "process_status_update")) {
-            try self.processStatusUpdateLocked(io, frame);
-        } else if (std.mem.eql(u8, method, "process_gcode_response")) {
-            try self.processGcodeResponseLocked(io, frame);
-        } else if (std.mem.eql(u8, method, "notify_status_update")) {
-            try self.processStatusUpdateLocked(io, frame);
-        } else if (std.mem.eql(u8, method, "notify_gcode_response")) {
-            try self.processGcodeResponseLocked(io, frame);
-        } else if (self.remote_handler) |handler| {
-            const params = if (frame == .object) frame.object.get("params") orelse .null else .null;
-            try handler(self.remote_handler_ctx orelse return, std.heap.smp_allocator, method, params);
-        }
-    }
-
-    /// Process a notify_status_update or process_status_update from Klippy.
-    /// Parses the status dict, checks webhooks for state transitions, and fans
-    /// out per-object to subscribed connections.
-    fn processStatusUpdate(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        const params = frame.object.get("params") orelse return;
-        try self.processStatusUpdateInner(io, params, false);
-    }
-
-    /// Locked variant — caller holds Core lock.
-    fn processStatusUpdateLocked(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        const params = frame.object.get("params") orelse return;
-        try self.processStatusUpdateInner(io, params, true);
-    }
-
-    /// Core status-update processing: parse params, check webhooks, fan out
-    /// per-object. `locked` selects emit vs emitLocked.
-    fn processStatusUpdateInner(self: *KlippyCtx, io: std.Io, params: std.json.Value, locked: bool) !void {
+    /// Process `process_status_update` params (Core held): track
+    /// `webhooks.state`, fan out per object, feed job state, OctoPrint and the
+    /// temperature store.
+    fn processStatusUpdate(self: *KlippyCtx, io: std.Io, params: std.json.Value) !void {
         // Klippy sends params as an OBJECT: {"eventtime": t, "status": {obj:{..}}}.
-        // (Clients then receive the array shape [status, eventtime] — built below.)
+        // Clients receive the array shape [status, eventtime] built below.
         if (params != .object) return;
         const eventtime: std.json.Value = params.object.get("eventtime") orelse .{ .float = 0 };
         const status_dict = params.object.get("status") orelse return;
         if (status_dict != .object) return;
 
-        // Check webhooks for state transitions.
-        if (status_dict.object.get("webhooks")) |wh_val| {
-            if (wh_val == .object) {
-                if (wh_val.object.get("state")) |state_val| {
-                    if (state_val == .string) {
-                        const st = state_val.string;
-                        if (std.mem.eql(u8, st, "shutdown")) {
-                            if (self.state != .shutdown) {
-                                _ = self.setState(.shutdown);
-                                if (locked) {
-                                    self.bus.emitLocked(io, notify.names.klippy_shutdown, .null) catch {};
-                                } else {
-                                    self.bus.emit(io, notify.names.klippy_shutdown, .null) catch {};
-                                }
-                            }
-                        } else if (std.mem.eql(u8, st, "ready")) {
-                            if (self.state != .ready) {
-                                _ = self.setState(.ready);
-                            }
-                        }
-                    }
+        if (status_dict.object.get("webhooks")) |wh| {
+            const st: std.json.Value = if (wh == .object) wh.object.get("state") orelse .null else .null;
+            if (st == .string) {
+                if (klippy_state_map.get(st.string)) |new_state| {
+                    // Moonraker defers a shutdown seen during the handshake.
+                    if (new_state == .shutdown and self.state != .shutdown and self.isConnected()) self.shutdownLocked(io);
+                    _ = self.setState(new_state);
                 }
             }
         }
 
-        // Fan out each object to connections subscribed to that object name.
-        // Reuse one map + array across the loop (clearRetainingCapacity) so the
-        // backing stores are allocated at most once per tick, not per object —
-        // emit copies params into its own frame, so the scaffolding is safe to
-        // recycle. Freed once at the end (defer).
+        // Reuse one map + array across objects: emit copies params into its
+        // own frame, so the scaffolding can be recycled.
         const scratch = std.heap.smp_allocator;
         var per_obj_map: std.json.ObjectMap = .empty;
         defer per_obj_map.deinit(scratch);
@@ -1053,25 +684,14 @@ pub const KlippyCtx = struct {
         var it = status_dict.object.iterator();
         while (it.next()) |entry| {
             const obj_name = entry.key_ptr.*;
-            // Build client status params: [{obj_name: obj_data}, eventtime].
             per_obj_map.clearRetainingCapacity();
             try per_obj_map.put(scratch, obj_name, entry.value_ptr.*);
-            const per_obj_val = std.json.Value{ .object = per_obj_map };
-
             params_arr.clearRetainingCapacity();
-            try params_arr.append(per_obj_val);
+            try params_arr.append(.{ .object = per_obj_map });
             try params_arr.append(eventtime);
-            const params_array = std.json.Value{ .array = params_arr };
+            _ = self.bus.emitStatusLocked(io, notify.names.status_update, .{ .array = params_arr }, obj_name) catch {};
 
-            if (locked) {
-                _ = self.bus.emitStatusLocked(io, notify.names.status_update, params_array, obj_name) catch {};
-            } else {
-                _ = self.bus.emitStatus(io, notify.names.status_update, params_array, obj_name) catch {};
-            }
-
-            // Feed the temperature store: any status object carrying a numeric
-            // `temperature` is a heater/sensor/fan. Heaters add target+power,
-            // fans add target+speed.
+            // Any object with a numeric `temperature` is a heater, sensor or fan.
             if (self.temp_store) |ts| {
                 if (entry.value_ptr.* == .object) {
                     const od = entry.value_ptr.object;
@@ -1080,68 +700,26 @@ pub const KlippyCtx = struct {
             }
         }
 
-        // Feed print_stats into the job state machine (job_state component).
-        if (self.job_state) |js| {
-            if (status_dict.object.get("print_stats")) |ps| {
-                js.statusUpdate(ps);
-            }
-        }
-
-        // Feed print_stats into the octoprint compat state tracker.
-        if (self.octoprint) |oc| {
-            if (status_dict.object.get("print_stats")) |ps| {
-                oc.statusUpdate(ps);
-            }
+        if (status_dict.object.get("print_stats")) |ps| {
+            if (self.job_state) |js| js.statusUpdate(ps);
+            if (self.octoprint) |oc| oc.statusUpdate(ps);
         }
     }
 
-    /// Process a notify_gcode_response or process_gcode_response from Klippy.
-    fn processGcodeResponse(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        try self.emitGcodeResponse(io, frame, false);
-    }
-
-    /// Locked variant — caller holds Core lock.
-    fn processGcodeResponseLocked(self: *KlippyCtx, io: std.Io, frame: std.json.Value) !void {
-        try self.emitGcodeResponse(io, frame, true);
-    }
-
-    /// Emit a `notify_gcode_response` matching Moonraker's wire shape.
-    ///
-    /// Klippy delivers the response via the `process_gcode_response` remote
-    /// method, so the frame's `params` is the kwarg object `{"response": "..."}`.
-    /// Moonraker forwards only the response STRING to clients, so the
-    /// notification `params` must be the single-element array `[response]`
-    /// (the notify bus requires an array — see notify.zig). Emitting the raw
-    /// `{"response": ...}` object gave clients the wrong container and value.
-    fn emitGcodeResponse(self: *KlippyCtx, io: std.Io, frame: std.json.Value, locked: bool) !void {
-        const params = frame.object.get("params") orelse return;
+    /// Emit a `notify_gcode_response` (Core held). Klippy's params are the
+    /// kwarg object `{"response": "..."}`; Moonraker forwards only the string,
+    /// so clients get `[response]`.
+    fn emitGcodeResponse(self: *KlippyCtx, io: std.Io, params: std.json.Value) !void {
         const resp: std.json.Value = switch (params) {
-            // Already array-shaped (defensive: a notify_gcode_response alias) —
-            // forward verbatim.
-            .array => {
-                if (locked) {
-                    _ = try self.bus.emitLocked(io, notify.names.gcode_response, params);
-                } else {
-                    _ = try self.bus.emit(io, notify.names.gcode_response, params);
-                }
-                return;
-            },
-            // Standard remote-method kwarg object.
+            .array => return self.bus.emitLocked(io, notify.names.gcode_response, params),
             .object => params.object.get("response") orelse return,
-            // A bare string/value — wrap it directly.
+            .null => return,
             else => params,
         };
-        // emit copies params into its own frame, so this scratch array is safe
-        // to free immediately after.
         var arr: std.json.Array = .init(std.heap.smp_allocator);
         defer arr.deinit();
         try arr.append(resp);
-        const params_array = std.json.Value{ .array = arr };
-        if (locked) {
-            _ = try self.bus.emitLocked(io, notify.names.gcode_response, params_array);
-        } else {
-            _ = try self.bus.emit(io, notify.names.gcode_response, params_array);
-        }
+        try self.bus.emitLocked(io, notify.names.gcode_response, .{ .array = arr });
     }
 
     // -----------------------------------------------------------------------
@@ -1150,374 +728,140 @@ pub const KlippyCtx = struct {
 
     /// Write a framed message to the Klippy socket.
     fn writeFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
-        // Serialize writes: in the concurrent path the reader (acks) and handler
-        // threads (request sends) both write; without this their frames interleave.
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
-        if (self.stream == null) return error.KlippyDisconnected;
-
+        const stream = self.stream orelse return error.KlippyDisconnected;
         var wbuf: [4096]u8 = undefined;
-        var w = self.stream.?.writer(io, &wbuf);
+        var w = stream.writer(io, &wbuf);
         try framing.write(&w.interface, payload);
         try w.interface.flush();
     }
 
-    /// Read one complete framed payload from the Klippy socket.
-    /// Blocks until a full \x03-delimited frame is available.
-    fn readFrame(self: *KlippyCtx) ![]const u8 {
-        if (self.reader == null) return error.KlippyDisconnected;
-        return framing.read(self.gpa, &self.reader.?.interface);
+    /// Read one framed payload (gpa-owned). Klippy task only.
+    fn readFrame(self: *KlippyCtx) ![]u8 {
+        const reader = if (self.reader) |*r| r else return error.KlippyDisconnected;
+        return framing.read(self.gpa, &reader.interface);
     }
 
-    /// Send a JSON-RPC request to Klippy and return the response result.
-    /// Only valid when `isConnected()`. Acquires `stream_mutex` for the
-    /// duration so the background read-loop cannot interleave. Notifications
-    /// that arrive while waiting for the response are dispatched inline via
-    /// `dispatchNotificationLocked` (assumes the caller holds the Core lock).
-    /// Send a JSON-RPC request to Klippy and return the result. Picks the path:
-    /// the concurrent reader-correlated path when a Core lock is wired
-    /// (production), else the legacy inline-drain path (bare unit tests).
-    /// Fire a Klippy JSON-RPC request without waiting for its response.
-    /// Used to deliver `feather/update_status` and `feather/update_progress`
-    /// from inside the reader, which cannot call `request()` without deadlocking.
-    pub fn postMethod(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) !void {
+    fn nextId(self: *KlippyCtx, io: std.Io) u64 {
+        self.next_id_mutex.lockUncancelable(io);
+        defer self.next_id_mutex.unlock(io);
+        self.next_id += 1;
+        return self.next_id;
+    }
+
+    /// Send one request and wait for its response. `release` is the Core lock
+    /// the caller holds: it is dropped for the wait so the reader can dispatch
+    /// pushes, and retaken before returning. The result lives in `alloc`.
+    fn call(
+        self: *KlippyCtx,
+        method: []const u8,
+        params_json: []const u8,
+        release: ?*server_core.Core,
+        alloc: std.mem.Allocator,
+    ) !std.json.Value {
         const io = self.io orelse return error.KlippyDisconnected;
-        if (self.stream == null) return error.KlippyDisconnected;
-        const params_json = try serializeParams(alloc, params);
-        defer if (params_json.len > 0) alloc.free(params_json);
-        self.next_id_mutex.lockUncancelable(io);
-        self.next_id += 1;
-        const id_num = self.next_id;
-        self.next_id_mutex.unlock(io);
-        const body = try std.fmt.allocPrint(alloc, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"{s}\",\"params\":{s}}}", .{
-            id_num,
-            method,
-            if (params_json.len == 0) "{}" else params_json,
-        });
-        defer alloc.free(body);
-        try self.writeFrame(io, body);
-    }
-
-    pub fn request(
-        self: *KlippyCtx,
-        method: []const u8,
-        params: std.json.Value,
-        alloc: std.mem.Allocator,
-    ) anyerror!std.json.Value {
-        if (self.core != null) return self.requestConcurrent(method, params, alloc);
-        return self.requestInline(method, params, alloc);
-    }
-
-    /// Concurrent path: register a waiter, send the frame, then release the Core
-    /// lock and block on the waiter while the persistent reader drains the socket
-    /// and routes our response back. Releasing Core lets the reader dispatch the
-    /// intervening status flood (its emits take Core) without deadlock.
-    /// Serialize client `params` to a JSON string in `alloc`, rejecting
-    /// pathologically-nested values first: they would otherwise hit
-    /// std.json.Stringify's fixed 256-level nesting stack here (jw.write) and
-    /// panic / corrupt memory in release. Real RPC params are shallow.
-    fn serializeParams(alloc: std.mem.Allocator, params: std.json.Value) ![]const u8 {
-        if (params == .null) return "";
-        if (jv.exceedsDepth(params, jv.max_value_depth)) return error.InvalidParams;
-        var aw: std.Io.Writer.Allocating = .init(alloc);
-        defer aw.deinit();
-        var jw: std.json.Stringify = .{ .writer = &aw.writer };
-        try jw.write(params);
-        return aw.toOwnedSlice();
-    }
-
-    /// Parse a Klippy response payload and extract `result`. Uses `.alloc_always`
-    /// so every string is COPIED into `alloc` (the request arena) — the default
-    /// `.alloc_if_needed` would alias the `payload` buffer, which the caller frees
-    /// on return (use-after-free, corrupting concurrent off-Core responses).
-    fn parseKlippyResult(alloc: std.mem.Allocator, payload: []const u8) !std.json.Value {
-        const root = try std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .allocate = .alloc_always });
-        if (root != .object) return error.KlippyRequestFailed;
-        if (root.object.get("error")) |_| return error.KlippyRequestFailed;
-        return root.object.get("result") orelse .null;
-    }
-
-    fn requestConcurrent(
-        self: *KlippyCtx,
-        method: []const u8,
-        params: std.json.Value,
-        alloc: std.mem.Allocator,
-    ) anyerror!std.json.Value {
-        if (!self.isConnected()) return error.KlippyDisconnected;
-        const io = self.io.?;
-        const core = self.core.?;
-
-        self.next_id_mutex.lockUncancelable(io);
-        self.next_id += 1;
-        const id_num = self.next_id;
-        self.next_id_mutex.unlock(io);
-        var rid_buf: [32]u8 = undefined;
-        const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
-
-        var waiter = Waiter{};
-        self.pending_mutex.lockUncancelable(io);
-        self.pending.put(self.gpa, id_num, &waiter) catch {
-            self.pending_mutex.unlock(io);
-            return error.OutOfMemory;
-        };
-        self.pending_mutex.unlock(io);
+        const id = self.nextId(io);
+        var waiter: Waiter = .{};
+        {
+            self.pending_mutex.lockUncancelable(io);
+            defer self.pending_mutex.unlock(io);
+            if (!self.connected.load(.acquire)) return error.KlippyDisconnected;
+            try self.pending.put(self.gpa, id, &waiter);
+        }
         defer {
             self.pending_mutex.lockUncancelable(io);
-            _ = self.pending.remove(id_num);
+            _ = self.pending.remove(id);
             self.pending_mutex.unlock(io);
             if (waiter.payload) |p| self.gpa.free(p);
         }
 
-        // Serialize + send the request frame.
-        const params_json = try serializeParams(alloc, params);
-        const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
-        defer alloc.free(req_buf);
-        const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
-        try self.writeFrame(io, req_frame);
-
-        // Release Core for the round-trip so the reader can dispatch; re-acquire
-        // after. The handler that called us runs under Core (core.run), so the
-        // balance is preserved (core.run's final unlock matches its initial lock).
-        core.unlock(io);
+        const frame = try formatRequest(alloc, method, id, params_json);
+        defer alloc.free(frame);
+        try self.writeFrame(io, frame);
         {
-            defer core.lock(io);
+            if (release) |core| core.unlock(io);
+            defer if (release) |core| core.lock(io);
             try waiter.sem.wait(io);
         }
-
-        if (waiter.failed) return error.KlippyDisconnected;
-        const payload = waiter.payload orelse return error.KlippyDisconnected;
-        return parseKlippyResult(alloc, payload);
+        if (waiter.payload) |payload| return parseKlippyResult(alloc, payload);
+        return if (waiter.failed) error.KlippyDisconnected else error.OutOfMemory;
     }
 
-    /// Resubscribe Klippy to the current aggregate object set (base + everything
-    /// added via `addSubscriptionObject`) WITH the `response_template`, and return
-    /// the subscribe result (`{"eventtime":..,"status":{..}}`). A WS client's
-    /// `printer.objects.subscribe` calls this after registering its objects, so
-    /// one template-bearing subscription stays live (a bare `objects/subscribe`
-    /// proxy would drop the template and stop status pushes). Called OFF the Core
-    /// lock (from the WS transport), so unlike `requestConcurrent` it does not
-    /// release Core. Requires the concurrent reader (Core wired); errors if not
-    /// connected.
-    pub fn subscribeAggregate(self: *KlippyCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
-        if (!self.isConnected() or self.core == null) return error.KlippyDisconnected;
-        const io = self.io.?;
-
-        self.next_id_mutex.lockUncancelable(io);
-        self.next_id += 1;
-        const id_num = self.next_id;
-        self.next_id_mutex.unlock(io);
-        var rid_buf: [32]u8 = undefined;
-        const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
-
-        var waiter = Waiter{};
-        self.pending_mutex.lockUncancelable(io);
-        self.pending.put(self.gpa, id_num, &waiter) catch {
-            self.pending_mutex.unlock(io);
-            return error.OutOfMemory;
-        };
-        self.pending_mutex.unlock(io);
-        defer {
-            self.pending_mutex.lockUncancelable(io);
-            _ = self.pending.remove(id_num);
-            self.pending_mutex.unlock(io);
-            if (waiter.payload) |p| self.gpa.free(p);
-        }
-
-        const objs = try self.buildSubObjectsJson(alloc);
-        defer alloc.free(objs);
-        // Envelope incl. the response_template field is ~140 bytes; pad generously.
-        const fbuf = try alloc.alloc(u8, objs.len + rid.len + 256);
-        defer alloc.free(fbuf);
-        const frame = try buildSubscribeRequest(objs, rid, fbuf);
-        try self.writeFrame(io, frame);
-
-        try waiter.sem.wait(io);
-        if (waiter.failed) return error.KlippyDisconnected;
-        const payload = waiter.payload orelse return error.KlippyDisconnected;
-        return parseKlippyResult(alloc, payload);
-    }
-
-    /// Like `requestConcurrent`, but for callers that do NOT hold the Core lock
-    /// (read-only Klippy proxies, dispatched off-Core on both transports). No Core
-    /// release/re-acquire — the reader runs freely since no Core lock is held.
-    pub fn requestOffCore(
-        self: *KlippyCtx,
-        method: []const u8,
-        params: std.json.Value,
-        alloc: std.mem.Allocator,
-    ) anyerror!std.json.Value {
-        // Requires the persistent reader (Core wired) to fulfil the waiter; in
-        // inline mode (no reader) the wait would never return — error instead.
-        if (!self.isConnected() or self.core == null) return error.KlippyDisconnected;
-        const io = self.io.?;
-
-        self.next_id_mutex.lockUncancelable(io);
-        self.next_id += 1;
-        const id_num = self.next_id;
-        self.next_id_mutex.unlock(io);
-        var rid_buf: [32]u8 = undefined;
-        const rid = std.fmt.bufPrint(&rid_buf, "{d}", .{id_num}) catch return error.OutOfMemory;
-
-        var waiter = Waiter{};
-        self.pending_mutex.lockUncancelable(io);
-        self.pending.put(self.gpa, id_num, &waiter) catch {
-            self.pending_mutex.unlock(io);
-            return error.OutOfMemory;
-        };
-        self.pending_mutex.unlock(io);
-        defer {
-            self.pending_mutex.lockUncancelable(io);
-            _ = self.pending.remove(id_num);
-            self.pending_mutex.unlock(io);
-            if (waiter.payload) |p| self.gpa.free(p);
-        }
-
+    /// Send a request from a handler that holds Core and return the result.
+    /// Core is released while waiting (see `call`).
+    pub fn request(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
         const params_json = try serializeParams(alloc, params);
-        const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
-        defer alloc.free(req_buf);
-        const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
-        try self.writeFrame(io, req_frame);
-
-        try waiter.sem.wait(io); // no Core held → reader runs freely
-        if (waiter.failed) return error.KlippyDisconnected;
-        const payload = waiter.payload orelse return error.KlippyDisconnected;
-        return parseKlippyResult(alloc, payload);
+        defer if (params_json.len > 0) alloc.free(params_json);
+        return self.call(method, params_json, self.bus.core, alloc);
     }
 
-    fn requestInline(
-        self: *KlippyCtx,
-        method: []const u8,
-        params: std.json.Value,
-        alloc: std.mem.Allocator,
-    ) anyerror!std.json.Value {
-        if (!self.isConnected()) return error.KlippyDisconnected;
-        const io = self.io.?;
-
-        try self.stream_mutex.lock(io);
-        defer self.stream_mutex.unlock(io);
-
-        // Build and send the request frame.
-        var rid_buf: [32]u8 = undefined;
-        const rid = self.nextReqId(&rid_buf);
-
-        // Serialize params to JSON for embedding in the request. Built on the
-        // caller's arena so arbitrarily large params (e.g. an objects/query
-        // listing every printer object) are never truncated.
-        var params_json: []const u8 = "";
-        var params_owned: ?[]u8 = null;
-        defer if (params_owned) |p| alloc.free(p);
-        if (params != .null) {
-            var aw: std.Io.Writer.Allocating = .init(alloc);
-            defer aw.deinit();
-            var jw: std.json.Stringify = .{ .writer = &aw.writer };
-            try jw.write(params);
-            params_owned = try aw.toOwnedSlice();
-            params_json = params_owned.?;
-        }
-
-        // Frame buffer sized to fit method + id + params with envelope overhead.
-        const req_buf = try alloc.alloc(u8, method.len + rid.len + params_json.len + 64);
-        defer alloc.free(req_buf);
-        const req_frame = try buildJsonRpcRequest(method, rid, params_json, req_buf);
-        try self.writeFrame(io, req_frame);
-
-        // Read frames until the matching response arrives.
-        while (true) {
-            const payload = try self.readFrame();
-            defer self.gpa.free(payload);
-            const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch |e| {
-                return e;
-            };
-
-            // Check whether this is our response (matching id).
-            if (parsed.value.object.get("id")) |id_val| {
-                if (id_val == .string and std.mem.eql(u8, id_val.string, rid)) {
-                    // Our response. Forward to bridges before returning.
-                    self.forwardToBridges(payload);
-                    if (parsed.value.object.get("error")) |_| {
-                        return error.KlippyRequestFailed;
-                    }
-                    const result = parsed.value.object.get("result") orelse .null;
-                    // Copy into `alloc` (the caller's request arena): the parse
-                    // references `payload`, which is freed on return. One-pass
-                    // jv.deepCopy replaces the old serialize+re-parse round-trip.
-                    return jv.deepCopy(alloc, result);
-                }
-                // Different id — silently consume (should not happen in single-
-                // request-in-flight model, but be safe).
-            }
-
-            // Not our response — dispatch inline (caller holds Core lock).
-            if (parsed.value.object.get("method")) |method_val| {
-                try self.dispatchInlineLocked(io, method_val.string, parsed.value);
-                // If the frame has an id it is a Klippy-initiated remote method
-                // call (not a notification); ack it so Klippy does not retransmit.
-                if (parsed.value.object.get("id")) |id_val| {
-                    if (id_val != .null) {
-                        try self.sendAck(io, id_val);
-                    }
-                }
-            }
-
-            // Forward every frame to bridge clients so /klippysocket sees
-            // responses and notifications alike.
-            self.forwardToBridges(payload);
-        }
+    /// `request` for callers that do NOT hold Core (off-Core proxies, the job
+    /// queue worker).
+    pub fn requestOffCore(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        const params_json = try serializeParams(alloc, params);
+        defer if (params_json.len > 0) alloc.free(params_json);
+        return self.call(method, params_json, null, alloc);
     }
 
-    /// Construct the next request id string (monotonic integer as string).
-    fn nextReqId(self: *KlippyCtx, buf: []u8) []const u8 {
-        self.next_id += 1;
-        return std.fmt.bufPrint(buf, "{}", .{self.next_id}) catch "0";
+    /// Resubscribe Klippy to the aggregate object set with the
+    /// `response_template` and return the result (`{"eventtime","status"}`).
+    /// Called off Core by the WebSocket `printer.objects.subscribe` handler.
+    pub fn subscribeAggregate(self: *KlippyCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        const io = self.io orelse return error.KlippyDisconnected;
+        const params_json = try self.buildSubscribeParams(io, alloc);
+        defer alloc.free(params_json);
+        return self.call("objects/subscribe", params_json, null, alloc);
     }
 
-    /// Transition state and return true if state actually changed.
-    pub fn setState(self: *KlippyCtx, new_state: State) bool {
+    /// Send a request without waiting for its response. Used for Feather
+    /// replies from inside the reader, where waiting would deadlock.
+    pub fn postMethod(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) !void {
+        const io = self.io orelse return error.KlippyDisconnected;
+        const params_json = try serializeParams(alloc, params);
+        defer if (params_json.len > 0) alloc.free(params_json);
+        const frame = try formatRequest(alloc, method, self.nextId(io), params_json);
+        defer alloc.free(frame);
+        try self.writeFrame(io, frame);
+    }
+
+    /// Set `state` and mirror it into `server.info`, where `klippy_connected`
+    /// means the socket is open (Moonraker `is_connected`). Returns false when
+    /// unchanged.
+    fn setState(self: *KlippyCtx, new_state: State) bool {
         if (self.state == new_state) return false;
         self.state = new_state;
-        if (new_state == .shutdown) {
-            self.klippy_identified = false;
-            self.klippy_started = false;
-        }
-        // Push to server.info so it reflects live Klippy state. Guard with the
-        // leaf state_mutex so the off-Core server.info handler reads a consistent
-        // (klippy_connected, klippy_state) pair.
         if (self.server_info) |info| {
-            const mio = self.io;
-            if (mio) |io| info.state_mutex.lockUncancelable(io);
-            defer if (mio) |io| info.state_mutex.unlock(io);
-            info.klippy_connected = self.isConnected();
-            info.klippy_state = @tagName(self.state);
+            if (self.io) |io| info.state_mutex.lockUncancelable(io);
+            defer if (self.io) |io| info.state_mutex.unlock(io);
+            info.klippy_connected = new_state != .disconnected;
+            info.klippy_state = @tagName(new_state);
         }
         return true;
     }
 
     // -----------------------------------------------------------------------
-    // Notification emission helpers
+    // Moonraker server events (Core held)
     // -----------------------------------------------------------------------
 
-    fn emitDisconnected(self: *KlippyCtx, io: std.Io) void {
-        self.bus.emit(io, notify.names.klippy_disconnected, .null) catch {};
-        // Notify job_state to update internal state to error.
-        if (self.job_state) |js| js.handleDisconnect();
-        // Finish the current job as klippy_disconnect.
-        if (self.history) |h| {
-            if (self.job_state) |js| {
-                h.handleKlippyDisconnect(js.getLastStats());
-            }
+    /// `server:klippy_disconnect`: notify clients, mark the active job errored
+    /// and finish it as `klippy_disconnect`.
+    fn disconnectedLocked(self: *KlippyCtx, io: std.Io) void {
+        self.bus.emitLocked(io, notify.names.klippy_disconnected, .null) catch {};
+        if (self.job_state) |js| {
+            js.handleDisconnect();
+            if (self.history) |h| h.handleKlippyDisconnect(js.getLastStats());
         }
         if (self.octoprint) |oc| oc.setKlippyDisconnected();
     }
 
-    fn emitShutdown(self: *KlippyCtx, io: std.Io) void {
-        self.bus.emit(io, notify.names.klippy_shutdown, .null) catch {};
-        // Finish the current job as klippy_shutdown.
+    /// `server:klippy_shutdown`: notify clients and finish the active job as
+    /// `klippy_shutdown`.
+    fn shutdownLocked(self: *KlippyCtx, io: std.Io) void {
+        self.bus.emitLocked(io, notify.names.klippy_shutdown, .null) catch {};
         if (self.history) |h| {
-            if (self.job_state) |js| {
-                h.handleKlippyShutdown(js.getLastStats());
-            }
+            if (self.job_state) |js| h.handleKlippyShutdown(js.getLastStats());
         }
-        if (self.octoprint) |oc| oc.setKlippyDisconnected();
     }
 };
 
@@ -1527,7 +871,7 @@ pub const KlippyCtx = struct {
 
 // NullBus must not be moved after init (contains self-referential pointers).
 const NullBus = struct {
-    core: @import("../server/core.zig").Core,
+    core: server_core.Core,
     conns_obj: @import("../server/connections.zig").Connections,
     bus: notify.NotifyBus,
 
@@ -1536,7 +880,7 @@ const NullBus = struct {
     fn init(alloc: std.mem.Allocator) !*NullBus {
         const nb = try alloc.create(NullBus);
         errdefer alloc.destroy(nb);
-        nb.core = @import("../server/core.zig").Core.init();
+        nb.core = server_core.Core.init();
         nb.conns_obj = @import("../server/connections.zig").Connections.init(alloc, &nb.core);
         nb.bus = notify.NotifyBus.init(&nb.core, &nb.conns_obj);
         return nb;
@@ -1548,8 +892,23 @@ const NullBus = struct {
     }
 };
 
+/// `name` inside `tmp`, relative to the cwd (short enough for `sun_path`).
+fn tmpSocketPath(buf: []u8, tmp: *const std.testing.TmpDir, name: []const u8) ![]u8 {
+    return std.fmt.bufPrint(buf, "{s}/{s}/{s}", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path, name });
+}
+
+/// Counts notification frames containing `needle` written to one connection.
+const NotifyCounter = struct {
+    needle: []const u8,
+    count: std.atomic.Value(u32) = .init(0),
+    fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *NotifyCounter = @ptrCast(@alignCast(ctx));
+        if (std.mem.indexOf(u8, bytes, self.needle) != null) _ = self.count.fetchAdd(1, .monotonic);
+    }
+};
+
 // ===========================================================================
-// Tests: context lifecycle
+// Tests: context lifecycle and subscriptions
 // ===========================================================================
 
 test "KlippyCtx.init: starts disconnected" {
@@ -1562,39 +921,64 @@ test "KlippyCtx.init: starts disconnected" {
     try std.testing.expectEqual(State.disconnected, ctx.state);
 }
 
-test "buildSubObjectsJson: base set, plus deduped extras (dynamic subscriptions)" {
+test "buildSubscribeParams: base set, deduped extras and response_template" {
     const alloc = std.testing.allocator;
     const nb = try NullBus.init(alloc);
     defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
+    ctx.io = std.testing.io;
 
-    // No extras → just the base objects.
-    const base = try ctx.buildSubObjectsJson(alloc);
-    defer alloc.free(base);
-    try std.testing.expectEqualStrings("{\"webhooks\":null,\"toolhead\":null,\"print_stats\":null}", base);
-
-    // Add extras, including a duplicate of a base object (must be skipped).
     try ctx.addSubscriptionObject("extruder");
-    try ctx.addSubscriptionObject("extruder"); // idempotent
+    try ctx.addSubscriptionObject("extruder");
     try ctx.addSubscriptionObject("heater_bed");
-    try ctx.addSubscriptionObject("print_stats"); // base dup → skipped in output
+    try ctx.addSubscriptionObject("print_stats");
 
-    const merged = try ctx.buildSubObjectsJson(alloc);
-    defer alloc.free(merged);
-    // Base prefix is always present; extras appended (order is map-dependent).
-    try std.testing.expect(std.mem.startsWith(u8, merged, "{\"webhooks\":null,\"toolhead\":null,\"print_stats\":null"));
-    try std.testing.expect(std.mem.indexOf(u8, merged, "\"extruder\":null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, merged, "\"heater_bed\":null") != null);
-    // print_stats appears exactly once (the base one), not duplicated.
-    try std.testing.expect(std.mem.indexOf(u8, merged, "print_stats") == std.mem.lastIndexOf(u8, merged, "print_stats"));
-    // Valid JSON object.
-    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, merged, .{});
+    const raw = try ctx.buildSubscribeParams(std.testing.io, alloc);
+    defer alloc.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
     defer parsed.deinit();
-    try std.testing.expect(parsed.value == .object);
+    const objects = parsed.value.object.get("objects").?.object;
+    try std.testing.expectEqual(@as(usize, 5), objects.count());
+    for ([_][]const u8{ "webhooks", "toolhead", "print_stats", "extruder", "heater_bed" }) |name| {
+        try std.testing.expect(objects.get(name).? == .null);
+    }
+    try std.testing.expectEqualStrings("process_status_update", parsed.value.object.get("response_template").?.object.get("method").?.string);
 }
 
-test "fuzz addSubscriptionObject + buildSubObjectsJson: never crashes, valid JSON" {
+test "addSubscriptionObject escapes client names and bounds the set" {
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+    ctx.io = std.testing.io;
+
+    const hostile = "x\":null},\"response_template\":{\"method\":\"evil";
+    try ctx.addSubscriptionObject(hostile);
+    try ctx.addSubscriptionObject("back\\slash\n");
+    const raw = try ctx.buildSubscribeParams(std.testing.io, alloc);
+    defer alloc.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+    defer parsed.deinit();
+    const objects = parsed.value.object.get("objects").?.object;
+    try std.testing.expect(objects.contains(hostile));
+    try std.testing.expect(objects.contains("back\\slash\n"));
+    try std.testing.expectEqualStrings("process_status_update", parsed.value.object.get("response_template").?.object.get("method").?.string);
+
+    const long: [max_sub_object_name_len + 1]u8 = @splat('a');
+    try std.testing.expectError(error.InvalidParams, ctx.addSubscriptionObject(&long));
+    var buf: [16]u8 = undefined;
+    var i: usize = ctx.extra_sub_objects.count();
+    while (i < max_sub_objects) : (i += 1) {
+        try ctx.addSubscriptionObject(try std.fmt.bufPrint(&buf, "obj{d}", .{i}));
+    }
+    try std.testing.expectError(error.TooManyObjects, ctx.addSubscriptionObject("one_more"));
+    // Already-present names stay accepted when the set is full.
+    try ctx.addSubscriptionObject("obj5");
+}
+
+test "fuzz addSubscriptionObject + buildSubscribeParams: valid JSON, names round-trip" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) anyerror!void {
             const alloc = std.testing.allocator;
@@ -1602,414 +986,220 @@ test "fuzz addSubscriptionObject + buildSubObjectsJson: never crashes, valid JSO
             defer nb.deinit(alloc);
             var ctx = try KlippyCtx.init(alloc, &nb.bus);
             defer ctx.deinit();
+            ctx.io = std.testing.io;
             var name: [12]u8 = undefined;
             smith.bytesWithHash(&name, 0);
-            // Only register names without JSON-special chars (config invariant).
-            var ok = true;
-            for (name) |ch| if (ch == '"' or ch == '\\' or ch < 0x20) {
-                ok = false;
-            };
-            if (ok) ctx.addSubscriptionObject(&name) catch return;
-            const j = ctx.buildSubObjectsJson(alloc) catch return;
+            // Client names come from parsed JSON keys, so they are valid UTF-8.
+            if (!std.unicode.utf8ValidateSlice(&name)) return;
+            try ctx.addSubscriptionObject(&name);
+            const j = try ctx.buildSubscribeParams(std.testing.io, alloc);
             defer alloc.free(j);
-            const p = std.json.parseFromSlice(std.json.Value, alloc, j, .{}) catch return;
+            const p = try std.json.parseFromSlice(std.json.Value, alloc, j, .{});
             defer p.deinit();
+            try std.testing.expect(p.value.object.get("objects").?.object.contains(&name));
         }
     }.run, .{});
 }
 
-test "KlippyCtx.setIo: stores io handle" {
+test "KlippyCtx.nextId: monotonic" {
     const alloc = std.testing.allocator;
     const nb = try NullBus.init(alloc);
     defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    ctx.setIo(io);
-    try std.testing.expect(ctx.io != null);
+    try std.testing.expectEqual(@as(u64, 1), ctx.nextId(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 2), ctx.nextId(std.testing.io));
 }
 
-test "KlippyCtx.nextReqId: monotonic" {
+// ===========================================================================
+// Tests: builders and parsing
+// ===========================================================================
+
+test "formatRequest: string id and params" {
+    const alloc = std.testing.allocator;
+    const got = try formatRequest(alloc, "objects/list", 1, "[\"gcode\"]");
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"method\":\"objects/list\",\"id\":\"1\",\"params\":[\"gcode\"]}", got);
+    const empty = try formatRequest(alloc, "info", 42, "");
+    defer alloc.free(empty);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"method\":\"info\",\"id\":\"42\",\"params\":{}}", empty);
+}
+
+test "fuzz formatRequest: valid JSON for any JSON params and id" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const alloc = std.testing.allocator;
+            var raw: [8]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            const id = std.mem.readInt(u64, &raw, .little);
+            const params = [_][]const u8{ "", "{}", "[1,2]", "{\"a\":\"\\\"\"}", "null" };
+            const got = try formatRequest(alloc, "gcode/script", id, params[raw[0] % params.len]);
+            defer alloc.free(got);
+            const p = try std.json.parseFromSlice(std.json.Value, alloc, got, .{});
+            defer p.deinit();
+            try std.testing.expect(frameIdMatches(got, id));
+        }
+    }.run, .{});
+}
+
+test "collectHeaterNames reads sensors and ignores null monitors" {
+    const alloc = std.testing.allocator;
+    const raw =
+        \\{"eventtime":1,"status":{"heaters":{"available_sensors":["extruder","heater_bed","temperature_sensor weightValue"],"available_monitors":null}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, raw, .{});
+    defer parsed.deinit();
+    var sensors: std.ArrayList([]const u8) = .empty;
+    defer sensors.deinit(alloc);
+    var monitors: std.ArrayList([]const u8) = .empty;
+    defer monitors.deinit(alloc);
+    try collectHeaterNames(parsed.value, "available_sensors", alloc, &sensors);
+    try collectHeaterNames(parsed.value, "available_monitors", alloc, &monitors);
+    try std.testing.expectEqual(@as(usize, 3), sensors.items.len);
+    try std.testing.expectEqualStrings("temperature_sensor weightValue", sensors.items[2]);
+    try std.testing.expectEqual(@as(usize, 0), monitors.items.len);
+}
+
+test "frameIdMatches does not accept a longer id" {
+    try std.testing.expect(frameIdMatches("{\"id\":\"12\",\"result\":1}", 12));
+    try std.testing.expect(!frameIdMatches("{\"id\":\"12\",\"result\":1}", 1));
+}
+
+test "parseKlippyState maps every Klippy state" {
+    const cases = [_]struct { json: []const u8, state: ?State }{
+        .{ .json = "{\"state\":\"ready\"}", .state = .ready },
+        .{ .json = "{\"state\":\"startup\"}", .state = .startup },
+        .{ .json = "{\"state\":\"shutdown\"}", .state = .shutdown },
+        .{ .json = "{\"state\":\"error\"}", .state = .@"error" },
+        .{ .json = "{\"state\":\"bogus\"}", .state = null },
+        .{ .json = "{\"state\":1}", .state = null },
+        .{ .json = "{}", .state = null },
+        .{ .json = "\"ready\"", .state = null },
+    };
+    for (cases) |c| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(c.state, parseKlippyState(parsed.value));
+    }
+}
+
+test "fuzz parseKlippyState: never crashes on arbitrary JSON" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var json_bytes: [256]u8 = undefined;
+            smith.bytesWithHash(&json_bytes, 0);
+            const parsed = std.json.parseFromSlice(std.json.Value, std.testing.allocator, &json_bytes, .{}) catch return;
+            defer parsed.deinit();
+            _ = parseKlippyState(parsed.value);
+        }
+    }.run, .{});
+}
+
+test "parseKlippyResult copies strings (no use-after-free on the freed payload)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const payload = try a.dupe(u8, "{\"result\":{\"msg\":\"hello world\",\"state\":\"ready\"}}");
+    defer a.free(payload);
+    const result = try parseKlippyResult(arena.allocator(), payload);
+    @memset(payload, 'X'); // would corrupt an aliasing result
+    try std.testing.expectEqualStrings("hello world", result.object.get("msg").?.string);
+    try std.testing.expectEqualStrings("ready", result.object.get("state").?.string);
+}
+
+test "serializeParams rejects pathologically deep params (guards the Stringify nesting stack)" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var v: std.json.Value = .{ .integer = 1 };
+    for (0..400) |_| {
+        var arr: std.json.Array = .init(al);
+        try arr.append(v);
+        v = .{ .array = arr };
+    }
+    try std.testing.expectError(error.InvalidParams, serializeParams(al, v));
+    var o: std.json.ObjectMap = .empty;
+    try o.put(al, "x", .{ .integer = 1 });
+    try std.testing.expectEqualStrings("{\"x\":1}", try serializeParams(al, .{ .object = o }));
+}
+
+// ===========================================================================
+// Tests: state and dispatch
+// ===========================================================================
+
+test "setState mirrors Moonraker klippy_connected and klippy_state" {
     const alloc = std.testing.allocator;
     const nb = try NullBus.init(alloc);
     defer nb.deinit(alloc);
     var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
+    var info: methods.ServerInfo = .{};
+    ctx.server_info = &info;
 
-    var b1: [16]u8 = undefined;
-    var b2: [16]u8 = undefined;
-    const id1 = ctx.nextReqId(&b1);
-    const id2 = ctx.nextReqId(&b2);
-    try std.testing.expectEqualStrings("1", id1);
-    try std.testing.expectEqualStrings("2", id2);
-    try std.testing.expect(ctx.next_id == 2);
-}
-
-// ===========================================================================
-// Tests: JSON-RPC builders
-// ===========================================================================
-
-test "buildJsonRpcRequest: minimal request" {
-    var buf: [256]u8 = undefined;
-    const got = try buildJsonRpcRequest("server.info", "42", null, &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"server.info\",\"id\":\"42\"}",
-        got,
-    );
-}
-
-test "buildJsonRpcRequest: with params" {
-    var buf: [256]u8 = undefined;
-    const got = try buildJsonRpcRequest("objects/list", "1", "[\"gcode\"]", &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"objects/list\",\"id\":\"1\",\"params\":[\"gcode\"]}",
-        got,
-    );
-}
-
-test "buildJsonRpcRequest: empty params omitted" {
-    var buf: [256]u8 = undefined;
-    const got = try buildJsonRpcRequest("test", "x", "", &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"test\",\"id\":\"x\"}",
-        got,
-    );
-}
-
-test "buildInfoRequest: identify form carries client_info" {
-    var buf: [512]u8 = undefined;
-    const got = try buildInfoRequest("phobos", "1.0.0", "identify", true, &buf);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"method\":\"info\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"id\":\"identify\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, got, "\"client_info\":{\"program\":\"phobos\",\"version\":\"1.0.0\"}") != null);
-    // No legacy moonraker identify shape.
-    try std.testing.expect(std.mem.indexOf(u8, got, "server.connection.identify") == null);
-}
-
-test "buildInfoRequest: poll form omits client_info" {
-    var buf: [256]u8 = undefined;
-    const got = try buildInfoRequest("phobos", "1.0.0", "7", false, &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"info\",\"id\":\"7\",\"params\":{}}",
-        got,
-    );
-}
-
-test "buildSubscribeRequest: includes objects and response_template" {
-    var buf: [256]u8 = undefined;
-    const got = try buildSubscribeRequest("{\"toolhead\":null}", "2", &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"objects/subscribe\",\"id\":\"2\",\"params\":{\"objects\":{\"toolhead\":null},\"response_template\":{\"method\":\"process_status_update\"}}}",
-        got,
-    );
-}
-
-test "buildRegisterMethodRequest" {
-    var buf: [512]u8 = undefined;
-    const got = try buildRegisterMethodRequest("process_status_update", "3", &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"register_remote_method\",\"id\":\"3\",\"params\":{\"response_template\":{\"method\":\"process_status_update\"},\"remote_method\":\"process_status_update\"}}",
-        got,
-    );
-}
-
-test "buildSubscribeGcodeRequest" {
-    var buf: [256]u8 = undefined;
-    const got = try buildSubscribeGcodeRequest("4", &buf);
-    try std.testing.expectEqualStrings(
-        "{\"jsonrpc\":\"2.0\",\"method\":\"gcode/subscribe_output\",\"id\":\"4\",\"params\":{\"response_template\":{\"method\":\"process_gcode_response\"}}}",
-        got,
-    );
-}
-
-// ===========================================================================
-// Tests: response parsing
-// ===========================================================================
-
-test "parseKlippyInfoResponse: ready state" {
-    const json =
-        \\{"state":"ready","state_message":"Printer is ready","version":"v0.12.0","hostname":"mainsailos"}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    const info = parseKlippyInfoResponse(parsed.value).?;
-    try std.testing.expectEqual(State.ready, info.state);
-    try std.testing.expectEqualStrings("Printer is ready", info.state_message);
-    try std.testing.expectEqualStrings("v0.12.0", info.version);
-}
-
-test "parseKlippyInfoResponse: startup state" {
-    const json =
-        \\{"state":"startup","state_message":"Initializing..."}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    const info = parseKlippyInfoResponse(parsed.value).?;
-    try std.testing.expectEqual(State.startup, info.state);
-    try std.testing.expectEqualStrings("Initializing...", info.state_message);
-}
-
-test "parseKlippyInfoResponse: shutdown state" {
-    const json =
-        \\{"state":"shutdown","state_message":"MCU shutdown"}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    const info = parseKlippyInfoResponse(parsed.value).?;
-    try std.testing.expectEqual(State.shutdown, info.state);
-}
-
-test "parseKlippyInfoResponse: null on non-object" {
-    const json = "\"just a string\"";
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(parseKlippyInfoResponse(parsed.value) == null);
-}
-
-test "parseKlippyInfoResponse: null on missing state" {
-    const json = "{}";
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(parseKlippyInfoResponse(parsed.value) == null);
-}
-
-test "getJsonRpcError: extracts error message" {
-    const json =
-        \\{"error":{"code":-32600,"message":"Invalid Request"}}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    const err = getJsonRpcError(parsed.value).?;
-    try std.testing.expectEqualStrings("Invalid Request", err);
-}
-
-test "getJsonRpcError: null on success response" {
-    const json =
-        \\{"id":"1","result":{"state":"ready"}}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(getJsonRpcError(parsed.value) == null);
-}
-
-test "isNotification: true for method without id" {
-    const json =
-        \\{"jsonrpc":"2.0","method":"notify_status_update"}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(isNotification(parsed.value));
-}
-
-test "isNotification: true for method with null id" {
-    const json =
-        \\{"jsonrpc":"2.0","method":"notify_status_update","id":null}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(isNotification(parsed.value));
-}
-
-test "isNotification: false for request with id" {
-    const json =
-        \\{"jsonrpc":"2.0","method":"server.info","id":"1"}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(!isNotification(parsed.value));
-}
-
-test "isNotification: false for response" {
-    const json =
-        \\{"jsonrpc":"2.0","id":"1","result":{}}
-    ;
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
-    defer parsed.deinit();
-    try std.testing.expect(!isNotification(parsed.value));
-}
-
-// ===========================================================================
-// Tests: setState
-// ===========================================================================
-
-test "KlippyCtx.setState: transition" {
-    const alloc = std.testing.allocator;
-    const nb = try NullBus.init(alloc);
-    defer nb.deinit(alloc);
-    var ctx = try KlippyCtx.init(alloc, &nb.bus);
-    defer ctx.deinit();
-
-    try std.testing.expect(ctx.setState(.connecting));
-    try std.testing.expectEqual(State.connecting, ctx.state);
-    try std.testing.expect(ctx.setState(.startup));
-    try std.testing.expectEqual(State.startup, ctx.state);
-    try std.testing.expect(ctx.setState(.ready));
-    try std.testing.expectEqual(State.ready, ctx.state);
-}
-
-test "KlippyCtx.setState: false when already in state" {
-    const alloc = std.testing.allocator;
-    const nb = try NullBus.init(alloc);
-    defer nb.deinit(alloc);
-    var ctx = try KlippyCtx.init(alloc, &nb.bus);
-    defer ctx.deinit();
-
-    try std.testing.expect(ctx.setState(.connecting));
-    try std.testing.expect(!ctx.setState(.connecting));
-}
-
-test "KlippyCtx.setState: shutdown resets flags" {
-    const alloc = std.testing.allocator;
-    const nb = try NullBus.init(alloc);
-    defer nb.deinit(alloc);
-    var ctx = try KlippyCtx.init(alloc, &nb.bus);
-    defer ctx.deinit();
-
-    ctx.klippy_identified = true;
-    ctx.klippy_started = true;
     try std.testing.expect(ctx.setState(.shutdown));
-    try std.testing.expect(!ctx.klippy_identified);
-    try std.testing.expect(!ctx.klippy_started);
+    try std.testing.expect(!ctx.setState(.shutdown));
+    try std.testing.expect(info.klippy_connected);
+    try std.testing.expectEqualStrings("shutdown", info.klippy_state);
+    try std.testing.expect(ctx.setState(.@"error"));
+    try std.testing.expectEqualStrings("error", info.klippy_state);
+    try std.testing.expect(ctx.setState(.disconnected));
+    try std.testing.expect(!info.klippy_connected);
 }
 
-// ---------------------------------------------------------------------------
-// Tests: processStatusUpdateInner / processGcodeResponse
-// ---------------------------------------------------------------------------
+fn statusParams(a: std.mem.Allocator, webhooks_state: []const u8) !std.json.Value {
+    var sd: std.json.ObjectMap = .empty;
+    var wh: std.json.ObjectMap = .empty;
+    try wh.put(a, "state", .{ .string = webhooks_state });
+    try sd.put(a, "webhooks", .{ .object = wh });
+    var pobj: std.json.ObjectMap = .empty;
+    try pobj.put(a, "eventtime", .{ .float = 0.0 });
+    try pobj.put(a, "status", .{ .object = sd });
+    return .{ .object = pobj };
+}
 
-test "processStatusUpdateInner: shutdown webhook sets state and emits" {
+test "processStatusUpdate: live shutdown sets state and emits once" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-
     const nb = try NullBus.init(a);
     defer nb.deinit(a);
     var ctx = try KlippyCtx.init(a, &nb.bus);
     defer ctx.deinit();
+    const io = std.testing.io;
+    var counter = NotifyCounter{ .needle = "notify_klippy_shutdown" };
+    const conn = try nb.conns_obj.add(io);
+    nb.conns_obj.attachWriter(io, conn, &counter, NotifyCounter.write);
+
     _ = ctx.setState(.ready);
-    try std.testing.expectEqual(State.ready, ctx.state);
-
-    // Build params: [0.0, {webhooks: {state: "shutdown"}}].
-    var sd: std.json.ObjectMap = .empty;
-    var wh: std.json.ObjectMap = .empty;
-    try wh.put(a, "state", .{ .string = "shutdown" });
-    try sd.put(a, "webhooks", .{ .object = wh });
-    var pobj: std.json.ObjectMap = .empty;
-    try pobj.put(a, "eventtime", .{ .float = 0.0 });
-    try pobj.put(a, "status", .{ .object = sd });
-    const params = std.json.Value{ .object = pobj };
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processStatusUpdateInner(io, params, true);
+    ctx.connected.store(true, .release);
+    const params = try statusParams(a, "shutdown");
+    try ctx.processStatusUpdate(io, params);
+    try ctx.processStatusUpdate(io, params);
     try std.testing.expectEqual(State.shutdown, ctx.state);
-}
+    try std.testing.expectEqual(@as(u32, 1), counter.count.load(.monotonic));
 
-test "processStatusUpdateInner: ready webhook sets state" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const nb = try NullBus.init(a);
-    defer nb.deinit(a);
-    var ctx = try KlippyCtx.init(a, &nb.bus);
-    defer ctx.deinit();
-
-    var sd: std.json.ObjectMap = .empty;
-    var wh: std.json.ObjectMap = .empty;
-    try wh.put(a, "state", .{ .string = "ready" });
-    try sd.put(a, "webhooks", .{ .object = wh });
-    var pobj: std.json.ObjectMap = .empty;
-    try pobj.put(a, "eventtime", .{ .float = 0.0 });
-    try pobj.put(a, "status", .{ .object = sd });
-    const params = std.json.Value{ .object = pobj };
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processStatusUpdateInner(io, params, true);
+    try ctx.processStatusUpdate(io, try statusParams(a, "ready"));
     try std.testing.expectEqual(State.ready, ctx.state);
 }
 
-test "processStatusUpdateInner: no webhooks — no crash" {
+test "processStatusUpdate: malformed params return early" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-
     const nb = try NullBus.init(a);
     defer nb.deinit(a);
     var ctx = try KlippyCtx.init(a, &nb.bus);
     defer ctx.deinit();
-
-    var sd: std.json.ObjectMap = .empty;
-    try sd.put(a, "toolhead", .{ .object = .empty });
-    var pobj: std.json.ObjectMap = .empty;
-    try pobj.put(a, "eventtime", .{ .float = 0.0 });
-    try pobj.put(a, "status", .{ .object = sd });
-    const params = std.json.Value{ .object = pobj };
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processStatusUpdateInner(io, params, true);
-}
-
-test "processStatusUpdateInner: non-array returns early" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const nb = try NullBus.init(a);
-    defer nb.deinit(a);
-    var ctx = try KlippyCtx.init(a, &nb.bus);
-    defer ctx.deinit();
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processStatusUpdateInner(io, .{ .object = .empty }, true);
-}
-
-test "processStatusUpdateInner: too-short array returns early" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const nb = try NullBus.init(a);
-    defer nb.deinit(a);
-    var ctx = try KlippyCtx.init(a, &nb.bus);
-    defer ctx.deinit();
-
-    var arr = std.json.Array.init(a);
-    try arr.append(.{ .float = 0.0 });
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processStatusUpdateInner(io, .{ .array = arr }, true);
-}
-
-test "processStatusUpdateInner: non-object status_dict returns early" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const nb = try NullBus.init(a);
-    defer nb.deinit(a);
-    var ctx = try KlippyCtx.init(a, &nb.bus);
-    defer ctx.deinit();
+    const io = std.testing.io;
 
     var arr = std.json.Array.init(a);
     try arr.append(.{ .float = 0.0 });
     try arr.append(.{ .string = "not-an-object" });
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processStatusUpdateInner(io, .{ .array = arr }, true);
+    try ctx.processStatusUpdate(io, .{ .array = arr });
+    try ctx.processStatusUpdate(io, .{ .object = .empty });
+    try ctx.processStatusUpdate(io, try statusParams(a, "bogus"));
+    try std.testing.expectEqual(State.disconnected, ctx.state);
 }
 
 // Capturing connection sink: records the last notification bytes written.
@@ -2027,139 +1217,93 @@ const GcodeCapture = struct {
     }
 };
 
-test "processGcodeResponse: forwards the response STRING as a [response] array" {
+test "process_gcode_response: forwards the response STRING as a [response] array" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-
     const nb = try NullBus.init(a);
     defer nb.deinit(a);
     var ctx = try KlippyCtx.init(a, &nb.bus);
     defer ctx.deinit();
+    const io = std.testing.io;
 
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    // Register a capturing connection so we can inspect the wire frame.
     var cap = GcodeCapture{};
     const conn = try nb.conns_obj.add(io);
     nb.conns_obj.attachWriter(io, conn, &cap, GcodeCapture.write);
 
-    // Klippy delivers params as the remote-method kwarg object {"response": ...}.
     var pobj: std.json.ObjectMap = .empty;
     try pobj.put(a, "response", .{ .string = "// ok" });
     var obj: std.json.ObjectMap = .empty;
     try obj.put(a, "params", .{ .object = pobj });
-    const frame = std.json.Value{ .object = obj };
+    try ctx.dispatchRemoteMethod(io, "process_gcode_response", .{ .object = obj });
 
-    try ctx.processGcodeResponse(io, frame);
-
-    // Client must receive params as the single-element array ["// ok"], NOT the
-    // raw {"response": ...} object.
     try std.testing.expect(std.mem.indexOf(u8, cap.slice(), "\"method\":\"notify_gcode_response\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, cap.slice(), "\"params\":[\"// ok\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, cap.slice(), "\"response\"") == null);
+
+    // Missing params and a non-object frame emit nothing and do not crash.
+    cap.len = 0;
+    try ctx.dispatchRemoteMethod(io, "process_gcode_response", .{ .object = .empty });
+    try ctx.dispatchRemoteMethod(io, "process_gcode_response", .null);
+    try std.testing.expectEqual(@as(usize, 0), cap.len);
 }
 
-test "processGcodeResponse: missing params — no crash" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const nb = try NullBus.init(a);
-    defer nb.deinit(a);
-    var ctx = try KlippyCtx.init(a, &nb.bus);
+test "dispatchFrame rejects non-object roots and non-string methods" {
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
     defer ctx.deinit();
-
-    const frame = std.json.Value{ .object = .empty };
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    try ctx.processGcodeResponse(io, frame);
-}
-
-// ===========================================================================
-// Fuzz tests
-// ===========================================================================
-
-test "fuzz buildJsonRpcRequest: never crashes, always valid JSON" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var method: [64]u8 = undefined;
-            var id: [32]u8 = undefined;
-            var params: [128]u8 = undefined;
-            smith.bytesWithHash(&method, 0);
-            smith.bytesWithHash(&id, 1);
-            smith.bytesWithHash(&params, 2);
-
-            var buf: [512]u8 = undefined;
-            const result = buildJsonRpcRequest(method[0..@min(63, method.len)], id[0..@min(31, id.len)], params[0..@min(127, params.len)], &buf) catch return;
-            // Must start with { and end with }.
-            if (result.len > 0) {
-                std.debug.assert(result[0] == '{');
-                std.debug.assert(result[result.len - 1] == '}');
-            }
-        }
-    }.run, .{});
-}
-
-test "fuzz parseKlippyInfoResponse: never crashes on arbitrary JSON" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var json_bytes: [1024]u8 = undefined;
-            smith.bytesWithHash(&json_bytes, 0);
-
-            const parsed = std.json.parseFromSlice(
-                std.json.Value,
-                std.heap.smp_allocator,
-                &json_bytes,
-                .{ .allocate = .alloc_always },
-            ) catch return;
-            defer parsed.deinit();
-            _ = parseKlippyInfoResponse(parsed.value);
-            _ = getJsonRpcError(parsed.value);
-            _ = isNotification(parsed.value);
-        }
-    }.run, .{});
-}
-
-test "parseKlippyResult copies strings (no use-after-free on the freed payload)" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    // Payload buffer is owned separately and scribbled after parse to simulate
-    // the gpa free + reuse the real code does. `.alloc_always` must have copied
-    // the strings into the arena, so the result stays intact.
-    const payload = try a.dupe(u8, "{\"result\":{\"msg\":\"hello world\",\"state\":\"ready\"}}");
-    defer a.free(payload);
-    const result = try KlippyCtx.parseKlippyResult(arena.allocator(), payload);
-    @memset(payload, 'X'); // would corrupt an aliasing result
-    try std.testing.expectEqualStrings("hello world", result.object.get("msg").?.string);
-    try std.testing.expectEqualStrings("ready", result.object.get("state").?.string);
-}
-
-test "serializeParams rejects pathologically deep params (guards the Stringify nesting stack)" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const al = arena.allocator();
-    var v: std.json.Value = .{ .integer = 1 };
-    for (0..400) |_| {
-        var arr: std.json.Array = .init(al);
-        try arr.append(v);
-        v = .{ .array = arr };
+    for ([_][]const u8{ "[]", "null", "42", "{\"method\":4}", "{\"method\":null}" }) |wire| {
+        try std.testing.expectError(error.InvalidFrame, ctx.dispatchFrame(std.testing.io, wire));
     }
-    try std.testing.expectError(error.InvalidParams, KlippyCtx.serializeParams(al, v));
-    // A shallow value serializes fine.
-    const ok = try KlippyCtx.serializeParams(al, .{ .object = blk: {
-        var o: std.json.ObjectMap = .empty;
-        try o.put(al, "x", .{ .integer = 1 });
-        break :blk o;
-    } });
-    try std.testing.expect(ok.len > 0);
+    // Responses nobody waits for are dropped.
+    try ctx.dispatchFrame(std.testing.io, "{\"id\":\"7\",\"result\":{}}");
+    try ctx.dispatchFrame(std.testing.io, "{\"id\":7,\"result\":{}}");
 }
+
+test "fuzz dispatchFrame: arbitrary frames never crash" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const alloc = std.testing.allocator;
+            const nb = try NullBus.init(alloc);
+            defer nb.deinit(alloc);
+            var ctx = try KlippyCtx.init(alloc, &nb.bus);
+            defer ctx.deinit();
+            const frames = [_][]const u8{
+                "{\"method\":\"process_status_update\",\"params\":{\"eventtime\":1,\"status\":{\"webhooks\":{\"state\":\"shutdown\"}}}}",
+                "{\"method\":\"process_status_update\",\"params\":[1,{}]}",
+                "{\"method\":\"process_gcode_response\",\"params\":{\"response\":7}}",
+                "{\"method\":\"unknown\",\"id\":\"3\"}",
+                "{\"id\":\"18446744073709551616\",\"result\":null}",
+            };
+            var b: [1]u8 = undefined;
+            smith.bytesWithHash(&b, 0);
+            ctx.dispatchFrame(std.testing.io, frames[b[0] % frames.len]) catch {};
+        }
+    }.run, .{});
+}
+
+test "subscription snapshots seed owned print state" {
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var js = @import("job_state.zig").JobStateCtx.init(alloc);
+    defer js.deinit();
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+    ctx.job_state = &js;
+    ctx.seedSubscribedStatus(std.testing.io,
+        \\{"id":"2","result":{"status":{"print_stats":{"state":"printing","filename":"benchy.gcode"}}}}
+    );
+    try std.testing.expect(js.isActive());
+    try std.testing.expectEqualStrings("benchy.gcode", js.getLastStats().get("filename").?.string);
+    try std.testing.expectEqual(@import("job_state.zig").JobEvent.standby, js.getLastEvent());
+}
+
+// ===========================================================================
+// Tests: sockets
+// ===========================================================================
 
 test "postMethod sends a frame without waiting for a reply" {
     const aio = std.testing.io;
@@ -2168,52 +1312,237 @@ test "postMethod sends a frame without waiting for a reply" {
     const stream = try server.socket.address.connect(aio, .{ .mode = .stream });
     const peer = try server.accept(aio);
     defer peer.close(aio);
-    var bus: notify.NotifyBus = undefined;
-    var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
+    const nb = try NullBus.init(std.testing.allocator);
+    defer nb.deinit(std.testing.allocator);
+    var ctx = try KlippyCtx.init(std.testing.allocator, &nb.bus);
     defer ctx.deinit();
     ctx.io = aio;
     ctx.stream = stream;
     try ctx.postMethod("feather/update_status", .null, std.testing.allocator);
     var buf: [512]u8 = undefined;
     var reader = peer.reader(aio, &buf);
-    const wire = try reader.interface.takeDelimiterInclusive(FrameEnd);
+    const wire = try reader.interface.takeDelimiterInclusive(framing.delimiter);
     const frame = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, wire[0 .. wire.len - 1], .{});
     defer frame.deinit();
     try std.testing.expectEqualStrings("feather/update_status", frame.value.object.get("method").?.string);
 }
 
-test "dispatchFrame rejects non-object roots and non-string methods" {
-    var bus: notify.NotifyBus = undefined;
-    var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
+test "requests are refused once waiters are failed, without writing" {
+    const aio = std.testing.io;
+    var server = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(aio, .{});
+    defer server.deinit(aio);
+    const stream = try server.socket.address.connect(aio, .{ .mode = .stream });
+    const peer = try server.accept(aio);
+    defer peer.close(aio);
+    const nb = try NullBus.init(std.testing.allocator);
+    defer nb.deinit(std.testing.allocator);
+    var ctx = try KlippyCtx.init(std.testing.allocator, &nb.bus);
     defer ctx.deinit();
-    for ([_][]const u8{ "[]", "null", "42", "{\"method\":4}", "{\"method\":null}" }) |wire| {
-        try std.testing.expectError(error.InvalidFrame, ctx.dispatchFrame(std.testing.io, wire));
-    }
+    ctx.io = aio;
+    ctx.stream = stream;
+    ctx.connected.store(true, .release);
+    ctx.failAllWaiters(aio);
+    try std.testing.expect(!ctx.isConnected());
+    try std.testing.expectError(error.KlippyDisconnected, ctx.requestOffCore("info", .null, std.testing.allocator));
+    try std.testing.expectEqual(@as(u32, 0), ctx.pending.count());
 }
 
-test "subscription snapshots seed owned print state and keep heater subscriptions additive" {
-    var bus: notify.NotifyBus = undefined;
-    var js = @import("job_state.zig").JobStateCtx.init(std.testing.allocator);
-    defer js.deinit();
-    var ctx = try KlippyCtx.init(std.testing.allocator, &bus);
-    defer ctx.deinit();
-    ctx.job_state = &js;
-    {
-        const response = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
-            \\{"status":{"print_stats":{"state":"printing","filename":"benchy.gcode"}}}
-        , .{});
-        defer response.deinit();
-        ctx.seedSubscribedStatus(std.testing.io, response.value);
+/// Test-local Klippy: accepts one connection, answers `info` with `state`,
+/// `objects/subscribe` with an empty status and anything else with `{}`,
+/// records methods, and closes after `gcode/script`.
+const FakeKlippy = struct {
+    server: net.Server,
+    state: []const u8,
+    seen: [16][32]u8 = undefined,
+    seen_len: [16]usize = @splat(0),
+    seen_count: usize = 0,
+
+    fn saw(self: *const FakeKlippy, method: []const u8) bool {
+        for (0..self.seen_count) |i| {
+            if (std.mem.eql(u8, self.seen[i][0..self.seen_len[i]], method)) return true;
+        }
+        return false;
     }
-    try std.testing.expect(js.isActive());
-    try std.testing.expectEqualStrings("benchy.gcode", js.getLastStats().get("filename").?.string);
-    try std.testing.expectEqual(@import("job_state.zig").JobEvent.standby, js.getLastEvent());
-    try ctx.addSubscriptionObject("extruder");
-    const objects = try ctx.buildSubObjectsJson(std.testing.allocator);
-    defer std.testing.allocator.free(objects);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, objects, .{});
-    defer parsed.deinit();
-    try std.testing.expect(parsed.value.object.contains("print_stats"));
-    try std.testing.expect(parsed.value.object.contains("webhooks"));
-    try std.testing.expect(parsed.value.object.contains("extruder"));
+
+    fn run(self: *FakeKlippy, io: std.Io) !void {
+        const stream = try self.server.accept(io);
+        defer stream.close(io);
+        var rbuf: [4096]u8 = undefined;
+        var reader = stream.reader(io, &rbuf);
+        var wbuf: [512]u8 = undefined;
+        var writer = stream.writer(io, &wbuf);
+        while (true) {
+            const payload = try framing.read(std.testing.allocator, &reader.interface);
+            defer std.testing.allocator.free(payload);
+            const req = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, payload, .{});
+            defer req.deinit();
+            const method = req.value.object.get("method").?.string;
+            const id = req.value.object.get("id").?.string;
+            if (self.seen_count < self.seen.len) {
+                const n = @min(method.len, self.seen[0].len);
+                @memcpy(self.seen[self.seen_count][0..n], method[0..n]);
+                self.seen_len[self.seen_count] = n;
+                self.seen_count += 1;
+            }
+            var out: [256]u8 = undefined;
+            const resp = if (std.mem.eql(u8, method, "info"))
+                try std.fmt.bufPrint(&out, "{{\"id\":\"{s}\",\"result\":{{\"state\":\"{s}\"}}}}", .{ id, self.state })
+            else if (std.mem.eql(u8, method, "objects/subscribe"))
+                try std.fmt.bufPrint(&out, "{{\"id\":\"{s}\",\"result\":{{\"eventtime\":1,\"status\":{{}}}}}}", .{id})
+            else
+                try std.fmt.bufPrint(&out, "{{\"id\":\"{s}\",\"result\":{{}}}}", .{id});
+            try framing.write(&writer.interface, resp);
+            try writer.interface.flush();
+            if (std.mem.eql(u8, method, "gcode/script")) return;
+        }
+    }
+};
+
+test "Klippy shutdown keeps the connection, allows FIRMWARE_RESTART and disconnects once" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpSocketPath(&path_buf, &tmp, "klippy.sock");
+
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var counter = NotifyCounter{ .needle = "notify_klippy_disconnected" };
+    const conn = try nb.conns_obj.add(io);
+    defer nb.conns_obj.remove(io, conn);
+    nb.conns_obj.attachWriter(io, conn, &counter, NotifyCounter.write);
+    var info: methods.ServerInfo = .{};
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.uds_path = path;
+    ctx.server_info = &info;
+    ctx.remote_methods = &.{"feather_x"};
+
+    const addr = try net.UnixAddress.init(path);
+    var fake = FakeKlippy{ .server = try addr.listen(io, .{}), .state = "shutdown" };
+    var fake_task = try io.concurrent(FakeKlippy.run, .{ &fake, io });
+    try ctx.start();
+
+    var waited: usize = 0;
+    while (!ctx.isConnected() and waited < 500) : (waited += 1) try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    try std.testing.expect(ctx.isConnected());
+    try std.testing.expectEqual(State.shutdown, ctx.state);
+    try std.testing.expect(info.klippy_connected);
+    try std.testing.expectEqualStrings("shutdown", info.klippy_state);
+
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    var params: std.json.ObjectMap = .empty;
+    try params.put(arena.allocator(), "script", .{ .string = "FIRMWARE_RESTART" });
+    const result = try ctx.requestOffCore("gcode/script", .{ .object = params }, arena.allocator());
+    try std.testing.expect(result == .object);
+    try fake_task.await(io);
+    fake.server.deinit(io);
+    try std.Io.Dir.cwd().deleteFile(io, path);
+
+    // Methods are registered and heaters queried only when Klippy is ready.
+    try std.testing.expect(fake.saw("gcode/subscribe_output"));
+    try std.testing.expect(!fake.saw("register_remote_method"));
+    try std.testing.expect(!fake.saw("objects/query"));
+
+    // The closed connection is reported once; failed reconnects are silent.
+    while (ctx.isConnected() and waited < 1000) : (waited += 1) try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    try std.Io.sleep(io, .fromMilliseconds(2500), .awake);
+    try std.testing.expectEqual(@as(u32, 1), counter.count.load(.monotonic));
+    try std.testing.expect(!info.klippy_connected);
+    ctx.stop(io);
+}
+
+test "serveBridge relays over a dedicated Klippy connection" {
+    const alloc = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpSocketPath(&path_buf, &tmp, "klippy.sock");
+    const addr = try net.UnixAddress.init(path);
+    var klippy_server = try addr.listen(io, .{});
+    defer klippy_server.deinit(io);
+
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.uds_path = path;
+    ctx.connected.store(true, .release);
+
+    // WebSocket over a loopback TCP pair; the test plays the client.
+    var tcp = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer tcp.deinit(io);
+    const client = try tcp.socket.address.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    const server_side = try tcp.accept(io);
+    defer server_side.close(io);
+    var srbuf: [4096]u8 = undefined;
+    var sr = server_side.reader(io, &srbuf);
+    var swbuf: [4096]u8 = undefined;
+    var sw = server_side.writer(io, &swbuf);
+    var ws: std.http.Server.WebSocket = .{ .key = "", .input = &sr.interface, .output = &sw.interface };
+    var bridge_task = try io.concurrent(KlippyCtx.serveBridge, .{ &ctx, io, &ws });
+
+    const klippy_side = try klippy_server.accept(io);
+    var krbuf: [512]u8 = undefined;
+    var kr = klippy_side.reader(io, &krbuf);
+    var kwbuf: [512]u8 = undefined;
+    var kw = klippy_side.writer(io, &kwbuf);
+    var cwbuf: [256]u8 = undefined;
+    var cw = client.writer(io, &cwbuf);
+    var crbuf: [512]u8 = undefined;
+    var cr = client.reader(io, &crbuf);
+
+    // Client text frame (zero mask key) reaches Klippy as one ETX frame.
+    const request = "{\"id\":\"17\",\"method\":\"info\"}";
+    try cw.interface.writeAll(&.{ 0x81, 0x80 | request.len, 0, 0, 0, 0 });
+    try cw.interface.writeAll(request);
+    try cw.interface.flush();
+    const got = try framing.read(alloc, &kr.interface);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(request, got);
+
+    // Klippy's reply reaches the client as one text frame.
+    const reply = "{\"id\":\"17\",\"result\":{}}";
+    try framing.write(&kw.interface, reply);
+    try kw.interface.flush();
+    const head = try cr.interface.takeArray(2);
+    try std.testing.expectEqual(@as(u8, 0x81), head[0]);
+    try std.testing.expectEqualStrings(reply, try cr.interface.take(head[1]));
+
+    // Klippy closing the socket closes the WebSocket with 1001.
+    klippy_side.close(io);
+    const close_head = try cr.interface.takeArray(2);
+    try std.testing.expectEqual(@as(u8, 0x88), close_head[0]);
+    const close_body = try cr.interface.take(close_head[1]);
+    try std.testing.expectEqual(@as(u16, bridge_close_code), std.mem.readInt(u16, close_body[0..2], .big));
+    try std.testing.expectEqualStrings(bridge_close_reason, close_body[2..]);
+    try cw.interface.writeAll(&.{ 0x88, 0x80, 0, 0, 0, 0 });
+    try cw.interface.flush();
+    bridge_task.await(io);
+}
+
+test "serveBridge refuses while Klippy is not connected" {
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+    var in: std.Io.Reader = .fixed("");
+    var out_buf: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buf);
+    var ws: std.http.Server.WebSocket = .{ .key = "", .input = &in, .output = &out };
+    ctx.serveBridge(std.testing.io, &ws);
+    const frame = out.buffered();
+    try std.testing.expectEqual(@as(u8, 0x88), frame[0]);
+    try std.testing.expectEqualStrings(bridge_close_reason, frame[4..]);
 }

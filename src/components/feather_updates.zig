@@ -555,9 +555,14 @@ test "dispatchFrame: id-less feather reset reaches onKlippyMethod" {
     const klippy = @import("klippy_connection.zig");
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
+    // dispatchFrame runs method frames under the bus's Core.
+    var core = @import("../server/core.zig").Core.init();
+    var conns = @import("../server/connections.zig").Connections.init(alloc, &core);
+    defer conns.deinit(threaded.io());
+    var bus = @import("../server/notify.zig").NotifyBus.init(&core, &conns);
     var kctx = klippy.KlippyCtx{
         .gpa = alloc,
-        .bus = undefined,
+        .bus = &bus,
         .uds_path = "/no/such/klippy.sock",
         .remote_handler = onKlippyMethod,
         .remote_handler_ctx = &feather,

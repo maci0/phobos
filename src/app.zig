@@ -579,9 +579,6 @@ pub const App = struct {
         klippy_ctx.server_info = info;
         klippy_ctx.job_state = job_state_ctx;
         klippy_ctx.history = history_ctx;
-        // Wire the Core lock so the Klippy bridge uses the concurrent reader path
-        // (persistent socket drain + response correlation) instead of inline drain.
-        klippy_ctx.core = core;
 
         // Wire the Klippy connection into the printer context so handlers
         // (print.start, pause, resume, cancel, restart, firmware_restart)
@@ -1634,13 +1631,12 @@ pub const SensorMqttBridge = struct {
 
 /// Dispatches a gcode request to Klippy on behalf of the job_queue component.
 /// This is the adapter that bridges job_queue's anyopaque dispatch to
-/// KlippyCtx.request(). Called via JobQueueCtx.setKlippyDispatch.
+/// KlippyCtx.requestOffCore(). Called via JobQueueCtx.setKlippyDispatch.
 fn jobQueueKlippyDispatch(klippy_opaque: *anyopaque, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const k: *KlippyConnectionCtx = @ptrCast(@alignCast(klippy_opaque));
-    // Always off-Core: job dispatch runs on a dedicated worker thread
-    // (job_queue.scheduleNextJobDispatch), never on the Klippy reader thread
-    // (which would block on its own response) and never while holding Core
-    // (requestConcurrent's core.unlock would then be unbalanced).
+    // Job dispatch runs on a dedicated worker thread
+    // (job_queue.scheduleNextJobDispatch) that holds no Core and is not the
+    // Klippy reader (which would block on its own response).
     return k.requestOffCore(method, params, alloc);
 }
 

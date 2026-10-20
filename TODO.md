@@ -252,9 +252,11 @@ Klippy protocol exchange.
 
 **Already done:**
 - `\x03`-delimited JSON-RPC framing, all request builders, response parsers.
-- KlippyCtx state machine (disconnected→connecting→startup→ready→shutdown).
+- KlippyCtx state machine (Moonraker states: disconnected, startup, ready, error,
+  shutdown); `shutdown`/`error` keep the connection.
 - UDS connect/identify/subscribe handshake, background reconnect task.
-- `/klippysocket` WS proxy bridge (Bridge relay), job_queue dispatch, history live tracking.
+- `/klippysocket` bridge on its own Klippy Unix connection per client, job_queue
+  dispatch, history live tracking.
 - printer.* proxy handlers with gcode/script param building.
 - `notify_proc_stat_update` background emission via `std.Thread`.
 - `websocket_connections` live count from Connections registry.
@@ -406,7 +408,7 @@ _norm_structure_compare array item masking (Python).
 5. ~~Klippy Unix-socket connection~~ (P0) — Done: connect, identify, subscribe handshake,
    background reconnect task, `server.info` dynamic klippy state, printer.* proxy,
    **`/klippysocket` WS proxy**, **`job_queue` dispatch**, **`history` live tracking**,
-   **processStatusUpdateInner + processGcodeResponse**.
+   **status and gcode push dispatch**.
    Remaining: `notify_proc_stat_update` (Done), ~~deep `print_stats` parsing~~ (Done),
    real-Klippy integration test.
 6. ~~Fix webcam notification unit tests~~ (P0) — Done.
@@ -431,3 +433,7 @@ _norm_structure_compare array item masking (Python).
     require hardware or external services.
 
 Keep the coverage gate at 100% and the full suite green after every step.
+
+## Known Moonraker gaps (2026-10-20 audit)
+
+- `printer.objects.subscribe` over WebSocket adds to one aggregate set and returns the unpruned aggregate status; Moonraker replaces the connection's subscription and prunes the response (`klippy_connection.py:619-702`). Needs `transport/ws.zig` to pass the requested objects and connection to `KlippyCtx` (`src/components/klippy_connection.zig` `subscribeAggregate`).
