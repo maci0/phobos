@@ -886,10 +886,11 @@ pub const App = struct {
         self.analysis_ctx.io = aio;
         if (cfg.hasSection("analysis")) self.applyAnalysisConfig(cfg);
 
-        // [spoolman] server (spoolman.py _get_spoolman_urls).
-        if (cfg.get("spoolman", "server")) |url| {
-            self.spoolman_ctx.setServerUrl(url) catch |err|
-                std.debug.print("phobos: warning: invalid [spoolman] server {s}: {}, Spoolman disabled\n", .{ url, err });
+        // [spoolman] requires a server and a positive reporting interval.
+        if (cfg.hasSection("spoolman")) {
+            const url = cfg.get("spoolman", "server") orelse return error.NoOption;
+            try self.spoolman_ctx.setServerUrl(url);
+            try self.spoolman_ctx.setSyncRate(if (cfg.get("spoolman", "sync_rate") != null) try cfg.getInt("spoolman", "sync_rate") else spoolman_component.default_sync_rate_seconds);
         }
 
         // System provider for machine.services.* ([machine] provider): selects
@@ -1262,7 +1263,7 @@ pub const App = struct {
         self.announcements_ctx.deinit();
         self.mqtt_ctx.deinit();
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
-        // Stop the Spoolman WS supervisor (uses io) before io/conns teardown.
+        // Stop Spoolman's socket and reporting workers before io/conns teardown.
         self.spoolman_ctx.deinit();
         // Stop the TD-1 discovery/poll thread (uses io + core) before teardown.
         self.td1_ctx.stopPolling();
@@ -1690,7 +1691,7 @@ pub const App = struct {
         // Wire the live io into the spoolman component so it can emit
         // notify_active_spool_set to connected WebSocket clients.
         self.spoolman_ctx.setIo(io);
-        // Spoolman WebSocket: live connection status + spool-deleted push.
+        // Spoolman WebSocket, deletion pushes and periodic filament reports.
         self.spoolman_ctx.on_spool_deleted = spoolmanSpoolDeleted;
         self.spoolman_ctx.on_spool_deleted_ctx = self;
         self.spoolman_ctx.startWs();
@@ -3498,4 +3499,29 @@ test "setConfig renders MQTT secrets and selects protocol and status configurati
     defer invalid.deinit(io);
     try invalid.setConfig(io, cfg_path);
     try std.testing.expect(invalid.mqtt_ctx.config == null);
+}
+
+test "setConfig loads Spoolman sync rate and rejects missing or invalid options" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/spoolman.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    const cases = .{
+        .{ "[spoolman]\nserver: 127.0.0.1:1234\nsync_rate: 9\n", @as(?anyerror, null), @as(u32, 9) },
+        .{ "[spoolman]\nserver: 127.0.0.1:1234\n", @as(?anyerror, null), @as(u32, 5) },
+        .{ "[spoolman]\nsync_rate: 1\n", @as(?anyerror, error.NoOption), @as(u32, 5) },
+        .{ "[spoolman]\nserver: http://\n", @as(?anyerror, error.InvalidUrl), @as(u32, 5) },
+        .{ "[spoolman]\nserver: 127.0.0.1:1234\nsync_rate: 0\n", @as(?anyerror, error.InvalidSyncRate), @as(u32, 5) },
+        .{ "[spoolman]\nserver: 127.0.0.1:1234\nsync_rate: bad\n", @as(?anyerror, error.InvalidValue), @as(u32, 5) },
+    };
+    inline for (cases) |case| {
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = case[0] });
+        var instance = try testApp(std.testing.allocator, io, &tmp);
+        defer instance.deinit(io);
+        const result = instance.setConfig(io, path);
+        if (case[1]) |err| try std.testing.expectError(err, result) else try result;
+        try std.testing.expectEqual(case[2], instance.spoolman_ctx.sync_rate_seconds);
+        try std.testing.expect(instance.spoolman_ctx.report_thread == null);
+    }
 }

@@ -28,7 +28,9 @@
 //! Toolhead E positions accumulate pending filament use, excluding retractions
 //! already recovered by the previous high-water mark. At most 128 spool IDs
 //! retain accounting; a full queue rejects a new selection before mutation.
-//! Filament-use delivery and active-spool validation are not implemented yet.
+//! An owned worker validates the active spool on each WebSocket connection and
+//! reports pending use at `sync_rate` (default five seconds). Failed reports
+//! retain their usage for the next cycle; no network operation holds Core.
 
 const std = @import("std");
 const webreq = @import("../json/params.zig");
@@ -65,8 +67,11 @@ pub const default_sync_rate_seconds: u32 = 5;
 
 const PendingReport = struct {
     used: f64 = 0,
-    in_flight: ?u64 = null,
+    in_flight: ?ReportClaim = null,
 };
+
+const ReportClaim = struct { id: i64, used: f64, token: u64 };
+const ReportResult = enum { sent, retry, missing };
 
 /// Methods the proxy forwards (spoolman.py `_proxy_spoolman_request`).
 const proxy_methods = std.StaticStringMap(std.http.Method).initComptime(.{
@@ -97,6 +102,11 @@ pub const SpoolmanCtx = struct {
     /// maintained by the WS supervisor thread.
     ws_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     ws_thread: ?std.Io.Future(void) = null,
+    report_thread: ?std.Io.Future(void) = null,
+    report_wake: std.Io.Event = .unset,
+    check_spool_pending: std.atomic.Value(bool) = .init(false),
+    /// Used only by the reporting worker, reset after successful delivery.
+    report_error_logged: bool = false,
     ws_stop: std.Io.Event = .unset,
     ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
     ws: ?*ws_client_mod.WsClient = null,
@@ -119,6 +129,7 @@ pub const SpoolmanCtx = struct {
     extruder_name: [max_extruder_name_len]u8 = undefined,
     extruder_name_len: usize = 0,
     sync_rate_seconds: u32 = default_sync_rate_seconds,
+    next_report_token: u64 = 0,
 
     pub fn init(alloc: std.mem.Allocator, store: DataStore, bus: *NotifyBus) !SpoolmanCtx {
         var self: SpoolmanCtx = .{ .store = store, .bus = bus, .io = null, .gpa = alloc };
@@ -126,7 +137,7 @@ pub const SpoolmanCtx = struct {
         return self;
     }
 
-    /// Stop the WebSocket supervisor and free the server target.
+    /// Stop both workers and free the server target and pending accounting.
     pub fn deinit(self: *SpoolmanCtx) void {
         self.stopWs();
         self.pending_reports.deinit(self.gpa);
@@ -170,6 +181,12 @@ pub const SpoolmanCtx = struct {
     /// Moonraker `connected()`: the WebSocket state.
     pub fn connected(self: *const SpoolmanCtx) bool {
         return self.ws_connected.load(.acquire);
+    }
+
+    /// Apply the positive `[spoolman] sync_rate` before starting workers.
+    pub fn setSyncRate(self: *SpoolmanCtx, seconds: i64) !void {
+        if (seconds < 1 or seconds > std.math.maxInt(u32)) return error.InvalidSyncRate;
+        self.sync_rate_seconds = @intCast(seconds);
     }
 
     /// Emit notify_spoolman_status_changed. `locked` selects emitLocked (caller
@@ -223,7 +240,7 @@ pub const SpoolmanCtx = struct {
         self.ws_tls = secure;
     }
 
-    /// Start the Spoolman WebSocket supervisor (no-op without a server, io, or
+    /// Start the WebSocket and reporting workers (no-op without a server, io, or
     /// if already running).
     pub fn startWs(self: *SpoolmanCtx) void {
         if (self.ws_thread != null or self.ws_host == null) return;
@@ -233,6 +250,11 @@ pub const SpoolmanCtx = struct {
             std.debug.print("phobos: warning: Spoolman worker not started: {}\n", .{err});
             return;
         };
+        self.report_thread = io.concurrent(reportSupervisor, .{self}) catch |err| {
+            self.stopWs();
+            std.debug.print("phobos: warning: Spoolman reporting worker not started: {}\n", .{err});
+            return;
+        };
     }
 
     pub fn stopWs(self: *SpoolmanCtx) void {
@@ -240,6 +262,11 @@ pub const SpoolmanCtx = struct {
         self.wsLock();
         if (self.ws) |w| w.shutdownRecv();
         self.wsUnlock();
+        if (self.io) |stop_io| self.report_wake.set(stop_io);
+        if (self.report_thread) |*t| {
+            t.cancel(self.io.?);
+            self.report_thread = null;
+        }
         if (self.ws_thread) |*t| {
             t.cancel(self.io.?);
             self.ws_thread = null;
@@ -274,6 +301,8 @@ pub const SpoolmanCtx = struct {
             w.enableHeartbeat(ws_ping_interval, ws_ping_interval);
             if (self.ws_stop.isSet()) w.shutdownRecv();
             self.ws_connected.store(true, .release);
+            self.check_spool_pending.store(true, .release);
+            self.report_wake.set(io);
             self.emitStatus(false);
             backoff_ms = 500;
 
@@ -290,6 +319,123 @@ pub const SpoolmanCtx = struct {
             if (self.ws_stop.isSet()) break;
             if (sleep.untilStopped(io, .fromMilliseconds(@intCast(backoff_ms)), &self.ws_stop)) break;
             backoff_ms = @min(backoff_ms * 2, max_backoff);
+        }
+    }
+
+    fn reportSupervisor(self: *SpoolmanCtx) void {
+        const io = self.io orelse return;
+        while (!self.ws_stop.isSet()) {
+            self.report_wake.reset();
+            if (self.connected()) {
+                if (self.check_spool_pending.swap(false, .acq_rel)) {
+                    self.report_error_logged = false;
+                    self.checkActiveSpool();
+                }
+                self.reportExtrusion();
+            }
+            if (self.ws_stop.isSet()) break;
+            _ = sleep.untilStopped(io, .fromSeconds(self.sync_rate_seconds), &self.report_wake);
+        }
+    }
+
+    /// Network work runs on the reporting worker; only state transitions enter Core.
+    fn checkActiveSpool(self: *SpoolmanCtx) void {
+        const io = self.io orelse return;
+        const id = self.bus.core.run(io, getSpoolId, .{self}) orelse return;
+        const base = self.api_url orelse return;
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const alloc = scratch.allocator();
+        const url = std.fmt.allocPrint(alloc, "{s}/v1/spool/{d}", .{ base, id }) catch return;
+        const response = proxyRequest(self.gpa, io, .GET, url, null, alloc, .fromSeconds(2)) catch |err| {
+            self.logReportError(err);
+            return;
+        };
+        if (response.status == 404) {
+            self.bus.core.run(io, forgetMissingSpoolLocked, .{ self, id }) catch |err| self.logReportError(err);
+        } else if (response.status < 200 or response.status >= 300) self.logReportError(error.UpstreamRequestFailed);
+    }
+
+    fn logReportError(self: *SpoolmanCtx, err: anyerror) void {
+        if (!self.report_error_logged and !self.ws_stop.isSet()) {
+            std.debug.print("phobos: Spoolman filament report failed: {}\n", .{err});
+            self.report_error_logged = true;
+        }
+    }
+
+    /// Claim a bounded batch so new extrusion can accumulate during HTTP requests.
+    fn claimReportsLocked(self: *SpoolmanCtx, batch: *[max_pending_spools]ReportClaim) usize {
+        var count: usize = 0;
+        var entries = self.pending_reports.iterator();
+        while (entries.next()) |entry| {
+            if (entry.value_ptr.used <= 0 or entry.value_ptr.in_flight != null) continue;
+            self.next_report_token +%= 1;
+            if (self.next_report_token == 0) self.next_report_token = 1;
+            const claim: ReportClaim = .{ .id = entry.key_ptr.*, .used = entry.value_ptr.used, .token = self.next_report_token };
+            entry.value_ptr.used = 0;
+            entry.value_ptr.in_flight = claim;
+            batch[count] = claim;
+            count += 1;
+        }
+        return count;
+    }
+
+    fn forgetMissingSpoolLocked(self: *SpoolmanCtx, id: i64) !void {
+        if (self.active_spool == id) try self.setSpoolId(null);
+        _ = self.pending_reports.orderedRemove(id);
+    }
+
+    fn finishReportLocked(self: *SpoolmanCtx, claim: ReportClaim, result: ReportResult) !void {
+        const report = self.pending_reports.getPtr(claim.id) orelse return;
+        const pending = report.in_flight orelse return;
+        if (pending.token != claim.token) return;
+        switch (result) {
+            .missing => return self.forgetMissingSpoolLocked(claim.id),
+            .retry => report.used += claim.used,
+            .sent => {},
+        }
+        report.in_flight = null;
+        self.removeEmptyReport(claim.id);
+    }
+
+    fn restoreReportsLocked(self: *SpoolmanCtx, claims: []const ReportClaim) void {
+        for (claims) |claim| self.finishReportLocked(claim, .retry) catch unreachable;
+    }
+
+    /// Called only by the owned reporting worker, or synchronously by fixtures.
+    /// A deferred restore also preserves unprocessed usage when canceled mid-request.
+    pub fn reportExtrusion(self: *SpoolmanCtx) void {
+        const io = self.io orelse return;
+        const base = self.api_url orelse return;
+        if (!self.connected()) return;
+        var batch: [max_pending_spools]ReportClaim = undefined;
+        const count = self.bus.core.run(io, claimReportsLocked, .{ self, &batch });
+        defer self.bus.core.run(io, restoreReportsLocked, .{ self, batch[0..count] });
+        for (batch[0..count]) |claim| {
+            if (!self.connected() or self.ws_stop.isSet()) break;
+            var scratch = std.heap.ArenaAllocator.init(self.gpa);
+            defer scratch.deinit();
+            const alloc = scratch.allocator();
+            const url = std.fmt.allocPrint(alloc, "{s}/v1/spool/{d}/use", .{ base, claim.id }) catch |err| {
+                self.logReportError(err);
+                continue;
+            };
+            var payload_buf: [512]u8 = undefined;
+            var payload: std.Io.Writer = .fixed(&payload_buf);
+            std.json.Stringify.value(.{ .use_length = claim.used }, .{}, &payload) catch |err| {
+                self.logReportError(err);
+                continue;
+            };
+            const response = proxyRequest(self.gpa, io, .PUT, url, payload.buffered(), alloc, proxy_timeout) catch |err| {
+                self.logReportError(err);
+                continue;
+            };
+            const result: ReportResult = if (response.status == 404) .missing else if (response.status < 200 or response.status >= 300) .retry else .sent;
+            self.bus.core.run(io, finishReportLocked, .{ self, claim, result }) catch |err| {
+                self.logReportError(err);
+                continue;
+            };
+            if (result == .retry) self.logReportError(error.UpstreamRequestFailed) else self.report_error_logged = false;
         }
     }
 
@@ -310,7 +456,7 @@ pub const SpoolmanCtx = struct {
         const idv = pl.object.get("id") orelse return;
         const id: i64 = switch (idv) {
             .integer => |i| i,
-            .float => |f| jv.floatToInt(f) orelse return,
+            .float => |f| if (f == @trunc(f)) jv.floatToInt(f) orelse return else return,
             else => return,
         };
         if (self.on_spool_deleted) |cb| {
@@ -427,7 +573,7 @@ pub const SpoolmanCtx = struct {
                 _ = try self.reserveReport(id);
                 const report = self.pending_reports.getPtr(id).?;
                 const updated = report.used + delta;
-                if (!std.math.isFinite(updated)) return error.InvalidParams;
+                if (!std.math.isFinite(updated) or !std.math.isFinite(updated + if (report.in_flight) |claim| claim.used else @as(f64, 0))) return error.InvalidParams;
                 report.used = updated;
             }
         }
@@ -866,8 +1012,36 @@ test "spoolman WS: deletion frame invokes on_spool_deleted with the spool id" {
     ws_captured_id = -1;
     ctx.handleWsMessage("{\"resource\":\"spool\",\"type\":\"updated\",\"payload\":{\"id\":7}}");
     ctx.handleWsMessage("{\"resource\":\"filament\",\"type\":\"deleted\",\"payload\":{\"id\":7}}");
+    ctx.handleWsMessage("{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{\"id\":42.5}}");
+    ctx.handleWsMessage("{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{\"id\":1e500}}");
     ctx.handleWsMessage("not json");
     try testing.expectEqual(@as(i64, -1), ws_captured_id);
+    ctx.handleWsMessage("{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{\"id\":42.0}}");
+    try testing.expectEqual(@as(i64, 42), ws_captured_id);
+}
+
+test "fuzz Spoolman deletion pushes preserve integer equality" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            var nb = NullBus.init(testing.allocator);
+            var ctx = try makeCtx(testing.allocator, &mem, &nb);
+            defer ctx.deinit();
+            var dummy: u8 = 0;
+            ctx.on_spool_deleted = wsCaptureDeleted;
+            ctx.on_spool_deleted_ctx = &dummy;
+            const id = smith.valueRangeAtMostWithHash(u8, 0, 127, 0);
+            const fractional = smith.valueWithHash(bool, 1);
+            var frame: [128]u8 = undefined;
+            ws_captured_id = -1;
+            ctx.handleWsMessage(try std.fmt.bufPrint(&frame, "{{\"resource\":\"spool\",\"type\":\"deleted\",\"payload\":{{\"id\":{d}.{s}}}}}", .{ id, if (fractional) "5" else "0" }));
+            try testing.expectEqual(if (fractional) @as(i64, -1) else @as(i64, id), ws_captured_id);
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 2);
+            ctx.handleWsMessage(&bytes);
+        }
+    }.run, .{});
 }
 
 test "spoolman WS: deletion clears the active spool only when it matches" {
@@ -1882,13 +2056,14 @@ test "fuzz handleStatus: never panics" {
 }
 
 test "stopWs cancels a peer stalled before the upgrade response" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
+    const a = std.heap.smp_allocator;
     var mem = MemStore.init(a);
     defer mem.deinit();
-    var nb = NullBus.init(a);
     const aio = testing.io;
+    var core = Core.init();
+    var conns = connections_mod.Connections.init(a, &core);
+    defer conns.deinit(aio);
+    var bus = NotifyBus.init(&core, &conns);
     var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(aio, .{});
     defer server.deinit(aio);
     var accepted: std.Io.Event = .unset;
@@ -1904,13 +2079,13 @@ test "stopWs cancels a peer stalled before the upgrade response" {
     };
     var peer = try aio.concurrent(Peer.run, .{ &server, &accepted, aio });
     defer peer.cancel(aio);
-    var ctx = try SpoolmanCtx.init(testing.allocator, mem.dataStore(), &nb.bus);
+    var ctx = try SpoolmanCtx.init(a, mem.dataStore(), &bus);
     defer ctx.deinit();
     var url: [80]u8 = undefined;
     try ctx.setServerUrl(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}", .{server.socket.address.getPort()}));
     ctx.io = aio;
     ctx.startWs();
-    try accepted.wait(aio);
+    try accepted.waitTimeout(aio, .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } });
     const start = std.Io.Clock.Timestamp.now(aio, .awake);
     ctx.stopWs();
     try testing.expect(start.untilNow(aio).raw.toMilliseconds() < 1000);
@@ -1961,4 +2136,443 @@ test "fuzz Spoolman URI parser rejects malformed bounded targets" {
             try testing.expect(std.mem.endsWith(u8, ctx.ws_path.?, "/api/v1/spool"));
         }
     }.run, .{});
+}
+
+test "Spoolman report claims preserve new usage, retries and deletion generations" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var nb = NullBus.init(testing.allocator);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    try ctx.setSpoolId(1);
+    ctx.pending_reports.getPtr(1).?.used = 10;
+    var batch: [max_pending_spools]ReportClaim = undefined;
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    ctx.pending_reports.getPtr(1).?.used = 2;
+    try ctx.finishReportLocked(batch[0], .retry);
+    try testing.expectEqual(@as(f64, 12), ctx.pending_reports.get(1).?.used);
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    const old = batch[0];
+    try ctx.handleSpoolDeletedLocked(1);
+    try ctx.setSpoolId(1);
+    ctx.pending_reports.getPtr(1).?.used = 3;
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    try ctx.finishReportLocked(old, .retry);
+    try testing.expectEqual(@as(f64, 0), ctx.pending_reports.get(1).?.used);
+    ctx.restoreReportsLocked(batch[0..1]);
+    try testing.expectEqual(@as(f64, 3), ctx.pending_reports.get(1).?.used);
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    mem.fail_writes = true;
+    try testing.expectError(error.BackendError, ctx.finishReportLocked(batch[0], .missing));
+    try testing.expectEqual(@as(?i64, 1), ctx.getSpoolId());
+    ctx.restoreReportsLocked(batch[0..1]);
+    try testing.expectEqual(@as(f64, 3), ctx.pending_reports.get(1).?.used);
+    mem.fail_writes = false;
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    try ctx.finishReportLocked(batch[0], .missing);
+    try testing.expect(ctx.getSpoolId() == null);
+    try testing.expectEqual(@as(usize, 0), ctx.pending_reports.count());
+    try ctx.setSpoolId(2);
+    ctx.pending_reports.getPtr(2).?.used = 5;
+    try ctx.setSpoolId(3);
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    try ctx.finishReportLocked(batch[0], .sent);
+    ctx.restoreReportsLocked(batch[0..1]);
+    try testing.expect(!ctx.pending_reports.contains(2));
+    try testing.expectEqual(@as(?i64, 3), ctx.getSpoolId());
+    try testing.expectEqual(@as(usize, 0), ctx.claimReportsLocked(&batch));
+    ctx.pending_reports.getPtr(3).?.used = std.math.floatMax(f64) / 2;
+    try testing.expectEqual(@as(usize, 1), ctx.claimReportsLocked(&batch));
+    ctx.onKlippyStateLocked(true);
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    try ctx.onKlippyStatusLocked(try mkParams(scratch.allocator(), "{\"toolhead\":{\"position\":[0,0,0,0]}}"), .null);
+    try testing.expectError(error.InvalidParams, ctx.onKlippyStatusLocked(try mkParams(scratch.allocator(), "{\"toolhead\":{\"position\":[0,0,0,1.7976931348623157e308]}}"), .null));
+    ctx.restoreReportsLocked(batch[0..1]);
+    try testing.expectEqual(std.math.floatMax(f64) / 2, ctx.pending_reports.get(3).?.used);
+}
+
+test "Spoolman sync rate rejects invalid values before mutation" {
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var nb = NullBus.init(testing.allocator);
+    var ctx = try makeCtx(testing.allocator, &mem, &nb);
+    defer ctx.deinit();
+    try testing.expectEqual(default_sync_rate_seconds, ctx.sync_rate_seconds);
+    try ctx.setSyncRate(1);
+    for ([_]i64{ 0, -1, std.math.maxInt(i64) }) |bad| {
+        try testing.expectError(error.InvalidSyncRate, ctx.setSyncRate(bad));
+        try testing.expectEqual(@as(u32, 1), ctx.sync_rate_seconds);
+    }
+}
+
+test "fuzz Spoolman report transitions retain finite bounded usage" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var mem = MemStore.init(testing.allocator);
+            defer mem.deinit();
+            var nb = NullBus.init(testing.allocator);
+            var ctx = try makeCtx(testing.allocator, &mem, &nb);
+            defer ctx.deinit();
+            var batch: [max_pending_spools]ReportClaim = undefined;
+            for (0..64) |step_index| {
+                const step: u32 = @intCast(step_index);
+                const id = smith.valueRangeAtMostWithHash(i64, 0, 7, step * 3);
+                try ctx.setSpoolId(id);
+                ctx.pending_reports.getPtr(id).?.used += @floatFromInt(smith.valueRangeAtMostWithHash(u16, 0, 1000, step * 3 + 1));
+                const count = ctx.claimReportsLocked(&batch);
+                for (batch[0..count]) |claim| {
+                    const result: ReportResult = @fromBackingInt(@intCast(smith.valueRangeAtMostWithHash(u8, 0, 2, step * 3 + 2)));
+                    try ctx.finishReportLocked(claim, result);
+                }
+                ctx.restoreReportsLocked(batch[0..count]);
+                try testing.expect(ctx.pending_reports.count() <= max_pending_spools);
+                for (ctx.pending_reports.values()) |report| {
+                    try testing.expect(report.in_flight == null);
+                    try testing.expect(std.math.isFinite(report.used) and report.used >= 0);
+                }
+            }
+            const seconds = smith.value(i64);
+            const result = ctx.setSyncRate(seconds);
+            if (seconds >= 1 and seconds <= std.math.maxInt(u32)) try result else try testing.expectError(error.InvalidSyncRate, result);
+        }
+    }.run, .{});
+}
+
+/// Local HTTP/WebSocket fixture; all workers use the runtime allocator.
+const ReportPeer = struct {
+    mutex: std.Io.Mutex = .init,
+    uses: [16]f64 = @splat(0),
+    ids: [16]i64 = @splat(0),
+    reports: std.atomic.Value(u32) = .init(0),
+    validations: std.atomic.Value(u32) = .init(0),
+    sockets: std.atomic.Value(u32) = .init(0),
+    disconnect_through: std.atomic.Value(u32) = .init(0),
+    missing: std.atomic.Value(bool) = .init(false),
+    first_fails: bool = false,
+    stall: bool = false,
+    release: std.Io.Event = .unset,
+    failed: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *@This(), server: *std.Io.net.Server, aio: std.Io) void {
+        var tasks: [24]?std.Io.Future(void) = @splat(null);
+        defer for (&tasks) |*task| if (task.*) |*future| future.cancel(aio);
+        for (&tasks) |*task| {
+            const stream = server.accept(aio) catch return;
+            task.* = aio.concurrent(serve, .{ self, stream, aio }) catch {
+                stream.close(aio);
+                self.failed.store(true, .release);
+                return;
+            };
+        }
+    }
+
+    fn serve(self: *@This(), stream: std.Io.net.Stream, aio: std.Io) void {
+        defer stream.close(aio);
+        self.serveRequest(stream, aio) catch |err| switch (err) {
+            error.Canceled, error.ReadFailed, error.WriteFailed => {},
+            else => self.failed.store(true, .release),
+        };
+    }
+
+    fn serveRequest(self: *@This(), stream: std.Io.net.Stream, aio: std.Io) !void {
+        var rbuf: [4096]u8 = undefined;
+        var wbuf: [2048]u8 = undefined;
+        var reader = stream.reader(aio, &rbuf);
+        var writer = stream.writer(aio, &wbuf);
+        var server = std.http.Server.init(&reader.interface, &writer.interface);
+        var request = try server.receiveHead();
+        switch (request.upgradeRequested()) {
+            .websocket => |maybe_key| {
+                var ws = try request.respondWebSocket(.{ .key = maybe_key orelse return error.InvalidUpgrade });
+                try ws.flush();
+                const generation = self.sockets.fetchAdd(1, .acq_rel) + 1;
+                while (generation > self.disconnect_through.load(.acquire)) try aio.sleep(.fromMilliseconds(5), .awake);
+                return;
+            },
+            else => {},
+        }
+        if (!std.mem.startsWith(u8, request.head.target, "/api/v1/spool/")) return error.InvalidTarget;
+        const suffix = request.head.target["/api/v1/spool/".len..];
+        const id_text = suffix[0 .. std.mem.indexOfScalar(u8, suffix, '/') orelse suffix.len];
+        const id = try std.fmt.parseInt(i64, id_text, 10);
+        if (request.head.method == .GET) {
+            _ = self.validations.fetchAdd(1, .acq_rel);
+            try request.respond("", .{ .status = if (self.missing.load(.acquire)) .not_found else .ok, .keep_alive = false });
+            return;
+        }
+        if (request.head.method != .PUT or !std.mem.endsWith(u8, suffix, "/use")) return error.InvalidMethod;
+        var body_buf: [512]u8 = undefined;
+        const body = try request.readerExpectNone(&body_buf).allocRemaining(std.heap.smp_allocator, .limited(512));
+        defer std.heap.smp_allocator.free(body);
+        const parsed = try std.json.parseFromSlice(struct { use_length: f64 }, std.heap.smp_allocator, body, .{});
+        defer parsed.deinit();
+        self.mutex.lockUncancelable(aio);
+        const index = self.reports.load(.monotonic);
+        const reply_status: std.http.Status = if (self.missing.load(.acquire)) .not_found else if (self.first_fails and index == 0) .service_unavailable else .ok;
+        if (index >= self.uses.len) {
+            self.mutex.unlock(aio);
+            return error.TooManyReports;
+        }
+        self.uses[index] = parsed.value.use_length;
+        self.ids[index] = id;
+        self.reports.store(index + 1, .release);
+        self.mutex.unlock(aio);
+        if (self.stall) try self.release.wait(aio);
+        try request.respond("", .{ .status = reply_status, .keep_alive = false });
+    }
+
+    fn waitCount(counter: *std.atomic.Value(u32), aio: std.Io, minimum: u32) !void {
+        const start = std.Io.Clock.Timestamp.now(aio, .awake);
+        while (counter.load(.acquire) < minimum) {
+            if (start.untilNow(aio).raw.toMilliseconds() > 5000) return error.Timeout;
+            try aio.sleep(.fromMilliseconds(5), .awake);
+        }
+    }
+};
+
+test "Spoolman live reporter retries, obeys sync rate and validates on reconnect" {
+    const alloc = std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    var peer: ReportPeer = .{ .first_fails = true };
+    var fake = try io.concurrent(ReportPeer.run, .{ &peer, &server, io });
+    defer fake.cancel(io);
+    var mem = MemStore.init(alloc);
+    defer mem.deinit();
+    var core = Core.init();
+    var conns = connections_mod.Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try SpoolmanCtx.init(alloc, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    var url: [64]u8 = undefined;
+    try ctx.setServerUrl(try std.fmt.bufPrint(&url, "127.0.0.1:{d}", .{server.socket.address.getPort()}));
+    try ctx.setSyncRate(1);
+    try ctx.setSpoolId(17);
+    ctx.pending_reports.getPtr(17).?.used = 10;
+    ctx.io = io;
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    ctx.startWs();
+    try ReportPeer.waitCount(&peer.reports, io, 2);
+    try testing.expect(started.untilNow(io).raw.toMilliseconds() >= 900);
+    peer.disconnect_through.store(1, .release);
+    core.lock(io);
+    ctx.pending_reports.getPtr(17).?.used += 3;
+    core.unlock(io);
+    try ReportPeer.waitCount(&peer.sockets, io, 2);
+    try ReportPeer.waitCount(&peer.reports, io, 3);
+    peer.mutex.lockUncancelable(io);
+    const uses = peer.uses[0..3].*;
+    const ids = peer.ids[0..3].*;
+    peer.mutex.unlock(io);
+    try testing.expectEqualSlices(f64, &.{ 10, 10, 3 }, &uses);
+    try testing.expectEqualSlices(i64, &.{ 17, 17, 17 }, &ids);
+    peer.missing.store(true, .release);
+    peer.disconnect_through.store(2, .release);
+    try ReportPeer.waitCount(&peer.validations, io, 3);
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    while (core.run(io, SpoolmanCtx.getSpoolId, .{&ctx}) != null) {
+        if (start.untilNow(io).raw.toMilliseconds() > 3000) return error.Timeout;
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    ctx.stopWs();
+    try testing.expect(!ctx.connected());
+    try testing.expect(ctx.report_thread == null and ctx.ws_thread == null);
+    try testing.expect(!peer.failed.load(.acquire));
+}
+
+test "Spoolman cancellation restores an in-flight report and permits Core updates" {
+    const alloc = std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    var peer: ReportPeer = .{ .stall = true };
+    var fake = try io.concurrent(ReportPeer.run, .{ &peer, &server, io });
+    defer fake.cancel(io);
+    var mem = MemStore.init(alloc);
+    defer mem.deinit();
+    var core = Core.init();
+    var conns = connections_mod.Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = try SpoolmanCtx.init(alloc, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    var url: [64]u8 = undefined;
+    try ctx.setServerUrl(try std.fmt.bufPrint(&url, "127.0.0.1:{d}", .{server.socket.address.getPort()}));
+    try ctx.setSpoolId(4);
+    ctx.pending_reports.getPtr(4).?.used = 10;
+    ctx.onKlippyStateLocked(true);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try ctx.onKlippyStatusLocked(try mkParams(arena.allocator(), "{\"toolhead\":{\"position\":[0,0,0,0]}}"), .null);
+    ctx.io = io;
+    ctx.startWs();
+    try ReportPeer.waitCount(&peer.reports, io, 1);
+    try core.run(io, SpoolmanCtx.onKlippyStatusLocked, .{ &ctx, try mkParams(arena.allocator(), "{\"toolhead\":{\"position\":[0,0,0,2]}}"), @as(std.json.Value, .null) });
+    const status = try core.run(io, handleStatus, .{ @as(*anyopaque, &ctx), @as(std.json.Value, .null), arena.allocator() });
+    const pending = status.object.get("pending_reports").?.array.items;
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try testing.expectEqual(@as(f64, 2), pending[0].object.get("filament_used").?.float);
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    ctx.stopWs();
+    try testing.expect(start.untilNow(io).raw.toMilliseconds() < 1000);
+    try testing.expectEqual(@as(f64, 12), ctx.pending_reports.get(4).?.used);
+    try testing.expect(ctx.pending_reports.get(4).?.in_flight == null);
+    // A 404 from a usage update also drops the queue and persisted selection.
+    peer.missing.store(true, .release);
+    peer.release.set(io);
+    ctx.ws_stop.reset();
+    ctx.ws_connected.store(true, .release);
+    ctx.reportExtrusion();
+    try testing.expect(ctx.getSpoolId() == null);
+    try testing.expectEqual(@as(usize, 0), ctx.pending_reports.count());
+    peer.missing.store(false, .release);
+    try core.run(io, SpoolmanCtx.setSpoolId, .{ &ctx, @as(?i64, 19) });
+    ctx.pending_reports.getPtr(19).?.used = std.math.floatMax(f64);
+    ctx.reportExtrusion();
+    try testing.expectEqual(std.math.floatMax(f64), peer.uses[2]);
+    try testing.expect(!peer.failed.load(.acquire));
+}
+
+test "Klippy Unix snapshots and pushed extrusion reach the Spoolman reporter" {
+    const klippy_mod = @import("klippy_connection.zig");
+    const framing = @import("../util/klippy_frame.zig");
+    const KlippyPeer = struct {
+        reconnect: std.Io.Event = .unset,
+        finish: std.Io.Event = .unset,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This(), server: *std.Io.net.Server, aio: std.Io) void {
+            self.sessions(server, aio) catch |err| switch (err) {
+                error.Canceled => {},
+                else => self.failed.store(true, .release),
+            };
+        }
+
+        fn sessions(self: *@This(), server: *std.Io.net.Server, aio: std.Io) !void {
+            for (0..2) |cycle| {
+                const stream = try server.accept(aio);
+                defer stream.close(aio);
+                var rbuf: [4096]u8 = undefined;
+                var wbuf: [2048]u8 = undefined;
+                var reader = stream.reader(aio, &rbuf);
+                var writer = stream.writer(aio, &wbuf);
+                while (true) {
+                    const payload = try framing.read(std.heap.smp_allocator, &reader.interface);
+                    defer std.heap.smp_allocator.free(payload);
+                    const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.smp_allocator, payload, .{});
+                    defer parsed.deinit();
+                    const req = parsed.value.object;
+                    const method = req.get("method").?.string;
+                    const id = req.get("id").?.string;
+                    var response: [512]u8 = undefined;
+                    const result = if (std.mem.eql(u8, method, "info"))
+                        "{\"state\":\"ready\"}"
+                    else if (std.mem.eql(u8, method, "objects/query"))
+                        "{\"status\":{\"heaters\":{\"available_sensors\":[]}}}"
+                    else if (std.mem.eql(u8, method, "objects/subscribe"))
+                        (if (cycle == 0) "{\"status\":{\"toolhead\":{\"position\":[0,0,0,100],\"extruder\":\"extruder\"}},\"eventtime\":1}" else "{\"status\":{\"toolhead\":{\"position\":[0,0,0,0],\"extruder\":\"extruder\"}},\"eventtime\":2}")
+                    else
+                        "{}";
+                    try framing.write(&writer.interface, try std.fmt.bufPrint(&response, "{{\"id\":\"{s}\",\"result\":{s}}}", .{ id, result }));
+                    try writer.interface.flush();
+                    if (std.mem.eql(u8, method, "gcode/subscribe_output")) break;
+                }
+                const first = [_][]const u8{
+                    "{\"toolhead\":{\"position\":[0,0,0,105]}}",
+                    "{\"toolhead\":{\"position\":[0,0,0,103]}}",
+                    "{\"toolhead\":{\"position\":[0,0,0,105]}}",
+                    "{\"toolhead\":{\"position\":[0,0,0,107]}}",
+                    "{\"toolhead\":{\"position\":[0,0,0,108]},\"gcode_move\":{\"extrude_factor\":0.5}}",
+                    "{\"toolhead\":{\"position\":[0,0,0,1000],\"extruder\":\"extruder1\"}}",
+                    "{\"toolhead\":{\"position\":[0,0,0,1002]}}",
+                };
+                const second = [_][]const u8{"{\"toolhead\":{\"position\":[0,0,0,3]}}"};
+                const updates: []const []const u8 = if (cycle == 0) &first else &second;
+                for (updates) |status| {
+                    var frame: [512]u8 = undefined;
+                    try framing.write(&writer.interface, try std.fmt.bufPrint(&frame, "{{\"method\":\"process_status_update\",\"params\":{{\"status\":{s},\"eventtime\":3}}}}", .{status}));
+                }
+                try writer.interface.flush();
+                if (cycle == 0) try self.reconnect.wait(aio) else try self.finish.wait(aio);
+            }
+        }
+    };
+    const Capture = struct {
+        spoolman: *SpoolmanCtx,
+        klippy: *klippy_mod.KlippyCtx,
+        statuses: std.atomic.Value(u32) = .init(0),
+        failed: std.atomic.Value(bool) = .init(false),
+        fn state(raw: *anyopaque, _: std.Io, state_value: klippy_mod.State) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.spoolman.onKlippyStateLocked(state_value == .ready);
+        }
+        fn status(raw: *anyopaque, _: std.Io, value: std.json.Value, time: std.json.Value) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            // The seeded status precedes the final ready callback.
+            self.spoolman.onKlippyStateLocked(self.klippy.state == .ready and self.spoolman.api_url != null);
+            self.spoolman.onKlippyStatusLocked(value, time) catch self.failed.store(true, .release);
+            _ = self.statuses.fetchAdd(1, .acq_rel);
+        }
+    };
+    const alloc = std.heap.smp_allocator;
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}/spool-klippy.sock", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    var uds = try (try std.Io.net.UnixAddress.init(path)).listen(io, .{});
+    defer uds.deinit(io);
+    var klippy_peer: KlippyPeer = .{};
+    var unix_task = try io.concurrent(KlippyPeer.run, .{ &klippy_peer, &uds, io });
+    defer unix_task.cancel(io);
+    var http = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer http.deinit(io);
+    var report_peer: ReportPeer = .{};
+    var http_task = try io.concurrent(ReportPeer.run, .{ &report_peer, &http, io });
+    defer http_task.cancel(io);
+    var mem = MemStore.init(alloc);
+    defer mem.deinit();
+    var core = Core.init();
+    var conns = connections_mod.Connections.init(alloc, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var spoolman = try SpoolmanCtx.init(alloc, mem.dataStore(), &bus);
+    defer spoolman.deinit();
+    var url: [64]u8 = undefined;
+    try spoolman.setServerUrl(try std.fmt.bufPrint(&url, "127.0.0.1:{d}", .{http.socket.address.getPort()}));
+    try spoolman.setSpoolId(29);
+    spoolman.io = io;
+    spoolman.ws_connected.store(true, .release);
+    var klippy = try klippy_mod.KlippyCtx.init(alloc, &bus);
+    defer klippy.deinit();
+    klippy.setIo(io);
+    klippy.uds_path = path;
+    var capture: Capture = .{ .spoolman = &spoolman, .klippy = &klippy };
+    klippy.event_ctx = &capture;
+    klippy.on_state = Capture.state;
+    klippy.on_status = Capture.status;
+    try klippy.start();
+    defer klippy.stop(io);
+    try ReportPeer.waitCount(&capture.statuses, io, 8);
+    spoolman.reportExtrusion();
+    try testing.expectEqual(@as(u32, 1), report_peer.reports.load(.acquire));
+    try testing.expectEqual(@as(f64, 10), report_peer.uses[0]);
+    klippy_peer.reconnect.set(io);
+    try ReportPeer.waitCount(&capture.statuses, io, 10);
+    spoolman.reportExtrusion();
+    try testing.expectEqual(@as(u32, 2), report_peer.reports.load(.acquire));
+    try testing.expectEqual(@as(f64, 3), report_peer.uses[1]);
+    try testing.expectEqual(@as(i64, 29), report_peer.ids[1]);
+    try testing.expect(!capture.failed.load(.acquire));
+    try testing.expect(!klippy_peer.failed.load(.acquire));
+    try testing.expect(!report_peer.failed.load(.acquire));
 }
