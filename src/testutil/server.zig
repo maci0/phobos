@@ -1613,7 +1613,7 @@ test "power: POST device action=on/toggle toggles state and emits notify_power_c
     defer conns.detachWriter(ts.io, cid);
 
     // Add a device via the power_ctx directly (no config loading in tests).
-    ts.app.power_ctx.addDevice("test_psu", "gpio", "off", false) catch unreachable;
+    try ts.app.power_ctx.addDevice(.{ .name = "test_psu", .type_str = "gpio", .state = "off" });
 
     // POST action=on → state becomes on.
     const on_body = try ts.postJson(alloc, "/machine/device_power/device",

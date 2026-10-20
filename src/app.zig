@@ -37,12 +37,12 @@ const file_manager_component = @import("components/file_manager.zig");
 const machine_component = @import("components/machine.zig");
 const update_manager_component = @import("components/update_manager.zig");
 const power_component = @import("components/power.zig");
+const gpio_sysfs = @import("components/gpio_sysfs.zig");
 const wled_component = @import("components/wled.zig");
 const td1_component = @import("components/td1.zig");
 const printer_component = @import("components/printer.zig");
 const klippy_connection_component = @import("components/klippy_connection.zig");
 const octoprint_component = @import("components/octoprint_compat.zig");
-const button_component = @import("components/button.zig");
 const zeroconf_component = @import("components/zeroconf.zig");
 const paneldue_component = @import("components/paneldue.zig");
 const feather_updates_component = @import("components/feather_updates.zig");
@@ -163,7 +163,6 @@ const UpdateSource = update_manager_component.Source;
 const PowerCtx = power_component.PowerCtx;
 const WledCtx = wled_component.WledCtx;
 const Td1Ctx = td1_component.Td1Ctx;
-const ButtonCtx = button_component.ButtonCtx;
 const PrinterCtx = printer_component.PrinterCtx;
 const KlippyConnectionCtx = klippy_connection_component.KlippyCtx;
 const OctoPrintCtx = octoprint_component.OctoPrintCtx;
@@ -245,7 +244,6 @@ pub const App = struct {
     power_ctx: *PowerCtx,
     wled_ctx: *WledCtx,
     td1_ctx: *Td1Ctx,
-    button_ctx: *ButtonCtx,
     printer_ctx: *PrinterCtx,
     klippy_ctx: *KlippyConnectionCtx,
     octoprint_ctx: *OctoPrintCtx,
@@ -534,6 +532,9 @@ pub const App = struct {
         const power_ctx = try alloc.create(PowerCtx);
         errdefer alloc.destroy(power_ctx);
         power_ctx.* = PowerCtx.init(alloc, bus);
+        // Reject locked_while_printing changes during a print (Moonraker power.py).
+        power_ctx.printing_check = JobStateCtx.isActiveErased;
+        power_ctx.printing_ctx = job_state_ctx;
 
         // --- WLED context (machine.wled.*) ---
         // Strips come from [wled <name>] config (none in the bare spine).
@@ -550,10 +551,6 @@ pub const App = struct {
         const td1_ctx = try alloc.create(Td1Ctx);
         errdefer alloc.destroy(td1_ctx);
         td1_ctx.* = Td1Ctx.init(alloc, aio);
-
-        const button_ctx = try alloc.create(ButtonCtx);
-        errdefer alloc.destroy(button_ctx);
-        button_ctx.* = ButtonCtx.init(alloc, aio, bus);
 
         // --- Printer context (printer.* — Klippy-disconnected stubs) ---
         const printer_ctx = try alloc.create(PrinterCtx);
@@ -629,7 +626,6 @@ pub const App = struct {
             .power_ctx = power_ctx,
             .wled_ctx = wled_ctx,
             .td1_ctx = td1_ctx,
-            .button_ctx = button_ctx,
             .printer_ctx = printer_ctx,
             .klippy_ctx = klippy_ctx,
             .octoprint_ctx = octoprint_ctx,
@@ -908,92 +904,52 @@ pub const App = struct {
         if (cfg.hasSection("mqtt")) self.applyMqttConfig(aio, cfg) catch |err|
             std.debug.print("phobos: warning: invalid [mqtt] config: {}, MQTT disabled\n", .{err});
 
-        // Wire power devices from [power <name>] sections.
-        var power_sects: std.ArrayList([]const u8) = .empty;
-        defer power_sects.deinit(self.alloc);
+        // Wire power devices from [power <name>] sections. addDevice copies
+        // every string, so config values are passed borrowed.
         if (cfg.sectionNames(self.alloc)) |names| {
             defer self.alloc.free(names);
+            var url_arena = std.heap.ArenaAllocator.init(self.alloc);
+            defer url_arena.deinit();
             for (names) |sect| {
                 if (!std.mem.startsWith(u8, sect, "power ")) continue;
                 const dev_name = sect["power ".len..];
                 if (dev_name.len == 0) continue;
-                power_sects.append(self.alloc, dev_name) catch continue;
+                const dev_type = cfg.get(sect, "type") orelse "gpio";
+                // Explicit on_url/off_url/status_url win; protocol types
+                // (tasmota/shelly) derive them from `address` + `output_id`.
+                var urls: ?power_component.ProtoUrls = null;
+                if (cfg.get(sect, "on_url") == null) if (cfg.get(sect, "address")) |addr| {
+                    const output_id = cfg.getInt(sect, "output_id") catch 1;
+                    const ua = url_arena.allocator();
+                    if (std.mem.eql(u8, dev_type, "tasmota"))
+                        urls = power_component.tasmotaUrls(ua, addr, output_id, cfg.get(sect, "password")) catch null
+                    else if (std.mem.eql(u8, dev_type, "shelly"))
+                        urls = power_component.shellyUrls(ua, addr, output_id) catch null;
+                };
+                // Moonraker gpio devices: `pin` in Klipper syntax, "!" = active-low.
+                const pin: ?gpio_sysfs.ParsedPin = if (cfg.get(sect, "pin")) |spec|
+                    gpio_sysfs.parsePin(spec) orelse {
+                        std.debug.print("phobos: warning: power device '{s}': invalid pin '{s}', device not added\n", .{ dev_name, spec });
+                        continue;
+                    }
+                else
+                    null;
+                self.power_ctx.addDevice(.{
+                    .name = dev_name,
+                    .type_str = dev_type,
+                    .state = "off",
+                    .locked_while_printing = cfg.getBoolean(sect, "locked_while_printing") catch false,
+                    .initial_state = cfg.get(sect, "initial_state"),
+                    .on_url = cfg.get(sect, "on_url") orelse if (urls) |u| u.on else null,
+                    .off_url = cfg.get(sect, "off_url") orelse if (urls) |u| u.off else null,
+                    .status_url = cfg.get(sect, "status_url") orelse if (urls) |u| u.status else null,
+                    .gpio_pin = if (pin) |p| p.line else null,
+                    .gpio_active_low = if (pin) |p| p.inverted else false,
+                }) catch |err| {
+                    std.debug.print("phobos: warning: failed to add power device '{s}': {}\n", .{ dev_name, err });
+                };
             }
         } else |_| {}
-        for (power_sects.items) |dev_name| {
-            const sect = std.fmt.allocPrint(self.alloc, "power {s}", .{dev_name}) catch continue;
-            defer self.alloc.free(sect);
-            const dev_type = cfg.get(sect, "type") orelse "gpio";
-            const initial_state: ?[]const u8 = if (cfg.get(sect, "initial_state")) |s|
-                self.alloc.dupe(u8, s) catch null
-            else
-                null;
-            const bound_services: ?[]const u8 = if (cfg.get(sect, "bound_services")) |s|
-                self.alloc.dupe(u8, s) catch null
-            else
-                null;
-            const name_dup = self.alloc.dupe(u8, dev_name) catch continue;
-            const type_dup = self.alloc.dupe(u8, dev_type) catch continue;
-            const state_dup = self.alloc.dupe(u8, "off") catch continue;
-
-            // HTTP URLs: explicit on_url/off_url/status_url win; otherwise derive
-            // them for protocol types (tasmota/shelly) from `address`+`output_id`.
-            // addDeviceFull dupes these, so the temporaries here are freed after.
-            var on_url: ?[]const u8 = if (cfg.get(sect, "on_url")) |s| (self.alloc.dupe(u8, s) catch null) else null;
-            var off_url: ?[]const u8 = if (cfg.get(sect, "off_url")) |s| (self.alloc.dupe(u8, s) catch null) else null;
-            var status_url: ?[]const u8 = if (cfg.get(sect, "status_url")) |s| (self.alloc.dupe(u8, s) catch null) else null;
-            if (on_url == null) {
-                if (cfg.get(sect, "address")) |addr| {
-                    const output_id = cfg.getInt(sect, "output_id") catch 1;
-                    const password = cfg.get(sect, "password");
-                    const urls: ?power_component.ProtoUrls =
-                        if (std.mem.eql(u8, dev_type, "tasmota"))
-                            (power_component.tasmotaUrls(self.alloc, addr, output_id, password) catch null)
-                        else if (std.mem.eql(u8, dev_type, "shelly"))
-                            (power_component.shellyUrls(self.alloc, addr, output_id) catch null)
-                        else
-                            null;
-                    if (urls) |u| {
-                        on_url = u.on;
-                        off_url = u.off;
-                        status_url = u.status;
-                    }
-                }
-            }
-            defer {
-                if (on_url) |u| self.alloc.free(u);
-                if (off_url) |u| self.alloc.free(u);
-                if (status_url) |u| self.alloc.free(u);
-            }
-
-            const dev = power_component.Device{
-                .name = name_dup,
-                .type_str = type_dup,
-                .state = state_dup,
-                .locked_while_printing = cfg.getBoolean(sect, "locked_while_printing") catch false,
-                .off_when_shutdown = cfg.getBoolean(sect, "off_when_shutdown") catch false,
-                .off_when_shutdown_delay = cfg.getFloat(sect, "off_when_shutdown_delay") catch 0.0,
-                .on_when_queued = cfg.getBoolean(sect, "on_when_job_queued") catch cfg.getBoolean(sect, "on_when_queued") catch false,
-                .klipper_restart = cfg.getBoolean(sect, "klipper_restart") catch false,
-                .restart_delay = cfg.getFloat(sect, "restart_delay") catch 0.0,
-                .bound_services = bound_services,
-                .initial_state = initial_state,
-                .restrict_actions = cfg.getBoolean(sect, "restrict_action_processing") catch true,
-                .timer = cfg.getFloat(sect, "timer") catch 0.0,
-                .is_shutdown = false,
-                .on_url = on_url,
-                .off_url = off_url,
-                .status_url = status_url,
-            };
-            self.power_ctx.addDeviceFull(dev) catch |err| {
-                std.debug.print("phobos: warning: failed to add power device '{s}': {}\n", .{ dev_name, err });
-                self.alloc.free(dev.name);
-                self.alloc.free(dev.type_str);
-                self.alloc.free(dev.state);
-                if (dev.bound_services) |bs| self.alloc.free(bs);
-                if (dev.initial_state) |is| self.alloc.free(is);
-            };
-        }
 
         // Wire WLED strips, webcams, and notifiers from prefixed sections.
         self.notifier_ctx.deinit(self.alloc);
@@ -1123,7 +1079,6 @@ pub const App = struct {
         self.data_store_ctx.stopSampler();
         self.klippy_ctx.stop(io);
         self.job_queue_ctx.cancelDelayTimer();
-        self.button_ctx.stopPolling();
         self.announcements_ctx.deinit();
         self.mqtt_ctx.deinit();
         self.history_ctx.handleServerExit(self.job_state_ctx.getLastStats());
@@ -1157,8 +1112,6 @@ pub const App = struct {
         self.alloc.destroy(self.wled_ctx);
         self.td1_ctx.deinit();
         self.alloc.destroy(self.td1_ctx);
-        self.button_ctx.deinit();
-        self.alloc.destroy(self.button_ctx);
         self.printer_ctx.deinit(self.alloc);
         self.alloc.destroy(self.printer_ctx);
         self.klippy_ctx.deinit();
@@ -1273,9 +1226,6 @@ pub const App = struct {
 
         // TD-1 component: machine.td1.* endpoints.
         try td1_component.registerTd1(self.reg, self.td1_ctx);
-
-        // Button component: notify_button_event (notification-only).
-        try button_component.registerButton(self.reg, self.button_ctx);
 
         // Printer component: printer.* endpoints (proxied to Klippy). With no
         // Klippy connection every handler returns the 503 disconnected error.
@@ -1547,9 +1497,8 @@ pub const App = struct {
         // Wire io into the power component so it can emit notify_power_changed.
         self.power_ctx.setIo(io);
         self.power_ctx.applyInitialStates();
-        // Wire io into the button component so it can emit notify_button_event.
-        self.button_ctx.setIo(io);
-        self.button_ctx.startPolling();
+        // Handlers hold Core from here on; device HTTP releases it.
+        self.power_ctx.core = self.core;
         self.sensor_ctx.setIo(io);
         // Wire io into the job queue so it can emit notify_job_queue_changed.
         self.job_queue_ctx.setIo(io);
@@ -2149,6 +2098,47 @@ test "setConfig loads auto-refresh, excludes, observer none, and hidden objects"
     try std.testing.expectEqual(@as(usize, 2), app.printer_ctx.hidden_objects.len);
     try std.testing.expectEqualStrings("output_pin level_h1", app.printer_ctx.hidden_objects[0]);
     try std.testing.expectEqualStrings("output_pin power_off", app.printer_ctx.hidden_objects[1]);
+}
+
+test "setConfig [power] reads pin and protocol URLs without leaking" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    const body =
+        \\[power psu]
+        \\type: gpio
+        \\pin: !gpiochip0/gpio23
+        \\locked_while_printing: True
+        \\initial_state: on
+        \\
+        \\[power plug]
+        \\type: shelly
+        \\address: 10.0.0.9
+        \\output_id: 2
+        \\
+        \\[power bad]
+        \\type: gpio
+        \\pin: nope
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = body });
+
+    var app = try testApp(alloc, io, &tmp);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    const psu = app.power_ctx.findDevice("psu").?;
+    try std.testing.expectEqual(@as(?u32, 23), psu.gpio_pin);
+    try std.testing.expect(psu.gpio_active_low);
+    try std.testing.expect(psu.locked_while_printing);
+    try std.testing.expectEqualStrings("on", psu.initial_state.?);
+    try std.testing.expectEqualStrings("off", psu.state);
+    const plug = app.power_ctx.findDevice("plug").?;
+    try std.testing.expectEqualStrings("http://10.0.0.9/relay/2?turn=on", plug.on_url.?);
+    try std.testing.expectEqualStrings("http://10.0.0.9/relay/2", plug.status_url.?);
+    try std.testing.expect(app.power_ctx.findDevice("bad") == null);
 }
 
 test "setConfig [paneldue] processPanelDueLine strips checksummed file commands" {

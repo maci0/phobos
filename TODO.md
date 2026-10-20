@@ -40,8 +40,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   added emergency_stop end-to-end test. handlePublishPrefixed handler added to mqtt
   with full test suite (prefix/prefixed param, 10 tests + fuzz).
   (sensor depth up from 5%→55%: real SensorCtx with MeasurementRing, change detection,
-  notify_sensor_update emission, param_info tracking. button depth up from 30%→80%:
-  full ButtonCtx with addButton/sendEvent/emitButtonEvent/notification_sent guard.
+  notify_sensor_update emission, param_info tracking.
   gcode_metadata depth: findObjectHeight (was stubbed, now 6 slicer patterns + G1 Z fallback),
   filament_weight_total, nozzle_diameter, thumbnails, slicer_version — 19 new unit tests
   + 9 new fuzz tests. file_manager depth up from 85%→90%.
@@ -97,7 +96,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   is the gated real-Klippy proxy test. Build with `zig build test-artifact` and run
   the newest standalone test binary to avoid the build runner's `--listen=-` hang.
 - All register functions now have unit tests verifying all expected routes are wired
-  in the Registry (machine, update_manager, power, wled, td1, button).
+  in the Registry (machine, update_manager, power, wled, td1).
 
 ### Build / test / run — IMPORTANT host quirks
 - This host's **system glibc cannot be linked** by Zig 0.16 (GCC 16 `.sframe` reloc).
@@ -205,7 +204,6 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   web, zip), notification sequencing (notify_update_response, notify_update_refreshed).
 - power/wled/td1 device registry with in-memory state tracking and notification emission.
 - sensor with real SensorCtx (MeasurementRing, change detection, notify_sensor_update).
-- button with full ButtonCtx (addButton, sendEvent, emitButtonEvent, notification_sent).
 - gcode_metadata with deep parsing: object height (6 slicer patterns + G1 Z fallback),
   filament_weight_total (7 patterns), nozzle_diameter (3 patterns), thumbnails,
   slicer_version for all five slicer families.
@@ -344,12 +342,11 @@ _norm_structure_compare array item masking (Python).
   history, change detection, emitSensorUpdate via emitLocked, param_info tracking.
   The MQTT sensor source has landed (ingestMqttMessage ← MqttClient reader, socket-
   validated). 15 unit + 4 fuzz tests.
-- **button** — ~~notification-only, GPIO stubbed.~~ DONE: full ButtonCtx with
-  addButton/sendEvent/emitButtonEvent/notification_sent guard, 10 unit + 3 fuzz tests.
 - **job_queue** — DONE: the job_queue.py state machine (loading → starting →
   job_loaded), transition gcode and delay before automatically loaded jobs on a
   cancellable dispatch worker, pause_job_queue/start_job_queue remote methods,
   [job_queue] config. Remaining gaps are listed under Known Moonraker gaps.
+- **button** — not implemented: see Known Moonraker gaps.
 
 ### P2 — misc
 - ~~Read host/port from config in `main()`.~~ Done: `-c`/`--config`, `extractBindAddr`, 5 tests.
@@ -445,3 +442,8 @@ Keep the coverage gate at 100% and the full suite green after every step.
 - `usb.ids` is neither downloaded nor parsed, so USB class fields are null and names cover only Moonraker's built-in 1d50 entries; V4L2 `modes` are not enumerated (VIDIOC_ENUM_FMT); `machine.peripherals.canbus` returns no UUIDs (`src/components/machine.zig` `buildUsbDevice`, `enumVideo`, `handleCanbus`).
 - `server.gcode_store` stays empty in production: `klippy_connection.zig` `emitGcodeResponse` and the `printer.gcode.script` proxy do not call `DataStoreCtx.pushGcodeResponse`/`pushGcodeCommand` (`src/components/data_store.zig`); Moonraker records both (`data_store.py` `_handle_gcode_response`, `_store_gcode_command`).
 - `[job_queue] load_on_startup` is not supported (phobos warns at config load) and the queue does not pause on Klippy shutdown: both need a Klippy ready/shutdown hook from `klippy_connection.zig` into `JobQueueCtx` (`src/components/job_queue.zig`; Moonraker `job_queue.py` `_handle_ready`, `_handle_shutdown`).
+- button: `[button]` sections, `on_press`/`on_release` templates and their `notify_button_event` are not implemented (vendor `components/button.py`); only the notification name exists (`src/server/notify.zig`).
+- power: `off_when_shutdown`, `on_when_job_queued`, `bound_services`, `restart_klipper_when_powered`, `restrict_action_processing` and `timer` are not parsed or acted on (`src/components/power.zig`).
+- power: the Klippy remote method `set_device_power` is not registered (`src/components/power.zig`); see the remote-method entry under wled.
+- power: generic `http` devices have no `request_template`/`response_template`; status replies use a fixed on/off heuristic (`power.parseStatus`).
+- power: device and printing-lock failures map to `Internal Server Error`/`Printer is busy`, not Moonraker's 400 messages (`src/jsonrpc.zig`, `src/http_transport.zig`).

@@ -11,13 +11,17 @@
 //!   POST /machine/device_power/device  → machine.device_power.post_device (single)
 //!
 //! HTTP power devices (type "http" or any type with on_url/off_url configured)
-//! send real HTTP GET requests to the configured URLs via `std.http.Client`.
-//! `tasmota` and `shelly` devices derive their on/off URLs from the configured
-//! address (see tasmotaUrls/shellyUrls, wired in app.setConfig) and so also issue
-//! real HTTP. `type: gpio` devices with a configured `gpio_pin` drive the line
-//! via the sysfs GPIO driver (`gpio_sysfs.zig`), honouring active-low. The
-//! remaining vendor types (tplink_smartplug, homeseer) still track state in
-//! memory only — no device-specific protocol is implemented for them.
+//! send HTTP GET requests to the configured URLs. `tasmota` and `shelly` devices
+//! derive their URLs from the configured address (see tasmotaUrls/shellyUrls,
+//! wired in app.setConfig). `type: gpio` devices with a `pin` drive the line via
+//! the sysfs GPIO driver (`gpio_sysfs.zig`), honouring active-low ("!pin"). The
+//! remaining vendor types (tplink_smartplug, homeseer) track state in memory
+//! only. A failed device request sets the state to "error" and fails the request
+//! (Moonraker `set_power`).
+//!
+//! CORE LOCK. Handlers run under Core; device HTTP releases it for the round
+//! trip (as `KlippyCtx.requestConcurrent` does) and re-resolves the device by
+//! name afterwards. Each request is bounded by `http_timeout`.
 //!
 //! DEVICES FROM CONFIG. Without `[power <name>]` config sections (the spine
 //! carries none), the devices map is empty and the list endpoint returns [].
@@ -31,50 +35,85 @@ const std = @import("std");
 const registry = @import("../server/registry.zig");
 const notify = @import("../server/notify.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
+const Core = @import("../server/core.zig").Core;
 const gpio_sysfs = @import("gpio_sysfs.zig");
 
 const Registry = registry.Registry;
+
+/// Request timeout of Moonraker's HTTP power devices (power.py `_send_http_command`).
+const http_timeout: std.Io.Duration = .fromSeconds(20);
+/// Largest device response body kept. Status replies are a few hundred bytes.
+const max_response_bytes = 4096;
+
+/// Send one HTTP request to a power or WLED device and return the 2xx response
+/// body, a slice of `body`. A longer body, a non-2xx status or an expired
+/// `timeout` is an error. The request runs as a concurrent task cancelled at
+/// the deadline: the installed `std.Io.Threaded` backend panics on a socket
+/// connect timeout, so cancelation bounds the connect.
+pub fn deviceRequest(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    method: std.http.Method,
+    url: []const u8,
+    payload: ?[]const u8,
+    timeout: std.Io.Duration,
+    body: []u8,
+) ![]u8 {
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    var writer: std.Io.Writer = .fixed(body);
+    const json_header = [_]std.http.Header{.{ .name = "content-type", .value = "application/json" }};
+    const Outcome = union(enum) {
+        fetched: std.http.Client.FetchError!std.http.Client.FetchResult,
+        expired: std.Io.Cancelable!void,
+    };
+    var outcomes: [2]Outcome = undefined;
+    var select: std.Io.Select(Outcome) = .init(io, &outcomes);
+    defer select.cancelDiscard();
+    try select.concurrent(.fetched, std.http.Client.fetch, .{ &client, .{
+        .location = .{ .url = url },
+        .method = method,
+        .payload = payload,
+        .response_writer = &writer,
+        .keep_alive = false,
+        .extra_headers = if (payload != null) &json_header else &.{},
+    } });
+    try select.concurrent(.expired, std.Io.sleep, .{ io, timeout, .awake });
+    switch (try select.await()) {
+        .expired => |result| {
+            try result;
+            return error.Timeout;
+        },
+        .fetched => |result| {
+            if ((try result).status.class() != .success) return error.HttpStatus;
+            return writer.buffered();
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Device types (matches power.py dev_types)
 // ---------------------------------------------------------------------------
 
 /// A configured power device. State is tracked in memory and, for HTTP and
-/// `type: gpio` devices, mirrored to real hardware on on/off (see
-/// processRequest); other vendor types are in-memory only.
+/// `type: gpio` devices, mirrored to real hardware on on/off (see setPower).
 pub const Device = struct {
     name: []const u8,
     type_str: []const u8,
     state: []const u8, // "on" | "off" | "init" | "error"
-    locked_while_printing: bool,
+    locked_while_printing: bool = false,
     /// KlipperDevice-specific field; always false for other types.
-    is_shutdown: bool,
-    /// Power off device when Klippy enters shutdown state.
-    off_when_shutdown: bool = false,
-    /// Delay (seconds) before powering off on Klippy shutdown.
-    off_when_shutdown_delay: f64 = 0.0,
-    /// Power on device when a job is queued.
-    on_when_queued: bool = false,
-    /// Send FIRMWARE_RESTART to Klippy after power-on.
-    klipper_restart: bool = false,
-    /// Delay (seconds) before sending FIRMWARE_RESTART.
-    restart_delay: f64 = 0.0,
-    /// Systemd services bound to this device (start on power-on, stop on power-off).
-    bound_services: ?[]const u8 = null,
+    is_shutdown: bool = false,
     /// Desired initial state on startup ("on" | "off" | null).
     initial_state: ?[]const u8 = null,
-    /// When set, suppresses bound-service/restart logic on external change.
-    restrict_actions: bool = false,
-    /// Auto-off timer: seconds before automatic power-off (0 = disabled).
-    timer: f64 = 0.0,
     /// HTTP device URLs. When non-null and io is wired, real HTTP GET
     /// requests are sent. on_url / off_url are used for power state changes;
     /// status_url is used for status-refresh queries.
     on_url: ?[]const u8 = null,
     off_url: ?[]const u8 = null,
     status_url: ?[]const u8 = null,
-    /// sysfs GPIO line number for `type: gpio` devices. When set and io is
-    /// wired, on/off drives the line via `gpio_sysfs`.
+    /// sysfs GPIO line number (config `pin`). When set and io is wired,
+    /// on/off drives the line via `gpio_sysfs`.
     gpio_pin: ?u32 = null,
     /// Active-low line: "on" drives the physical level low (Moonraker "!pin").
     gpio_active_low: bool = false,
@@ -112,13 +151,14 @@ pub const PowerCtx = struct {
     gpa: std.mem.Allocator,
     bus: ?*NotifyBus,
     io: ?std.Io,
+    /// Held by the caller of every handler once wired; released for device HTTP.
+    core: ?*Core = null,
     /// Configured devices. Owned by the ctx; keys/values allocated with gpa.
     devices: std.StringHashMap(Device),
-    /// Tracks whether the printer is currently printing. When true,
-    /// power operations on devices with locked_while_printing=true are
-    /// rejected with a "locked_while_printing" error matching Moonraker's
-    /// `PrinterPowerLock` in power.py.
-    printing_active: bool = false,
+    /// Reports an active print. Mutating requests on `locked_while_printing`
+    /// devices are rejected while it returns true (Moonraker `kconn.is_printing()`).
+    printing_check: ?*const fn (*anyopaque) bool = null,
+    printing_ctx: ?*anyopaque = null,
     /// sysfs GPIO controller root. Overridable so tests can target a temp dir.
     gpio_root: []const u8 = "/sys/class/gpio",
 
@@ -128,7 +168,6 @@ pub const PowerCtx = struct {
             .bus = bus,
             .io = null,
             .devices = std.StringHashMap(Device).init(alloc),
-            .printing_active = false,
         };
     }
 
@@ -146,91 +185,63 @@ pub const PowerCtx = struct {
     }
 
     /// Drive every device configured with an `initial_state` to that state at
-    /// startup (Moonraker `_set_initial_state`). Hardware (HTTP/gpio) is driven
-    /// when io is wired; the in-memory state is always updated. Does not emit a
-    /// change notification (this is the boot baseline, not a user action).
+    /// startup (Moonraker `_set_initial_state`). Runs before `core` is wired, so
+    /// device I/O does not release a lock. A failed device is left in "error".
+    /// Does not emit a change notification (this is the boot baseline).
     pub fn applyInitialStates(self: *PowerCtx) void {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
         var it = self.devices.valueIterator();
         while (it.next()) |dev| {
             const target = dev.initial_state orelse continue;
             const on = std.mem.eql(u8, target, "on");
             if (!on and !std.mem.eql(u8, target, "off")) continue;
-            if (on) {
-                if (dev.on_url) |u| self.sendDeviceHttpGet(u);
-            } else {
-                if (dev.off_url) |u| self.sendDeviceHttpGet(u);
-            }
-            self.driveGpio(dev, on);
-            self.setState(dev.name, target) catch {};
+            self.setPower(arena.allocator(), dev.name, on) catch |err|
+                std.debug.print("phobos: warning: power device '{s}' initial state failed: {}\n", .{ dev.name, err });
         }
     }
 
-    /// Drive a `type: gpio` device's sysfs line on power on/off. No-op for
-    /// non-gpio devices, devices without a configured pin, or when io is not
-    /// wired (unit-test path). Best-effort: hardware errors are swallowed since
-    /// the in-memory state has already been committed.
-    fn driveGpio(self: *PowerCtx, dev: *const Device, on: bool) void {
+    /// Drive a device's sysfs line. No-op without a configured pin or when io is
+    /// not wired (unit-test path).
+    fn driveGpio(self: *PowerCtx, dev: *const Device, on: bool) !void {
         const io = self.io orelse return;
         const pin = dev.gpio_pin orelse return;
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
         const g = gpio_sysfs.SysfsGpio{ .io = io, .root = self.gpio_root };
         // active_low: "on" places a LOW level on the line.
-        const physical_high = on != dev.gpio_active_low;
-        g.setValue(arena.allocator(), pin, physical_high) catch |err|
-            std.debug.print("phobos: warning: power device '{s}' gpio pin {d} drive failed: {} — reported state may not match hardware\n", .{ dev.name, pin, err });
+        try g.setValue(pin, on != dev.gpio_active_low);
     }
 
-    /// Issue an HTTP GET to a device URL. Silently returns on any error
-    /// (DNS, connect, timeout, non-200) — the in-memory state update is
-    /// already committed, and we treat the HTTP part as best-effort.
-    fn sendDeviceHttpGet(self: *PowerCtx, url: []const u8) void {
-        const io = self.io orelse return;
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const aa = arena.allocator();
-
-        var client: std.http.Client = .{ .allocator = aa, .io = io };
-        defer client.deinit();
-
-        var aw: std.Io.Writer.Allocating = .init(aa);
-        defer aw.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .GET,
-            .response_writer = &aw.writer,
-        }) catch |err| {
-            std.debug.print("phobos: warning: power device http GET {s} failed: {} — reported state may not match hardware\n", .{ url, err });
-            return;
-        };
-        _ = result;
-    }
-
-    /// Try to read live device status via HTTP GET to the device's
-    /// `status_url`. Returns the response body as a dupe'd string on
-    /// success, null on failure or if status_url is not configured.
-    fn fetchDeviceStatus(self: *PowerCtx, url: []const u8) ?[]const u8 {
+    /// HTTP GET `url` (borrowed from `alloc`, not from a device) with Core
+    /// released. Returns the body in `alloc`, or null when io is not wired.
+    fn deviceGet(self: *PowerCtx, alloc: std.mem.Allocator, url: []const u8) !?[]u8 {
         const io = self.io orelse return null;
-        var arena = std.heap.ArenaAllocator.init(self.gpa);
-        defer arena.deinit();
-        const aa = arena.allocator();
+        const body = try alloc.alloc(u8, max_response_bytes);
+        if (self.core) |core| core.unlock(io);
+        defer if (self.core) |core| core.lock(io);
+        return try deviceRequest(self.gpa, io, .GET, url, null, http_timeout, body);
+    }
 
-        var client: std.http.Client = .{ .allocator = aa, .io = io };
-        defer client.deinit();
-
-        var aw: std.Io.Writer.Allocating = .init(aa);
-        defer aw.deinit();
-
-        const result = client.fetch(.{
-            .location = .{ .url = url },
-            .method = .GET,
-            .response_writer = &aw.writer,
-        }) catch return null;
-
-        if (result.status != .ok) return null;
-        const body = aw.written();
-        return if (body.len > 0) self.gpa.dupe(u8, body) catch null else null;
+    /// Switch device `name` on or off: drive its GPIO line or send its on/off
+    /// URL, then record the new state. On a device failure the state becomes
+    /// "error" and `error.DeviceRequestFailed` is returned. `name` must not
+    /// borrow from a device: Core is released during HTTP.
+    fn setPower(self: *PowerCtx, alloc: std.mem.Allocator, name: []const u8, on: bool) !void {
+        const dev = self.findDevice(name) orelse return error.NotFound;
+        const url: ?[]const u8 = if (on) dev.on_url else dev.off_url;
+        const owned_url = if (url) |u| try alloc.dupe(u8, u) else null;
+        const ok = blk: {
+            self.driveGpio(dev, on) catch |err| {
+                std.debug.print("phobos: warning: power device '{s}' gpio drive failed: {}\n", .{ name, err });
+                break :blk false;
+            };
+            if (owned_url) |u| _ = self.deviceGet(alloc, u) catch |err| {
+                std.debug.print("phobos: warning: power device '{s}' http request failed: {}\n", .{ name, err });
+                break :blk false;
+            };
+            break :blk true;
+        };
+        try self.setState(name, if (!ok) "error" else if (on) "on" else "off");
+        if (!ok) return error.DeviceRequestFailed;
     }
 
     /// Get a device by name (borrowed pointer into the map).
@@ -246,38 +257,16 @@ pub const PowerCtx = struct {
         dev.state = owned;
     }
 
-    /// Set whether the printer is currently printing. When `true`, power
-    /// operations on devices with `locked_while_printing=true` are rejected.
-    pub fn setPrintingActive(self: *PowerCtx, active: bool) void {
-        self.printing_active = active;
-    }
-
-    /// Check whether a device is locked due to an active print. Returns
-    /// `error.PrinterLocked` when the device has `locked_while_printing=true`
-    /// and printing is active, matching Moonraker's `PrinterPowerLock`.
+    /// Reject a mutating request on a `locked_while_printing` device during a
+    /// print, matching Moonraker's `process_request` lock check.
     pub fn checkPrintingLock(self: *const PowerCtx, dev: *const Device) !void {
-        if (dev.locked_while_printing and self.printing_active) return error.PrinterLocked;
-    }
-
-    /// Add a device (takes ownership of all slices).
-    pub fn addDevice(
-        self: *PowerCtx,
-        name: []const u8,
-        type_str: []const u8,
-        initial_state: []const u8,
-        locked_while_printing: bool,
-    ) !void {
-        return self.addDeviceFull(.{
-            .name = name,
-            .type_str = type_str,
-            .state = initial_state,
-            .locked_while_printing = locked_while_printing,
-            .is_shutdown = false,
-        });
+        if (!dev.locked_while_printing) return;
+        const check = self.printing_check orelse return;
+        if (check(self.printing_ctx orelse return)) return error.PrinterLocked;
     }
 
     /// Add or replace a device, copying all configuration strings.
-    pub fn addDeviceFull(self: *PowerCtx, opts: Device) !void {
+    pub fn addDevice(self: *PowerCtx, opts: Device) !void {
         const k = try self.gpa.dupe(u8, opts.name);
         errdefer self.gpa.free(k);
         var dev = try opts.dupe(self.gpa);
@@ -287,59 +276,6 @@ pub const PowerCtx = struct {
             var old = prior.value;
             old.deinit(self.gpa);
         }
-    }
-
-    /// Handle Klippy shutdown: power off all devices with off_when_shutdown=true.
-    /// Called when notify_klippy_shutdown is emitted.
-    pub fn handleKlippyShutdown(self: *PowerCtx, alloc: std.mem.Allocator) void {
-        var it = self.devices.iterator();
-        while (it.next()) |entry| {
-            const dev = entry.value_ptr;
-            if (dev.off_when_shutdown) {
-                // setState already frees the old state and installs a fresh
-                // "off"; do not free/re-dupe it again (redundant + fragile).
-                self.setState(dev.name, "off") catch continue;
-                dev.is_shutdown = true;
-                emitPowerChanged(self, alloc, dev);
-            }
-        }
-    }
-
-    /// Handle job queued: power on all devices with on_when_queued=true.
-    /// Called when notify_job_queue_changed with action="jobs_added" is emitted.
-    pub fn handleJobQueued(self: *PowerCtx, alloc: std.mem.Allocator) void {
-        var it = self.devices.iterator();
-        while (it.next()) |entry| {
-            const dev = entry.value_ptr;
-            if (dev.on_when_queued) {
-                // setState already frees+replaces dev.state; no extra free/dupe.
-                self.setState(dev.name, "on") catch continue;
-                emitPowerChanged(self, alloc, dev);
-            }
-        }
-    }
-
-    /// Set device power (remote method callable from Klippy macros).
-    /// Accepts force parameter to bypass the printing lock.
-    pub fn setDevicePower(
-        self: *PowerCtx,
-        device_name: []const u8,
-        state: []const u8,
-        force: bool,
-        alloc: std.mem.Allocator,
-    ) !void {
-        const dev = self.findDevice(device_name) orelse return error.NotFound;
-        if (!force) {
-            try self.checkPrintingLock(dev);
-        }
-        // Normalize state: accept "true"/"false" strings as on/off.
-        const action: []const u8 = if (std.mem.eql(u8, state, "true"))
-            "on"
-        else if (std.mem.eql(u8, state, "false"))
-            "off"
-        else
-            state;
-        _ = try processRequest(self, dev, action, alloc, force);
     }
 };
 
@@ -399,15 +335,9 @@ fn emitPowerChanged(ctx: *PowerCtx, alloc: std.mem.Allocator, dev: *const Device
 }
 
 // ---------------------------------------------------------------------------
-// State machine helpers
+// Protocol helpers
 // ---------------------------------------------------------------------------
 
-/// Apply a power request ("on" | "off" | "toggle" | "status") to a device.
-/// HTTP-type devices with URLs configured send real HTTP GET requests via
-/// std.http.Client; `type: gpio` devices drive the sysfs line; other non-HTTP
-/// types update in-memory state only.
-/// Returns the resulting state string (points into ctx-owned memory or a
-/// literal — caller must not free).
 /// on/off/status URLs for a protocol-specific HTTP power device. Strings are
 /// allocated in `alloc` (caller owns all three).
 pub const ProtoUrls = struct { on: []const u8, off: []const u8, status: []const u8 };
@@ -436,61 +366,69 @@ pub fn shellyUrls(alloc: std.mem.Allocator, address: []const u8, output_id: i64)
     };
 }
 
-fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {
-    const cur = dev.state;
-    if (std.mem.eql(u8, req, "status")) {
-        // If a status_url is configured, try to read live state from the
-        // hardware via HTTP GET. On failure, fall back to cached state.
-        if (dev.status_url) |url| {
-            if (ctx.fetchDeviceStatus(url)) |body| {
-                defer ctx.gpa.free(body);
-                // Moonraker's power types return various response formats;
-                // we do a best-effort parse: if the body contains "on"
-                // but not "off", treat as on; "off" but not "on", treat
-                // as off. Otherwise keep the cached state.
-                const has_on = std.mem.indexOf(u8, body, "\"on\"") != null or
-                    std.mem.indexOf(u8, body, "ON") != null or
-                    std.mem.indexOf(u8, body, "\"POWER\":\"ON\"") != null;
-                const has_off = std.mem.indexOf(u8, body, "\"off\"") != null or
-                    std.mem.indexOf(u8, body, "OFF") != null or
-                    std.mem.indexOf(u8, body, "\"POWER\":\"OFF\"") != null;
-                if (has_on and !has_off) {
-                    ctx.setState(dev.name, "on") catch {};
-                    const updated = ctx.findDevice(dev.name) orelse return "on";
-                    return updated.state;
-                } else if (has_off and !has_on) {
-                    ctx.setState(dev.name, "off") catch {};
-                    const updated = ctx.findDevice(dev.name) orelse return "off";
-                    return updated.state;
-                }
-            }
+/// Parse a status reply into on (true) / off (false); null when unrecognised.
+/// Shelly reads `ison` (shelly.py `_send_status_request`); Tasmota reads the
+/// `POWER<id>` or `POWER` key, ON/OFF in any case (tasmota.py). Other types
+/// accept a body that names exactly one of on/off.
+pub fn parseStatus(alloc: std.mem.Allocator, type_str: []const u8, body: []const u8) ?bool {
+    if (std.mem.eql(u8, type_str, "shelly") or std.mem.eql(u8, type_str, "tasmota")) {
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{}) catch return null;
+        if (parsed != .object) return null;
+        if (std.mem.eql(u8, type_str, "shelly")) {
+            const ison = parsed.object.get("ison") orelse return null;
+            return if (ison == .bool) ison.bool else null;
         }
-        return cur;
+        var it = parsed.object.iterator();
+        while (it.next()) |entry| {
+            if (!std.mem.startsWith(u8, entry.key_ptr.*, "POWER") or entry.value_ptr.* != .string) continue;
+            const value = entry.value_ptr.string;
+            if (std.ascii.eqlIgnoreCase(value, "on")) return true;
+            if (std.ascii.eqlIgnoreCase(value, "off")) return false;
+        }
+        return null;
     }
-    // Enforce the printing lock on mutating actions. Status queries (above)
-    // are exempt. Matches Moonraker's `PrinterPowerLock` in power.py.
-    if (!force) {
-        try ctx.checkPrintingLock(dev);
+    const has_on = std.mem.indexOf(u8, body, "\"on\"") != null or std.mem.indexOf(u8, body, "ON") != null;
+    const has_off = std.mem.indexOf(u8, body, "\"off\"") != null or std.mem.indexOf(u8, body, "OFF") != null;
+    if (has_on == has_off) return null;
+    return has_on;
+}
+
+// ---------------------------------------------------------------------------
+// State machine
+// ---------------------------------------------------------------------------
+
+/// Apply a power request ("on" | "off" | "toggle" | "status") to a device and
+/// return the resulting state (ctx-owned or a literal; caller must not free).
+/// A status request with a `status_url` refreshes the state from the device; a
+/// failed or unrecognised reply sets "error" (Moonraker `refresh_status`).
+fn processRequest(ctx: *PowerCtx, dev: *Device, req: []const u8, alloc: std.mem.Allocator, force: bool) ![]const u8 {
+    // Device HTTP releases Core, which may replace `dev`; work by name.
+    const name = try alloc.dupe(u8, dev.name);
+    if (std.mem.eql(u8, req, "status")) {
+        const url = try alloc.dupe(u8, dev.status_url orelse return dev.state);
+        const type_str = try alloc.dupe(u8, dev.type_str);
+        const before = try alloc.dupe(u8, dev.state);
+        const body = ctx.deviceGet(alloc, url) catch null;
+        const after = ctx.findDevice(name) orelse return error.NotFound;
+        if (body == null and ctx.io == null) return after.state;
+        const on = if (body) |b| parseStatus(alloc, type_str, b) else null;
+        try ctx.setState(name, if (on) |v| (if (v) "on" else "off") else "error");
+        const updated = ctx.findDevice(name) orelse return error.NotFound;
+        if (!std.mem.eql(u8, before, updated.state)) emitPowerChanged(ctx, alloc, updated);
+        return updated.state;
     }
+    // Enforce the printing lock on mutating actions (Moonraker `process_request`).
+    if (!force) try ctx.checkPrintingLock(dev);
     // Resolve "toggle" to the opposite of the current state.
     const action: []const u8 = blk: {
         if (!std.mem.eql(u8, req, "toggle")) break :blk req;
-        break :blk if (std.mem.eql(u8, cur, "off")) "on" else "off";
+        break :blk if (std.mem.eql(u8, dev.state, "off")) "on" else "off";
     };
     if (!std.mem.eql(u8, action, "on") and !std.mem.eql(u8, action, "off")) {
         return error.InvalidParams;
     }
-    // Drive real hardware: HTTP GET for URL devices, sysfs GPIO for gpio pins.
-    const turning_on = std.mem.eql(u8, action, "on");
-    if (turning_on) {
-        if (dev.on_url) |url| ctx.sendDeviceHttpGet(url);
-    } else {
-        if (dev.off_url) |url| ctx.sendDeviceHttpGet(url);
-    }
-    ctx.driveGpio(dev, turning_on);
-    ctx.setState(dev.name, action) catch {};
-    // Refresh pointer after setState (dupe may have reallocated).
-    const updated = ctx.findDevice(dev.name) orelse return action;
+    try ctx.setPower(alloc, name, std.mem.eql(u8, action, "on"));
+    const updated = ctx.findDevice(name) orelse return error.NotFound;
     emitPowerChanged(ctx, alloc, updated);
     return updated.state;
 }
@@ -554,13 +492,9 @@ pub fn handleSingleDevice(ctx_ptr: *anyopaque, params: std.json.Value, alloc: st
 // POST /machine/device_power/off      → batch off
 // ---------------------------------------------------------------------------
 
-/// Batch handler. The request names are inferred from the endpoint path last
-/// segment: "status" | "on" | "off". Device names come from the query params
-/// (each param key is a device name; values are ignored by Moonraker).
-/// Returns `{ "<device>": "<state>" | "device_not_found" }`.
-///
-/// We route all three paths here; the actual action is passed via a param
-/// `__batch_action` injected by the per-path wrappers below.
+/// Batch handler: each param key is a device name (values are ignored by
+/// Moonraker); keys starting with `_` are transport-injected and skipped.
+/// Returns `{ "<device>": "<state>" | "device_not_found" | "error" }`.
 fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator, action: []const u8) anyerror!std.json.Value {
     const ctx: *PowerCtx = @ptrCast(@alignCast(ctx_ptr));
     var out: std.json.ObjectMap = .empty;
@@ -570,9 +504,7 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
             var device_count: usize = 0;
             while (it.next()) |entry| {
                 const name = entry.key_ptr.*;
-                // Skip internal keys injected by the transport (_method etc.)
-                // and the per-path batch action discriminator.
-                if (name[0] == '_') continue;
+                if (std.mem.startsWith(u8, name, "_")) continue;
                 device_count += 1;
                 if (ctx.findDevice(name)) |dev| {
                     const state = processRequest(ctx, dev, action, alloc, false) catch "error";
@@ -667,6 +599,201 @@ fn testCtx(alloc: std.mem.Allocator) PowerCtx {
     return PowerCtx.init(alloc, null);
 }
 
+fn alwaysPrinting(_: *anyopaque) bool {
+    return true;
+}
+
+/// Loopback HTTP device double: accepts one connection, reads the request
+/// head, optionally takes `core` (blocks while a handler holds it), then
+/// writes `reply` (or nothing when null) and closes.
+const DeviceDouble = struct {
+    io: std.Io,
+    server: std.Io.net.Server,
+    reply: ?[]const u8,
+    core: ?*Core = null,
+    request_line: [128]u8 = undefined,
+    request_len: usize = 0,
+
+    fn bind(io: std.Io, reply: ?[]const u8) !DeviceDouble {
+        var ip = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        return .{ .io = io, .server = try ip.listen(io, .{ .reuse_address = true }), .reply = reply };
+    }
+
+    fn url(self: *const DeviceDouble, buf: []u8, path: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "http://127.0.0.1:{d}{s}", .{ self.server.socket.address.getPort(), path });
+    }
+
+    fn serveOne(self: *DeviceDouble) void {
+        const stream = self.server.accept(self.io) catch return;
+        defer stream.close(self.io);
+        var rbuf: [1024]u8 = undefined;
+        var r = stream.reader(self.io, &rbuf);
+        const first = r.interface.takeDelimiterInclusive('\n') catch return;
+        self.request_len = @min(first.len, self.request_line.len);
+        @memcpy(self.request_line[0..self.request_len], first[0..self.request_len]);
+        while (r.interface.takeDelimiterInclusive('\n')) |line| {
+            if (line.len <= 2) break;
+        } else |_| return;
+        if (self.core) |core| core.run(self.io, struct {
+            fn noop() void {}
+        }.noop, .{});
+        const reply = self.reply orelse {
+            // Hold the connection open until the client gives up.
+            _ = r.interface.takeDelimiterInclusive('\n') catch {};
+            return;
+        };
+        var wbuf: [256]u8 = undefined;
+        var w = stream.writer(self.io, &wbuf);
+        w.interface.writeAll(reply) catch return;
+        w.interface.flush() catch return;
+    }
+};
+
+test "deviceRequest: 2xx body, non-2xx and an expired deadline" {
+    const io = testing.io;
+    var body: [64]u8 = undefined;
+    var url_buf: [64]u8 = undefined;
+    {
+        var device = try DeviceDouble.bind(io, "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"ison\":true}");
+        defer device.server.deinit(io);
+        var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+        defer serving.cancel(io);
+        const reply = try deviceRequest(testing.allocator, io, .GET, try device.url(&url_buf, "/relay/0"), null, .fromSeconds(5), &body);
+        try testing.expectEqualStrings("{\"ison\":true}", reply);
+    }
+    {
+        var device = try DeviceDouble.bind(io, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        defer device.server.deinit(io);
+        var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+        defer serving.cancel(io);
+        try testing.expectError(error.HttpStatus, deviceRequest(testing.allocator, io, .GET, try device.url(&url_buf, "/"), null, .fromSeconds(5), &body));
+    }
+    {
+        var device = try DeviceDouble.bind(io, null);
+        defer device.server.deinit(io);
+        var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+        defer serving.cancel(io);
+        try testing.expectError(error.Timeout, deviceRequest(testing.allocator, io, .GET, try device.url(&url_buf, "/"), null, .fromMilliseconds(100), &body));
+    }
+}
+
+test "fuzz deviceRequest: malformed URLs fail without a request" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var raw: [24]u8 = undefined;
+            smith.bytesWithHash(&raw, 0);
+            // A scheme-less URL never reaches the network.
+            for (&raw) |*byte| if (byte.* == ':') {
+                byte.* = '_';
+            };
+            var body: [16]u8 = undefined;
+            if (deviceRequest(testing.allocator, testing.io, .GET, &raw, null, .fromMilliseconds(100), &body)) |_| {
+                return error.TestUnexpectedResult;
+            } else |_| {}
+        }
+    }.run, .{});
+}
+
+test "handleSingleDevice: releases Core for device HTTP" {
+    const io = testing.io;
+    var core = Core.init();
+    var device = try DeviceDouble.bind(io, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+    defer device.server.deinit(io);
+    // The double takes Core before replying: it would block until the
+    // request timed out if the handler kept Core during the round trip.
+    device.core = &core;
+    var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(io);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    ctx.core = &core;
+    var url_buf: [64]u8 = undefined;
+    try ctx.addDevice(.{ .name = "psu", .type_str = "http", .state = "off", .on_url = try device.url(&url_buf, "/on") });
+    const params = try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}");
+    const v = try core.run(io, handleSingleDevice, .{ @as(*anyopaque, @ptrCast(&ctx)), params, a });
+    try testing.expectEqualStrings("on", v.object.get("psu").?.string);
+    try testing.expectEqualStrings("GET /on HTTP/1.1\r\n", device.request_line[0..device.request_len]);
+}
+
+test "handleSingleDevice: a failed device request sets error and fails" {
+    const io = testing.io;
+    var device = try DeviceDouble.bind(io, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    defer device.server.deinit(io);
+    var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(io);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    var url_buf: [64]u8 = undefined;
+    try ctx.addDevice(.{ .name = "psu", .type_str = "http", .state = "off", .on_url = try device.url(&url_buf, "/on") });
+    const params = try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}");
+    try testing.expectError(error.DeviceRequestFailed, handleSingleDevice(@ptrCast(&ctx), params, a));
+    try testing.expectEqualStrings("error", ctx.findDevice("psu").?.state);
+}
+
+test "handleSingleDevice: shelly status reads ison" {
+    const io = testing.io;
+    var device = try DeviceDouble.bind(io, "HTTP/1.1 200 OK\r\nContent-Length: 47\r\nConnection: close\r\n\r\n{\"ison\":true,\"has_timer\":false,\"source\":\"http\"}");
+    defer device.server.deinit(io);
+    var serving = try io.concurrent(DeviceDouble.serveOne, .{&device});
+    defer serving.cancel(io);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    var url_buf: [64]u8 = undefined;
+    try ctx.addDevice(.{ .name = "relay", .type_str = "shelly", .state = "off", .status_url = try device.url(&url_buf, "/relay/0") });
+    const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"relay\"}"), a);
+    try testing.expectEqualStrings("on", v.object.get("relay").?.string);
+}
+
+test "parseStatus: shelly ison, tasmota POWER keys, generic on/off" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(@as(?bool, true), parseStatus(a, "shelly", "{\"ison\":true,\"timer_remaining\":0}"));
+    try testing.expectEqual(@as(?bool, false), parseStatus(a, "shelly", "{\"ison\":false}"));
+    try testing.expectEqual(@as(?bool, null), parseStatus(a, "shelly", "{\"ison\":\"on\"}"));
+    try testing.expectEqual(@as(?bool, true), parseStatus(a, "tasmota", "{\"POWER2\":\"ON\"}"));
+    try testing.expectEqual(@as(?bool, false), parseStatus(a, "tasmota", "{\"POWER\":\"off\"}"));
+    try testing.expectEqual(@as(?bool, null), parseStatus(a, "tasmota", "{\"Power\":\"ON\"}"));
+    try testing.expectEqual(@as(?bool, null), parseStatus(a, "tasmota", "not json"));
+    try testing.expectEqual(@as(?bool, true), parseStatus(a, "http", "{\"state\":\"on\"}"));
+    try testing.expectEqual(@as(?bool, null), parseStatus(a, "http", "{\"on\":\"off\"}"));
+}
+
+test "fuzz parseStatus: arbitrary bodies never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var body: [32]u8 = undefined;
+            smith.bytesWithHash(&body, 0);
+            const types = [_][]const u8{ "shelly", "tasmota", "http" };
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            _ = parseStatus(arena.allocator(), types[smith.valueRangeLessThanWithHash(u8, 0, types.len, 1)], &body);
+        }
+    }.run, .{});
+}
+
+test "handleOn: an empty device name is reported, not indexed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(a);
+    defer ctx.deinit();
+    const v = try handleOn(@ptrCast(&ctx), try objParams(a, "{\"\":null}"), a);
+    try testing.expectEqualStrings("device_not_found", v.object.get("").?.string);
+}
+
 // ---- handleDevices ----
 
 test "handleDevices: empty list when no devices configured" {
@@ -686,7 +813,7 @@ test "handleDevices: returns device info shape for configured device" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("printer_psu", "gpio", "off", false);
+    try ctx.addDevice(.{ .name = "printer_psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
     const v = try handleDevices(@ptrCast(&ctx), .null, a);
     const arr = v.object.get("devices").?.array;
     try testing.expectEqual(@as(usize, 1), arr.items.len);
@@ -715,7 +842,7 @@ test "handleSingleDevice: GET returns current status" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
     const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\"}"), a);
     try testing.expectEqualStrings("off", v.object.get("psu").?.string);
 }
@@ -728,7 +855,7 @@ test "handleSingleDevice: POST action=on changes state" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
     const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("psu").?.string);
     // State persisted.
@@ -741,7 +868,7 @@ test "handleSingleDevice: POST action=toggle flips state" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
     const v1 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v1.object.get("psu").?.string);
     const v2 = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"toggle\",\"_method\":\"POST\"}"), a);
@@ -754,7 +881,7 @@ test "handleSingleDevice: POST action=invalid returns InvalidParams" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
     try testing.expectError(error.InvalidParams, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"banana\",\"_method\":\"POST\"}"), a));
 }
 
@@ -764,8 +891,9 @@ test "handleSingleDevice: locked_while_printing blocks mutating actions while pr
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
-    ctx.setPrintingActive(true);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = true }); // locked_while_printing=true
+    ctx.printing_check = alwaysPrinting;
+    ctx.printing_ctx = &ctx;
 
     try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a));
     try testing.expectError(error.PrinterLocked, handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"off\",\"_method\":\"POST\"}"), a));
@@ -783,7 +911,7 @@ test "handleSingleDevice: locked_while_printing allows operations when not print
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = true }); // locked_while_printing=true
     // printing_active defaults to false — lock not enforced.
     const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"psu\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("psu").?.string);
@@ -795,8 +923,9 @@ test "handleSingleDevice: unlocked device unaffected by printing_active" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("fan", "gpio", "off", false); // locked_while_printing=false
-    ctx.setPrintingActive(true);
+    try ctx.addDevice(.{ .name = "fan", .type_str = "gpio", .state = "off", .locked_while_printing = false }); // locked_while_printing=false
+    ctx.printing_check = alwaysPrinting;
+    ctx.printing_ctx = &ctx;
     const v = try handleSingleDevice(@ptrCast(&ctx), try objParams(a, "{\"device\":\"fan\",\"action\":\"on\",\"_method\":\"POST\"}"), a);
     try testing.expectEqualStrings("on", v.object.get("fan").?.string);
 }
@@ -809,7 +938,7 @@ test "handleOn: turns on named device" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", false);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
     const v = try handleOn(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
     try testing.expectEqualStrings("on", v.object.get("psu").?.string);
 }
@@ -820,7 +949,7 @@ test "handleOff: turns off named device" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "on", false);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "on", .locked_while_printing = false });
     const v = try handleOff(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
     try testing.expectEqualStrings("off", v.object.get("psu").?.string);
 }
@@ -851,8 +980,9 @@ test "batch handlers: locked_while_printing blocks on/off but not status" {
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
-    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
-    ctx.setPrintingActive(true);
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = true }); // locked_while_printing=true
+    ctx.printing_check = alwaysPrinting;
+    ctx.printing_ctx = &ctx;
 
     // Batch handlers catch errors from processRequest and return "error".
     const v_on = try handleOn(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
@@ -892,7 +1022,7 @@ test "fuzz_single_device: arbitrary params never crash handleSingleDevice" {
             const a = arena.allocator();
             var ctx = PowerCtx.init(a, null);
             defer ctx.deinit();
-            ctx.addDevice("psu", "gpio", "off", false) catch {};
+            ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false }) catch {};
 
             const alphabet = "abcdefghijklmnopqrstuvwxyz_";
             var name_buf: [16]u8 = undefined;
@@ -919,8 +1049,8 @@ test "fuzz_batch: arbitrary batch params never crash handleOn/Off/Status" {
             const a = arena.allocator();
             var ctx = PowerCtx.init(a, null);
             defer ctx.deinit();
-            ctx.addDevice("psu", "gpio", "off", false) catch {};
-            ctx.addDevice("fan", "gpio", "on", true) catch {};
+            ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false }) catch {};
+            ctx.addDevice(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = true }) catch {};
 
             // Alternate between known and unknown device names.
             const names = [_][]const u8{ "psu", "fan", "unknown", "" };
@@ -944,8 +1074,8 @@ test "fuzz_handleDevices: arbitrary params never crash" {
             const a = arena.allocator();
             var ctx = PowerCtx.init(a, null);
             defer ctx.deinit();
-            ctx.addDevice("psu", "gpio", "off", false) catch {};
-            ctx.addDevice("fan", "gpio", "on", true) catch {};
+            ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false }) catch {};
+            ctx.addDevice(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = true }) catch {};
             _ = handleDevices(@ptrCast(&ctx), .null, a) catch {};
         }
     }.run, .{});
@@ -972,43 +1102,26 @@ test "registerPower: wires expected routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/machine/device_power/device") != null);
 }
 
-// ---- addDeviceFull + new device fields ----
+// ---- addDevice + new device fields ----
 
-test "addDeviceFull: accepts full Device opts" {
+test "addDevice: accepts full Device opts" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.addDeviceFull(.{
+    try ctx.addDevice(.{
         .name = "printer",
         .type_str = "gpio",
         .state = "off",
         .locked_while_printing = true,
-        .is_shutdown = false,
-        .off_when_shutdown = true,
-        .off_when_shutdown_delay = 1.5,
-        .on_when_queued = true,
-        .klipper_restart = true,
-        .restart_delay = 2.0,
-        .bound_services = "klipper,moonraker",
         .initial_state = "on",
-        .restrict_actions = true,
-        .timer = 30.0,
     });
 
     const dev = ctx.findDevice("printer").?;
     try testing.expectEqual(true, dev.locked_while_printing);
-    try testing.expectEqual(true, dev.off_when_shutdown);
-    try testing.expectEqual(1.5, dev.off_when_shutdown_delay);
-    try testing.expectEqual(true, dev.on_when_queued);
-    try testing.expectEqual(true, dev.klipper_restart);
-    try testing.expectEqual(2.0, dev.restart_delay);
-    try testing.expectEqualStrings("klipper,moonraker", dev.bound_services.?);
     try testing.expectEqualStrings("on", dev.initial_state.?);
-    try testing.expectEqual(true, dev.restrict_actions);
-    try testing.expectEqual(30.0, dev.timer);
 }
 
 test "applyInitialStates: drives configured devices to their initial_state" {
@@ -1018,9 +1131,9 @@ test "applyInitialStates: drives configured devices to their initial_state" {
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.addDeviceFull(.{ .name = "lamp", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .initial_state = "on" });
-    try ctx.addDeviceFull(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .initial_state = "off" });
-    try ctx.addDeviceFull(.{ .name = "keep", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false }); // no initial_state
+    try ctx.addDevice(.{ .name = "lamp", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .initial_state = "on" });
+    try ctx.addDevice(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .initial_state = "off" });
+    try ctx.addDevice(.{ .name = "keep", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false }); // no initial_state
 
     ctx.applyInitialStates();
     try testing.expectEqualStrings("on", ctx.findDevice("lamp").?.state);
@@ -1028,14 +1141,14 @@ test "applyInitialStates: drives configured devices to their initial_state" {
     try testing.expectEqualStrings("off", ctx.findDevice("keep").?.state); // untouched
 }
 
-test "addDeviceFull: optional fields default to null/false" {
+test "addDevice: optional fields default to null/false" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.addDeviceFull(.{
+    try ctx.addDevice(.{
         .name = "simple",
         .type_str = "gpio",
         .state = "off",
@@ -1044,23 +1157,22 @@ test "addDeviceFull: optional fields default to null/false" {
     });
 
     const dev = ctx.findDevice("simple").?;
-    try testing.expectEqual(false, dev.off_when_shutdown);
-    try testing.expectEqual(false, dev.on_when_queued);
-    try testing.expectEqual(null, dev.bound_services);
+    try testing.expectEqual(false, dev.is_shutdown);
+    try testing.expectEqual(null, dev.gpio_pin);
     try testing.expectEqual(null, dev.initial_state);
     try testing.expectEqual(null, dev.on_url);
     try testing.expectEqual(null, dev.off_url);
     try testing.expectEqual(null, dev.status_url);
 }
 
-test "addDeviceFull: http device with URLs" {
+test "addDevice: http device with URLs" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var ctx = testCtx(a);
     defer ctx.deinit();
 
-    try ctx.addDeviceFull(.{
+    try ctx.addDevice(.{
         .name = "wled",
         .type_str = "http",
         .state = "off",
@@ -1076,148 +1188,6 @@ test "addDeviceFull: http device with URLs" {
     try testing.expectEqualStrings("http://10.0.0.1/on", dev.on_url.?);
     try testing.expectEqualStrings("http://10.0.0.1/off", dev.off_url.?);
     try testing.expectEqualStrings("http://10.0.0.1/status", dev.status_url.?);
-}
-
-// ---- handleKlippyShutdown ----
-
-test "handleKlippyShutdown: powers off devices with off_when_shutdown" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addDeviceFull(.{ .name = "psu", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .off_when_shutdown = true });
-    try ctx.addDeviceFull(.{ .name = "fan", .type_str = "gpio", .state = "on", .locked_while_printing = false, .is_shutdown = false, .off_when_shutdown = false });
-
-    ctx.handleKlippyShutdown(a);
-
-    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
-    try testing.expectEqual(true, ctx.findDevice("psu").?.is_shutdown);
-    try testing.expectEqualStrings("on", ctx.findDevice("fan").?.state);
-}
-
-// ---- handleJobQueued ----
-
-test "handleJobQueued: powers on devices with on_when_queued" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addDeviceFull(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .on_when_queued = true });
-    try ctx.addDeviceFull(.{ .name = "fan", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .on_when_queued = false });
-
-    ctx.handleJobQueued(a);
-
-    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
-    try testing.expectEqualStrings("off", ctx.findDevice("fan").?.state);
-}
-
-// ---- setDevicePower (remote method) ----
-
-test "setDevicePower: changes state" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addDevice("psu", "gpio", "off", false);
-    try ctx.setDevicePower("psu", "on", false, a);
-    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
-}
-
-test "setDevicePower: accepts true/false strings" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addDevice("psu", "gpio", "off", false);
-    try ctx.setDevicePower("psu", "true", false, a);
-    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
-    try ctx.setDevicePower("psu", "false", false, a);
-    try testing.expectEqualStrings("off", ctx.findDevice("psu").?.state);
-}
-
-test "setDevicePower: force bypasses printing lock" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try ctx.addDevice("psu", "gpio", "off", true); // locked_while_printing=true
-    ctx.setPrintingActive(true);
-
-    // Without force — would fail through normal path.
-    try testing.expectError(error.PrinterLocked, ctx.setDevicePower("psu", "on", false, a));
-    // With force — bypasses the lock.
-    try ctx.setDevicePower("psu", "on", true, a);
-    try testing.expectEqualStrings("on", ctx.findDevice("psu").?.state);
-}
-
-test "setDevicePower: unknown device returns NotFound" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var ctx = testCtx(a);
-    defer ctx.deinit();
-
-    try testing.expectError(error.NotFound, ctx.setDevicePower("ghost", "on", false, a));
-}
-
-// ---- fuzz: new features ----
-
-test "fuzz_setDevicePower: never crashes on arbitrary device/state" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [32]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = PowerCtx.init(a, null);
-            defer ctx.deinit();
-            ctx.addDevice("psu", "gpio", "off", false) catch {};
-
-            const states = [_][]const u8{ "on", "off", "toggle", "true", "false", "status", "" };
-            const state = states[buf[0] % states.len];
-            const force = buf[1] % 2 == 0;
-            _ = ctx.setDevicePower("psu", state, force, a) catch {};
-        }
-    }.run, .{});
-}
-
-test "fuzz_handleKlippyShutdown: never crashes" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var buf: [32]u8 = undefined;
-            smith.bytesWithHash(&buf, 0);
-            var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
-            defer arena.deinit();
-            const a = arena.allocator();
-            var ctx = PowerCtx.init(a, null);
-            defer ctx.deinit();
-
-            const count = buf[0] % 10;
-            for (0..count) |i| {
-                const name = try std.fmt.allocPrint(a, "dev{d}", .{i});
-                ctx.addDeviceFull(.{
-                    .name = name,
-                    .type_str = "gpio",
-                    .state = if (buf[1 + i] % 2 == 0) "on" else "off",
-                    .locked_while_printing = false,
-                    .is_shutdown = false,
-                    .off_when_shutdown = buf[1 + i] % 3 == 0,
-                }) catch continue;
-            }
-            ctx.handleKlippyShutdown(a);
-        }
-    }.run, .{});
 }
 
 // --- Fuzz tests for internal functions ---
@@ -1261,7 +1231,7 @@ test "fuzz processRequest: never panics, handles all action states" {
             defer ctx.deinit();
 
             const name = try std.fmt.allocPrint(a, "d_{d}", .{buf[0] % 16});
-            ctx.addDevice(name, "gpio", if (buf[1] % 2 == 0) "on" else "off", false) catch return;
+            ctx.addDevice(.{ .name = name, .type_str = "gpio", .state = if (buf[1] % 2 == 0) "on" else "off", .locked_while_printing = false }) catch return;
 
             const dev = ctx.findDevice(name) orelse return;
             const actions = [_][]const u8{ "on", "off", "toggle", "status", "invalid" };
@@ -1297,7 +1267,7 @@ test "fuzz addDevice/findDevice: round-trip, handles duplicates" {
             const state = if (buf[2] % 2 == 0) "on" else "off";
 
             // Adding same name twice is an error
-            ctx.addDevice(name, t, state, buf[3] % 2 == 0) catch {};
+            ctx.addDevice(.{ .name = name, .type_str = t, .state = state, .locked_while_printing = buf[3] % 2 == 0 }) catch {};
 
             // Should be findable
             const found = ctx.findDevice(name);
@@ -1327,14 +1297,17 @@ test "fuzz checkPrintingLock: correct gating behaviour" {
             };
 
             // No printing = always allowed
-            ctx.setPrintingActive(false);
+            ctx.printing_check = null;
             try ctx.checkPrintingLock(&dev);
 
             // Printing active, only locked if locked_while_printing
-            ctx.setPrintingActive(true);
+            ctx.printing_check = alwaysPrinting;
+            ctx.printing_ctx = &ctx;
             const result = ctx.checkPrintingLock(&dev);
             if (val) {
                 try testing.expectError(error.PrinterLocked, result);
+            } else {
+                try result;
             }
         }
     }.run, .{});
@@ -1351,7 +1324,7 @@ test "fuzz setState: never panics, updates correctly" {
             var ctx = PowerCtx.init(a, null);
             defer ctx.deinit();
 
-            ctx.addDevice("d", "gpio", "off", false) catch return;
+            ctx.addDevice(.{ .name = "d", .type_str = "gpio", .state = "off", .locked_while_printing = false }) catch return;
             const new_state = if (buf[0] % 2 == 0) "on" else "off";
             ctx.setState("d", new_state) catch return;
             try testing.expectEqualStrings(new_state, ctx.findDevice("d").?.state);
@@ -1394,16 +1367,16 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
     ctx.gpio_root = root;
 
     // Active-high gpio device: on → 1, off → 0.
-    try ctx.addDeviceFull(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .gpio_pin = 23 });
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false, .gpio_pin = 23 });
     const dev = ctx.findDevice("psu").?;
 
-    ctx.driveGpio(dev, true);
+    try ctx.driveGpio(dev, true);
     {
         const v = try readVal(io, tmp.dir);
         defer testing.allocator.free(v);
         try testing.expectEqualStrings("1", v);
     }
-    ctx.driveGpio(dev, false);
+    try ctx.driveGpio(dev, false);
     {
         const v = try readVal(io, tmp.dir);
         defer testing.allocator.free(v);
@@ -1412,7 +1385,7 @@ test "driveGpio: drives sysfs line on/off, honouring active_low" {
 
     // Active-low: on → physical 0.
     dev.gpio_active_low = true;
-    ctx.driveGpio(dev, true);
+    try ctx.driveGpio(dev, true);
     {
         const v = try readVal(io, tmp.dir);
         defer testing.allocator.free(v);
@@ -1424,8 +1397,8 @@ test "driveGpio: no-op without pin or io (no crash)" {
     var ctx = PowerCtx.init(testing.allocator, null);
     defer ctx.deinit();
     // No io, no pin → must not crash.
-    try ctx.addDeviceFull(.{ .name = "d", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false });
-    ctx.driveGpio(ctx.findDevice("d").?, true);
+    try ctx.addDevice(.{ .name = "d", .type_str = "gpio", .state = "off", .locked_while_printing = false, .is_shutdown = false });
+    try ctx.driveGpio(ctx.findDevice("d").?, true);
 }
 
 test "power devices preserve ownership on replacement and allocation failure" {
@@ -1439,14 +1412,13 @@ test "power devices preserve ownership on replacement and allocation failure" {
                 .state = "off",
                 .locked_while_printing = false,
                 .is_shutdown = false,
-                .bound_services = "service",
                 .initial_state = "off",
                 .on_url = "on",
                 .off_url = "off",
                 .status_url = "status",
             };
-            try ctx.addDeviceFull(device);
-            try ctx.addDeviceFull(ctx.findDevice("test").?.*);
+            try ctx.addDevice(device);
+            try ctx.addDevice(ctx.findDevice("test").?.*);
             try ctx.setState("test", ctx.findDevice("test").?.state);
             try std.testing.expectEqualStrings("off", ctx.findDevice("test").?.state);
         }

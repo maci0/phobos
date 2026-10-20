@@ -745,7 +745,7 @@ test "WS: power device action=on emits notify_power_changed" {
     defer ts.stop();
 
     // Add a device — no config loading in tests.
-    ts.app.power_ctx.addDevice("test_psu", "gpio", "off", false) catch unreachable;
+    try ts.app.power_ctx.addDevice(.{ .name = "test_psu", .type_str = "gpio", .state = "off" });
 
     var c = try connect(ts, alloc);
     defer c.close();

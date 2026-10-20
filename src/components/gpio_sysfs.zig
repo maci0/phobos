@@ -1,4 +1,4 @@
-//! Minimal Linux sysfs GPIO driver (`/sys/class/gpio`).
+//! Minimal Linux sysfs GPIO output driver (`/sys/class/gpio`).
 //!
 //! Used by the power component to drive `type: gpio` devices on the target
 //! board (Cortex-A7). sysfs GPIO is the legacy-but-universally-available
@@ -7,11 +7,40 @@
 //!
 //! `root` is overridable so the driver can be exercised against a temporary
 //! directory in tests without touching real hardware. All filesystem access
-//! goes through `std.Io.Dir` (no raw syscalls).
+//! goes through `std.Io.Dir` (no raw syscalls); paths are formatted into
+//! `Dir.max_path_bytes` stack buffers.
 
 const std = @import("std");
 const Dir = std.Io.Dir;
 const Io = std.Io;
+
+/// A parsed Klipper-style pin: sysfs line number + active-low inversion.
+pub const ParsedPin = struct { line: u32, inverted: bool };
+
+/// Parse a Klipper pin spec into a sysfs line + inversion. Handles a leading
+/// "!" (active-low) and "^"/"~" (pull-up/down, irrelevant to an output), an
+/// optional "gpiochipN/" chip prefix, a "gpio" prefix, and a bare or trailing
+/// number. Returns null when no line number can be extracted.
+pub fn parsePin(spec: []const u8) ?ParsedPin {
+    var s = std.mem.trim(u8, spec, " \t");
+    var inverted = false;
+    // Strip modifier prefixes in any order.
+    while (s.len > 0 and (s[0] == '!' or s[0] == '^' or s[0] == '~')) {
+        if (s[0] == '!') inverted = true;
+        s = s[1..];
+    }
+    // Drop a "gpiochipN/" chip prefix.
+    if (std.mem.indexOfScalar(u8, s, '/')) |slash| s = s[slash + 1 ..];
+    // Drop a leading "gpio" token.
+    if (std.mem.startsWith(u8, s, "gpio")) s = s["gpio".len..];
+    // Take the trailing run of digits.
+    var i: usize = s.len;
+    while (i > 0 and std.ascii.isDigit(s[i - 1])) i -= 1;
+    const digits = s[i..];
+    if (digits.len == 0) return null;
+    const line = std.fmt.parseInt(u32, digits, 10) catch return null;
+    return .{ .line = line, .inverted = inverted };
+}
 
 pub const SysfsGpio = struct {
     io: Io,
@@ -19,53 +48,22 @@ pub const SysfsGpio = struct {
     /// at a temp dir holding a pre-created `gpio<pin>/{direction,value}`.
     root: []const u8 = "/sys/class/gpio",
 
-    fn writePath(self: SysfsGpio, alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype, data: []const u8) !void {
-        const path = try std.fmt.allocPrint(alloc, fmt, args);
-        defer alloc.free(path);
+    fn writePath(self: SysfsGpio, comptime fmt: []const u8, args: anytype, data: []const u8) !void {
+        var buf: [Dir.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&buf, fmt, args);
         try Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = data });
     }
 
-    /// Export the pin if not already exported. Best-effort: a kernel returns
-    /// EBUSY (surfacing as a write error) when the pin is already exported,
-    /// which is not an error condition for us.
-    pub fn exportPin(self: SysfsGpio, alloc: std.mem.Allocator, pin: u32) void {
+    /// Drive `pin` to the given physical level: export (best-effort: the kernel
+    /// rejects an already exported pin with EBUSY), set the direction to output,
+    /// and write the value. `physical_high` is the level placed on the line; the
+    /// caller applies any active-low inversion.
+    pub fn setValue(self: SysfsGpio, pin: u32, physical_high: bool) !void {
         var buf: [16]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{pin}) catch return;
-        self.writePath(alloc, "{s}/export", .{self.root}, s) catch {};
-    }
-
-    /// Release the pin. Best-effort.
-    pub fn unexportPin(self: SysfsGpio, alloc: std.mem.Allocator, pin: u32) void {
-        var buf: [16]u8 = undefined;
-        const s = std.fmt.bufPrint(&buf, "{d}", .{pin}) catch return;
-        self.writePath(alloc, "{s}/unexport", .{self.root}, s) catch {};
-    }
-
-    /// Drive `pin` to the given physical level: export (best-effort), set the
-    /// direction to output, and write the value. `physical_high` is the level
-    /// placed on the line — the caller applies any active-low inversion.
-    pub fn setValue(self: SysfsGpio, alloc: std.mem.Allocator, pin: u32, physical_high: bool) !void {
-        self.exportPin(alloc, pin);
-        try self.writePath(alloc, "{s}/gpio{d}/direction", .{ self.root, pin }, "out");
-        try self.writePath(alloc, "{s}/gpio{d}/value", .{ self.root, pin }, if (physical_high) "1" else "0");
-    }
-
-    /// Read the physical level of `pin` (export + direction=in best-effort first).
-    /// Returns 1 if the value file's first byte is '1', else 0. Errors if the pin
-    /// is not exported / value file is missing.
-    pub fn readValue(self: SysfsGpio, alloc: std.mem.Allocator, pin: u32) !u1 {
-        self.exportPin(alloc, pin);
-        // Direction=in is best-effort: some pins are input-only / already set.
-        self.writePath(alloc, "{s}/gpio{d}/direction", .{ self.root, pin }, "in") catch {};
-        const path = try std.fmt.allocPrint(alloc, "{s}/gpio{d}/value", .{ self.root, pin });
-        defer alloc.free(path);
-        const f = try Dir.cwd().openFile(self.io, path, .{});
-        defer f.close(self.io);
-        var buf: [8]u8 = undefined;
-        var r = f.reader(self.io, &.{});
-        const n = try r.interface.readSliceShort(&buf);
-        if (n == 0) return error.EmptyValue;
-        return if (buf[0] == '1') 1 else 0;
+        const number = try std.fmt.bufPrint(&buf, "{d}", .{pin});
+        self.writePath("{s}/export", .{self.root}, number) catch {};
+        try self.writePath("{s}/gpio{d}/direction", .{ self.root, pin }, "out");
+        try self.writePath("{s}/gpio{d}/value", .{ self.root, pin }, if (physical_high) "1" else "0");
     }
 };
 
@@ -78,9 +76,34 @@ const testing = std.testing;
 fn readSmall(io: Io, dir: Dir, path: []const u8, buf: []u8) ![]u8 {
     const f = try dir.openFile(io, path, .{});
     defer f.close(io);
-    var r = f.reader(io, &.{});
-    const n = try r.interface.readSliceShort(buf);
-    return buf[0..n];
+    return buf[0..try f.readStreaming(io, &.{buf})];
+}
+
+test "parsePin: gpio prefixes, chip prefix, inversion, bare number" {
+    try testing.expectEqual(@as(u32, 26), parsePin("gpio26").?.line);
+    try testing.expectEqual(false, parsePin("gpio26").?.inverted);
+    try testing.expectEqual(@as(u32, 27), parsePin("!gpio27").?.line);
+    try testing.expectEqual(true, parsePin("!gpio27").?.inverted);
+    try testing.expectEqual(@as(u32, 5), parsePin("^~gpio5").?.line); // pull modifiers ignored
+    try testing.expectEqual(@as(u32, 13), parsePin("gpiochip0/gpio13").?.line);
+    try testing.expectEqual(@as(u32, 7), parsePin("7").?.line); // bare number
+    try testing.expectEqual(@as(u32, 4), parsePin("!4").?.line);
+    // No trailing digits → unparseable.
+    try testing.expect(parsePin("") == null);
+    try testing.expect(parsePin("gpio") == null);
+    try testing.expect(parsePin("abc") == null);
+    try testing.expect(parsePin("gpio99999999999") == null); // overflows u32
+}
+
+test "fuzz parsePin: arbitrary specs never crash" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [24]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const len = smith.valueRangeAtMostWithHash(u8, 0, buf.len, 1);
+            _ = parsePin(buf[0..len]);
+        }
+    }.run, .{});
 }
 
 test "SysfsGpio.setValue: writes direction=out and value high/low" {
@@ -99,13 +122,13 @@ test "SysfsGpio.setValue: writes direction=out and value high/low" {
 
     const gpio = SysfsGpio{ .io = io, .root = root };
 
-    try gpio.setValue(testing.allocator, 17, true);
+    try gpio.setValue(17, true);
     var buf: [8]u8 = undefined;
     try testing.expectEqualStrings("out", try readSmall(io, tmp.dir, "gpio17/direction", &buf));
     var buf2: [8]u8 = undefined;
     try testing.expectEqualStrings("1", try readSmall(io, tmp.dir, "gpio17/value", &buf2));
 
-    try gpio.setValue(testing.allocator, 17, false);
+    try gpio.setValue(17, false);
     var buf3: [8]u8 = undefined;
     try testing.expectEqualStrings("0", try readSmall(io, tmp.dir, "gpio17/value", &buf3));
 
@@ -125,7 +148,13 @@ test "SysfsGpio.setValue: missing pin dir errors (no crash)" {
 
     const gpio = SysfsGpio{ .io = io, .root = root };
     // No gpio99 dir → writing direction fails; must return an error, not crash.
-    try testing.expectError(error.FileNotFound, gpio.setValue(testing.allocator, 99, true));
+    try testing.expectError(error.FileNotFound, gpio.setValue(99, true));
+}
+
+test "SysfsGpio.setValue: a root longer than a path errors without allocating" {
+    const long_root: [Dir.max_path_bytes]u8 = @splat('x');
+    const gpio = SysfsGpio{ .io = testing.io, .root = &long_root };
+    try testing.expectError(error.NoSpaceLeft, gpio.setValue(1, true));
 }
 
 test "fuzz SysfsGpio.setValue: arbitrary pins never crash" {
@@ -136,28 +165,14 @@ test "fuzz SysfsGpio.setValue: arbitrary pins never crash" {
             const io = threaded.io();
             var buf: [5]u8 = undefined;
             smith.bytesWithHash(&buf, 0);
-            const pin = std.mem.readInt(u32, buf[0..4], .little) % 1024;
+            const pin = std.mem.readInt(u32, buf[0..4], .little);
             var tmp = testing.tmpDir(.{});
             defer tmp.cleanup();
             var root_buf: [64]u8 = undefined;
             const root = try std.fmt.bufPrint(&root_buf, "{s}/{s}/nonexistent", .{ testing.TmpDir.parent_dir_path, &tmp.sub_path });
             const gpio = SysfsGpio{ .io = io, .root = root };
             // Nonexistent root → always errors, never crashes.
-            gpio.setValue(testing.allocator, pin, buf[4] & 1 == 1) catch {};
+            try testing.expectError(error.FileNotFound, gpio.setValue(pin, buf[4] & 1 == 1));
         }
     }.run, .{});
-}
-
-test "GPIO reads keep the leading bytes when the file exceeds the read buffer" {
-    const io = testing.io;
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(io, "gpio17", .default_dir);
-    try tmp.dir.writeFile(io, .{ .sub_path = "gpio17/value", .data = "1000000000000000" });
-    const root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
-    defer testing.allocator.free(root);
-    const gpio: SysfsGpio = .{ .io = io, .root = root };
-    try testing.expectEqual(@as(u1, 1), try gpio.readValue(testing.allocator, 17));
-    var bytes: [4]u8 = undefined;
-    try testing.expectEqualStrings("1000", try readSmall(io, tmp.dir, "gpio17/value", &bytes));
 }
