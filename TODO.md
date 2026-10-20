@@ -45,7 +45,8 @@ socket is absent. Test totals belong with the verified commit in
 
 Release notes: [v0.1.1](docs/releases/v0.1.1.md),
 [v0.1.2](docs/releases/v0.1.2.md), [v0.1.3](docs/releases/v0.1.3.md),
-[v0.1.4](docs/releases/v0.1.4.md). Historical footprint and load measurements live
+[v0.1.4](docs/releases/v0.1.4.md), [v0.1.5](docs/releases/v0.1.5.md).
+Historical footprint and load measurements live
 in [MEMORY.md](docs/MEMORY.md) and [PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Implemented review work

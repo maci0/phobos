@@ -653,3 +653,44 @@ installed executable both report package 0.1.2 but have different hashes; neithe
 was changed here and restart behavior was not tested. `/tmp` still had 3.3 MiB
 free. No production replacement, restart, motion, heating, print start, power
 action, real update, live database write, push or tag was performed.
+
+## 2026-10-21: package v0.1.5
+
+Requested by the user: cut a new release after the printer checks. Version
+`0.1.5` follows the existing annotated `v0.1.x` tags and the repository's existing
+GitHub release convention. `build.zig.zon`, README and TODO point to the new
+version; `docs/releases/v0.1.5.md` describes the review and integration changes
+through `df89cf4`, their checks and retained limits. Packaging changed no source
+under `src/` or the build graph. The package version changes generated CLI
+metadata; the reported API and implementation identity remain unchanged.
+
+The bumped version passed the complete standalone Debug suite: 1717 passed,
+1 skipped, 0 failed; 325 bounded fuzz harnesses. The artifact was built with
+`zig build test-artifact -Doptimize=Debug` and run with
+`--cache-dir=./.zig-cache`, without a runtime filter. The existing skip requires
+the separate host real-Klippy fixture. The preceding 11-group real-printer pass
+and cold-start regression are recorded above; the version-bumped artifact was
+not redeployed or rerun on the printer.
+
+Zig 0.17.0 built stripped static musl ReleaseSmall binaries for
+`arm-linux-musleabihf` with `cortex_a7` and `x86_64-linux-musl` with `baseline`.
+The ARM ELF reports Cortex-A7, ARMv7 and hard-float EABI. The native release
+binary reports JSON package version `0.1.5`; its compiled API dump passes
+123/123 endpoints, 130/130 methods and 27/27 notifications. Native Debug was
+rebuilt and restored in `zig-out/bin/phobos`, also reporting `0.1.5`. Formatting
+and diff checks passed. No API documents or unavailable Graphify output were
+regenerated.
+
+Release assets are held in the ignored `.scratch/releases/v0.1.5/assets/`
+directory, with a verified `SHA256SUMS` file:
+
+- `phobos-v0.1.5-arm-linux-musleabihf`, 2583596 bytes:
+  `809436f960a25ba5f2d35e9a5cd15b57901b4a46426eb37e8875d22eb279cd8a`.
+- `phobos-v0.1.5-x86_64-linux-musl`, 2708392 bytes:
+  `c511eab7a693785340b4a46266281e922f6d872ba1833bdcd7b634cce83202e2`.
+
+Remote main was fetched and confirmed to be an ancestor before publication.
+Release publication uses an annotated tag and a normal fast-forward push. No
+printer deployment, restart, control action, live database access or image
+mutation was part of packaging. Optional hardware, current performance and
+production restart behavior retain the verification limits recorded above.

@@ -34,7 +34,7 @@ and Apprise are out of scope.
 
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
 identify their measurement conditions and limits. They do not describe the
-current checkout. The latest release is [v0.1.4](docs/releases/v0.1.4.md).
+current checkout. The latest release is [v0.1.5](docs/releases/v0.1.5.md).
 
 ## Architecture
 
