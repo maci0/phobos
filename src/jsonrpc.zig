@@ -11,8 +11,9 @@
 //! caller's transport -32601 "Method not found for transport <T>"; non-object
 //! params -32602 "Invalid params:"; an `auth_required` method on an
 //! unauthenticated caller -32602 "Unauthorized". Handler errors map through
-//! `errorReply` (404 → -32601, otherwise the HTTP status). Requests without an
-//! id (or with `"id": null`) get no reply on success; errors are still sent.
+//! `errorReply` (404 → -32601, 401 → -32602, otherwise the HTTP status).
+//! Requests without an id (or with `"id": null`) get no reply on success;
+//! errors are still sent.
 const std = @import("std");
 const jv = @import("json/value.zig");
 const Core = @import("server/core.zig").Core;
@@ -64,7 +65,8 @@ pub const ErrorReply = struct {
     status: std.http.Status,
     message: []const u8,
     /// JSON-RPC code: `JsonRPC.execute_method` maps 404 to -32601 and 401 to
-    /// -32602; invalid params are -32602; otherwise the HTTP status.
+    /// -32602; any other ServerError, including a bad argument (400), keeps
+    /// its status. -32602 "Invalid params:" is only for non-object params.
     rpc_code: i64,
 };
 
@@ -82,6 +84,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         // Moonraker ServerError("Klippy Host not connected", 503).
         error.KlippyDisconnected => .{ .service_unavailable, "Klippy Host not connected" },
         error.MqttNotConfigured => .{ .service_unavailable, "MQTT not configured" },
+        error.MqttTimeout => .{ .gateway_timeout, "MQTT Subscribe Timed Out" },
         error.ServiceUnavailable, error.NotReady => .{ .service_unavailable, "Service Unavailable" },
         error.UpdateRefusedPrinting => .{ .service_unavailable, "Update Refused: Klippy is printing" },
         error.PrinterLocked => .{ .service_unavailable, "Printer is busy" },
@@ -98,13 +101,10 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.NoSubscriptionConnection => .{ .bad_request, "No connection associated with subscription request" },
         else => .{ .internal_server_error, "Internal Server Error" },
     };
-    const rpc_code: i64 = switch (err) {
-        error.InvalidParams => -32602,
-        else => switch (status) {
-            .not_found => -32601,
-            .unauthorized => -32602,
-            else => @backingInt(status),
-        },
+    const rpc_code: i64 = switch (status) {
+        .not_found => -32601,
+        .unauthorized => -32602,
+        else => @backingInt(status),
     };
     return .{ .status = status, .message = message, .rpc_code = rpc_code };
 }
@@ -399,7 +399,7 @@ test "echo method returns params as result" {
     try std.testing.expectEqual(@as(i64, 4), obj.get("id").?.integer);
 }
 
-test "handler raising invalid params returns -32602" {
+test "handler raising invalid params returns Moonraker's ServerError code 400" {
     const alloc = std.testing.allocator;
     var d = try makeDispatcher(alloc);
     defer d.deinit();
@@ -413,7 +413,7 @@ test "handler raising invalid params returns -32602" {
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, resp, .{});
     defer parsed.deinit();
     const err_obj = parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, -32602), err_obj.get("code").?.integer);
+    try std.testing.expectEqual(@as(i64, 400), err_obj.get("code").?.integer);
 }
 
 test "notification: handle returns empty slice, handler still ran" {
@@ -608,8 +608,11 @@ test "errorReply maps statuses to Moonraker JSON-RPC codes" {
     try std.testing.expectEqual(std.http.Status.not_found, nf.status);
     try std.testing.expectEqual(@as(i64, -32601), nf.rpc_code);
     try std.testing.expectEqual(@as(i64, -32602), (try errorReply(error.Unauthorized, .null, a)).rpc_code);
-    try std.testing.expectEqual(@as(i64, -32602), (try errorReply(error.InvalidParams, .null, a)).rpc_code);
+    try std.testing.expectEqual(@as(i64, 400), (try errorReply(error.InvalidParams, .null, a)).rpc_code);
     try std.testing.expectEqual(@as(i64, 503), (try errorReply(error.KlippyDisconnected, .null, a)).rpc_code);
+    const mqtt_timeout = try errorReply(error.MqttTimeout, .null, a);
+    try std.testing.expectEqual(@as(i64, 504), mqtt_timeout.rpc_code);
+    try std.testing.expectEqualStrings("MQTT Subscribe Timed Out", mqtt_timeout.message);
     const no_conn = try errorReply(error.NoSubscriptionConnection, .null, a);
     try std.testing.expectEqual(@as(i64, 400), no_conn.rpc_code);
     try std.testing.expectEqualStrings("No connection associated with subscription request", no_conn.message);
