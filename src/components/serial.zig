@@ -45,7 +45,7 @@ pub const Serial = struct {
     }
 
     /// Map a numeric rate to its termios constant. `B0` (hang up) is excluded.
-    fn baudToSpeed(baud: u32) error{UnsupportedBaud}!std.posix.speed_t {
+    pub fn baudToSpeed(baud: u32) error{UnsupportedBaud}!std.posix.speed_t {
         const speeds = comptime std.meta.tags(std.posix.speed_t);
         const rates = comptime blk: {
             @setEvalBranchQuota(10_000);
@@ -63,12 +63,46 @@ pub const Serial = struct {
         try self.file.writeStreamingAll(self.io, bytes);
     }
 
+    /// Cancel and join a stalled write at `timeout`; `bytes` stays borrowed.
+    pub fn writeTimeout(self: *Serial, bytes: []const u8, timeout: Io.Timeout) !void {
+        const Outcome = union(enum) { wrote: anyerror!void, expired: Io.Cancelable!void };
+        var outcomes: [2]Outcome = undefined;
+        var select: Io.Select(Outcome) = .init(self.io, &outcomes);
+        defer select.cancelDiscard();
+        try select.concurrent(.wrote, write, .{ self, bytes });
+        try select.concurrent(.expired, Io.Timeout.sleep, .{ timeout, self.io });
+        switch (try select.await()) {
+            .wrote => |result| try result,
+            .expired => |result| {
+                try result;
+                return error.Timeout;
+            },
+        }
+    }
+
     /// Read up to `buf.len` bytes; returns the count actually read, 0 when the
     /// read timeout expires without data or at end of file.
     pub fn readSome(self: *Serial, buf: []u8) !usize {
         return self.file.readStreaming(self.io, &.{buf}) catch |err| switch (err) {
             error.EndOfStream => 0,
             else => return err,
+        };
+    }
+
+    /// Cancel and join a read at `timeout`; unread bytes remain on the stream.
+    pub fn readSomeTimeout(self: *Serial, buf: []u8, timeout: Io.Timeout) !usize {
+        const Outcome = union(enum) { read: anyerror!usize, expired: Io.Cancelable!void };
+        var outcomes: [2]Outcome = undefined;
+        var select: Io.Select(Outcome) = .init(self.io, &outcomes);
+        defer select.cancelDiscard();
+        try select.concurrent(.read, readSome, .{ self, buf });
+        try select.concurrent(.expired, Io.Timeout.sleep, .{ timeout, self.io });
+        return switch (try select.await()) {
+            .read => |result| try result,
+            .expired => |result| blk: {
+                try result;
+                break :blk error.Timeout;
+            },
         };
     }
 
@@ -177,6 +211,48 @@ test "Serial.readSome advances the stream without losing unread bytes" {
     try testing.expectEqual(@as(usize, 4), try serial.readSome(&bytes));
     try testing.expectEqualStrings("efgh", &bytes);
     try testing.expectEqual(@as(usize, 0), try serial.readSome(&bytes));
+}
+
+test "Serial deadlines cancel silent reads and writes to a stalled pseudo-terminal" {
+    const Pty = @import("../testutil/pty.zig").Pty;
+    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const aio = threaded.io();
+    var pty = try Pty.init(aio);
+    defer pty.deinit();
+    var serial = try Serial.open(aio, pty.path(), 115200);
+    defer serial.close();
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } };
+    var byte: [1]u8 = undefined;
+    try testing.expectError(error.Timeout, serial.readSomeTimeout(&byte, timeout));
+    try pty.master.writeTimeout("a", timeout);
+    try testing.expectEqual(@as(usize, 1), try serial.readSomeTimeout(&byte, timeout));
+    try testing.expectEqualStrings("a", &byte);
+    const payload: [64 * 1024]u8 = @splat('x');
+    try testing.expectError(error.Timeout, serial.writeTimeout(&payload, timeout));
+}
+
+test "fuzz Serial deadlines preserve bounded pseudo-terminal bytes" {
+    const Pty = @import("../testutil/pty.zig").Pty;
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer threaded.deinit();
+            const aio = threaded.io();
+            var pty = try Pty.init(aio);
+            defer pty.deinit();
+            var serial = try Serial.open(aio, pty.path(), 115200);
+            defer serial.close();
+            var expected: [16]u8 = undefined;
+            smith.bytesWithHash(&expected, 0);
+            const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } };
+            try pty.master.writeTimeout(&expected, timeout);
+            var actual: [16]u8 = undefined;
+            var n: usize = 0;
+            while (n < actual.len) n += try serial.readSomeTimeout(actual[n..], timeout);
+            try testing.expectEqualSlices(u8, &expected, &actual);
+        }
+    }.run, .{});
 }
 
 test "Serial.open configures baud and raw 8N1 on a pseudo-terminal" {
