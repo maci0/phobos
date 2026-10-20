@@ -10,9 +10,9 @@
 //!
 //! server.logs.rollover (loghelper.py _handle_log_rollover):
 //!   Optional param: application (str) — "moonraker" or "klipper"
-//!   Response: {"rolled_over": [...], "failed": {}}
-//!   Without real log files, moonraker rollover always fails (File Logging
-//!   Disabled); in phobos we report both as failed (no log file configured).
+//!   Response: {"rolled_over": [...], "failed": {...}}
+//!   phobos has no log file and no Klipper service unit, so each requested
+//!   application fails with Moonraker's text for that case.
 
 const std = @import("std");
 const registry = @import("../server/registry.zig");
@@ -37,53 +37,32 @@ pub fn handleRestart(_: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator)
     return .{ .string = "ok" };
 }
 
-/// POST /server/logs/rollover → {"rolled_over": [...], "failed": {}}
-/// In phobos there is no log file; we report each requested application as
-/// failed with "File Logging Disabled", matching Moonraker's error text.
+/// Moonraker's rollover failure for its own log: phobos keeps no log file.
+const moonraker_rollover_error = "File Logging Disabled";
+/// Moonraker's rollover failure when it has no Klipper service unit
+/// (`KlippyConnection.rollover_log`); phobos never detects one.
+const klipper_rollover_error = "Unable to detect Klipper Service, cannot perform manual rollover";
+
+/// POST /server/logs/rollover → {"rolled_over": [], "failed": {...}}
+/// Every requested application fails with Moonraker's text for its missing
+/// log or service. A present `application` other than "moonraker" or
+/// "klipper" (including null or a number, which Moonraker str()-converts) is
+/// error.InvalidParams.
 pub fn handleLogsRollover(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    const log_apps = [_][]const u8{ "moonraker", "klipper" };
+    const app: ?std.json.Value = if (params == .object) params.object.get("application") else null;
+    const want_moonraker, const want_klipper = if (app) |v| blk: {
+        if (v != .string) return error.InvalidParams;
+        if (std.mem.eql(u8, v.string, "moonraker")) break :blk .{ true, false };
+        if (std.mem.eql(u8, v.string, "klipper")) break :blk .{ false, true };
+        return error.InvalidParams;
+    } else .{ true, true };
 
-    // Determine which apps were requested
-    const requested_app: ?[]const u8 = blk: {
-        switch (params) {
-            .object => |obj| {
-                const v = obj.get("application") orelse break :blk null;
-                switch (v) {
-                    .string => |s| {
-                        // Validate application name matches Moonraker check
-                        var valid = false;
-                        for (log_apps) |app| {
-                            if (std.mem.eql(u8, app, s)) {
-                                valid = true;
-                                break;
-                            }
-                        }
-                        if (!valid) return error.InvalidParams;
-                        break :blk s;
-                    },
-                    .null => break :blk null,
-                    else => break :blk null,
-                }
-            },
-            else => break :blk null,
-        }
-    };
-
-    const rolled_over_arr: std.json.Array = .init(alloc);
     var failed_obj: std.json.ObjectMap = .empty;
-
-    // phobos has no log files; report each as failed
-    const apps_to_process: []const []const u8 = if (requested_app) |app|
-        @as([]const []const u8, &.{app})
-    else
-        &log_apps;
-
-    for (apps_to_process) |app| {
-        try failed_obj.put(alloc, app, .{ .string = "File Logging Disabled" });
-    }
+    if (want_moonraker) try failed_obj.put(alloc, "moonraker", .{ .string = moonraker_rollover_error });
+    if (want_klipper) try failed_obj.put(alloc, "klipper", .{ .string = klipper_rollover_error });
 
     var result: std.json.ObjectMap = .empty;
-    try result.put(alloc, "rolled_over", .{ .array = rolled_over_arr });
+    try result.put(alloc, "rolled_over", .{ .array = .init(alloc) });
     try result.put(alloc, "failed", .{ .object = failed_obj });
     return .{ .object = result };
 }
@@ -140,8 +119,8 @@ test "handleLogsRollover: no param → both apps in failed, none rolled_over" {
     const failed = result.object.get("failed").?.object;
 
     try testing.expectEqual(@as(usize, 0), rolled.items.len);
-    try testing.expect(failed.get("moonraker") != null);
-    try testing.expect(failed.get("klipper") != null);
+    try testing.expectEqualStrings("File Logging Disabled", failed.get("moonraker").?.string);
+    try testing.expectEqualStrings("Unable to detect Klipper Service, cannot perform manual rollover", failed.get("klipper").?.string);
 }
 
 test "handleLogsRollover: application=moonraker → only moonraker in failed" {
@@ -178,8 +157,10 @@ test "handleLogsRollover: unknown application → InvalidParams" {
     const a = arena.allocator();
     var ctx = ServerMiscCtx{};
 
-    const params = try mkParams(a, "{\"application\":\"unknown_app\"}");
-    try testing.expectError(error.InvalidParams, handleLogsRollover(@ptrCast(&ctx), params, a));
+    // Moonraker str()-converts the value, so null and numbers are unknown too.
+    for ([_][]const u8{ "{\"application\":\"unknown_app\"}", "{\"application\":null}", "{\"application\":5}" }) |body| {
+        try testing.expectError(error.InvalidParams, handleLogsRollover(@ptrCast(&ctx), try mkParams(a, body), a));
+    }
 }
 
 test "handleLogsRollover: response has both rolled_over and failed keys" {
