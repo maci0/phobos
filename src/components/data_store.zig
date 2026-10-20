@@ -301,9 +301,9 @@ pub const DataStoreCtx = struct {
         }
     }
 
-    /// Push a gcode response entry (type="response"). Called when Klippy sends
-    /// a gcode response. Currently not wired to a live source (no Klippy),
-    /// but the ring buffer is available for future integration.
+    /// Push a gcode response entry (type="response"). Production does not call
+    /// it yet: klippy_connection.zig emits notify_gcode_response without
+    /// recording it (TODO.md, Known Moonraker gaps).
     pub fn pushGcodeResponse(self: *DataStoreCtx, message: []const u8, time: f64) !void {
         try self.gcode_ring.push(message, time, .response);
     }
@@ -361,13 +361,17 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     var tmp_buf = try alloc.alloc(GcodeEntry, ring.entries.len);
     defer alloc.free(tmp_buf);
 
-    const n: usize = if (getOptInt(params, "count")) |cnt|
-        ring.copyLast(@intCast(@max(cnt, 0)), tmp_buf)
+    const n = ring.copyAll(tmp_buf);
+    // data_store.py returns `list(queue)[-count:]`: 0 keeps every entry and a
+    // negative count drops the oldest |count|. lossyCast clamps i64 counts a
+    // 32-bit usize cannot hold.
+    const first: usize = if (getOptInt(params, "count")) |cnt|
+        if (cnt > 0) n - @min(std.math.lossyCast(usize, cnt), n) else @min(std.math.lossyCast(usize, @abs(cnt)), n)
     else
-        ring.copyAll(tmp_buf);
+        0;
 
     var arr: std.json.Array = .init(alloc);
-    for (tmp_buf[0..n]) |entry| {
+    for (tmp_buf[first..n]) |entry| {
         var obj: std.json.ObjectMap = .empty;
         try obj.put(alloc, "message", .{ .string = entry.message });
         try obj.put(alloc, "time", .{ .float = entry.time });
@@ -682,6 +686,31 @@ test "handleGcodeStore: count param limits entries" {
     try testing.expectEqual(@as(usize, 2), arr.items.len);
     try testing.expectEqualStrings("msg2", arr.items[0].object.get("message").?.string);
     try testing.expectEqualStrings("msg3", arr.items[1].object.get("message").?.string);
+}
+
+test "handleGcodeStore: count follows Python list[-count:] slicing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var ctx = try DataStoreCtx.init(a);
+    defer ctx.deinit();
+    try ctx.pushGcodeResponse("msg1", 1.0);
+    try ctx.pushGcodeResponse("msg2", 2.0);
+    try ctx.pushGcodeResponse("msg3", 3.0);
+
+    const cases = [_]struct { params: []const u8, len: usize, first: []const u8 }{
+        .{ .params = "{\"count\":0}", .len = 3, .first = "msg1" },
+        .{ .params = "{\"count\":-1}", .len = 2, .first = "msg2" },
+        .{ .params = "{\"count\":-9223372036854775808}", .len = 0, .first = "" },
+        .{ .params = "{\"count\":9223372036854775807}", .len = 3, .first = "msg1" },
+    };
+    for (cases) |case| {
+        const result = try handleGcodeStore(@ptrCast(&ctx), try mkParams(a, case.params), a);
+        const arr = result.object.get("gcode_store").?.array;
+        try testing.expectEqual(case.len, arr.items.len);
+        if (case.len > 0) try testing.expectEqualStrings(case.first, arr.items[0].object.get("message").?.string);
+    }
 }
 
 test "handleTempStore: returns empty object (no Klippy)" {

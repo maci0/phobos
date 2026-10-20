@@ -581,6 +581,9 @@ pub const App = struct {
         job_queue_ctx.file_check_ctx = file_ctx;
         job_queue_ctx.printing_check = JobStateCtx.isActiveErased;
         job_queue_ctx.printing_ctx = job_state_ctx;
+        // History jobs report whether their gcode file still exists.
+        history_ctx.file_check = FileCtx.gcodeExistsErased;
+        history_ctx.file_check_ctx = file_ctx;
 
         // --- OctoPrint compatibility context (/api/*) ---
         const octoprint_ctx = try alloc.create(OctoPrintCtx);

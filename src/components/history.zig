@@ -13,10 +13,9 @@
 //! format "<job_id_hex>" (6-char uppercase hex, e.g. "000001").
 //! Totals are persisted under namespace "history_totals" with key "totals".
 //!
-//! NOTE: Without Klippy there are no live jobs. This component operates purely
-//! on stored history. The notify_history_changed notification is emitted when
-//! jobs are added/deleted (no live source in this slice, but the shapes are
-//! faithful to history.py).
+//! `job_state.zig` reports print_stats transitions through `onJobStateChanged`,
+//! which adds and finishes jobs. notify_history_changed is emitted when a job
+//! is added, finished or deleted.
 //!
 //! Job record shape (matches history.py PrinterJob / _prep_requested_job):
 //!   job_id, filename, status, start_time, end_time, print_duration,
@@ -153,9 +152,10 @@ pub const HistoryCtx = struct {
     store: DataStore,
     bus: *NotifyBus,
     io: ?std.Io,
-    /// Current in-progress job_id (numeric), if any. Written by the Klippy reader
-    /// thread (addJob/finishJob, off-Core) and read by Core-locked handlers
-    /// (e.g. reset_totals); guard with cur_job_mutex to avoid a torn read.
+    /// Current in-progress job_id (numeric), if any. Written by addJob/finishJob
+    /// (job-state events under Core; Klippy disconnect/shutdown off Core) and
+    /// read by Core-locked handlers (e.g. reset_totals); guard with
+    /// cur_job_mutex to avoid a torn read.
     current_job_id: ?u64,
     /// Guards `current_job_id`. No-op when io is unset — see getCurrentJobId.
     cur_job_mutex: std.Io.Mutex = .init,
@@ -171,6 +171,15 @@ pub const HistoryCtx = struct {
     aux_fields: std.ArrayList(AuxField) = .empty,
     /// Allocator for aux-field registrations.
     gpa: std.mem.Allocator = std.heap.smp_allocator,
+    /// Does "gcodes/<filename>" exist (file_manager.gcodeExistsErased)? Sets a
+    /// job's `exists` (history.py `_prep_requested_job`); unset reports false.
+    file_check: ?*const fn (*anyopaque, []const u8) bool = null,
+    file_check_ctx: ?*anyopaque = null,
+
+    fn fileExists(self: *const HistoryCtx, filename: []const u8) bool {
+        const f = self.file_check orelse return false;
+        return f(self.file_check_ctx orelse return false, filename);
+    }
 
     pub fn setIo(self: *HistoryCtx, io: std.Io) void {
         self.io = io;
@@ -287,42 +296,47 @@ pub const HistoryCtx = struct {
         for (self.aux_fields.items) |*f| f.total = 0;
     }
 
-    /// Called by JobStateCtx when a job state transition is detected.
-    /// `locked` indicates whether the caller holds the Core lock (and thus
-    /// emitLocked should be used vs emit).
+    /// Called by JobStateCtx (under Core) when a job state transition is
+    /// detected. Store failures are logged: an event has no caller to report to.
     pub fn onJobStateChanged(self: *HistoryCtx, event: anytype, prev_ps: std.json.ObjectMap, new_ps: std.json.ObjectMap) void {
         switch (event) {
             .started => {
                 // Finish any previous in-progress job.
-                if (self.getCurrentJobId() != null) {
-                    self.finishJob("cancelled", prev_ps) catch {};
-                }
-                self.addJob(new_ps) catch {};
+                if (self.getCurrentJobId() != null) self.finishOrWarn("cancelled", prev_ps);
+                self.addJob(new_ps) catch |err|
+                    std.debug.print("phobos: warning: history could not add the started job: {}\n", .{err});
             },
-            .complete => self.finishJob("completed", new_ps) catch {},
-            .@"error" => self.finishJob("error", new_ps) catch {},
-            .cancelled => self.finishJob("cancelled", prev_ps) catch {},
-            .standby => self.finishJob("cancelled", prev_ps) catch {},
+            .complete => self.finishOrWarn("completed", new_ps),
+            .@"error" => self.finishOrWarn("error", new_ps),
+            .cancelled => self.finishOrWarn("cancelled", prev_ps),
+            .standby => self.finishOrWarn("cancelled", prev_ps),
             else => {},
         }
+    }
+
+    /// Finish the current job, logging a failure (the job then stays
+    /// "in_progress" until the next startup marks it interrupted).
+    fn finishOrWarn(self: *HistoryCtx, status: []const u8, ps: std.json.ObjectMap) void {
+        self.finishJob(status, ps) catch |err|
+            std.debug.print("phobos: warning: history could not finish the job as {s}: {}\n", .{ status, err });
     }
 
     /// Called on Klippy shutdown while a job is active.
     /// Finishes the current job with status "klippy_shutdown".
     pub fn handleKlippyShutdown(self: *HistoryCtx, last_ps: std.json.ObjectMap) void {
-        self.finishJob("klippy_shutdown", last_ps) catch {};
+        self.finishOrWarn("klippy_shutdown", last_ps);
     }
 
     /// Called on Klippy disconnect while a job is active.
     /// Finishes the current job with status "klippy_disconnect".
     pub fn handleKlippyDisconnect(self: *HistoryCtx, last_ps: std.json.ObjectMap) void {
-        self.finishJob("klippy_disconnect", last_ps) catch {};
+        self.finishOrWarn("klippy_disconnect", last_ps);
     }
 
     /// Called on server exit while a job is active.
     /// Finishes the current job with status "server_exit".
     pub fn handleServerExit(self: *HistoryCtx, last_ps: std.json.ObjectMap) void {
-        self.finishJob("server_exit", last_ps) catch {};
+        self.finishOrWarn("server_exit", last_ps);
     }
 
     /// On startup, mark any stale "in_progress" jobs as "interrupted".
@@ -348,7 +362,9 @@ pub const HistoryCtx = struct {
                     try updated.put(a, kv.key_ptr.*, kv.value_ptr.*);
                 }
             }
-            try self.store.updateItem(a, ns_history, je.key, .{ .object = updated });
+            // insertItem, not updateItem: a migrated job_history row has no KV
+            // record to update; the KV copy shadows the row.
+            try self.store.insertItem(a, ns_history, je.key, .{ .object = updated });
         }
     }
 
@@ -391,10 +407,11 @@ pub const HistoryCtx = struct {
         self.setCurrentJobId(job_id_u64);
 
         // Update totals.
-        self.incrementTotalJobs(a) catch {};
+        self.incrementTotalJobs(a) catch |err|
+            std.debug.print("phobos: warning: history total_jobs update failed: {}\n", .{err});
 
         // Emit.
-        const prepped = try prepJob(a, .{ .object = job_obj }, job_id_str);
+        const prepped = try prepJob(self, a, .{ .object = job_obj }, job_id_str);
         emitHistoryChanged(self, a, "added", prepped);
     }
 
@@ -412,22 +429,25 @@ pub const HistoryCtx = struct {
         var id_buf: [16]u8 = undefined;
         const job_id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{job_id_u64});
 
-        const stored = try self.store.getItem(a, ns_history, job_id_str);
-        // Record vanished from the store — the id is invalid, so clear it
-        // (a retry could never find the record) and give up on this finish.
-        if (stored == null) {
-            self.setCurrentJobId(null);
-            return;
-        }
+        // A record that vanished or was overwritten with a non-object (the
+        // history namespace is writable through /server/database/item) leaves
+        // nothing to finish; a retry could never succeed, so drop the id.
+        const stored = switch ((try self.store.getItem(a, ns_history, job_id_str)) orelse .null) {
+            .object => |o| o,
+            else => {
+                self.setCurrentJobId(null);
+                return;
+            },
+        };
 
         // Stats guard (matches Moonraker finish_job guard):
         // discard print_stats if they belong to a different job or were reset.
         var p = pstats;
-        const stored_fn = if (stored.?.object.get("filename")) |v| switch (v) {
+        const stored_fn = if (stored.get("filename")) |v| switch (v) {
             .string => |s| s,
             else => "",
         } else "";
-        const stored_td: f64 = switch (stored.?.object.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
+        const stored_td: f64 = switch (stored.get("total_duration") orelse std.json.Value{ .float = 0.0 }) {
             .float => |f| f,
             .integer => |i| @floatFromInt(i),
             else => 0.0,
@@ -446,7 +466,7 @@ pub const HistoryCtx = struct {
         }
 
         var job_obj: std.json.ObjectMap = .empty;
-        if (stored.?.object.get("start_time")) |st| {
+        if (stored.get("start_time")) |st| {
             try job_obj.put(a, "start_time", st);
         } else {
             try job_obj.put(a, "start_time", .{ .float = 0.0 });
@@ -492,10 +512,11 @@ pub const HistoryCtx = struct {
 
         // Update totals: total_time += total_duration, total_print_time += print_duration,
         // total_filament_used += filament_used, longest_job/longest_print = max.
-        self.updateTotalsOnFinish(a, total_duration, print_duration, filament_used) catch {};
+        self.updateTotalsOnFinish(a, total_duration, print_duration, filament_used) catch |err|
+            std.debug.print("phobos: warning: history totals update failed: {}\n", .{err});
 
         // Emit.
-        const prepped = try prepJob(a, .{ .object = job_obj }, job_id_str);
+        const prepped = try prepJob(self, a, .{ .object = job_obj }, job_id_str);
         emitHistoryChanged(self, a, "finished", prepped);
     }
 
@@ -702,12 +723,10 @@ fn saveTotals(c: *HistoryCtx, alloc: std.mem.Allocator, totals: std.json.Value) 
 /// Returns slice of {hex_key, job_value} pairs, sorted ascending by integer key.
 const JobEntry = struct { key: []const u8, val: std.json.Value };
 
+/// A store error propagates: an empty list would make `nextJobId` reuse an
+/// existing id and overwrite that job.
 fn loadAllJobs(c: *HistoryCtx, alloc: std.mem.Allocator) ![]JobEntry {
-    const ns_obj = c.store.getNamespace(alloc, ns_history) catch |err| switch (err) {
-        ds.Error.BackendError, ds.Error.NamespaceNotFound => return &.{},
-        else => return err,
-    };
-    switch (ns_obj) {
+    switch (try c.store.getNamespace(alloc, ns_history)) {
         .object => |obj| {
             var entries: std.ArrayList(JobEntry) = .empty;
             var it = obj.iterator();
@@ -730,8 +749,11 @@ fn loadAllJobs(c: *HistoryCtx, alloc: std.mem.Allocator) ![]JobEntry {
     }
 }
 
-/// Prep a stored job object for the API response: add job_id and exists=false.
-fn prepJob(alloc: std.mem.Allocator, job_val: std.json.Value, job_id: []const u8) !std.json.Value {
+/// Prep a stored job object for the API response (history.py
+/// `_prep_requested_job`): drop instance_id, add job_id and whether the gcode
+/// file still exists. Moonraker also compares `metadata.modified` with the
+/// file's mtime; phobos jobs store empty metadata, so only presence is checked.
+fn prepJob(c: *const HistoryCtx, alloc: std.mem.Allocator, job_val: std.json.Value, job_id: []const u8) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     // Copy existing fields
     switch (job_val) {
@@ -744,8 +766,12 @@ fn prepJob(alloc: std.mem.Allocator, job_val: std.json.Value, job_id: []const u8
         },
         else => {},
     }
+    const filename: []const u8 = switch (obj.get("filename") orelse .null) {
+        .string => |s| s,
+        else => "",
+    };
     try obj.put(alloc, "job_id", .{ .string = job_id });
-    try obj.put(alloc, "exists", .{ .bool = false }); // no file_manager in phobos
+    try obj.put(alloc, "exists", .{ .bool = filename.len > 0 and c.fileExists(filename) });
     return .{ .object = obj };
 }
 
@@ -804,16 +830,18 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
         std.mem.reverse(JobEntry, filtered.items);
     }
 
-    // Apply start offset and limit
-    const total = filtered.items.len;
-    const s: usize = if (start < 0) 0 else @min(@as(usize, @intCast(start)), total);
-    var remaining = filtered.items[s..];
-    const limit: usize = if (limit_raw <= 0) remaining.len else @min(@as(usize, @intCast(limit_raw)), remaining.len);
-    remaining = remaining[0..limit];
+    // Moonraker applies `start` only with a positive `limit` (history.py
+    // "LIMIT ? OFFSET ?"); SQLite treats a negative OFFSET as 0. lossyCast
+    // clamps i64 values that a 32-bit usize cannot hold.
+    var remaining = filtered.items;
+    if (limit_raw > 0) {
+        remaining = remaining[@min(std.math.lossyCast(usize, start), remaining.len)..];
+        remaining = remaining[0..@min(std.math.lossyCast(usize, limit_raw), remaining.len)];
+    }
 
     var jobs_arr: std.json.Array = .init(alloc);
     for (remaining) |je| {
-        const prepped = try prepJob(alloc, je.val, je.key);
+        const prepped = try prepJob(c, alloc, je.val, je.key);
         try jobs_arr.append(prepped);
     }
 
@@ -863,7 +891,7 @@ pub fn handleGetJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allo
     const job_id = try alloc.dupe(u8, job_id_tmp);
 
     const val = (try c.store.getItem(alloc, ns_history, job_id)) orelse return error.NotFound;
-    const prepped = try prepJob(alloc, val, job_id);
+    const prepped = try prepJob(c, alloc, val, job_id);
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "job", prepped);
     return .{ .object = obj };
@@ -898,11 +926,12 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
         const all_jobs = try loadAllJobs(c, alloc);
         for (all_jobs) |je| {
             // Capture the prepped job shape before deleting so we can emit
-            // the notification with full data.
-            const prepped = prepJob(alloc, je.val, je.key) catch null;
-            _ = c.store.deleteItem(alloc, ns_history, je.key) catch .null;
+            // the notification with full data. A failed delete is reported,
+            // never listed as deleted.
+            const prepped = try prepJob(c, alloc, je.val, je.key);
+            _ = try c.store.deleteItem(alloc, ns_history, je.key);
             try deleted.append(.{ .string = je.key });
-            if (prepped) |job| emitHistoryChanged(c, alloc, "deleted", job);
+            emitHistoryChanged(c, alloc, "deleted", prepped);
         }
     } else {
         const uid_raw = (try getOptStr(params, "uid")) orelse return error.InvalidParams;
@@ -916,7 +945,7 @@ pub fn handleDeleteJob(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
             ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
             else => return err,
         };
-        const job_to_emit: ?std.json.Value = if (val) |v| prepJob(alloc, v, job_id) catch null else null;
+        const job_to_emit: ?std.json.Value = if (val) |v| try prepJob(c, alloc, v, job_id) else null;
 
         _ = c.store.deleteItem(alloc, ns_history, job_id) catch |err| switch (err) {
             ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
@@ -977,23 +1006,9 @@ pub fn registerHistory(reg: *Registry, ctx: *HistoryCtx) !void {
         c,
         handleResetTotals,
     );
-    // /server/history/job registers GET and DELETE as a multi-verb pair.
-    // The registry's multi=true logic derives:
-    //   GET  → "server.history.get_job"
-    //   DELETE → "server.history.delete_job"
-    // We register both verbs pointing to the same compound handler, which
-    // dispatches based on whether a "uid" or "all" param is present.
-    // Since the JSON-RPC layer doesn't carry verb info, the caller must use
-    // the appropriately named method which routes to this same handler.
-    // For HTTP, we also register HTTP-only GET/DELETE so per-verb routes exist.
-    // Strategy: register the multi-verb pair with all transports. Both JSON-RPC
-    // methods and both HTTP routes point to the same handler; the handler
-    // distinguishes GET vs DELETE by presence of params.
-    //
-    // Actually the cleanest approach matching database.zig: use the multi-verb
-    // pair registration to get the two JSON-RPC names, both pointing to the same
-    // handler. HTTP GET params include "uid"; DELETE params include "uid" or "all".
-    // The handler checks "all" to distinguish.
+    // GET + DELETE in one call → "server.history.get_job" and
+    // "server.history.delete_job"; handleJobDispatch picks the verb from the
+    // transport's `_method` param.
     try reg.registerEndpoint(
         .{ .path = "/server/history/job", .methods = &.{ .GET, .DELETE } },
         c,
@@ -1813,6 +1828,109 @@ test "markInterruptedJobs: no in_progress jobs is no-op" {
     var ctx = HistoryCtx{ .clock_io = std.testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
 
     try ctx.markInterruptedJobs();
+}
+
+test "finishJob: a non-object history record clears the job instead of panicking" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .clock_io = std.testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "a.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    var id_buf: [16]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{X:0>6}", .{ctx.current_job_id.?});
+    // POST /server/database/item may overwrite the running job's record.
+    try mem.dataStore().insertItem(a, ns_history, id_str, .{ .integer = 1 });
+    ctx.onJobStateChanged(JobEvent.complete, ps, ps);
+    try testing.expect(ctx.current_job_id == null);
+    try testing.expectEqual(@as(i64, 1), (try mem.dataStore().getItem(a, ns_history, id_str)).?.integer);
+}
+
+test "handleList: start applies only with a positive limit and is clamped" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    try insertJob(&mem, a, "000001", "{\"filename\":\"a.gcode\",\"start_time\":1.0,\"end_time\":2.0}");
+    try insertJob(&mem, a, "000002", "{\"filename\":\"b.gcode\",\"start_time\":3.0,\"end_time\":4.0}");
+    try insertJob(&mem, a, "000003", "{\"filename\":\"c.gcode\",\"start_time\":5.0,\"end_time\":6.0}");
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .clock_io = std.testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+
+    const cases = [_]struct { params: []const u8, count: i64 }{
+        .{ .params = "{\"limit\":0,\"start\":2}", .count = 3 },
+        .{ .params = "{\"limit\":-1,\"start\":2}", .count = 3 },
+        .{ .params = "{\"limit\":2,\"start\":5000000000}", .count = 0 },
+        .{ .params = "{\"limit\":5000000000,\"start\":-3}", .count = 3 },
+    };
+    for (cases) |case| {
+        const result = try handleList(@ptrCast(&ctx), try mkParams(a, case.params), a);
+        try testing.expectEqual(case.count, result.object.get("count").?.integer);
+    }
+}
+
+test "history handlers report store failures instead of empty results" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    try insertJob(&mem, a, "000001", "{\"filename\":\"a.gcode\"}");
+    const failing = struct {
+        fn deleteItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!std.json.Value {
+            return ds.Error.BackendError;
+        }
+        fn getNamespace(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8) ds.Error!std.json.Value {
+            return ds.Error.BackendError;
+        }
+    };
+    var bus: NotifyBus = undefined;
+
+    var no_delete = MemStore.vtable;
+    no_delete.deleteItem = failing.deleteItem;
+    var ctx = HistoryCtx{ .clock_io = std.testing.io, .store = .{ .ctx = &mem, .vtable = &no_delete }, .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    try testing.expectError(ds.Error.BackendError, handleDeleteJob(@ptrCast(&ctx), try mkParams(a, "{\"all\":true}"), a));
+
+    var no_read = MemStore.vtable;
+    no_read.getNamespace = failing.getNamespace;
+    ctx.store = .{ .ctx = &mem, .vtable = &no_read };
+    try testing.expectError(ds.Error.BackendError, handleList(@ptrCast(&ctx), .null, a));
+    // A new job must not reuse an id while the existing ids are unreadable.
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "filename", .{ .string = "b.gcode" });
+    ctx.onJobStateChanged(JobEvent.started, .empty, ps);
+    try testing.expect(ctx.current_job_id == null);
+    try testing.expectEqualStrings("a.gcode", (try mem.dataStore().getItem(a, ns_history, "000001")).?.object.get("filename").?.string);
+}
+
+test "prepJob: exists reports whether the gcode file is present" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    try insertJob(&mem, a, "000001", "{\"filename\":\"here.gcode\"}");
+    try insertJob(&mem, a, "000002", "{\"filename\":\"gone.gcode\"}");
+    const files = struct {
+        fn exists(_: *anyopaque, name: []const u8) bool {
+            return std.mem.eql(u8, name, "here.gcode");
+        }
+    };
+    var bus: NotifyBus = undefined;
+    var ctx = HistoryCtx{ .clock_io = std.testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "", .file_check = files.exists, .file_check_ctx = &mem };
+    const result = try handleList(@ptrCast(&ctx), try mkParams(a, "{\"order\":\"asc\"}"), a);
+    const jobs = result.object.get("jobs").?.array.items;
+    try testing.expect(jobs[0].object.get("exists").?.bool);
+    try testing.expect(!jobs[1].object.get("exists").?.bool);
 }
 
 test "finishJob stats guard: discards stats with wrong filename" {
