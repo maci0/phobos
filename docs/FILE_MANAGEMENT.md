@@ -27,3 +27,22 @@ bounded to 4096 files, 1 MiB of retained paths and 65536 examined directory
 entries; ZIP64 extents are rejected. Failed requests preserve an existing
 destination and remove the temporary file. The loaded-file guard is checked
 again under Core before replacement. Successful creation emits `create_file`.
+
+`[file_manager] queue_gcode_uploads` defaults to false. A gcode upload with
+`print=true` starts when Klippy is ready and no print is active; otherwise, or
+after a rejected start, it joins the job queue when this option is enabled.
+Multipart `print` fields may precede or follow the file. Upload responses report
+`print_started` and `print_queued`; uploads without a print request do neither.
+OctoPrint select-to-print uses the same queue and returns 204 after starting or
+queueing, or 409 when neither is possible. Upload replacement rechecks the
+loaded-file guard under Core after streaming, before the new data is visible.
+
+The daemon starts native inotify observation by default. Set
+`file_system_observer: none` to use API mutation notifications only. External
+creates, writes, renames and deletes emit file-list changes and invalidate
+metadata. Writes and atomic replacements coalesce before notification; `.thumbs`,
+`.git` and configured excludes do not produce events. Watch state is bounded to
+512 directories, 128 pending changes and 128 KiB of names. Overflow, exhausted
+capacity or an externally replaced root stops observation with a warning until
+restart; API mutation notifications then resume. Shutdown cancels and joins
+the observer before freeing roots or connection state.

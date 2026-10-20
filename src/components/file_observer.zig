@@ -177,7 +177,7 @@ pub const Observer = struct {
         const owned = try self.ownPath(path);
         errdefer self.freePath(owned);
         const wd = try Native.add(self.file, dir);
-        // shortcut: inode aliases share one watch; add alias fan-out if both names are needed.
+        // Inode aliases share one watch and report its first registered path.
         for (self.watches[0..self.watch_count]) |watch| if (watch.wd == wd) {
             self.freePath(owned);
             return false;

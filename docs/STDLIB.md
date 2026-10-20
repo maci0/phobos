@@ -27,6 +27,12 @@ vendored libraries keep their upstream implementations.
 | Request arguments | `json/params.zig` over standard numeric parsers and ASCII helpers |
 | Text searches, case conversion, hex and Base64 | `std.mem`, `std.ascii`, `std.fmt`, `std.base64` |
 | Test directories and allocation failures | `std.testing.tmpDir` and `checkAllAllocationFailures` |
+| ZIP archives | Native `std.zip` headers and readers, `std.compress.flate.Compress`, `std.hash.Crc32` and `std.Io.File.Writer` |
+
+The installed `std.zip` module reads and extracts archives, but does not write
+them. `zip_writer.zig` provides bounded streaming ZIP32 framing using those
+native structures and codecs; no filesystem-stat ABI or compression adapter is
+needed. Large source files stream through one reusable DEFLATE workspace.
 
 An I/O reader's internal buffer must not alias the output buffer of a read.
 Use `File.readStreaming` for a one-shot byte read. Keep persistent network

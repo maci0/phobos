@@ -1166,12 +1166,8 @@ test "files: zip creates an archive and emits its create_file notification" {
     defer ts.stop();
     const upload = try ts.uploadFile(alloc, "gcodes", null, "cube.gcode", "G1 X25\n");
     defer alloc.free(upload);
-    var rec = RecordWriter{};
-    defer rec.deinit();
-    const cid = try ts.conns.add(ts.io, false);
-    ts.conns.attachWriter(ts.io, cid, &rec, RecordWriter.write);
-    defer ts.conns.remove(ts.io, cid);
-    defer ts.conns.detachWriter(ts.io, cid);
+    const client = try @import("ws_client.zig").connect(ts, alloc);
+    defer client.close();
     const body = try ts.postJson(alloc, "/server/files/zip", "{\"dest\":\"config/out.zip\",\"items\":[\"gcodes/cube.gcode\"]}");
     defer alloc.free(body);
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
@@ -1183,13 +1179,185 @@ test "files: zip creates an archive and emits its create_file notification" {
     defer alloc.free(download);
     try std.testing.expect(download.len > 30);
     try std.testing.expectEqualSlices(u8, &std.zip.local_file_header_sig, download[0..4]);
-    var saw = false;
-    for (rec.frames.items) |frame| {
-        if (std.mem.indexOf(u8, frame, "notify_filelist_changed") != null and
-            std.mem.indexOf(u8, frame, "create_file") != null and
-            std.mem.indexOf(u8, frame, "out.zip") != null) saw = true;
+    client.read_deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(3), .clock = .awake });
+    const frame = try client.readFrame();
+    defer alloc.free(frame.data);
+    const notification = try std.json.parseFromSlice(std.json.Value, alloc, frame.data, .{});
+    defer notification.deinit();
+    try std.testing.expectEqualStrings("notify_filelist_changed", notification.value.object.get("method").?.string);
+    const change = notification.value.object.get("params").?.array.items[0].object;
+    try std.testing.expectEqualStrings("create_file", change.get("action").?.string);
+    try std.testing.expectEqualStrings("out.zip", change.get("item").?.object.get("path").?.string);
+}
+
+test "files: print upload queues while busy and supports a print field after the file" {
+    const alloc = std.testing.allocator;
+    var config_tmp = std.testing.tmpDir(.{});
+    defer config_tmp.cleanup();
+    try config_tmp.dir.writeFile(std.testing.io, .{ .sub_path = "moonraker.conf", .data = "[file_manager]\nqueue_gcode_uploads: True\n" });
+    const config_path = try config_tmp.dir.realPathFileAlloc(std.testing.io, "moonraker.conf", alloc);
+    defer alloc.free(config_path);
+    const ts = try TestServer.initWithConfig(alloc, config_path);
+    defer ts.stop();
+    const client = try @import("ws_client.zig").connect(ts, alloc);
+    defer client.close();
+    const body = "--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"next.gcode\"\r\n\r\nG1 X5\n\r\n--upload\r\nContent-Disposition: form-data; name=\"print\"\r\n\r\ntrue\r\n--upload--\r\n";
+    // A disconnected printer cannot start a print, but the requested file can
+    // be queued for the same later dispatch as a busy printer.
+    const response = try ts.postJson(alloc, "/server/files/upload", body);
+    defer alloc.free(response);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expect(!result.get("print_started").?.bool);
+    try std.testing.expect(result.get("print_queued").?.bool);
+    const queue = try ts.get(alloc, "/server/job_queue/status");
+    defer alloc.free(queue);
+    const queued = try std.json.parseFromSlice(std.json.Value, alloc, queue, .{});
+    defer queued.deinit();
+    const jobs = queued.value.object.get("result").?.object.get("queued_jobs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), jobs.len);
+    try std.testing.expectEqualStrings("next.gcode", jobs[0].object.get("filename").?.string);
+    var notified = false;
+    client.read_deadline = .fromNow(ts.io, .{ .raw = .fromSeconds(3), .clock = .awake });
+    for (0..2) |_| {
+        const frame = try client.readFrame();
+        defer alloc.free(frame.data);
+        if (std.mem.indexOf(u8, frame.data, "notify_job_queue_changed") != null and
+            std.mem.indexOf(u8, frame.data, "jobs_added") != null and
+            std.mem.indexOf(u8, frame.data, "next.gcode") != null) notified = true;
     }
-    try std.testing.expect(saw);
+    try std.testing.expect(notified);
+}
+
+test "files: a rejected print start can be queued and invalid print flags are rejected" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    ts.app.core.lock(ts.io);
+    ts.app.file_ctx.queue_gcode_uploads = true;
+    // Force the start attempt without a connected Klippy bridge. startPrint
+    // rejects it, so this covers queue fallback after a start error.
+    ts.app.info.state_mutex.lockUncancelable(ts.io);
+    ts.app.info.klippy_connected = true;
+    ts.app.info.klippy_state = "ready";
+    ts.app.info.state_mutex.unlock(ts.io);
+    ts.app.core.unlock(ts.io);
+    const response = try ts.postJson(alloc, "/server/files/upload", "--upload\r\nContent-Disposition: form-data; name=\"print\"\r\n\r\ntrue\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"next.gcode\"\r\n\r\nG1 X5\n\r\n--upload--\r\n");
+    defer alloc.free(response);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
+    defer parsed.deinit();
+    const result = parsed.value.object.get("result").?.object;
+    try std.testing.expect(!result.get("print_started").?.bool);
+    try std.testing.expect(result.get("print_queued").?.bool);
+    const invalid = try ts.postJson(alloc, "/server/files/upload", "--upload\r\nContent-Disposition: form-data; name=\"print\"\r\n\r\ninvalid\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"invalid.gcode\"\r\n\r\nG1 X5\n\r\n--upload--\r\n");
+    defer alloc.free(invalid);
+    const invalid_result = try std.json.parseFromSlice(std.json.Value, alloc, invalid, .{});
+    defer invalid_result.deinit();
+    try std.testing.expectEqual(@as(i64, 400), invalid_result.value.object.get("error").?.object.get("code").?.integer);
+    try std.testing.expect(!ts.app.file_ctx.fileExists("gcodes", "invalid.gcode"));
+}
+
+test "files: print upload starts when idle and queues while printing or paused" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    try ts.startKlippyBridge();
+    try std.testing.expect(waitKlippyConnected(ts));
+    ts.app.core.lock(ts.io);
+    ts.app.file_ctx.queue_gcode_uploads = true;
+    ts.app.core.unlock(ts.io);
+    const states = [_][]const u8{ "standby", "printing", "paused" };
+    for (states, 0..) |state, index| {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const stats = try std.json.parseFromSliceLeaky(std.json.Value, a, try std.fmt.allocPrint(a, "{{\"state\":\"{s}\",\"filename\":\"active.gcode\"}}", .{state}), .{});
+        ts.app.core.run(ts.io, @import("../components/job_state.zig").JobStateCtx.initialize, .{ ts.app.job_state_ctx, stats });
+        const form = try std.fmt.allocPrint(a, "--upload\r\nContent-Disposition: form-data; name=\"print\"\r\n\r\nTRUE\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"print{d}.gcode\"\r\n\r\nG1 X5\n\r\n--upload--\r\n", .{index});
+        const response = try ts.postJson(a, "/server/files/upload", form);
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, response, .{});
+        const result = parsed.object.get("result").?.object;
+        try std.testing.expectEqual(index == 0, result.get("print_started").?.bool);
+        try std.testing.expectEqual(index != 0, result.get("print_queued").?.bool);
+    }
+    const log = try ts.get(alloc, "/server/gcode_store");
+    defer alloc.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "print0.gcode") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "print1.gcode") == null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "print2.gcode") == null);
+    const queue = try ts.get(alloc, "/server/job_queue/status");
+    defer alloc.free(queue);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, queue, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.object.get("result").?.object.get("queued_jobs").?.array.items.len);
+}
+
+test "octoprint: select-to-print uses the configured upload queue when busy" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const upload = try ts.uploadFile(alloc, "gcodes", null, "next.gcode", "G1 X5\n");
+    defer alloc.free(upload);
+    const args = "{\"command\":\"select\",\"print\":true}";
+    const disabled = try ts.postJson(alloc, "/api/files/moonraker/gcodes/next.gcode", args);
+    defer alloc.free(disabled);
+    const disabled_result = try std.json.parseFromSlice(std.json.Value, alloc, disabled, .{});
+    defer disabled_result.deinit();
+    try std.testing.expectEqual(@as(i64, 409), disabled_result.value.object.get("error").?.object.get("code").?.integer);
+    ts.app.core.lock(ts.io);
+    ts.app.file_ctx.queue_gcode_uploads = true;
+    ts.app.core.unlock(ts.io);
+    try ts.startKlippyBridge();
+    try std.testing.expect(waitKlippyConnected(ts));
+    const states = [_][]const u8{ "printing", "paused" };
+    for (states) |state| {
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const stats = try std.json.parseFromSliceLeaky(std.json.Value, a, try std.fmt.allocPrint(a, "{{\"state\":\"{s}\"}}", .{state}), .{});
+        ts.app.core.lock(ts.io);
+        ts.app.job_state_ctx.initialize(stats);
+        ts.app.octoprint_ctx.statusUpdate(stats);
+        ts.app.core.unlock(ts.io);
+        const queued = try ts.postJson(a, "/api/files/moonraker/gcodes/next.gcode", args);
+        try std.testing.expectEqualStrings("", queued);
+    }
+    const queue = try ts.get(alloc, "/server/job_queue/status");
+    defer alloc.free(queue);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, queue, .{});
+    defer parsed.deinit();
+    const jobs = parsed.value.object.get("result").?.object.get("queued_jobs").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), jobs.len);
+    for (jobs) |job| try std.testing.expectEqualStrings("next.gcode", job.object.get("filename").?.string);
+    const log = try ts.get(alloc, "/server/gcode_store");
+    defer alloc.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "SDCARD_PRINT_FILE") == null);
+}
+
+test "fuzz upload print flags queue only requested gcode files" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const alloc = std.testing.allocator;
+            const ts = try TestServer.init(alloc);
+            defer ts.stop();
+            const enabled = smith.value(bool);
+            const requested = smith.value(bool);
+            const gcode = smith.value(bool);
+            ts.app.core.lock(ts.io);
+            ts.app.file_ctx.queue_gcode_uploads = enabled;
+            ts.app.core.unlock(ts.io);
+            const form = try std.fmt.allocPrint(alloc, "--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"next.{s}\"\r\n\r\nG1 X5\n\r\n--upload\r\nContent-Disposition: form-data; name=\"print\"\r\n\r\n{s}\r\n--upload--\r\n", .{ if (gcode) "gcode" else "txt", if (requested) "true" else "false" });
+            defer alloc.free(form);
+            const response = try ts.postJson(alloc, "/server/files/upload", form);
+            defer alloc.free(response);
+            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, response, .{});
+            defer parsed.deinit();
+            const result = parsed.value.object.get("result").?.object;
+            try std.testing.expect(!result.get("print_started").?.bool);
+            try std.testing.expectEqual(enabled and requested and gcode, result.get("print_queued").?.bool);
+        }
+    }.run, .{});
 }
 
 test "files: metadata thumbnails persist and their advertised URLs serve image bytes" {

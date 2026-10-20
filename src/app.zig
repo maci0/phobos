@@ -647,7 +647,7 @@ pub const App = struct {
 
         const file_ctx = try alloc.create(FileCtx);
         errdefer alloc.destroy(file_ctx);
-        file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus, .job_state = job_state_ctx, .server_info = info };
+        file_ctx.* = .{ .gpa = alloc, .roots = file_roots, .bus = bus, .job_state = job_state_ctx, .server_info = info, .job_queue = job_queue_ctx };
         analysis_ctx.files = file_ctx;
 
         // --- Machine context (machine.* + machine.proc_stats) ---
@@ -723,6 +723,7 @@ pub const App = struct {
         klippy_ctx.job_state = job_state_ctx;
         klippy_ctx.history = history_ctx;
         extensions_ctx.klippy = klippy_ctx;
+        file_ctx.klippy = klippy_ctx;
 
         // Wire the Klippy connection into the printer context so handlers
         // (print.start, pause, resume, cancel, restart, firmware_restart)
@@ -838,6 +839,10 @@ pub const App = struct {
             self.alloc.destroy(cfg);
         };
         if (self.cfg != null) return error.ConfigAlreadyLoaded;
+        const queue_gcode_uploads = if (cfg.get("file_manager", "queue_gcode_uploads") != null)
+            try cfg.getBoolean("file_manager", "queue_gcode_uploads")
+        else
+            false;
         const owned_path = try self.alloc.dupe(u8, config_path);
         self.cfg = cfg;
         published = true;
@@ -1003,6 +1008,8 @@ pub const App = struct {
                 }
             }
         }
+
+        self.file_ctx.queue_gcode_uploads = queue_gcode_uploads;
 
         if (cfg.get("file_manager", "file_system_observer")) |raw| {
             self.file_ctx.observer_kind = if (std.ascii.eqlIgnoreCase(raw, "inotify")) .inotify else .none;
@@ -2331,6 +2338,7 @@ test "setConfig loads auto-refresh, excludes, and hidden objects" {
         \\
         \\[file_manager]
         \\file_system_observer: none
+        \\queue_gcode_uploads: True
         \\excludes:
         \\    gcodes/.mod
         \\    gcodes/logFiles
@@ -2352,6 +2360,7 @@ test "setConfig loads auto-refresh, excludes, and hidden objects" {
     try std.testing.expectEqual(@as(i64, 5), app.update_ctx.refresh_window_end);
     try std.testing.expect(app.update_ctx.refresh_thread == null);
     try std.testing.expectEqual(.none, app.file_ctx.observer_kind);
+    try std.testing.expect(app.file_ctx.queue_gcode_uploads);
     try std.testing.expect(app.file_ctx.observer == null);
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", ".mod"));
     try std.testing.expect(file_manager_component.FileCtx.pathExcluded(app.file_ctx.excludes, "gcodes", "logFiles/a.log"));
@@ -2359,6 +2368,23 @@ test "setConfig loads auto-refresh, excludes, and hidden objects" {
     try std.testing.expectEqual(@as(usize, 2), app.printer_ctx.hidden_objects.len);
     try std.testing.expectEqualStrings("output_pin level_h1", app.printer_ctx.hidden_objects[0]);
     try std.testing.expectEqualStrings("output_pin power_off", app.printer_ctx.hidden_objects[1]);
+}
+
+test "setConfig refuses an invalid upload queue boolean" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "moonraker.conf", .data = "[file_manager]\nqueue_gcode_uploads: invalid\n" });
+    const path = try tmp.dir.realPathFileAlloc(io, "moonraker.conf", alloc);
+    defer alloc.free(path);
+    var application = try testApp(alloc, io, &tmp);
+    defer application.deinit(io);
+    try std.testing.expect(!application.file_ctx.queue_gcode_uploads);
+    try std.testing.expectError(error.InvalidValue, application.setConfig(io, path));
+    try std.testing.expect(!application.file_ctx.queue_gcode_uploads);
+    try std.testing.expect(application.cfg == null);
+    try std.testing.expect(application.info.cfg == null);
 }
 
 test "setConfig [power] reads pin and protocol URLs without leaking" {

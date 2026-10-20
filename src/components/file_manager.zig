@@ -56,6 +56,8 @@ const job_state_component = @import("job_state.zig");
 const ServerInfo = @import("../core/methods.zig").ServerInfo;
 const zip_writer = @import("../zip_writer.zig");
 const file_observer = @import("file_observer.zig");
+const job_queue_component = @import("job_queue.zig");
+const KlippyCtx = @import("klippy_connection.zig").KlippyCtx;
 
 const Registry = registry.Registry;
 const Dir = std.Io.Dir;
@@ -109,10 +111,9 @@ const MetaEntry = struct {
 
 /// Metadata cache caps. `server.files.metadata` re-reads up to 256 KiB + re-parses
 /// the gcode header on every call; Mainsail/Fluidd request it for every file in a
-/// listing, so on slow eMMC this is a real, repeated stall. Entries carry base64
-/// thumbnails (tens of KiB each), so the cache is bounded by entries and by
-/// arena bytes and cleared wholesale on overflow. A record larger than the byte
-/// cap is not cached.
+/// listing, so on slow eMMC this is a real, repeated stall. The cache is bounded
+/// by entries and arena bytes and cleared wholesale on overflow. A record
+/// larger than the byte cap is not cached. Thumbnail images are stored on disk.
 const metadata_cache_cap = 256;
 const metadata_cache_max_bytes = 512 * 1024;
 
@@ -140,6 +141,10 @@ pub const FileCtx = struct {
     job_state: ?*job_state_component.JobStateCtx = null,
     /// Klippy readiness for the loaded-file lock. Borrowed; set by the App.
     server_info: ?*ServerInfo = null,
+    queue_gcode_uploads: bool = false,
+    /// Borrowed upload/select-to-print dependencies, wired by the App.
+    job_queue: ?*job_queue_component.JobQueueCtx = null,
+    klippy: ?*KlippyCtx = null,
     observer_kind: file_observer.Kind = .inotify,
     observer: ?*file_observer.Observer = null,
 
@@ -354,6 +359,45 @@ pub const FileCtx = struct {
         else
             std.mem.eql(u8, name, path.rel);
         if (in_use) return error.FileInUse;
+    }
+
+    /// An upload may outlive the print-state check made before streaming.
+    /// Call under Core immediately before making its temporary file visible.
+    pub fn replaceUpload(self: *const FileCtx, atomic: *std.Io.File.Atomic, path: Resolved) !void {
+        try self.checkInUse(path, false);
+        try atomic.replace(try self.requireIo());
+    }
+
+    pub const PrintResult = struct { started: bool = false, queued: bool = false };
+
+    /// Upload and OctoPrint select share Moonraker's start-or-queue behavior.
+    /// Call under Core; Klippy request releases Core while awaiting its reply.
+    pub fn startOrQueue(self: *const FileCtx, filename: []const u8, can_start: bool, alloc: std.mem.Allocator) !PrintResult {
+        var ready = false;
+        if (self.server_info) |info| {
+            const io = self.io orelse info.io;
+            if (io) |aio| info.state_mutex.lockUncancelable(aio);
+            ready = info.klippy_connected and std.mem.eql(u8, info.klippy_state, "ready");
+            if (io) |aio| info.state_mutex.unlock(aio);
+        }
+        const active = if (self.job_state) |state| state.isActive() else false;
+        if (can_start and ready and !active) if (self.klippy) |klippy| {
+            if (@import("printer.zig").startPrint(klippy, filename, alloc)) |_| {
+                return .{ .started = true };
+            } else |err| switch (err) {
+                error.OutOfMemory, error.Canceled => return err,
+                else => {}, // A failed start may still be queued, as in Moonraker.
+            }
+        };
+        if (self.queue_gcode_uploads) if (self.job_queue) |queue| {
+            var filenames: std.json.Array = .init(alloc);
+            try filenames.append(.{ .string = filename });
+            var params: std.json.ObjectMap = .empty;
+            try params.put(alloc, "filenames", .{ .array = filenames });
+            _ = try job_queue_component.handlePostJob(@ptrCast(queue), .{ .object = params }, alloc);
+            return .{ .queued = true };
+        };
+        return .{};
     }
 };
 
@@ -1481,17 +1525,18 @@ fn commitArchive(ctx: *FileCtx, atomic: *std.Io.File.Atomic, destination: Resolv
 /// Build the upload response and emit notify_filelist_changed (create_file).
 /// Response shape mirrors Moonraker's `_finish_*_upload`:
 ///   { "item": {path, root, size, modified, permissions},
-///     "action": "create_file", "print_started": false, "print_queued": false }
-pub fn buildUploadResult(ctx: *FileCtx, alloc: std.mem.Allocator, resolved: Resolved) !std.json.Value {
+///     "action": "create_file", "print_started": bool, "print_queued": bool }
+pub fn buildUploadResult(ctx: *FileCtx, alloc: std.mem.Allocator, resolved: Resolved, start_print: bool) !std.json.Value {
     const io = try ctx.requireIo();
     const info = try buildNotifyInfo(io, alloc, "create_file", resolved.root, resolved.rel, resolved.abs, null);
     emitFilelistChanged(ctx, io, alloc, info);
+    const printing = if (start_print and std.mem.eql(u8, resolved.root.name, "gcodes") and isGcodeExt(resolved.rel)) try ctx.startOrQueue(resolved.rel, true, alloc) else FileCtx.PrintResult{};
 
     var out: std.json.ObjectMap = .empty;
     try out.put(alloc, "item", info.object.get("item").?);
     try out.put(alloc, "action", .{ .string = "create_file" });
-    try out.put(alloc, "print_started", .{ .bool = false });
-    try out.put(alloc, "print_queued", .{ .bool = false });
+    try out.put(alloc, "print_started", .{ .bool = printing.started });
+    try out.put(alloc, "print_queued", .{ .bool = printing.queued });
     return .{ .object = out };
 }
 
@@ -2926,6 +2971,63 @@ test "fuzz handleZip archives only the selected file and preserves its contents"
             try testing.expectEqualSlices(u8, bytes, data.written());
             try testing.expectEqual(std.hash.Crc32.hash(bytes), entry.crc32);
             try testing.expectEqual(null, try iter.next());
+        }
+    }.run, .{});
+}
+
+test "upload replacement refuses a file that became active while streaming" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/active.gcode", "original print");
+    var c = tr.ctx();
+    var state = job_state_component.JobStateCtx.init(a);
+    defer state.deinit();
+    c.job_state = &state;
+    var info: ServerInfo = .{ .klippy_connected = true, .klippy_state = "ready", .io = tr.io };
+    c.server_info = &info;
+    const destination = try resolveRequestPath(&c, a, "gcodes/active.gcode");
+    try c.checkInUse(destination, false);
+    var parent = try destination.parent(tr.io, a, .{});
+    defer parent.close(tr.io);
+    var atomic = try parent.dir.createFileAtomic(tr.io, parent.name, .{ .replace = true });
+    defer atomic.deinit(tr.io);
+    try atomic.file.writePositionalAll(tr.io, "replacement", 0);
+    state.initialize(try objParams(a, "{\"state\":\"printing\",\"filename\":\"active.gcode\"}"));
+    try testing.expectError(error.FileInUse, c.replaceUpload(&atomic, destination));
+    try testing.expectEqualStrings("original print", try tr.tmp.dir.readFileAlloc(tr.io, "gcodes/active.gcode", a, .limited(100)));
+}
+
+test "fuzz upload replacement preserves active files and commits other files" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var tr = try TestRoots.init(a);
+            defer tr.deinit();
+            try tr.writeFile("gcodes/target.gcode", "original");
+            var c = tr.ctx();
+            var state = job_state_component.JobStateCtx.init(a);
+            defer state.deinit();
+            c.job_state = &state;
+            const active = smith.value(bool);
+            const loaded = smith.value(bool);
+            const ready = smith.value(bool);
+            var info: ServerInfo = .{ .klippy_connected = ready, .klippy_state = if (ready) "ready" else "shutdown", .io = tr.io };
+            c.server_info = &info;
+            state.initialize(try objParams(a, try std.fmt.allocPrint(a, "{{\"state\":\"{s}\",\"filename\":\"{s}\"}}", .{ if (active) "paused" else "standby", if (loaded) "target.gcode" else "another.gcode" })));
+            const destination = try resolveRequestPath(&c, a, "gcodes/target.gcode");
+            var parent = try destination.parent(tr.io, a, .{});
+            defer parent.close(tr.io);
+            var atomic = try parent.dir.createFileAtomic(tr.io, parent.name, .{ .replace = true });
+            defer atomic.deinit(tr.io);
+            try atomic.file.writePositionalAll(tr.io, "replacement", 0);
+            const locked = active and loaded and ready;
+            if (locked) try testing.expectError(error.FileInUse, c.replaceUpload(&atomic, destination)) else try c.replaceUpload(&atomic, destination);
+            try testing.expectEqualStrings(if (locked) "original" else "replacement", try tr.tmp.dir.readFileAlloc(tr.io, "gcodes/target.gcode", a, .limited(100)));
         }
     }.run, .{});
 }

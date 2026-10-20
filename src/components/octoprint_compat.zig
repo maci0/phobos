@@ -28,7 +28,6 @@
 const std = @import("std");
 const webreq = @import("../json/params.zig");
 const registry = @import("../server/registry.zig");
-const printer_component = @import("printer.zig");
 
 const Registry = registry.Registry;
 
@@ -316,8 +315,8 @@ pub fn handlePrinterProfiles(_: *anyopaque, _: std.json.Value, alloc: std.mem.Al
 
 /// POST /api/files/moonraker/(relative_path) → `_select_file`. A plain select
 /// is a no-op (204). `print=true` starts the gcodes file unless Klippy is
-/// printing, paused or unavailable; phobos has no `queue_gcode_uploads`, so
-/// that case is 409 Conflict like Moonraker without the upload queue.
+/// printing, paused or unavailable. When queue_gcode_uploads is enabled, a
+/// failed or deferred start is appended to the job queue; otherwise it is 409.
 pub fn handleSelectFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *const OctoPrintCtx = @ptrCast(@alignCast(ctx_ptr));
     const command = try webreq.required([]const u8, params, "command");
@@ -330,13 +329,9 @@ pub fn handleSelectFile(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.
     if (!std.mem.eql(u8, root, "gcodes")) return error.SelectNotGcodes;
     const files = ctx.files orelse return error.FileDoesNotExist;
     if (!files.fileExists("gcodes", filename)) return error.FileDoesNotExist;
-    const available = ctx.connectionState() != .offline and ctx.print_state != .printing and ctx.print_state != .paused;
-    if (!available) return error.Conflict;
-    const k = ctx.klippy orelse return error.Conflict;
-    _ = printer_component.startPrint(k, filename, alloc) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return error.Conflict,
-    };
+    const available = ctx.connectionState() == .ready and ctx.print_state != .printing and ctx.print_state != .paused;
+    const result = try files.startOrQueue(filename, available, alloc);
+    if (!result.started and !result.queued) return error.Conflict;
     return .null;
 }
 

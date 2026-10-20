@@ -919,6 +919,7 @@ fn handleUploadStreaming(
 
     var root_field: ?[]const u8 = null;
     var path_field: ?[]const u8 = null;
+    var print_requested = false;
     var resolved: ?file_manager.Resolved = null;
 
     parts: while (true) {
@@ -959,16 +960,31 @@ fn handleUploadStreaming(
             };
             fw.interface.flush() catch return bad(req, alloc, headers, "Write error");
             output.file.sync(io) catch return bad(req, alloc, headers, "Write error");
-            output.replace(io) catch return bad(req, alloc, headers, "Write error");
+            srv.core.run(io, file_manager.FileCtx.replaceUpload, .{ fctx, &output, res }) catch |err| {
+                if (err == error.FileInUse) {
+                    const b = try errorBody(alloc, 403, "File currently in use");
+                    return req.respond(b, .{ .status = .forbidden, .extra_headers = headers });
+                }
+                return bad(req, alloc, headers, "Write error");
+            };
             resolved = res;
         } else if (extractDispositionField(cd, "name")) |n| {
-            // Small field value — buffer it (root / path).
+            // Small field value. Print/select fields may follow the file part.
             var vb: std.Io.Writer.Allocating = .init(alloc);
             streamUntilSeparator(r, &vb.writer, part_sep, max_field_bytes) catch |e| {
                 if (e == error.UploadTooLarge) return tooLarge(req, alloc, headers);
                 return bad(req, alloc, headers, "Invalid upload form");
             };
-            if (std.mem.eql(u8, n, "root")) root_field = vb.written() else if (std.mem.eql(u8, n, "path")) path_field = vb.written();
+            if (std.mem.eql(u8, n, "root")) {
+                root_field = vb.written();
+            } else if (std.mem.eql(u8, n, "path")) {
+                path_field = vb.written();
+            } else if (std.mem.eql(u8, n, "print")) {
+                var params: std.json.ObjectMap = .empty;
+                try params.put(alloc, "print", .{ .string = vb.written() });
+                print_requested = @import("json/params.zig").required(bool, .{ .object = params }, "print") catch
+                    return bad(req, alloc, headers, "Invalid print argument");
+            }
         } else {
             // Unknown field: discard, but still bound it so it can't run forever.
             streamUntilSeparator(r, null, part_sep, max_field_bytes) catch |e| {
@@ -985,7 +1001,7 @@ fn handleUploadStreaming(
 
     const res = resolved orelse return bad(req, alloc, headers, "No file name specified in upload form");
     // notify_filelist_changed + result build run under Core (emitLocked assumes it).
-    const result = srv.core.run(io, file_manager.buildUploadResult, .{ fctx, alloc, res }) catch
+    const result = srv.core.run(io, file_manager.buildUploadResult, .{ fctx, alloc, res, print_requested }) catch
         return bad(req, alloc, headers, "Write error");
     if (octoprint) {
         // OctoPrint upload response (wrap_result=false): slicers ("Upload to
