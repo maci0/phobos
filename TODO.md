@@ -88,8 +88,8 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
 - **2026-10-19 parity:** Update status restores the persisted cache without fetching; git status omits `repo_detected`. `[server] use_xheaders` (default on) is read in `setConfig` and copied by `httpServer`. When it is on, `X-Forwarded-For` / `X-Real-Ip` rewrite the client and the socket peer must be trusted; when it is off, the socket peer stays the client. `[paneldue]` lines enter through `App.processPanelDueLine`: the checksummed script is stripped, and file commands (`M23`/`M30`/`M32`/`M36`/`M37`/`M98`) keep one filename only when it is non-empty. Package commands are built for an injected shell; the default daemon runner rejects apt and pip. Web/zip installation remains unimplemented. `server.analysis.estimate` runs `klipper_estimator --config_file … estimate -f json` and returns `sequences[0]`; no binary is `EstimatorNotAvailable`. A configured notifier test is `AppriseNotAvailable` (apprise is not linked); an unknown name is 404.
 - **API surface coverage: 100%** — methods 130/130, static endpoints 123/123,
   notifications 27/27, router routes 4/4. Verified by the coverage tool (exit 0).
-- **Conformance oracle: 54/54 events pass normalized equality** (conformance/replay.py
-  against golden capture from vendored Moonraker 9008485). Tools: `conformance/capture.py`
+- **Conformance oracle: 49/54 events pass normalized equality** (2026-10-20 run of conformance/replay.py
+  against golden capture from vendored Moonraker 9008485). Failing: `server.info` x3 lists `update_manager` and `octoprint_compat`, which phobos always loads (`src/core/methods.zig:48`) and the capture config lacks; `machine.peripherals.usb` x2 compares host hardware (32 devices captured, 26 on this host). Tools: `conformance/capture.py`
   (boots stock Moonraker, captures scripted HTTP/WS sequence), `conformance/replay.py`
   (replays against phobos, asserts normalized equality with manifest-based field
   masking).
@@ -218,7 +218,7 @@ then `docs/superpowers/specs/2026-06-01-phobos-server-spine-design.md` (design) 
   on state change.
 - Conformance oracle: capture.py (boots vendored Moonraker, captures 54 HTTP/WS
   events), replay.py (replays against phobos, asserts normalized equality with
-  manifest-based field masking). All 54 events pass.
+  manifest-based field masking). See the status line above for the current pass count.
 - Normalizer: Python (`conformance/replay.py`) with manifest-based rules (mask,
   version_pin, sort_array, path_relativize, structure_compare, files_compare),
   v4l2_devices mask rule. `src/oracle/replay.zig` checks result keys and error codes in-process.
@@ -279,7 +279,7 @@ sequence, replay against phobos, and assert **normalized**-equality (mask volati
 fields: `connection_id`/`websocket_id` = object identity, version strings, paths,
 component ordering — see the §8a manifest).
 
-**All 54 events pass normalized equality.** Tools:
+**Pass count: see the conformance status line at the top of this file.** Tools:
 - `conformance/capture.py` — boots vendored Moonraker (commit 9008485), runs
   scripted sequence (HTTP REST + JSON-RPC + WebSocket), captures 54 ordered events
   to `conformance/golden/capture.json`.
@@ -416,8 +416,8 @@ _norm_structure_compare array item masking (Python).
 9. ~~OctoPrint compat live state~~ — Done: printer_state() tracks Klippy readiness
    + print_stats.state; handleServer dynamic safemode; handleJob/handlePrinter live
    state flags. 13 unit tests + fuzz test.
-10. ~~Conformance oracle~~ (P1) — Done: 54/54 events pass normalized equality.
-   Golden capture + replay harness complete. Normalizer bugs fixed (Zig + Python).
+10. ~~Conformance oracle~~ (P1) — Done: golden capture + replay harness (pass count in
+   the conformance status line at the top).
 11. ~~P2 cleanup~~ — Done: memory baseline measured per backend
     test, subsystem depth: machine sudo validation, machine services systemctl,
     update_manager git fetch/reset, file_manager gcode parsing, octoprint_compat
