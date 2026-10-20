@@ -271,8 +271,7 @@ pub const App = struct {
     use_xheaders: bool = true,
     /// `[server] max_websocket_connections`, Moonraker default 50.
     max_websocket_connections: usize = http_transport.default_max_websocket_connections,
-    /// PanelDue serial-line processor. `processPanelDueLine` is the reader
-    /// entry: it strips the line and calls `parseLine`.
+    /// PanelDue line parser. No serial device is opened, so only tests feed it.
     paneldue: paneldue_component.PanelDue = .{},
     /// Forge-X Feather update adapter. Enabled when `[feather_updates]` exists.
     feather: feather_updates_component.FeatherCtx = .{},
@@ -689,11 +688,13 @@ pub const App = struct {
             }
         }
 
-        // [paneldue] enable_checksum defaults true, matching Moonraker. The
-        // serial reader calls processPanelDueLine, which strips the line and
-        // parses it. Absent section leaves the processor idle (checksum off).
+        // [paneldue] enable_checksum defaults true, matching Moonraker. A
+        // malformed value is reported and leaves the default.
         if (cfg.hasSection("paneldue")) {
-            self.paneldue.enable_checksum = cfg.getBoolean("paneldue", "enable_checksum") catch true;
+            self.paneldue.enable_checksum = cfg.getBoolean("paneldue", "enable_checksum") catch |err| blk: {
+                if (err != error.NoOption) std.debug.print("phobos: warning: [paneldue] enable_checksum: {}\n", .{err});
+                break :blk true;
+            };
         }
 
         // [analysis] points at klipper_estimator under the datadir. The binary
@@ -1344,13 +1345,6 @@ pub const App = struct {
         self.feather.klippy_send_ctx = self;
         self.klippy_ctx.remote_handler = feather_updates_component.onKlippyMethod;
         self.klippy_ctx.remote_handler_ctx = &self.feather;
-    }
-
-    /// Feed one PanelDue serial line. Strips it, treats M112 as emergency stop,
-    /// and otherwise parses through `parseLine` (checksummed file commands keep
-    /// a single filename only when it is non-empty).
-    pub fn processPanelDueLine(self: *App, line: []const u8) paneldue_component.ParseError!void {
-        return self.paneldue.processLine(line);
     }
 
     /// Moonraker registers `config_examples` and `docs` only after Klippy
@@ -2239,7 +2233,7 @@ test "setConfig [paneldue] processPanelDueLine strips checksummed file commands"
     var wrapped: [80]u8 = undefined;
     const line = std.fmt.bufPrint(&wrapped, "  {s}\r\n", .{checksummed}) catch unreachable;
 
-    try app.processPanelDueLine(line);
+    try app.paneldue.processLine(line);
     try std.testing.expectEqual(@as(usize, 2), app.paneldue.part_count);
     try std.testing.expectEqualStrings("M32", app.paneldue.parts[0]);
     try std.testing.expectEqualStrings("plate.gco", app.paneldue.parts[1]);
@@ -2248,11 +2242,26 @@ test "setConfig [paneldue] processPanelDueLine strips checksummed file commands"
     sum = 0;
     for (bare) |c| sum ^= c;
     const m98 = std.fmt.bufPrint(&core, "{s}*{d}", .{ bare, sum }) catch unreachable;
-    try app.processPanelDueLine(m98);
-    try std.testing.expectEqual(@as(usize, 1), app.paneldue.part_count);
+    try app.paneldue.processLine(m98);
+    try std.testing.expectEqual(@as(usize, 2), app.paneldue.part_count);
     try std.testing.expectEqualStrings("M98", app.paneldue.parts[0]);
+    try std.testing.expectEqualStrings("", app.paneldue.parts[1]);
 
-    try std.testing.expectError(error.InvalidChecksum, app.processPanelDueLine("N1 M30 my file.gco*0"));
+    try std.testing.expectError(error.InvalidChecksum, app.paneldue.processLine("N1 M30 my file.gco*0"));
+}
+
+test "setConfig [paneldue] keeps checksums on for a malformed enable_checksum" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cfg_buf: [64]u8 = undefined;
+    const cfg_path = try std.fmt.bufPrint(&cfg_buf, "{s}/{s}/moonraker.conf", .{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = cfg_path, .data = "[paneldue]\nenable_checksum: maybe\n" });
+    var app = try testApp(alloc, io, &tmp);
+    defer app.deinit(io);
+    app.setConfig(io, cfg_path);
+    try std.testing.expect(app.paneldue.enable_checksum);
 }
 
 test "setConfig loads an analysis platform and a notifier record" {

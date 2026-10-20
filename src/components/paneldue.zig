@@ -1,6 +1,9 @@
-//! PanelDue line parser. Matches `moonraker/components/paneldue.py` after the
-//! 2026-09-28 parser change: the checksummed script is stripped, and M23/M30/
-//! M32/M36/M37/M98 keep a single filename argument only when it is non-empty.
+//! PanelDue line parser, matching `process_line` in
+//! `vendor/moonraker/moonraker/components/paneldue.py`: M112 anywhere is an
+//! emergency stop, the checksummed script is extracted and verified, and
+//! M23/M30/M32/M36/M37/M98 split into the command and one argument (possibly
+//! empty). Parser only: phobos opens no PanelDue serial device, so nothing
+//! outside tests feeds it lines (TODO.md).
 const std = @import("std");
 
 pub const ParseError = error{InvalidChecksum};
@@ -14,31 +17,10 @@ fn isFileCmd(cmd: []const u8) bool {
 
 pub const PanelDue = struct {
     enable_checksum: bool = false,
-    /// Parts from the last accepted line. Slices point into `line_store` after
-    /// `feedBytes`, or into the caller's line after `processLine`.
+    /// Parts from the last accepted line; they borrow the caller's line.
     parts: [8][]const u8 = undefined,
     part_count: usize = 0,
     emergency_stop: bool = false,
-    /// Last finished line from `feedBytes`. `parts` borrow this after a chunk
-    /// is split, so they stay valid once the pending buffer drops the line.
-    line_store: [512]u8 = undefined,
-
-    /// Split a serial chunk on newlines and run `processLine` on each finished
-    /// line. `pending` holds an incomplete trailing line between reads.
-    /// A line longer than `line_store` is truncated. No serial device is opened.
-    pub fn feedBytes(self: *PanelDue, alloc: std.mem.Allocator, pending: *std.ArrayList(u8), chunk: []const u8) !void {
-        try pending.appendSlice(alloc, chunk);
-        while (std.mem.indexOfScalar(u8, pending.items, '\n')) |nl| {
-            const raw = pending.items[0..nl];
-            const n = @min(raw.len, self.line_store.len);
-            @memcpy(self.line_store[0..n], raw[0..n]);
-            self.processLine(self.line_store[0..n]) catch |err| {
-                pending.replaceRange(alloc, 0, nl + 1, &.{}) catch {};
-                return err;
-            };
-            try pending.replaceRange(alloc, 0, nl + 1, &.{});
-        }
-    }
 
     pub fn processLine(self: *PanelDue, line: []const u8) ParseError!void {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
@@ -53,8 +35,8 @@ pub const PanelDue = struct {
 };
 
 /// Split a PanelDue line into gcode parts.
-/// `out` receives the command and, for file commands with an argument, that
-/// argument (spaces preserved). Returns the slice of `out` that was filled.
+/// `out` receives the command and, for file commands, the trimmed rest of the
+/// script (spaces preserved, possibly empty). Returns the filled slice of `out`.
 pub fn parseLine(line: []const u8, enable_checksum: bool, out: [][]const u8) ParseError![]const []const u8 {
     const script = if (enable_checksum) blk: {
         const cs_index = std.mem.lastIndexOfScalar(u8, line, '*') orelse return error.InvalidChecksum;
@@ -74,21 +56,15 @@ pub fn parseLine(line: []const u8, enable_checksum: bool, out: [][]const u8) Par
         break :blk std.mem.trim(u8, raw, " \t\r\n");
     } else line;
 
-    var n: usize = 0;
     var it = std.mem.tokenizeAny(u8, script, " \t");
     const cmd = it.next() orelse return out[0..0];
     if (out.len == 0) return out[0..0];
     out[0] = cmd;
-    n = 1;
+    var n: usize = 1;
     if (isFileCmd(cmd)) {
-        if (cmd.len <= script.len) {
-            const arg = std.mem.trim(u8, script[cmd.len..], " \t\r\n");
-            if (arg.len > 0 and out.len > 1) {
-                out[1] = arg;
-                n = 2;
-            }
-        }
-        return out[0..n];
+        if (out.len < 2) return out[0..1];
+        out[1] = std.mem.trim(u8, it.rest(), " \t\r\n");
+        return out[0..2];
     }
     while (it.next()) |tok| {
         if (n >= out.len) break;
@@ -105,16 +81,23 @@ fn checksumLine(buf: []u8, body: []const u8) []const u8 {
     return n;
 }
 
-test "processLine: file command keeps spaces and drops an empty argument" {
+test "processLine: file command keeps spaces and an empty argument" {
     var due = PanelDue{};
     try due.processLine("M23 my file.gco");
     try std.testing.expectEqual(@as(usize, 2), due.part_count);
     try std.testing.expectEqualStrings("M23", due.parts[0]);
     try std.testing.expectEqualStrings("my file.gco", due.parts[1]);
 
+    // paneldue.py always builds `[cmd, arg]` for file commands.
     try due.processLine("M98");
-    try std.testing.expectEqual(@as(usize, 1), due.part_count);
+    try std.testing.expectEqual(@as(usize, 2), due.part_count);
     try std.testing.expectEqualStrings("M98", due.parts[0]);
+    try std.testing.expectEqualStrings("", due.parts[1]);
+
+    var out: [2][]const u8 = undefined;
+    const parts = try parseLine(" \tM32  a b ", false, &out);
+    try std.testing.expectEqualStrings("a b", parts[1]);
+    try std.testing.expectEqual(@as(usize, 1), (try parseLine("M32 x", false, out[0..1])).len);
 }
 
 test "processLine: checksummed script is stripped before the command is split" {
@@ -125,22 +108,6 @@ test "processLine: checksummed script is stripped before the command is split" {
     try std.testing.expectEqual(@as(usize, 2), due.part_count);
     try std.testing.expectEqualStrings("M32", due.parts[0]);
     try std.testing.expectEqualStrings("plate.gco", due.parts[1]);
-}
-
-test "feedBytes splits a chunk on newlines and keeps the unfinished tail" {
-    var due = PanelDue{};
-    var pending: std.ArrayList(u8) = .empty;
-    defer pending.deinit(std.testing.allocator);
-    try due.feedBytes(std.testing.allocator, &pending, "M23 my file.gco");
-    try std.testing.expectEqual(@as(usize, 0), due.part_count);
-    try std.testing.expectEqualStrings("M23 my file.gco", pending.items);
-    try due.feedBytes(std.testing.allocator, &pending, "\n");
-    try std.testing.expectEqual(@as(usize, 2), due.part_count);
-    try std.testing.expectEqualStrings("M23", due.parts[0]);
-    try std.testing.expectEqualStrings("my file.gco", due.parts[1]);
-    try std.testing.expectEqual(@as(usize, 0), pending.items.len);
-    try due.feedBytes(std.testing.allocator, &pending, "M112\n");
-    try std.testing.expect(due.emergency_stop);
 }
 
 test "processLine: bad checksum is rejected and M112 is emergency stop" {
