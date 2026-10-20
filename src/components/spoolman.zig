@@ -38,6 +38,7 @@ const ds = @import("../store/datastore.zig");
 const notify = @import("../server/notify.zig");
 const ws_client_mod = @import("ws_client.zig");
 const http_get = @import("http_get.zig");
+const jsonrpc = @import("../jsonrpc.zig");
 
 const Registry = registry.Registry;
 const DataStore = ds.DataStore;
@@ -52,6 +53,10 @@ const active_spool_key = "spoolman.spool_id";
 
 /// Largest proxied Spoolman response body; larger replies are 503.
 const max_proxy_response_len = 4 * 1024 * 1024;
+/// Moonraker's HTTP client request deadline, including connection and body.
+const proxy_timeout: std.Io.Duration = .fromSeconds(10);
+/// Moonraker's WebSocket keepalive interval; allow one interval for a pong.
+const ws_ping_interval: std.Io.Duration = .fromSeconds(20);
 
 /// Methods the proxy forwards (spoolman.py `_proxy_spoolman_request`).
 const proxy_methods = std.StaticStringMap(std.http.Method).initComptime(.{
@@ -115,7 +120,7 @@ pub const SpoolmanCtx = struct {
     pub fn setIo(self: *SpoolmanCtx, io: std.Io) void {
         self.io = io;
         // Emit current connection state now that the event loop is live.
-        self.emitSpoolmanStatusChanged();
+        self.emitStatus(false);
     }
 
     /// Apply `[spoolman] server` like spoolman.py `_get_spoolman_urls`: an
@@ -161,10 +166,6 @@ pub const SpoolmanCtx = struct {
             self.bus.emitLocked(io, notify.names.spoolman_status_changed, .{ .array = arr }) catch {}
         else
             self.bus.emit(io, notify.names.spoolman_status_changed, .{ .array = arr }) catch {};
-    }
-
-    fn emitSpoolmanStatusChanged(self: *SpoolmanCtx) void {
-        self.emitStatus(true);
     }
 
     fn wsLock(self: *SpoolmanCtx) void {
@@ -247,6 +248,7 @@ pub const SpoolmanCtx = struct {
             self.wsLock();
             self.ws = w;
             self.wsUnlock();
+            w.enableHeartbeat(ws_ping_interval, ws_ping_interval);
             if (self.ws_stop.isSet()) w.shutdownRecv();
             self.ws_connected.store(true, .release);
             self.emitStatus(false);
@@ -320,13 +322,14 @@ pub const SpoolmanCtx = struct {
     /// Set the active spool ID. Persists to DataStore and, if io is set,
     /// emits notify_active_spool_set with payload [{"spool_id": <id|null>}].
     pub fn setSpoolId(self: *SpoolmanCtx, spool_id: ?i64) void {
+        if (self.getSpoolId() == spool_id) return;
         var arena = std.heap.ArenaAllocator.init(self.gpa);
         defer arena.deinit();
         const a = arena.allocator();
 
         const val: std.json.Value = if (spool_id) |id| .{ .integer = id } else .null;
         self.store.insertItem(a, db_namespace, active_spool_key, val) catch |err|
-            std.debug.print("phobos: warning: failed to persist active spool: {} — selection lost on restart\n", .{err});
+            std.debug.print("phobos: warning: failed to persist active spool: {}, selection lost on restart\n", .{err});
 
         // Emit notification only when a live event loop is available.
         const io = self.io orelse return;
@@ -433,13 +436,16 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
     const io = c.io orelse return errNotAvailable(alloc, use_v2);
     const url = try std.fmt.allocPrint(alloc, "{s}{s}{s}{s}", .{ api_url, path, if (query != null) "?" else "", query orelse "" });
     const payload: ?[]const u8 = if (body) |b| try std.json.Stringify.valueAlloc(alloc, b, .{}) else null;
-    const response = proxyRequest(c.gpa, io, method, url, payload, alloc) catch |err| switch (err) {
+    const response = proxyRequest(c.gpa, io, method, url, payload, alloc, proxy_timeout) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errNotAvailable(alloc, use_v2),
     };
 
     if (response.status >= 400) {
-        if (!use_v2) return error.ServiceUnavailable;
+        if (!use_v2) {
+            try jsonrpc.setErrorReply(alloc, params, @fromBackingInt(@intCast(response.status)), response.reason);
+            return error.UpstreamRequestFailed;
+        }
         // Surface Spoolman's own {"message": ...} from the error body when present.
         const msg = extractSpoolmanMessage(alloc, response.body) orelse "Spoolman request failed";
         var err_obj: std.json.ObjectMap = .empty;
@@ -451,11 +457,10 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
         return .{ .object = obj };
     }
 
-    var response_val: std.json.Value = .null;
-    if (response.body.len > 0) {
-        response_val = std.json.parseFromSliceLeaky(std.json.Value, alloc, response.body, .{}) catch
-            .{ .string = response.body };
-    }
+    const response_val = parseProxyBody(alloc, response.body) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidUtf8 => return errNotAvailable(alloc, use_v2),
+    };
     if (!use_v2) return response_val;
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "response", response_val);
@@ -466,9 +471,22 @@ pub fn handleProxy(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
 
 const ProxyResponse = struct {
     status: u16,
+    reason: []const u8,
     headers: std.json.ObjectMap,
     body: []const u8,
 };
+
+/// Decode external JSON without passing excessive nesting to the serializer.
+/// Strings and parsed storage borrow the request arena and response body.
+fn parseProxyBody(alloc: std.mem.Allocator, body: []const u8) error{ OutOfMemory, InvalidUtf8 }!std.json.Value {
+    if (body.len == 0) return .null;
+    if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidUtf8;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{ .string = body },
+    };
+    return if (jv.exceedsDepth(parsed, jv.max_value_depth)) .{ .string = body } else parsed;
+}
 
 /// One HTTP round trip to Spoolman. The client lives in a gpa arena freed on
 /// return; status, headers and body are copied into `out`. The body must be
@@ -480,10 +498,45 @@ fn proxyRequest(
     url: []const u8,
     payload: ?[]const u8,
     out: std.mem.Allocator,
+    timeout: std.Io.Duration,
 ) !ProxyResponse {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var client: std.http.Client = .{ .allocator = arena.allocator(), .io = io };
+    const Outcome = union(enum) {
+        response: anyerror!ProxyResponse,
+        expired: std.Io.Cancelable!void,
+    };
+    var outcomes: [2]Outcome = undefined;
+    var select: std.Io.Select(Outcome) = .init(io, &outcomes);
+    defer select.cancelDiscard();
+    try select.concurrent(.response, proxyRoundTrip, .{ arena.allocator(), io, method, url, payload });
+    try select.concurrent(.expired, std.Io.sleep, .{ io, timeout, .awake });
+    const response = switch (try select.await()) {
+        .expired => |result| {
+            try result;
+            return error.Timeout;
+        },
+        .response => |result| try result,
+    };
+    var headers: std.json.ObjectMap = .empty;
+    var it = response.headers.iterator();
+    while (it.next()) |h| try headers.put(out, try out.dupe(u8, h.key_ptr.*), .{ .string = try out.dupe(u8, h.value_ptr.string) });
+    return .{
+        .status = response.status,
+        .reason = try out.dupe(u8, response.reason),
+        .headers = headers,
+        .body = try out.dupe(u8, response.body),
+    };
+}
+
+fn proxyRoundTrip(
+    out: std.mem.Allocator,
+    io: std.Io,
+    method: std.http.Method,
+    url: []const u8,
+    payload: ?[]const u8,
+) !ProxyResponse {
+    var client: std.http.Client = .{ .allocator = out, .io = io };
     defer client.deinit();
 
     var headers = http_get.identity_headers;
@@ -507,16 +560,21 @@ fn proxyRequest(
 
     var redirect_buf: [8 * 1024]u8 = undefined;
     var response = try req.receiveHead(if (payload == null) &redirect_buf else &.{});
+    if (!std.unicode.utf8ValidateSlice(response.head.reason)) return error.InvalidUtf8;
+    const reason = try out.dupe(u8, response.head.reason);
     var headers_out: std.json.ObjectMap = .empty;
     var it = response.head.iterateHeaders();
-    while (it.next()) |h| try headers_out.put(out, try out.dupe(u8, h.name), .{ .string = try out.dupe(u8, h.value) });
+    while (it.next()) |h| {
+        if (!std.unicode.utf8ValidateSlice(h.name) or !std.unicode.utf8ValidateSlice(h.value)) return error.InvalidUtf8;
+        try headers_out.put(out, try out.dupe(u8, h.name), .{ .string = try out.dupe(u8, h.value) });
+    }
     var transfer_buf: [4096]u8 = undefined;
     const reader = response.reader(&transfer_buf);
     const body = reader.allocRemaining(out, .limited(max_proxy_response_len)) catch |err| switch (err) {
-        error.ReadFailed => return response.bodyErr().?,
+        error.ReadFailed => return response.bodyErr() orelse error.ReadFailed,
         else => |e| return e,
     };
-    return .{ .status = @backingInt(response.head.status), .headers = headers_out, .body = body };
+    return .{ .status = @backingInt(response.head.status), .reason = reason, .headers = headers_out, .body = body };
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +679,7 @@ const NullBus = struct {
 const MemStore = struct {
     alloc: std.mem.Allocator,
     data: std.StringHashMap(std.json.Value),
+    writes: usize = 0,
 
     fn init(alloc: std.mem.Allocator) MemStore {
         return .{ .alloc = alloc, .data = std.StringHashMap(std.json.Value).init(alloc) };
@@ -638,6 +697,7 @@ const MemStore = struct {
     fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds_mod.Error!void {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         self.data.put(key, value) catch return ds_mod.Error.OutOfMemory;
+        self.writes += 1;
     }
 
     fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds_mod.Error!void {
@@ -1029,9 +1089,71 @@ test "spoolman active-spool persistence round-trip: set then reload" {
     try testing.expectEqual(@as(?i64, 77), ctx2.getSpoolId());
 }
 
+test "Spoolman startup notifications hold Core and unchanged spools do not notify" {
+    const io = testing.io;
+    var mem = MemStore.init(testing.allocator);
+    defer mem.deinit();
+    var core = Core.init();
+    var conns = connections_mod.Connections.init(testing.allocator, &core);
+    defer conns.deinit(io);
+    var bus = NotifyBus.init(&core, &conns);
+    var ctx = SpoolmanCtx.init(testing.allocator, mem.dataStore(), &bus);
+    defer ctx.deinit();
+    const Capture = struct {
+        core: *Core,
+        io: std.Io,
+        status: usize = 0,
+        active: usize = 0,
+        unlocked: bool = false,
+
+        fn write(ptr: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.core.mutex.tryLock()) {
+                self.core.unlock(self.io);
+                self.unlocked = true;
+            }
+            if (std.mem.indexOf(u8, bytes, notify.names.spoolman_status_changed) != null) self.status += 1;
+            if (std.mem.indexOf(u8, bytes, notify.names.active_spool_set) != null) self.active += 1;
+        }
+    };
+    var capture: Capture = .{ .core = &core, .io = io };
+    const conn = try conns.add(io);
+    conns.attachWriter(io, conn, &capture, Capture.write);
+    ctx.setIo(io);
+    for ([_]?i64{ 7, 7, null, null }) |id| core.run(io, SpoolmanCtx.setSpoolId, .{ &ctx, id });
+    try testing.expectEqual(@as(usize, 1), capture.status);
+    try testing.expectEqual(@as(usize, 2), capture.active);
+    try testing.expectEqual(@as(usize, 2), mem.writes);
+    try testing.expect(!capture.unlocked);
+}
+
+test "fuzz Spoolman spool selection only persists changes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var mem = MemStore.init(arena.allocator());
+            defer mem.deinit();
+            var nb = NullBus.init(arena.allocator());
+            var ctx = makeCtx(arena.allocator(), &mem, &nb);
+            var buf: [16]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var previous: ?i64 = null;
+            var expected: usize = 0;
+            for (buf) |byte| {
+                const id: ?i64 = if (byte % 3 == 0) null else byte % 4;
+                if (id != previous) expected += 1;
+                ctx.setSpoolId(id);
+                try testing.expectEqual(expected, mem.writes);
+                try testing.expectEqual(id, ctx.getSpoolId());
+                previous = id;
+            }
+        }
+    }.run, .{});
+}
+
 test "registerSpoolman: wires expected routes and JSON-RPC methods" {
     const alloc = testing.allocator;
-    const jsonrpc = @import("../jsonrpc.zig");
 
     var d = jsonrpc.Dispatcher.init(alloc);
     defer d.deinit();
@@ -1181,7 +1303,7 @@ test "handleProxy forwards to <server>/api with JSON body, headers and Spoolman 
         }
     };
 
-    var ctx = makeCtx(testing.allocator, &mem, &nb);
+    var ctx = makeCtx(std.heap.smp_allocator, &mem, &nb);
     defer ctx.deinit();
     var url: [64]u8 = undefined;
     try ctx.setServerUrl(try std.fmt.bufPrint(&url, "127.0.0.1:{d}/", .{server.socket.address.getPort()}));
@@ -1206,6 +1328,173 @@ test "handleProxy forwards to <server>/api with JSON body, headers and Spoolman 
     const err = missing.object.get("error").?.object;
     try testing.expectEqual(@as(i64, 404), err.get("status_code").?.integer);
     try testing.expectEqualStrings("No such spool", err.get("message").?.string);
+
+    var dispatcher = jsonrpc.Dispatcher.init(a);
+    defer dispatcher.deinit();
+    try dispatcher.registerEntry("proxy", .{ .ctx = &ctx, .handler = handleProxy, .off_core = true });
+    task = io.async(Peer.serve, .{ &peer, &server, io, @as([]const u8, "HTTP/1.1 404 Custom reason\r\nContent-Length: 27\r\nConnection: close\r\n\r\n{\"message\":\"No such spool\"}") });
+    const wire = try dispatcher.handle("{\"jsonrpc\":\"2.0\",\"method\":\"proxy\",\"params\":{\"request_method\":\"GET\",\"path\":\"/v1/spool/9\"},\"id\":1}", a);
+    task.await(io);
+    const reply = try std.json.parseFromSliceLeaky(std.json.Value, a, wire, .{});
+    const failure = reply.object.get("error").?.object;
+    try testing.expectEqual(@as(i64, -32601), failure.get("code").?.integer);
+    try testing.expectEqualStrings("Custom reason", failure.get("message").?.string);
+
+    for ([_][]const u8{
+        "HTTP/1.1 404 \xff\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nX-Label: \xff\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    }) |invalid| {
+        task = io.async(Peer.serve, .{ &peer, &server, io, invalid });
+        const unavailable = try handleProxy(@ptrCast(&ctx), try mkParams(a, "{\"request_method\":\"GET\",\"path\":\"/v1/spool\",\"use_v2_response\":true}"), a);
+        task.await(io);
+        try testing.expectEqual(@as(i64, 503), unavailable.object.get("error").?.object.get("status_code").?.integer);
+    }
+}
+
+test "Spoolman proxy survives a reset during a fixed-length body" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, aio: std.Io) !void {
+            const stream = try s.accept(aio);
+            defer stream.close(aio);
+            var wbuf: [256]u8 = undefined;
+            var w = stream.writer(aio, &wbuf);
+            try w.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{\"a\":");
+            try w.interface.flush();
+            // Unread request bytes make close reset the connection.
+            try aio.sleep(.fromMilliseconds(50), .awake);
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &server, io });
+    defer peer.cancel(io) catch {};
+    var url_buf: [80]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    if (proxyRequest(std.heap.smp_allocator, io, .GET, url, null, arena.allocator(), .fromSeconds(1))) |_| {
+        return error.ExpectedInterruptedBody;
+    } else |err| try testing.expect(err == error.ReadFailed or err == error.HttpConnectionClosing);
+    try peer.await(io);
+}
+
+test "Spoolman proxy cancels a stalled response at its deadline" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, aio: std.Io, closed: *std.Io.Event) !void {
+            defer closed.set(aio);
+            const stream = try s.accept(aio);
+            defer stream.close(aio);
+            var buf: [4096]u8 = undefined;
+            var reader = stream.reader(aio, &buf);
+            while (true) _ = try reader.interface.takeByte();
+        }
+    };
+    var closed: std.Io.Event = .unset;
+    var peer = try io.concurrent(Peer.run, .{ &server, io, &closed });
+    defer peer.cancel(io) catch {};
+    var url_buf: [80]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{server.socket.address.getPort()});
+    const started = std.Io.Clock.Timestamp.now(io, .awake);
+    try testing.expectError(error.Timeout, proxyRequest(std.heap.smp_allocator, io, .GET, url, null, arena.allocator(), .fromMilliseconds(50)));
+    try testing.expect(started.untilNow(io).raw.toMilliseconds() < 1000);
+    try closed.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(1), .clock = .awake } });
+    try testing.expectError(error.EndOfStream, peer.await(io));
+}
+
+test "Spoolman proxy converts excessive JSON nesting into a safe string" {
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var nb = NullBus.init(a);
+    var ctx = makeCtx(std.heap.smp_allocator, &mem, &nb);
+    defer ctx.deinit();
+    var server = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer server.deinit(io);
+    const Peer = struct {
+        fn run(s: *std.Io.net.Server, aio: std.Io) !void {
+            const stream = try s.accept(aio);
+            defer stream.close(aio);
+            var rbuf: [2048]u8 = undefined;
+            var reader = stream.reader(aio, &rbuf);
+            var head: std.http.Reader = .{ .in = &reader.interface, .interface = undefined, .state = .ready, .max_head_len = 2048 };
+            _ = try head.receiveHead();
+            var wbuf: [2048]u8 = undefined;
+            var writer = stream.writer(aio, &wbuf);
+            const depth = 512;
+            try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{depth * 2});
+            try writer.interface.splatByteAll('[', depth);
+            try writer.interface.splatByteAll(']', depth);
+            try writer.interface.flush();
+        }
+    };
+    var peer = try io.concurrent(Peer.run, .{ &server, io });
+    defer peer.cancel(io) catch {};
+    var url_buf: [80]u8 = undefined;
+    try ctx.setServerUrl(try std.fmt.bufPrint(&url_buf, "127.0.0.1:{d}", .{server.socket.address.getPort()}));
+    ctx.io = io;
+    ctx.ws_connected.store(true, .release);
+    const result = try handleProxy(@ptrCast(&ctx), try mkParams(a, "{\"request_method\":\"GET\",\"path\":\"/v1/spool\",\"use_v2_response\":true}"), a);
+    try testing.expect(result.object.get("response").? == .string);
+    const serialized = try jv.successResponse(a, .{ .integer = 1 }, result);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, serialized, .{});
+    try testing.expectEqual(@as(usize, 1024), parsed.object.get("result").?.object.get("response").?.string.len);
+    try peer.await(io);
+}
+
+test "fuzz Spoolman response bodies stay safe to serialize" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var buf: [512]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            const depth: usize = buf[0];
+            const nested = buf[1] % 2 == 0;
+            if (nested) {
+                @memset(buf[0..depth], '[');
+                @memset(buf[depth .. depth * 2], ']');
+            }
+            const body = if (nested) buf[0 .. depth * 2] else &buf;
+            const parsed = parseProxyBody(a, body) catch |err| switch (err) {
+                error.InvalidUtf8 => {
+                    try testing.expect(!std.unicode.utf8ValidateSlice(body));
+                    return;
+                },
+                else => return err,
+            };
+            try testing.expect(!jv.exceedsDepth(parsed, jv.max_value_depth));
+            const wire = try jv.successResponse(a, .{ .integer = 1 }, parsed);
+            _ = try std.json.parseFromSliceLeaky(std.json.Value, a, wire, .{});
+        }
+    }.run, .{});
+}
+
+test "Spoolman response parsing rejects invalid UTF-8 and preserves plain text" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectError(error.InvalidUtf8, parseProxyBody(a, "\xff"));
+    try testing.expectEqualStrings("not JSON", (try parseProxyBody(a, "not JSON")).string);
+    try testing.expectEqual(std.json.Value.null, try parseProxyBody(a, ""));
+    try testing.expectEqual(@as(i64, 7), (try parseProxyBody(a, "7")).integer);
+    const Allocation = struct {
+        fn run(gpa: std.mem.Allocator) !void {
+            var parsed_arena = std.heap.ArenaAllocator.init(gpa);
+            defer parsed_arena.deinit();
+            _ = try parseProxyBody(parsed_arena.allocator(), "{\"items\":[1,{\"value\":\"test\"}]}");
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Allocation.run, .{});
 }
 
 test "fuzz handleSpoolId: never panics on arbitrary params" {

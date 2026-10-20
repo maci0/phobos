@@ -7,8 +7,8 @@
 //!   POST /debug/notifiers/test    → debug.notifiers.test (debug only)
 //!
 //! `[notifier <name>]` sections fill the list. Sending needs apprise, which
-//! phobos does not link: the test endpoint fails with `AppriseNotAvailable`
-//! for a configured name and 404 for an unknown one.
+//! phobos does not link: the test endpoint and Klipper `notify` remote method
+//! fail with `AppriseNotAvailable` for a configured name and 404 otherwise.
 //!
 //! Notifier record shape (NotifierInstance.as_dict): name, url, title, body,
 //! body_format (null when unset), events (the configured list), attach (null).
@@ -56,6 +56,17 @@ pub const NotifierCtx = struct {
     /// Moonraker's `getlist(separator=",")`: items are trimmed and empty ones
     /// dropped. On error the list is unchanged.
     pub fn addNotifier(self: *NotifierCtx, alloc: std.mem.Allocator, src: Config) !void {
+        const scheme_end = std.mem.indexOf(u8, src.url, "://") orelse return error.InvalidNotifierUrl;
+        if (scheme_end == 0) return error.InvalidNotifierUrl;
+        for (src.url[0..scheme_end]) |char| {
+            if (!std.ascii.isAlphanumeric(char) and char != '_') return error.InvalidNotifierUrl;
+        }
+        if (src.body_format) |format| {
+            const valid = for ([_][]const u8{ "text", "html", "markdown" }) |candidate| {
+                if (std.ascii.eqlIgnoreCase(format, candidate)) break true;
+            } else false;
+            if (!valid) return error.InvalidBodyFormat;
+        }
         var arena = self.arena.promote(alloc);
         defer self.arena = arena.state;
         const a = arena.allocator();
@@ -152,6 +163,7 @@ pub fn registerNotifier(reg: *Registry, ctx: *NotifierCtx) !void {
         c,
         handleNotifierTest,
     );
+    try reg.dispatcher.register("notify", c, handleNotifierTest);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +219,7 @@ test "fuzz addNotifier: arbitrary events never leak and never keep empty items" 
             smith.bytesWithHash(&buf, 0);
             var ctx = NotifierCtx{};
             defer ctx.deinit(testing.allocator);
-            try ctx.addNotifier(testing.allocator, .{ .name = "n", .url = "u", .events = &buf });
+            try ctx.addNotifier(testing.allocator, .{ .name = "n", .url = "json://host", .events = &buf });
             for (ctx.notifiers[0].events) |e| try testing.expect(e.len > 0);
         }
     }.run, .{});
@@ -271,6 +283,58 @@ test "registerNotifier: wires routes and JSON-RPC methods" {
     try testing.expect(reg.lookup(.POST, "/debug/notifiers/test") != null);
     try testing.expect(d.methods.get("server.notifiers.list") != null);
     try testing.expect(d.methods.get("debug.notifiers.test") != null);
+    try testing.expect(d.methods.get("notify") != null);
+}
+
+test "notifier config rejects malformed service URLs and unknown body formats" {
+    var ctx = NotifierCtx{};
+    defer ctx.deinit(testing.allocator);
+    for ([_][]const u8{ "", "relative/path", "://host", "mail+tls://host", "mail scheme://host" }) |url| {
+        try testing.expectError(error.InvalidNotifierUrl, ctx.addNotifier(testing.allocator, .{ .name = "bad", .url = url, .events = "*" }));
+    }
+    try testing.expectError(error.InvalidBodyFormat, ctx.addNotifier(testing.allocator, .{ .name = "bad", .url = "json://host", .events = "*", .body_format = "xml" }));
+    try testing.expectEqual(@as(usize, 0), ctx.notifiers.len);
+    try ctx.addNotifier(testing.allocator, .{ .name = "good", .url = "json://host", .events = "*", .body_format = "MaRkDoWn" });
+    try testing.expectEqual(@as(usize, 1), ctx.notifiers.len);
+}
+
+test "notifier remote action resolves configured names and reports unavailable transport" {
+    const jsonrpc = @import("../jsonrpc.zig");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = NotifierCtx{};
+    defer ctx.deinit(testing.allocator);
+    try ctx.addNotifier(testing.allocator, .{ .name = "desk", .url = "json://host", .events = "gcode" });
+    var dispatcher = jsonrpc.Dispatcher.init(testing.allocator);
+    defer dispatcher.deinit();
+    var reg = Registry.init(testing.allocator, &dispatcher);
+    defer reg.deinit();
+    try registerNotifier(&reg, &ctx);
+    for ([_][]const u8{ "desk", "missing" }) |name| {
+        const request = try std.json.Stringify.valueAlloc(a, .{ .jsonrpc = "2.0", .method = "notify", .params = .{ .name = name, .message = "done" }, .id = 1 }, .{});
+        const response = try dispatcher.handle(request, a);
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, response, .{});
+        try testing.expectEqual(@as(i64, if (std.mem.eql(u8, name, "missing")) -32601 else 500), parsed.object.get("error").?.object.get("code").?.integer);
+    }
+}
+
+test "fuzz notifier configuration validates URL schemes and body formats" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bytes: [32]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var ctx = NotifierCtx{};
+            defer ctx.deinit(testing.allocator);
+            const formats = [_]?[]const u8{ null, "text", "HTML", "markdown", "xml", &bytes };
+            const urls = [_][]const u8{ "json://host", "relative", "", &bytes };
+            ctx.addNotifier(testing.allocator, .{ .name = "n", .url = urls[bytes[0] % urls.len], .events = "*", .body_format = formats[bytes[1] % formats.len] }) catch |err| switch (err) {
+                error.InvalidNotifierUrl, error.InvalidBodyFormat => return,
+                else => return err,
+            };
+            try testing.expectEqual(@as(usize, 1), ctx.notifiers.len);
+        }
+    }.run, .{});
 }
 
 // --- Fuzz tests ---

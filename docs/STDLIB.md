@@ -127,6 +127,22 @@ Update tests create native temporary repositories whose `origin` points to the
 same local fixture. Refresh assertions check the resulting tracking ref; the
 test suite does not fetch the project's remote.
 
+Spoolman HTTP requests race a native `Io.Select` timer, cancelling and joining
+the request after ten seconds. Response data is copied out only after the task
+finishes. Bodies, reason text and headers must be UTF-8; invalid text returns
+the unavailable response. External JSON passes the depth guard before
+serialization. The v1 proxy preserves upstream status and HTTP reason text;
+v2 prefers the JSON `message` field. WebSocket keepalive uses `Io.operateTimeout` on the underlying
+reader and writer, including TLS, with a ping every twenty seconds and one
+interval to receive a matching pong. Startup status emission takes Core; active
+spool changes emit while Core is held, and repeated selections do not emit.
+
+Notifier records validate ASCII word-character service URL prefixes and the
+case-insensitive `text`, `html` and `markdown` body formats before registration.
+Klipper's `notify` method resolves configured names through the notifier handler. Delivery still
+fails with `AppriseNotAvailable`; the transport and full template rendering are
+not implemented.
+
 Base32, UUID layout and CIDR prefix matching remain small local codecs. The
 standard library has no matching complete API. Address comparison for trusted
 clients intentionally ignores ports; `IpAddress.eql` also compares the port.

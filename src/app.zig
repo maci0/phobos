@@ -139,13 +139,14 @@ fn featherKlippySend(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const 
 const remote_call_queue_len = 16;
 
 /// Remote methods registered with Klippy: Feather's, plus the component
-/// methods Moonraker registers (power.py, wled.py, spoolman.py, mqtt.py).
+/// methods Moonraker registers (power, WLED, Spoolman, MQTT and notifiers).
 const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]const u8{
     "set_device_power",
     "set_wled_state",
     "set_wled",
     "spoolman_set_active_spool",
     "publish_mqtt_topic",
+    "notify",
 };
 
 /// Klippy `RemoteHandler`, run on the Klippy reader under Core. Queues the
@@ -2416,6 +2417,15 @@ test "setConfig loads an analysis platform and a notifier record" {
         \\body_format: text
         \\events: complete, error
         \\
+        \\[notifier bad-url]
+        \\url: relative/path
+        \\events: *
+        \\
+        \\[notifier bad-format]
+        \\url: json://host
+        \\body_format: xml
+        \\events: *
+        \\
     });
 
     var app = try testApp(alloc, io, &tmp);
@@ -2708,6 +2718,7 @@ test "App.init: dispatcher has exactly the expected methods" {
         // Notifier
         "server.notifiers.list",
         "debug.notifiers.test",
+        "notify",
         // Webcam (item endpoint is verb-prefixed)
         "server.webcams.list",
         "server.webcams.get_item",
@@ -2956,6 +2967,16 @@ test "Klipper remote methods map to Moonraker's JSON-RPC requests" {
     try std.testing.expectEqualStrings(
         \\{"jsonrpc":"2.0","method":"server.mqtt.publish_mqtt_topic","params":{},"id":0}
     , mqtt);
+    params.clearRetainingCapacity();
+    try params.put(alloc, "name", .{ .string = "desk" });
+    try params.put(alloc, "message", .{ .string = "done" });
+    const notification = (try remoteMethodRequest(alloc, "notify", .{ .object = params })).?;
+    defer alloc.free(notification);
+    const parsed_notification = try std.json.parseFromSlice(std.json.Value, alloc, notification, .{});
+    defer parsed_notification.deinit();
+    try std.testing.expectEqualStrings("notify", parsed_notification.value.object.get("method").?.string);
+    try std.testing.expectEqualStrings("desk", parsed_notification.value.object.get("params").?.object.get("name").?.string);
+    try std.testing.expectEqualStrings("done", parsed_notification.value.object.get("params").?.object.get("message").?.string);
     try std.testing.expectEqualStrings("toggle", devicePowerAction(.{ .string = "Toggle" }).?);
     try std.testing.expectEqualStrings("off", devicePowerAction(.{ .bool = false }).?);
     try std.testing.expect(devicePowerAction(.{ .integer = 1 }) == null);
