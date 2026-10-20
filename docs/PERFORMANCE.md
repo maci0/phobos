@@ -251,11 +251,15 @@ Klippy-bound workload, so it is not done.
 ## Reproduce
 
 ```sh
-zig build -Doptimize=ReleaseFast
-bash tools/perf_harness/bench_local.sh   # writes /tmp/perf-report.txt
+bash tools/perf_harness/bench_local.sh   # prints its .scratch/bench-*/ capture path
 
 # profile the hot path (needs perf; FlameGraph at $FLAMEGRAPH_DIR or ~/FlameGraph)
 tools/perf_harness/profile.sh            # or USE_BPFTRACE=1 for eBPF
 ```
 
 Absolute numbers vary with host and kernel.
+
+The current helpers use isolated build prefixes and fresh datadirs. Their setup
+and cleanup were checked after this report was recorded; the historical load
+numbers were not rerun. See the [harness README](../tools/perf_harness/README.md)
+for dependencies, loopback ports and command-double checks.

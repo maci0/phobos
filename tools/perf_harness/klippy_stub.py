@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Minimal Klipper API-server stub for performance benchmarking.
 
 Speaks the real Klipper unix-socket protocol (JSON-RPC 2.0 frames delimited by
@@ -10,7 +9,7 @@ Responds to: info, objects/list, objects/query, objects/subscribe,
 gcode/subscribe_output, register_remote_method, gcode/script, and anything else
 with an empty result. No status pushes (benchmarks hit request/response paths).
 
-Usage: python klippy_stub.py /tmp/klippy_stub.sock
+Usage: uv run python klippy_stub.py .scratch/<run>/klippy.sock
 """
 
 from __future__ import annotations
@@ -25,28 +24,57 @@ import time
 ETX = b"\x03"
 
 OBJECTS = [
-    "webhooks", "configfile", "mcu", "gcode_move", "toolhead", "extruder",
-    "heater_bed", "fan", "print_stats", "virtual_sdcard", "gcode", "gcode_macro M117",
-    "idle_timeout", "display_status", "pause_resume", "system_stats",
+    "webhooks",
+    "configfile",
+    "mcu",
+    "gcode_move",
+    "toolhead",
+    "extruder",
+    "heater_bed",
+    "fan",
+    "print_stats",
+    "virtual_sdcard",
+    "gcode",
+    "gcode_macro M117",
+    "idle_timeout",
+    "display_status",
+    "pause_resume",
+    "system_stats",
 ]
 
 
-def _status_for(name: str):
+def _status_for(name: str) -> dict[str, object]:
     if name == "webhooks":
         return {"state": "ready", "state_message": "Printer is ready"}
     if name == "configfile":
-        return {"config": {"printer": {"kinematics": "cartesian"}},
-                "settings": {"printer": {"kinematics": "cartesian", "max_velocity": 300.0}},
-                "save_config_pending": False, "warnings": [], "save_config_pending_items": {}}
+        return {
+            "config": {"printer": {"kinematics": "cartesian"}},
+            "settings": {"printer": {"kinematics": "cartesian", "max_velocity": 300.0}},
+            "save_config_pending": False,
+            "warnings": [],
+            "save_config_pending_items": {},
+        }
     if name in ("heater_bed", "extruder"):
         return {"temperature": 24.31, "target": 0.0, "power": 0.0}
     if name == "toolhead":
-        return {"position": [0.0, 0.0, 0.0, 0.0], "homed_axes": "",
-                "axis_minimum": [0, 0, 0, 0], "axis_maximum": [300, 300, 300, 0],
-                "max_velocity": 300.0, "max_accel": 3000.0, "estimated_print_time": 0.0}
+        return {
+            "position": [0.0, 0.0, 0.0, 0.0],
+            "homed_axes": "",
+            "axis_minimum": [0, 0, 0, 0],
+            "axis_maximum": [300, 300, 300, 0],
+            "max_velocity": 300.0,
+            "max_accel": 3000.0,
+            "estimated_print_time": 0.0,
+        }
     if name == "print_stats":
-        return {"filename": "", "state": "standby", "total_duration": 0.0,
-                "print_duration": 0.0, "filament_used": 0.0, "info": {"total_layer": None, "current_layer": None}}
+        return {
+            "filename": "",
+            "state": "standby",
+            "total_duration": 0.0,
+            "print_duration": 0.0,
+            "filament_used": 0.0,
+            "info": {"total_layer": None, "current_layer": None},
+        }
     if name == "virtual_sdcard":
         return {"is_active": False, "progress": 0.0, "file_position": 0}
     if name == "display_status":
@@ -54,32 +82,61 @@ def _status_for(name: str):
     if name == "idle_timeout":
         return {"state": "Idle", "printing_time": 0.0}
     if name == "gcode_move":
-        return {"speed_factor": 1.0, "speed": 1500.0, "extrude_factor": 1.0,
-                "absolute_coordinates": True, "absolute_extrude": True,
-                "homing_origin": [0, 0, 0, 0], "position": [0, 0, 0, 0], "gcode_position": [0, 0, 0, 0]}
+        return {
+            "speed_factor": 1.0,
+            "speed": 1500.0,
+            "extrude_factor": 1.0,
+            "absolute_coordinates": True,
+            "absolute_extrude": True,
+            "homing_origin": [0, 0, 0, 0],
+            "position": [0, 0, 0, 0],
+            "gcode_position": [0, 0, 0, 0],
+        }
     return {}
 
 
-def _handle(method: str, params: dict):
+def _handle(method: str, params: dict[str, object]) -> dict[str, object]:
+    if method == "list_endpoints":
+        return {
+            "endpoints": [
+                "info",
+                "objects/list",
+                "objects/query",
+                "objects/subscribe",
+                "gcode/help",
+                "gcode/script",
+            ]
+        }
     if method == "info":
-        return {"state": "ready", "state_message": "Printer is ready",
-                "hostname": "perfbench", "klipper_path": "/opt/klipper",
-                "python_path": "/usr/bin/python3", "log_file": "/tmp/klippy.log",
-                "config_file": "/tmp/printer.cfg", "software_version": "v0.12.0-stub",
-                "cpu_info": "stub", "app": "Klipper", "protocol_version": "1"}
+        return {
+            "state": "ready",
+            "state_message": "Printer is ready",
+            "hostname": "perfbench",
+            "klipper_path": "/opt/klipper",
+            "python_path": "/usr/bin/python3",
+            "log_file": "/tmp/klippy.log",
+            "config_file": "/tmp/printer.cfg",
+            "software_version": "v0.12.0-stub",
+            "cpu_info": "stub",
+            "app": "Klipper",
+            "protocol_version": "1",
+        }
     if method == "objects/list":
         return {"objects": OBJECTS}
     if method in ("objects/query", "objects/subscribe"):
         req = (params or {}).get("objects") or {}
         names = list(req.keys()) if isinstance(req, dict) else OBJECTS
-        return {"eventtime": time.monotonic(), "status": {n: _status_for(n) for n in names}}
+        return {
+            "eventtime": time.monotonic(),
+            "status": {n: _status_for(n) for n in names},
+        }
     if method == "gcode/help":
         return {}
     # gcode/script, gcode/subscribe_output, register_remote_method, etc.
     return {}
 
 
-def serve_conn(conn: socket.socket):
+def serve_conn(conn: socket.socket) -> None:
     buf = bytearray()
     conn.settimeout(None)
     try:
@@ -93,10 +150,14 @@ def serve_conn(conn: socket.socket):
                 if idx < 0:
                     break
                 frame = bytes(buf[:idx])
-                del buf[:idx + 1]
+                del buf[: idx + 1]
                 try:
                     msg = json.loads(frame)
-                except Exception:
+                except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                    print(f"invalid JSON frame: {error}", file=sys.stderr)
+                    continue
+                if not isinstance(msg, dict):
+                    print("expected a JSON object frame", file=sys.stderr)
                     continue
                 mid = msg.get("id")
                 method = msg.get("method", "")
@@ -104,7 +165,12 @@ def serve_conn(conn: socket.socket):
                 if mid is None:
                     continue  # notification / no reply expected
                 result = _handle(method, params)
-                reply = json.dumps({"id": mid, "result": result}, separators=(",", ":")).encode() + ETX
+                reply = (
+                    json.dumps(
+                        {"id": mid, "result": result}, separators=(",", ":")
+                    ).encode()
+                    + ETX
+                )
                 conn.sendall(reply)
     except OSError:
         return
@@ -112,25 +178,28 @@ def serve_conn(conn: socket.socket):
         conn.close()
 
 
-def main(argv=None):
-    argv = argv or sys.argv[1:]
-    path = argv[0] if argv else "/tmp/klippy_stub.sock"
-    if os.path.exists(path):
-        os.unlink(path)
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    srv.listen(128)
-    print(f"klippy stub listening on {path}", flush=True)
-    try:
-        while True:
-            conn, _ = srv.accept()
-            threading.Thread(target=serve_conn, args=(conn,), daemon=True).start()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        srv.close()
-        if os.path.exists(path):
-            os.unlink(path)
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if len(argv) != 1:
+        print(
+            "provide an unused Unix socket path in an owned directory", file=sys.stderr
+        )
+        return 2
+    path = argv[0]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as srv:
+        srv.bind(path)
+        try:
+            srv.listen(128)
+            print(f"klippy stub listening on {path}", flush=True)
+            while True:
+                conn, _ = srv.accept()
+                threading.Thread(target=serve_conn, args=(conn,), daemon=True).start()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+    return 0
 
 
 if __name__ == "__main__":

@@ -42,3 +42,48 @@ Verification on the `2ab11b8` source with the documentation candidate:
 No physical printer, live database, service deployment, privileged profiling,
 fresh memory measurement or external update source was used for this entry.
 Further implementation commits need their own verification entries.
+
+## 2026-10-20: isolate measurement helpers
+
+Requested by the user as part of finishing the source review. The local
+comparison, profiling, load and memory helpers previously reused `/tmp` paths;
+profiling rebound a shared Klippy socket, and memory cleanup could signal PID 0
+if startup failed. They now keep configurations, fresh databases, sockets,
+captures and build prefixes in unique project-local scratch directories. Only
+recorded child PIDs can be stopped; teardown bounds its TERM wait before KILL.
+Port checks reject invalid values, production port 7125 and an existing HTTP
+listener. Python formatting and interpreter sampling live in Python files run
+through `uv`, with absent measurements reported as errors.
+
+Source evidence: `scripts/measure-memory.sh`, `scripts/python-memory.py`,
+`tools/perf_harness/{common,bench_local,profile,loadtest}.sh`, `report.py` and
+`klippy_stub.py`. The stub advertises proxy endpoints for stock Moonraker,
+requires an unused explicit socket path and preserves existing files. Local
+server fixtures disable announcement fetches and update refresh; the Moonraker
+fixture carries an empty USB-ID file to prevent its automatic download.
+
+Verification:
+
+- `timeout 90 bash tools/perf_harness/tests/smoke.sh`: command-double checks
+  passed for capture locations, both profiler branches, metric formatting,
+  failed builds and loads, invalid/busy/production ports, unowned PID refusal
+  and TERM-resistant child cleanup.
+- Python helper tests: 10 passed, including malformed-frame recovery over a
+  socket pair and refusal to replace an existing Unix path. Scanner tests
+  remain 78 passed. Test temporary files were directed below `.scratch/`.
+- `bash -n` and ShellCheck passed for the changed shell helpers; Ruff lint and
+  formatting passed for the changed Python helpers. Strict mypy passed for
+  `klippy_stub.py`, `report.py` and `scripts/python-memory.py`.
+- Native Debug phobos connected to the isolated stub. Stock Moonraker
+  `900848584374` then reached Klippy-ready and its HTTP objects query returned
+  the stub heater temperature 24.31. Both used new scratch datadirs and were
+  stopped; no owned process remained. Earlier stock smoke attempts failed on
+  an overlong absolute Unix socket path; one also downloaded `usb.ids` into
+  its scratch datadir before the fixture was corrected.
+- Full standalone Zig suite on the unchanged `2ab11b8` source: 1283 passed,
+  1 skipped, 0 failed; 226 fuzz tests. `git diff --check` passed.
+
+No real load run, privileged profiler, printer or live database was used. The
+historical performance and memory numbers were not remeasured. Black could not
+run because it was absent from the offline package cache; Ruff formatting was
+checked without fetching packages.

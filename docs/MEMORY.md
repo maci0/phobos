@@ -92,12 +92,17 @@ That is reserved, uncommitted address space:
 ## Method
 
 ```sh
-zig build -Doptimize=ReleaseSmall
-./zig-out/bin/phobos -c <config-with-a-free-port> &   # idle, no traffic
-sleep 6                                               # let startup allocations free
-grep -E 'VmRSS|VmHWM|VmData|Threads' /proc/<pid>/status
+scripts/measure-memory.sh 7188
 ```
 
-Use a project-local scratch datadir with `-d` and a free loopback port. Never
-point a measurement run at a live printer database. Record the commit, backend,
-configuration, architecture, traffic and sampling interval beside the result.
+The helper builds ReleaseSmall under a unique `.scratch/memory-*/` prefix,
+starts a fresh SQLite datadir on loopback, waits six seconds after HTTP readiness,
+and prints the commit, binary size and `/proc` values in KiB. Its configuration
+disables remote announcement fetching and update refresh and points Klippy at an
+unused owned socket path. It also prints the interpreter version and RSS after
+the baseline stdlib imports. Captures stay in that run directory, and cleanup
+stops only its own daemon. It does not overwrite `zig-out/bin/phobos`.
+
+Record the architecture, configuration and traffic beside a new result. Never
+point a measurement run at a live printer database. The historic measurements
+above were not rerun after these helper changes.

@@ -159,6 +159,10 @@ primitives are gone, so use `std.Io.Mutex`.
       never run them by default
 
 - Tests:
+    - Python tool tests use a project-local `--basetemp=.scratch/<name>`.
+      Measurement helpers keep captures, data and build prefixes below `.scratch/`
+      and terminate only child PIDs they created. Do not restore fixed shared
+      Klippy sockets or process-group cleanup signals.
     - temperature sampling and automatic update refresh start only in the daemon
       entry point. Tests tick them synchronously; no sampler uses the testing
       allocator.
