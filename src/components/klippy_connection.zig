@@ -25,6 +25,7 @@ const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
 const clock = @import("../util/clock.zig");
+const SocketDeadline = @import("../util/socket_deadline.zig").SocketDeadline;
 
 /// One in-flight request awaiting its response. The persistent reader routes
 /// a matching response frame here and posts the semaphore.
@@ -70,6 +71,7 @@ const max_sub_object_name_len = 256;
 const startup_polls = 100;
 const startup_poll_delay: std.Io.Duration = .fromMilliseconds(250);
 const reconnect_delay: std.Io.Duration = .fromSeconds(1);
+const write_timeout: std.Io.Duration = .fromSeconds(5);
 /// Frames read while waiting for one handshake response.
 const handshake_max_frames = 40;
 /// WebSocket close sent to `/klippysocket` clients (BridgeSocket.close_socket).
@@ -171,6 +173,7 @@ const Bridge = struct {
     io: std.Io,
     ws: *std.http.Server.WebSocket,
     stream: net.Stream,
+    client_stream: net.Stream,
     /// Serializes WebSocket writes (relayed frames, pongs, close).
     ws_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
@@ -183,6 +186,7 @@ const Bridge = struct {
     /// Klippy to client. On EOF, a read error or cancellation, closes the
     /// WebSocket with 1001.
     fn relayKlippy(self: *Bridge) void {
+        defer self.client_stream.shutdown(self.io, .both) catch {};
         var buf: [4096]u8 = undefined;
         var reader = self.stream.reader(self.io, &buf);
         while (true) {
@@ -378,14 +382,14 @@ pub const KlippyCtx = struct {
     /// either side closes. Klippy keeps one subscription per connection, so a
     /// bridge client never replaces phobos's. Refused with close 1001 while
     /// phobos itself is not connected.
-    pub fn serveBridge(self: *KlippyCtx, io: std.Io, ws: *std.http.Server.WebSocket) void {
+    pub fn serveBridge(self: *KlippyCtx, io: std.Io, ws: *std.http.Server.WebSocket, client_stream: net.Stream) void {
         if (!self.isConnected()) return closeBridge(ws);
         const addr = net.UnixAddress.init(self.uds_path) catch return closeBridge(ws);
         const stream = addr.connect(io) catch return closeBridge(ws);
         defer stream.close(io);
         // Send the upgrade response: Klippy says nothing until the client does.
         ws.flush() catch return;
-        var bridge: Bridge = .{ .gpa = self.gpa, .io = io, .ws = ws, .stream = stream };
+        var bridge: Bridge = .{ .gpa = self.gpa, .io = io, .ws = ws, .stream = stream, .client_stream = client_stream };
         var klippy_side = io.concurrent(Bridge.relayKlippy, .{&bridge}) catch return closeBridge(ws);
         bridge.relayClient();
         klippy_side.cancel(io);
@@ -736,8 +740,9 @@ pub const KlippyCtx = struct {
         self.write_mutex.lockUncancelable(io);
         defer self.write_mutex.unlock(io);
         const stream = self.stream orelse return error.KlippyDisconnected;
+        var deadline: SocketDeadline = .{ .base_io = io, .timeout = .{ .deadline = .fromNow(io, .{ .raw = write_timeout, .clock = .awake }) } };
         var wbuf: [4096]u8 = undefined;
-        var w = stream.writer(io, &wbuf);
+        var w = stream.writer(deadline.io(), &wbuf);
         try framing.write(&w.interface, payload);
         try w.interface.flush();
     }
@@ -783,10 +788,10 @@ pub const KlippyCtx = struct {
 
         const frame = try formatRequest(alloc, method, id, params_json);
         defer alloc.free(frame);
-        try self.writeFrame(io, frame);
         {
             if (release) |core| core.unlock(io);
             defer if (release) |core| core.lock(io);
+            try self.writeFrame(io, frame);
             try waiter.sem.wait(io);
         }
         if (waiter.payload) |payload| return parseKlippyResult(alloc, payload);
@@ -1400,6 +1405,50 @@ test "requests are refused once waiters are failed, without writing" {
     try std.testing.expectEqual(@as(u32, 0), ctx.pending.count());
 }
 
+test "request releases Core before a socket write needs the reader to drain" {
+    const io = std.testing.io;
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(std.heap.smp_allocator, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(io);
+    var listener = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(io, .{});
+    defer listener.deinit(io);
+    ctx.stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    const peer = try listener.accept(io);
+    defer peer.close(io);
+    ctx.connected.store(true, .release);
+    const Peer = struct {
+        fn run(k: *KlippyCtx, stream: net.Stream) void {
+            const aio = k.io.?;
+            k.bus.core.lock(aio);
+            k.bus.core.unlock(aio);
+            var deadline: SocketDeadline = .{ .base_io = aio, .timeout = .{ .deadline = .fromNow(aio, .{ .raw = .fromSeconds(2), .clock = .awake }) } };
+            var buffer: [4096]u8 = undefined;
+            var reader = stream.reader(deadline.io(), &buffer);
+            const frame = framing.read(std.heap.smp_allocator, &reader.interface) catch return;
+            defer std.heap.smp_allocator.free(frame);
+            k.dispatchFrame(aio, "{\"id\":\"1\",\"result\":\"ok\"}") catch {};
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const large = try a.alloc(u8, 8 * 1024 * 1024);
+    @memset(large, 'x');
+    var params: std.json.ObjectMap = .empty;
+    try params.put(a, "data", .{ .string = large });
+    nb.core.lock(io);
+    var peer_task = try io.concurrent(Peer.run, .{ &ctx, peer });
+    const result = ctx.request("info", .{ .object = params }, a);
+    nb.core.unlock(io);
+    // Wake a reader on a partial request when testing a failed write.
+    if (result) |_| {} else |_| ctx.stream.?.shutdown(io, .both) catch {};
+    peer_task.cancel(io);
+    try std.testing.expectEqualStrings("ok", (try result).string);
+}
+
 /// Test-local Klippy: accepts one connection, answers `info` with `state`,
 /// `objects/subscribe` with an empty status and anything else with `{}`,
 /// records methods, and closes after `gcode/script`.
@@ -1543,7 +1592,7 @@ test "serveBridge relays over a dedicated Klippy connection" {
     var swbuf: [4096]u8 = undefined;
     var sw = server_side.writer(io, &swbuf);
     var ws: std.http.Server.WebSocket = .{ .key = "", .input = &sr.interface, .output = &sw.interface };
-    var bridge_task = try io.concurrent(KlippyCtx.serveBridge, .{ &ctx, io, &ws });
+    var bridge_task = try io.concurrent(KlippyCtx.serveBridge, .{ &ctx, io, &ws, server_side });
 
     const klippy_side = try klippy_server.accept(io);
     var krbuf: [512]u8 = undefined;
@@ -1579,8 +1628,7 @@ test "serveBridge relays over a dedicated Klippy connection" {
     const close_body = try cr.interface.take(close_head[1]);
     try std.testing.expectEqual(@as(u16, bridge_close_code), std.mem.readInt(u16, close_body[0..2], .big));
     try std.testing.expectEqualStrings(bridge_close_reason, close_body[2..]);
-    try cw.interface.writeAll(&.{ 0x88, 0x80, 0, 0, 0, 0 });
-    try cw.interface.flush();
+    // The bridge must end even when the client never answers the close frame.
     bridge_task.await(io);
 }
 
@@ -1594,7 +1642,7 @@ test "serveBridge refuses while Klippy is not connected" {
     var out_buf: [64]u8 = undefined;
     var out: std.Io.Writer = .fixed(&out_buf);
     var ws: std.http.Server.WebSocket = .{ .key = "", .input = &in, .output = &out };
-    ctx.serveBridge(std.testing.io, &ws);
+    ctx.serveBridge(std.testing.io, &ws, undefined);
     const frame = out.buffered();
     try std.testing.expectEqual(@as(u8, 0x88), frame[0]);
     try std.testing.expectEqualStrings(bridge_close_reason, frame[4..]);

@@ -115,6 +115,7 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.DuplicateMqttRequest => .{ .bad_request, "Duplicate MQTT Request" },
         error.ServiceUnavailable, error.NotReady => .{ .service_unavailable, "Service Unavailable" },
         error.UpdateRefusedPrinting => .{ .service_unavailable, "Update Refused: Klippy is printing" },
+        error.UpdateBusy => .{ .service_unavailable, "Server is busy, cannot perform refresh" },
         // power.py process_request with locked_while_printing.
         error.PrinterLocked => .{ .bad_request, try std.fmt.allocPrint(alloc, "Unable to change power for {s} while printing", .{paramStr(params, "device")}) },
         // power.py _send_power_request failure, or wled.py _send_wled_command.
@@ -470,6 +471,50 @@ test "fuzz upstream error carrier validates status and retains owned text" {
             } else try std.testing.expectEqual(std.http.Status.internal_server_error, reply.status);
         }
     }.run, .{});
+}
+
+test "handler borrowed strings are serialized while Core is held" {
+    const Probe = struct {
+        core: Core = .{},
+        text: [4]u8 = "good".*,
+        armed: bool = false,
+        checks: usize = 0,
+        fn handler(raw: *anyopaque, _: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.armed = true;
+            return .{ .string = &self.text };
+        }
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.armed) {
+                self.checks += 1;
+                if (self.core.mutex.tryLock()) {
+                    self.text = "bad!".*;
+                    self.core.unlock(std.testing.io);
+                }
+            }
+            return std.testing.allocator.rawAlloc(len, alignment, ret);
+        }
+        fn resize(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) bool {
+            return std.testing.allocator.rawResize(memory, alignment, len, ret);
+        }
+        fn remap(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ret: usize) ?[*]u8 {
+            return std.testing.allocator.rawRemap(memory, alignment, len, ret);
+        }
+        fn free(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ret);
+        }
+    };
+    var probe: Probe = .{};
+    const alloc: std.mem.Allocator = .{ .ptr = &probe, .vtable = &.{ .alloc = Probe.alloc, .resize = Probe.resize, .remap = Probe.remap, .free = Probe.free } };
+    var d = Dispatcher.init(std.testing.allocator);
+    defer d.deinit();
+    d.setRuntime(&probe.core, std.testing.io);
+    try d.register("borrow", &probe, Probe.handler);
+    const response = try d.handle("{\"jsonrpc\":\"2.0\",\"method\":\"borrow\",\"id\":1}", alloc);
+    defer alloc.free(response);
+    try std.testing.expect(probe.checks > 0);
+    try std.testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"result\":\"good\",\"id\":1}", response);
 }
 
 test "invalid JSON returns -32700" {

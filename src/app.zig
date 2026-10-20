@@ -1203,12 +1203,12 @@ pub const App = struct {
 
     /// Stop and join workers before freeing their dependencies.
     pub fn deinit(self: *App, io: std.Io) void {
+        self.remote_calls.close(io);
         if (self.remote_worker) |*w| {
-            self.remote_calls.close(io);
             // Cancel an in-flight device or broker request.
             w.cancel(io);
-            while (self.remote_calls.getOne(io)) |req| self.alloc.free(req) else |_| {}
         }
+        while (self.remote_calls.getOne(io)) |req| self.alloc.free(req) else |_| {}
         self.update_ctx.stopAutoRefresh();
         self.data_store_ctx.stopSampler();
         self.klippy_ctx.stop(io);
@@ -1594,6 +1594,7 @@ pub const App = struct {
         if (self.remote_worker == null) {
             self.remote_calls = .init(&self.remote_call_buf);
             self.remote_worker = io.concurrent(remoteWorker, .{ self, io }) catch |err| blk: {
+                self.remote_calls.close(io);
                 std.debug.print("phobos: warning: Klipper remote methods disabled: {}\n", .{err});
                 break :blk null;
             };
@@ -1744,6 +1745,19 @@ fn jobQueueKlippyDispatch(klippy_opaque: *anyopaque, method: []const u8, params:
 }
 
 // --- tests ---------------------------------------------------------------
+
+test "deinit drains queued remote calls even without a worker" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try tmp.dir.realPath(std.testing.io, &path_buf)];
+    var instance = try App.init(alloc, std.testing.io, path);
+    instance.remote_calls = .init(&instance.remote_call_buf);
+    const req = (try remoteMethodRequest(alloc, "set_wled", .null)).?;
+    try instance.remote_calls.putAll(std.testing.io, &.{req});
+    instance.deinit(std.testing.io);
+}
 
 /// App whose datadir is `tmp`.
 fn testApp(alloc: std.mem.Allocator, io: std.Io, tmp: *std.testing.TmpDir) !App {

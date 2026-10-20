@@ -500,7 +500,10 @@ fn serveUpgrade(
         if (outcome == .unauthorized) return refuse(req, alloc, headers, .unauthorized, "Unauthorized");
         const kc = srv.klippy_ctx orelse return refuse(req, alloc, headers, .service_unavailable, "Failed to open connection to Klippy");
         var bridge = req.respondWebSocket(.{ .key = key }) catch return;
-        ws.serveBridge(srv.io, &bridge, kc);
+        bridge.flush() catch return;
+        var out = ws.DeadlineWriter.init(srv.io, stream, out_buf);
+        bridge.output = &out.interface;
+        ws.serveBridge(srv.io, &bridge, kc, stream);
         return;
     }
 

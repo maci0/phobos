@@ -261,8 +261,8 @@ pub const DeadlineWriter = struct {
 
 /// Serve the `/klippysocket` bridge socket (Moonraker's `BridgeSocket`) on its
 /// own Klippy connection; see `KlippyCtx.serveBridge`.
-pub fn serveBridge(io: Io, ws: *std.http.Server.WebSocket, klippy: *klippy_connection.KlippyCtx) void {
-    klippy.serveBridge(io, ws);
+pub fn serveBridge(io: Io, ws: *std.http.Server.WebSocket, klippy: *klippy_connection.KlippyCtx, client_stream: std.Io.net.Stream) void {
+    klippy.serveBridge(io, ws, client_stream);
 }
 
 /// Adapter exposing a `std.http.Server.WebSocket` as a `connections.WriteFn`.

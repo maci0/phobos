@@ -147,3 +147,9 @@ WebSocket authentication state is initialized before registry insertion and
 published atomically. Notification fan-out excludes unauthenticated sessions.
 Listener capacity waits remain cancellable and close the accepted stream if
 canceled before a handler starts.
+
+Klippy requests release Core before writing as well as waiting for a reply.
+Socket writes use a native stream writer with one absolute five-second deadline
+for the complete ETX frame. Each bridge shuts down the client socket when its
+Klippy connection ends, without waiting for the client's close response.
+Remote-method queues close and drain even when their worker could not start.
