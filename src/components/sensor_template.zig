@@ -21,6 +21,11 @@ const Value = std.json.Value;
 
 pub const RenderError = error{ ParseError, EvalError, OutOfMemory };
 
+/// Temporary render storage stays on the bounded handler stack.
+const max_render_bytes = 64 * 1024;
+/// Counts executed nodes, loop iterations and expression operands per render.
+const max_render_steps = 10_000;
+
 // ===========================================================================
 // Public API
 // ===========================================================================
@@ -43,13 +48,19 @@ pub const Template = struct {
     }
 
     /// Execute with `payload` + `set_result`, recording measurements into
-    /// `out` (name → .integer/.float). Output text is discarded. All render
-    /// state lives in `arena`.
+    /// `out` (name → .integer/.float). Only result keys enter `arena`; temporary
+    /// evaluation uses at most `max_render_bytes` and `max_render_steps`.
     pub fn render(self: *const Template, arena: std.mem.Allocator, payload: []const u8, out: *std.json.ObjectMap) RenderError!void {
-        var ctx = Ctx{ .arena = arena, .out = out };
-        try ctx.vars.put(arena, "payload", .{ .string = payload });
+        var storage: [max_render_bytes]u8 = undefined;
+        var bounded = std.heap.FixedBufferAllocator.init(&storage);
+        const scratch = bounded.allocator();
+        var results: std.json.ObjectMap = .empty;
+        var ctx = Ctx{ .arena = scratch, .out = &results };
+        try ctx.vars.put(scratch, "payload", .{ .string = payload });
         var sink = std.Io.Writer.Discarding.init(&.{});
         try exec(&ctx, self.nodes, &sink.writer);
+        var it = results.iterator();
+        while (it.next()) |entry| try out.put(arena, try arena.dupe(u8, entry.key_ptr.*), entry.value_ptr.*);
     }
 };
 
@@ -236,8 +247,14 @@ const Ctx = struct {
     vars: std.StringHashMapUnmanaged(Value) = .empty,
     out: ?*std.json.ObjectMap, // set_result target (sensor path); null otherwise
     depth: u16 = 0,
+    steps_left: usize = max_render_steps,
 
     const max_depth: u16 = 64;
+
+    fn step(self: *Ctx) RenderError!void {
+        if (self.steps_left == 0) return error.EvalError;
+        self.steps_left -= 1;
+    }
 };
 
 fn exec(ctx: *Ctx, nodes: []const Node, w: *std.Io.Writer) RenderError!void {
@@ -245,6 +262,7 @@ fn exec(ctx: *Ctx, nodes: []const Node, w: *std.Io.Writer) RenderError!void {
     defer ctx.depth -= 1;
     if (ctx.depth > Ctx.max_depth) return error.EvalError;
     for (nodes) |node| {
+        try ctx.step();
         switch (node) {
             .text => |s| w.writeAll(s) catch return error.OutOfMemory,
             .output => |src| {
@@ -280,6 +298,7 @@ fn exec(ctx: *Ctx, nodes: []const Node, w: *std.Io.Writer) RenderError!void {
                     if (node_for.else_body) |eb| try exec(ctx, eb, w);
                 } else {
                     for (items, 0..) |item, idx| {
+                        try ctx.step();
                         try bindLoop(ctx, node_for, item, idx, items.len);
                         try exec(ctx, node_for.body, w);
                     }
@@ -495,6 +514,7 @@ const Parser = struct {
     fn postfixOps(self: *Parser, start: Value, with_filter: bool) RenderError!Value {
         var v = start;
         while (self.peek()) |c| {
+            try self.ctx.step();
             switch (c) {
                 '.' => {
                     self.pos += 1;
@@ -520,6 +540,7 @@ const Parser = struct {
     }
 
     fn parsePrimary(self: *Parser) RenderError!Value {
+        try self.ctx.step();
         const c = self.peek() orelse return error.ParseError;
         if (c == '(') {
             self.pos += 1;
@@ -980,6 +1001,64 @@ fn joinArray(arena: std.mem.Allocator, v: Value, sep: []const u8) RenderError![]
 // ===========================================================================
 
 const testing = std.testing;
+
+test "Template render bounds repeated string expansion" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var template = try Template.init(testing.allocator, "{% set s = payload %}{% for i in range(20) %}{% set s = s ~ s %}{% endfor %}");
+    defer template.deinit();
+    var out: std.json.ObjectMap = .empty;
+    try testing.expectError(error.OutOfMemory, template.render(arena.allocator(), "x", &out));
+    try testing.expectEqual(@as(usize, 0), out.count());
+}
+
+test "Template execution shares its step budget across nested loops" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const nodes = try parse(a, "{% for i in range(10) %}{% for j in range(10) %}{% endfor %}{% endfor %}");
+    var ctx = Ctx{ .arena = a, .out = null, .steps_left = 32 };
+    var sink = std.Io.Writer.Discarding.init(&.{});
+    try testing.expectError(error.EvalError, exec(&ctx, nodes, &sink.writer));
+    try testing.expectEqual(@as(usize, 0), ctx.steps_left);
+}
+
+test "Template render copies results out of temporary storage and releases failures" {
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var template = try Template.init(alloc, "{ set_result(payload, 12) }{ set_result(\"other\", 34) }");
+            defer template.deinit();
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            defer arena.deinit();
+            var out: std.json.ObjectMap = .empty;
+            var key = [_]u8{ 's', 'e', 'n', 's', 'o', 'r' };
+            try template.render(arena.allocator(), &key, &out);
+            @memset(&key, 'x');
+            try testing.expectEqual(@as(i64, 12), out.get("sensor").?.integer);
+            try testing.expectEqual(@as(i64, 34), out.get("other").?.integer);
+        }
+    }.run, .{});
+}
+
+test "fuzz Template render bounds expanding strings and owns successful results" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            const count = smith.valueRangeAtMostWithHash(u5, 0, 24, 0);
+            var source: [160]u8 = undefined;
+            const src = try std.fmt.bufPrint(&source, "{{% set s = payload %}}{{% for i in range({d}) %}}{{% set s = s ~ s %}}{{% endfor %}}{{ set_result(\"length\", s|length) }}", .{count});
+            var template = try Template.init(testing.allocator, src);
+            defer template.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var out: std.json.ObjectMap = .empty;
+            template.render(arena.allocator(), "x", &out) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                return testing.expectEqual(@as(usize, 0), out.count());
+            };
+            try testing.expectEqual(@as(i64, 1) << count, out.get("length").?.integer);
+        }
+    }.run, .{});
+}
 
 fn renderToMap(arena: std.mem.Allocator, tmpl: []const u8, payload: []const u8) !std.json.ObjectMap {
     const t = try Template.init(arena, tmpl);

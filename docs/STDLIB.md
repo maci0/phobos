@@ -105,6 +105,13 @@ provides iteration but no glob operation. Template title casing keeps its own
 word-start rules over `std.ascii`; case-insensitive searches use
 `std.ascii.findIgnoreCase`.
 
+Sensor templates evaluate with `std.heap.FixedBufferAllocator`: temporary state
+uses at most 64 KiB on the handler stack, and nested execution shares a
+10,000-step budget. Exceeding either limit fails the render without publishing
+partial measurements. Only successful numeric results and their copied keys
+enter the caller's arena. Power batch responses copy each device's state before
+the next device request can release Core and change that state.
+
 Update tests create native temporary repositories whose `origin` points to the
 same local fixture. Refresh assertions check the resulting tracking ref; the
 test suite does not fetch the project's remote.

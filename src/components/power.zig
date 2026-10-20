@@ -492,7 +492,7 @@ fn handleBatch(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloc
                 device_count += 1;
                 if (ctx.findDevice(name)) |dev| {
                     const state = processRequest(ctx, dev, action, alloc, false) catch "error";
-                    try out.put(alloc, name, .{ .string = state });
+                    try out.put(alloc, name, .{ .string = try alloc.dupe(u8, state) });
                 } else {
                     try out.put(alloc, name, .{ .string = "device_not_found" });
                 }
@@ -927,6 +927,20 @@ test "handleOn: turns on named device" {
     try testing.expectEqualStrings("on", v.object.get("psu").?.string);
 }
 
+test "power batch results own state before another device releases Core" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    try ctx.addDevice(.{ .name = "psu", .type_str = "gpio", .state = "off", .locked_while_printing = false });
+    const value = try handleStatus(@ptrCast(&ctx), try objParams(a, "{\"psu\":null}"), a);
+    const state = value.object.get("psu").?.string;
+    try testing.expect(state.ptr != ctx.findDevice("psu").?.state.ptr);
+    try ctx.setState("psu", "on");
+    try testing.expectEqualStrings("off", state);
+}
+
 test "handleOff: turns off named device" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1043,7 +1057,14 @@ test "fuzz_batch: arbitrary batch params never crash handleOn/Off/Status" {
             const pv = std.json.parseFromSlice(std.json.Value, a, params_str, .{}) catch return;
             _ = handleOn(@ptrCast(&ctx), pv.value, a) catch {};
             _ = handleOff(@ptrCast(&ctx), pv.value, a) catch {};
-            _ = handleStatus(@ptrCast(&ctx), pv.value, a) catch {};
+            const snapshot = handleStatus(@ptrCast(&ctx), pv.value, a) catch return;
+            if (ctx.findDevice(nm)) |device| {
+                const state = snapshot.object.get(nm).?.string;
+                try testing.expect(state.ptr != device.state.ptr);
+                const saved = try a.dupe(u8, state);
+                try ctx.setState(nm, "changed");
+                try testing.expectEqualStrings(saved, state);
+            }
         }
     }.run, .{});
 }
