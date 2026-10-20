@@ -1643,6 +1643,7 @@ pub const App = struct {
         self.klippy_ctx.on_klipper_path = onKlipperPath;
         self.klippy_ctx.on_klipper_path_ctx = self;
         // Wire io into the machine component for /proc & /sys reads.
+        self.machine_ctx.core = self.core;
         self.machine_ctx.setIo(io);
         // Wire io into the update manager so it can emit notify_update_response /
         // notify_update_refreshed to connected WebSocket clients.
