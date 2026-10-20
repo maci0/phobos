@@ -1,11 +1,25 @@
 //! Conditional HTTP GET helper built on the lower-level `std.http.Client.request`
-//! API so response headers (notably `ETag`) are observable — `Client.fetch` does
-//! not expose them in Zig 0.16. Used by announcements (RSS) and spoolman to do
-//! `If-None-Match` conditional fetches and skip unchanged downloads (304).
+//! API so response headers (notably `ETag`) are observable; `Client.fetch`
+//! returns only the status. Announcements (RSS) use it for `If-None-Match`
+//! conditional fetches that skip unchanged downloads (304).
+//!
+//! Requests ask for `identity` encoding: `Response.reader` returns encoded
+//! bytes as-is, so an encoded reply fails with `HttpContentEncodingUnsupported`
+//! instead of handing compressed data to a parser.
 
 const std = @import("std");
 const http = std.http;
 const Io = std.Io;
+
+/// Request headers that advertise only the identity encoding.
+pub const identity_headers: http.Client.Request.Headers = .{ .accept_encoding = .{ .override = "identity" } };
+
+/// `Request.accept_encoding` value that rejects any encoded response body.
+pub const identity_only = blk: {
+    var accepted: @TypeOf(http.Client.Request.default_accept_encoding) = @splat(false);
+    accepted[@backingInt(http.ContentEncoding.identity)] = true;
+    break :blk accepted;
+};
 
 pub const Result = struct {
     status: u16,
@@ -43,8 +57,9 @@ pub fn getConditional(
         extra = extra_storage[0..1];
     }
 
-    var req = try client.request(.GET, uri, .{ .extra_headers = extra });
+    var req = try client.request(.GET, uri, .{ .headers = identity_headers, .extra_headers = extra });
     defer req.deinit();
+    req.accept_encoding = identity_only;
     try req.sendBodiless();
 
     var redirect_buf: [8192]u8 = undefined;
@@ -155,6 +170,46 @@ test "getConditional: 200 returns body + ETag; conditional re-fetch returns 304"
     try testing.expectEqual(@as(u16, 304), r2.status);
     try testing.expect(r2.not_modified);
     try testing.expectEqual(@as(usize, 0), r2.body.len);
+}
+
+test "getConditional asks for identity and rejects a gzip body" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var srv = try EtagServer.bind(io);
+    defer srv.deinit();
+    const Gzip = struct {
+        fn serve(s: *EtagServer, accept: *[64]u8, accept_len: *usize) void {
+            const stream = s.server.accept(s.io) catch return;
+            defer stream.close(s.io);
+            var rbuf: [4096]u8 = undefined;
+            var r = stream.reader(s.io, &rbuf);
+            while (true) {
+                const line = r.interface.takeDelimiterInclusive('\n') catch return;
+                if (line.len <= 2) break;
+                if (std.ascii.startsWithIgnoreCase(line, "accept-encoding:")) {
+                    const value = std.mem.trim(u8, line["accept-encoding:".len..], " \r\n");
+                    @memcpy(accept[0..value.len], value);
+                    accept_len.* = value.len;
+                }
+            }
+            var wbuf: [256]u8 = undefined;
+            var w = stream.writer(s.io, &wbuf);
+            // gzip of "hello".
+            const body = [_]u8{ 0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0, 0x86, 0xa6, 0x10, 0x36, 5, 0, 0, 0 };
+            w.interface.print("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body.len}) catch return;
+            w.interface.writeAll(&body) catch return;
+            w.interface.flush() catch return;
+        }
+    };
+    var accept: [64]u8 = undefined;
+    var accept_len: usize = 0;
+    var server_task = io.async(Gzip.serve, .{ &srv, &accept, &accept_len });
+    const url = try std.fmt.allocPrint(testing.allocator, "http://127.0.0.1:{d}/feed", .{srv.port()});
+    defer testing.allocator.free(url);
+    try testing.expectError(error.HttpContentEncodingUnsupported, getConditional(testing.allocator, io, url, null));
+    server_task.await(io);
+    try testing.expectEqualStrings("identity", accept[0..accept_len]);
 }
 
 test "fuzz getConditional url parsing: never crashes on arbitrary urls" {

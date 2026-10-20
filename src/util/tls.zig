@@ -25,8 +25,6 @@ pub const State = struct {
     wbuf: []u8, // decrypted write buffer
     net_reader: net.Stream.Reader,
     net_writer: net.Stream.Writer,
-    bundle: ?Certificate.Bundle = null,
-    rwlock: Io.RwLock = .init,
     client: tls.Client = undefined,
 };
 
@@ -56,7 +54,6 @@ pub fn connect(gpa: std.mem.Allocator, io: Io, stream: net.Stream, to: Options) 
     var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
     try io.randomSecure(&entropy);
     const now = Io.Timestamp.now(io, .real);
-    errdefer if (t.bundle) |*b| b.deinit(gpa);
 
     var options: tls.Client.Options = .{
         .host = if (to.insecure) .no_verification else .{ .explicit = to.host },
@@ -66,20 +63,23 @@ pub fn connect(gpa: std.mem.Allocator, io: Io, stream: net.Stream, to: Options) 
         .entropy = &entropy,
         .realtime_now = now,
     };
+    // `tls.Client.init` reads the CA bundle only during the handshake, so the
+    // parsed system bundle is freed on return rather than held per connection.
+    var bundle: Certificate.Bundle = .empty;
+    defer bundle.deinit(gpa);
+    var lock: Io.RwLock = .init;
     if (!to.insecure) {
-        t.bundle = .{ .map = .empty, .bytes = .empty };
         if (to.ca_path) |p|
-            try t.bundle.?.addCertsFromFilePath(gpa, io, now, .cwd(), p)
+            try bundle.addCertsFromFilePath(gpa, io, now, .cwd(), p)
         else
-            try t.bundle.?.rescan(gpa, io, now);
-        options.ca = .{ .bundle = .{ .gpa = gpa, .io = io, .lock = &t.rwlock, .bundle = &t.bundle.? } };
+            try bundle.rescan(gpa, io, now);
+        options.ca = .{ .bundle = .{ .gpa = gpa, .io = io, .lock = &lock, .bundle = &bundle } };
     }
     t.client = try tls.Client.init(&t.net_reader.interface, &t.net_writer.interface, options);
     return t;
 }
 
 pub fn deinit(gpa: std.mem.Allocator, t: *State) void {
-    if (t.bundle) |*b| b.deinit(gpa);
     gpa.free(t.nrbuf);
     gpa.free(t.nwbuf);
     gpa.free(t.rbuf);

@@ -10,15 +10,8 @@ const net = std.Io.net;
 const Io = std.Io;
 const tls_transport = @import("../util/tls.zig");
 
-pub const Opcode = enum(u4) {
-    continuation = 0,
-    text = 1,
-    binary = 2,
-    close = 8,
-    ping = 9,
-    pong = 10,
-    _,
-};
+const WebSocket = std.http.Server.WebSocket;
+pub const Opcode = WebSocket.Opcode;
 
 pub const Message = struct { opcode: Opcode, data: []u8 };
 pub const max_message_len = 8 * 1024 * 1024;
@@ -95,21 +88,16 @@ pub const WsClient = struct {
         try validateHandshake(try http.receiveHead(), &key);
     }
 
-    /// Write a masked client frame (clients MUST mask, RFC 6455 §5.3).
+    /// Write a masked client control frame (clients MUST mask, RFC 6455
+    /// §5.3). Control payloads are at most 125 bytes (§5.5), which
+    /// `readFrameHeader` enforces on the frames this echoes.
     fn writeFrame(self: *WsClient, op: Opcode, payload: []const u8) !void {
+        std.debug.assert(payload.len <= 125);
         var mask: [4]u8 = undefined;
         try self.io.randomSecure(&mask);
         const w = self.output();
-        try w.writeByte(0x80 | @as(u8, @backingInt(op)));
-        if (payload.len < 126) {
-            try w.writeByte(0x80 | @as(u8, @intCast(payload.len)));
-        } else if (payload.len <= 0xffff) {
-            try w.writeByte(0x80 | 126);
-            try w.writeInt(u16, @intCast(payload.len), .big);
-        } else {
-            try w.writeByte(0x80 | 127);
-            try w.writeInt(u64, payload.len, .big);
-        }
+        try w.writeByte(@bitCast(WebSocket.Header0{ .opcode = op, .fin = true }));
+        try w.writeByte(@bitCast(WebSocket.Header1{ .payload_len = @fromBackingInt(@as(u7, @intCast(payload.len))), .mask = true }));
         try w.writeAll(&mask);
         for (payload, 0..) |b, i| try w.writeByte(b ^ mask[i % 4]);
         try self.flush();
@@ -125,13 +113,13 @@ pub const WsClient = struct {
         while (true) {
             const frame = try readFrameHeader(r);
             switch (frame.op) {
-                .ping, .pong, .close => {
+                .ping, .pong, .connection_close => {
                     var control: [125]u8 = undefined;
                     const payload = control[0..frame.len];
                     try r.readSliceAll(payload);
                     if (frame.op == .ping) try self.writeFrame(.pong, payload);
-                    if (frame.op == .close) {
-                        self.writeFrame(.close, payload) catch {};
+                    if (frame.op == .connection_close) {
+                        self.writeFrame(.connection_close, payload) catch {};
                         return error.WsClosed;
                     }
                     continue;
@@ -194,26 +182,31 @@ fn validateHandshake(bytes: []const u8, key: []const u8) !void {
 }
 
 fn readFrameHeader(r: *Io.Reader) !struct { op: Opcode, fin: bool, len: usize } {
-    const b0 = try r.takeByte();
-    const b1 = try r.takeByte();
-    if (b0 & 0x70 != 0 or b1 & 0x80 != 0) return error.WsProtocolError;
-    const op: Opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b0))));
+    const h0: WebSocket.Header0 = @bitCast(try r.takeByte());
+    const h1: WebSocket.Header1 = @bitCast(try r.takeByte());
+    // Server frames carry no RSV bits (no extension negotiated) and no mask.
+    if (h0.rsv1 != 0 or h0.rsv2 != 0 or h0.rsv3 != 0 or h1.mask) return error.WsProtocolError;
+    const op = h0.opcode;
     switch (op) {
-        .continuation, .text, .binary, .close, .ping, .pong => {},
+        .continuation, .text, .binary, .connection_close, .ping, .pong => {},
         _ => return error.WsProtocolError,
     }
-    var len: u64 = b1 & 0x7f;
-    if (len == 126) {
-        len = try r.takeInt(u16, .big);
-        if (len < 126) return error.WsProtocolError;
-    } else if (len == 127) {
-        len = try r.takeInt(u64, .big);
-        if (len < 65536 or len >> 63 != 0) return error.WsProtocolError;
-    }
-    const fin = b0 & 0x80 != 0;
-    if (@backingInt(op) >= 8 and (!fin or len > 125 or (op == .close and len == 1))) return error.WsProtocolError;
+    const len: u64 = switch (h1.payload_len) {
+        .len16 => len: {
+            const n = try r.takeInt(u16, .big);
+            if (n < 126) return error.WsProtocolError;
+            break :len n;
+        },
+        .len64 => len: {
+            const n = try r.takeInt(u64, .big);
+            if (n < 65536 or n >> 63 != 0) return error.WsProtocolError;
+            break :len n;
+        },
+        _ => @backingInt(h1.payload_len),
+    };
+    if (@backingInt(op) >= 8 and (!h0.fin or len > 125 or (op == .connection_close and len == 1))) return error.WsProtocolError;
     if (len > max_message_len) return error.WsMessageTooLarge;
-    return .{ .op = op, .fin = fin, .len = @intCast(len) };
+    return .{ .op = op, .fin = h0.fin, .len = @intCast(len) };
 }
 
 // ===========================================================================
