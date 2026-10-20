@@ -11,8 +11,6 @@
 const std = @import("std");
 const update_manager = @import("update_manager.zig");
 
-pub const FeatherError = error{InvalidStatus};
-
 pub const CmdFn = *const fn (*anyopaque, std.mem.Allocator, []const []const u8) anyerror!void;
 pub const KlippySendFn = *const fn (*anyopaque, std.mem.Allocator, []const u8, std.json.Value) anyerror!void;
 
@@ -53,30 +51,26 @@ fn versionOf(value: std.json.Value) ?[]const u8 {
     return s;
 }
 
-fn field(obj: std.json.ObjectMap, key: []const u8) ?std.json.Value {
-    return obj.get(key);
-}
-
 /// `forge_x_update_snapshot`. `info` is one `version_info` entry.
 pub fn forgeXUpdateSnapshot(alloc: std.mem.Allocator, info: std.json.Value) !std.json.Value {
     if (info != .object) return error.InvalidStatus;
     const o = info.object;
-    const installed = versionOf(field(o, "version") orelse .null) orelse return error.InvalidStatus;
-    const remote = versionOf(field(o, "remote_version") orelse .null) orelse return error.InvalidStatus;
-    const behind_v = field(o, "commits_behind_count") orelse std.json.Value{ .integer = 0 };
+    const installed = versionOf(o.get("version") orelse .null) orelse return error.InvalidStatus;
+    const remote = versionOf(o.get("remote_version") orelse .null) orelse return error.InvalidStatus;
+    const behind_v = o.get("commits_behind_count") orelse std.json.Value{ .integer = 0 };
     const behind: i64 = switch (behind_v) {
         .integer => |n| @max(n, 0),
         else => return error.InvalidStatus,
     };
-    const current_rev = if (field(o, "current_hash")) |v| versionOf(v) else null;
-    const remote_rev = if (field(o, "remote_hash")) |v| versionOf(v) else null;
-    const valid = if (field(o, "is_valid")) |v| v == .bool and v.bool else false;
-    const corrupt = if (field(o, "corrupt")) |v| v == .bool and v.bool else false;
-    const dirty = if (field(o, "is_dirty")) |v| v == .bool and v.bool else false;
+    const current_rev = if (o.get("current_hash")) |v| versionOf(v) else null;
+    const remote_rev = if (o.get("remote_hash")) |v| versionOf(v) else null;
+    const valid = if (o.get("is_valid")) |v| v == .bool and v.bool else false;
+    const corrupt = if (o.get("corrupt")) |v| v == .bool and v.bool else false;
+    const dirty = if (o.get("is_dirty")) |v| v == .bool and v.bool else false;
     const available = valid and !corrupt and !dirty and !std.mem.eql(u8, installed, remote) and behind > 0 and current_rev != null and remote_rev != null and !std.mem.eql(u8, current_rev.?, remote_rev.?);
 
     var changes: std.json.Array = .init(alloc);
-    if (field(o, "commits_behind")) |commits| {
+    if (o.get("commits_behind")) |commits| {
         if (commits == .array) {
             for (commits.array.items, 0..) |commit, i| {
                 if (i >= 24) break;
@@ -99,45 +93,6 @@ pub fn forgeXUpdateSnapshot(alloc: std.mem.Allocator, info: std.json.Value) !std
     try out.put(alloc, "changes", .{ .array = changes });
     try out.put(alloc, "changes_total", .{ .integer = behind });
     return .{ .object = out };
-}
-
-/// Lines Git prints as blocking a merge, tagged `UNTRACKED` or `MODIFIED`.
-pub fn gitConflictingFiles(alloc: std.mem.Allocator, message: []const u8) ![]const []const u8 {
-    const markers = [_]struct { []const u8, []const u8 }{
-        .{ "The following untracked working tree files would be overwritten by merge:", "UNTRACKED" },
-        .{ "Your local changes to the following files would be overwritten by merge:", "MODIFIED" },
-    };
-    var kind: ?[]const u8 = null;
-    var out: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (out.items) |s| alloc.free(s);
-        out.deinit(alloc);
-    }
-    var it = std.mem.splitScalar(u8, message, '\n');
-    while (it.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        var matched: ?[]const u8 = null;
-        for (markers) |m| {
-            if (std.mem.indexOf(u8, line, m[0]) != null) matched = m[1];
-        }
-        if (matched) |label| {
-            kind = label;
-            continue;
-        }
-        const tag = kind orelse continue;
-        if (line.len == 0 or std.mem.startsWith(u8, line, "Please ") or std.mem.eql(u8, line, "Aborting") or std.mem.startsWith(u8, line, "error:")) {
-            kind = null;
-            continue;
-        }
-        const path_n = @min(line.len, 160);
-        const entry = try std.fmt.allocPrint(alloc, "{s}: {s}", .{ tag, line[0..path_n] });
-        if (out.items.len >= 64) {
-            alloc.free(entry);
-            break;
-        }
-        try out.append(alloc, entry);
-    }
-    return out.toOwnedSlice(alloc);
 }
 
 fn sourceInfo(status: std.json.Value, key: []const u8) ?std.json.Value {
@@ -321,24 +276,6 @@ test "forgeXUpdateSnapshot: available only when versions and revisions differ" {
     try info.put(arena, "remote_version", .{ .string = "1.4.2" });
     const same = try forgeXUpdateSnapshot(arena, .{ .object = info });
     try std.testing.expect(!same.object.get("available").?.bool);
-}
-
-test "gitConflictingFiles: tags untracked and modified paths" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const alloc = arena_state.allocator();
-    const msg =
-        \\The following untracked working tree files would be overwritten by merge:
-        \\ printer.cfg
-        \\Please move or remove them before you merge.
-        \\Your local changes to the following files would be overwritten by merge:
-        \\ moonraker.conf
-        \\Aborting
-    ;
-    const files = try gitConflictingFiles(alloc, msg);
-    try std.testing.expectEqual(@as(usize, 2), files.len);
-    try std.testing.expectEqualStrings("UNTRACKED: printer.cfg", files[0]);
-    try std.testing.expectEqualStrings("MODIFIED: moonraker.conf", files[1]);
 }
 
 const Recorder = struct {

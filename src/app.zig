@@ -99,7 +99,7 @@ fn daemonFeatherRun(app: *App, alloc: std.mem.Allocator, argv: []const []const u
             return;
         }
         const io = app.update_ctx.io orelse return error.NoCommandRunner;
-        const result = std.process.run(alloc, io, .{ .argv = full.items }) catch return error.GitFailed;
+        const result = update_manager_component.gitRun(io, alloc, src.repo_path, argv[1..], update_manager_component.git_fetch_timeout_s) catch return error.GitFailed;
         defer alloc.free(result.stdout);
         defer alloc.free(result.stderr);
         if (!(result.term == .exited and result.term.exited == 0)) return error.GitFailed;
@@ -108,34 +108,23 @@ fn daemonFeatherRun(app: *App, alloc: std.mem.Allocator, argv: []const []const u
     return error.NoCommandRunner;
 }
 
-fn daemonShell(ctx: *anyopaque, alloc: std.mem.Allocator, cmdline: []const u8) anyerror!void {
-    const app: *App = @ptrCast(@alignCast(ctx));
-    var args: std.ArrayList([]const u8) = .empty;
-    defer args.deinit(alloc);
-    var it = std.mem.tokenizeAny(u8, cmdline, " \t");
-    while (it.next()) |arg| try args.append(alloc, arg);
-    try daemonFeatherRun(app, alloc, args.items);
-}
-
 fn featherCmd(ctx: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) anyerror!void {
     const app: *App = @ptrCast(@alignCast(ctx));
     for (argv) |arg| {
         if (hostPowerArg(arg)) return error.Refused;
     }
-    // TestServer installs a no-op shell so HTTP update tests do not spawn
-    // git, apt, or pip. The daemon shell is the production runner.
+    // Only tests install a shell (TestServer's no-op), so HTTP update tests do
+    // not spawn git, apt, or pip. The daemon runs `daemonFeatherRun`.
     if (app.update_ctx.shell) |sh| {
-        if (sh != daemonShell) {
-            const shell_ctx = app.update_ctx.shell_ctx orelse return error.NoCommandRunner;
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(alloc);
-            for (argv, 0..) |arg, i| {
-                if (i != 0) try buf.append(alloc, ' ');
-                try buf.appendSlice(alloc, arg);
-            }
-            try sh(shell_ctx, alloc, buf.items);
-            return;
+        const shell_ctx = app.update_ctx.shell_ctx orelse return error.NoCommandRunner;
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(alloc);
+        for (argv, 0..) |arg, i| {
+            if (i != 0) try buf.append(alloc, ' ');
+            try buf.appendSlice(alloc, arg);
         }
+        try sh(shell_ctx, alloc, buf.items);
+        return;
     }
     try daemonFeatherRun(app, alloc, argv);
 }
@@ -291,8 +280,8 @@ pub const App = struct {
     /// `daemonFeatherRun` spawns git only when update io is set.
     git_spawn: ?GitSpawnFn = null,
     git_spawn_ctx: ?*anyopaque = null,
-    /// True when `update_ctx.sources` is an owned `sourcesFromConfig` result.
-    update_sources_owned: bool = false,
+    /// Owns `update_ctx.sources` once `sourcesFromConfig` has replaced the defaults.
+    update_sources_arena: ?std.heap.ArenaAllocator = null,
     /// True when `klippy_ctx.uds_path` was duped from config and must be freed.
     klippy_uds_owned: bool = false,
 
@@ -776,11 +765,13 @@ pub const App = struct {
         // [update_manager] and [update_manager <name>] clients. System is
         // omitted when enable_system_updates is false. Paths are recorded
         // only; status does not fetch unless a later refresh asks it to.
-        if (update_manager_component.sourcesFromConfig(self.alloc, cfg)) |srcs| {
-            if (self.update_sources_owned) update_manager_component.freeSources(self.alloc, self.update_ctx.sources);
+        var sources_arena = std.heap.ArenaAllocator.init(self.alloc);
+        if (update_manager_component.sourcesFromConfig(sources_arena.allocator(), cfg)) |srcs| {
+            if (self.update_sources_arena) |*old| old.deinit();
+            self.update_sources_arena = sources_arena;
             self.update_ctx.sources = srcs;
-            self.update_sources_owned = true;
         } else |err| {
+            sources_arena.deinit();
             std.debug.print("phobos: warning: update sources not applied: {}\n", .{err});
         }
 
@@ -1154,7 +1145,7 @@ pub const App = struct {
         if (self.instance_uuid_owned) self.alloc.free(self.instance_uuid);
         self.file_ctx.deinit(); // frees the metadata cache
         self.alloc.destroy(self.file_ctx);
-        if (self.update_sources_owned) update_manager_component.freeSources(self.alloc, self.update_ctx.sources);
+        if (self.update_sources_arena) |*arena| arena.deinit();
         self.alloc.destroy(self.update_ctx);
         self.power_ctx.deinit();
         self.alloc.destroy(self.power_ctx);
@@ -1370,12 +1361,6 @@ pub const App = struct {
         self.feather.klippy_send_ctx = self;
         self.klippy_ctx.remote_handler = feather_updates_component.onKlippyMethod;
         self.klippy_ctx.remote_handler_ctx = &self.feather;
-        // Keep a test-installed shell (TestServer's no-op). Otherwise the
-        // daemon runner is what live reset/update calls.
-        if (self.update_ctx.shell == null or self.update_ctx.shell == daemonShell) {
-            self.update_ctx.shell = daemonShell;
-            self.update_ctx.shell_ctx = self;
-        }
     }
 
     /// Feed one PanelDue serial line. Strips it, treats M112 as emergency stop,
@@ -1849,7 +1834,8 @@ test "dispatchFrame: id-less reset uses the daemon runner and does not spawn git
     defer app.deinit(io);
     app.setConfig(io, cfg_path);
     app.bindFeather();
-    try std.testing.expect(app.update_ctx.shell == daemonShell);
+    // No package runner: apt and pip updates are refused before they start.
+    try std.testing.expect(app.update_ctx.shell == null);
     try std.testing.expect(app.update_ctx.io == null);
     app.info.klippy_connected = true;
     app.info.klippy_state = "ready";

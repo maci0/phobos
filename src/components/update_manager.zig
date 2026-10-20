@@ -15,11 +15,15 @@
 //!   POST /machine/update/recover    → machine.update.recover
 //!   POST /machine/update/rollback   → machine.update.rollback
 //!
-//! REAL UPDATE OPERATIONS ARE STUBBED. phobos must never run git/pip/apt on the
-//! development machine, so every "do an update" handler validates inputs, emits
-//! faithfully-shaped `notify_update_response` progress events, and returns
-//! Moonraker's bare "ok" ack. No repository is fetched, no package is installed.
-//! Each stub is noted at its handler.
+//! COMMANDS. git runs only when `io` is set and the source has a `repo_path`:
+//! refresh and `status?refresh=true` run `git fetch origin --prune`; a single
+//! update runs fetch and `git reset --hard origin/<branch>`; recover and
+//! rollback run the `git reset`/`clean`/`checkout` steps documented at their
+//! handlers. apt-get and pip lines go only to an installed `shell` runner; the
+//! daemon installs none, so system and requirements updates are refused with
+//! error.NoPackageProvider. Each handler emits Moonraker's
+//! `notify_update_response` lines and returns the bare "ok" ack. Tests fetch
+//! only local temporary repositories.
 //!
 //! The `status`/`refresh` responses carry the full Moonraker
 //! `version_info` map. For each configured source we report the exact per-source
@@ -109,49 +113,6 @@ pub const default_sources = [_]Source{
     .{ .name = "klipper", .type = .git_repo, .owner = "Klipper3d", .repo_name = "klipper", .branch = "master" },
 };
 
-fn dupeField(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
-    return alloc.dupe(u8, s);
-}
-
-fn ownSource(alloc: std.mem.Allocator, src: Source) !Source {
-    return .{
-        .name = try dupeField(alloc, src.name),
-        .type = src.type,
-        .owner = try dupeField(alloc, src.owner),
-        .repo_name = try dupeField(alloc, src.repo_name),
-        .branch = try dupeField(alloc, src.branch),
-        .repo_path = try dupeField(alloc, src.repo_path),
-        .requirements = try dupeField(alloc, src.requirements),
-        .channel = try dupeField(alloc, src.channel),
-        .origin = try dupeField(alloc, src.origin),
-        .pinned_version = try dupeField(alloc, src.pinned_version),
-        .pinned_remote_version = try dupeField(alloc, src.pinned_remote_version),
-        .pinned_hash = try dupeField(alloc, src.pinned_hash),
-        .pinned_remote_hash = try dupeField(alloc, src.pinned_remote_hash),
-        .pinned_behind = src.pinned_behind,
-        .rollback_ref = try dupeField(alloc, src.rollback_ref),
-    };
-}
-
-pub fn freeSources(alloc: std.mem.Allocator, sources: []const Source) void {
-    for (sources) |s| {
-        alloc.free(s.name);
-        alloc.free(s.owner);
-        alloc.free(s.repo_name);
-        alloc.free(s.branch);
-        alloc.free(s.repo_path);
-        alloc.free(s.requirements);
-        alloc.free(s.channel);
-        alloc.free(s.origin);
-        alloc.free(s.pinned_version);
-        alloc.free(s.pinned_remote_version);
-        alloc.free(s.pinned_hash);
-        alloc.free(s.pinned_remote_hash);
-        alloc.free(s.rollback_ref);
-    }
-    alloc.free(sources);
-}
-
 /// `github.com/<owner>/<repo>` from an origin URL. Slices borrow `origin`.
 fn githubOwnerRepo(origin: []const u8) struct { owner: []const u8, repo: []const u8 } {
     const marker = "github.com/";
@@ -165,34 +126,17 @@ fn githubOwnerRepo(origin: []const u8) struct { owner: []const u8, repo: []const
 
 /// Moonraker's updater set: `system` only when `enable_system_updates` is true
 /// (default true), plus moonraker, klipper, and each `[update_manager <name>]`.
-/// Every string in the result is owned by `alloc`.
-pub fn sourcesFromConfig(alloc: std.mem.Allocator, cfg: *const config_helper.ConfigParser) ![]Source {
+/// `arena` owns the result and every config string in it; the caller frees
+/// them together by freeing the arena (nothing is freed individually, so an
+/// error part-way leaks nothing beyond the arena). Default sources keep their
+/// static strings.
+pub fn sourcesFromConfig(arena: std.mem.Allocator, cfg: *const config_helper.ConfigParser) ![]Source {
     var list: std.ArrayList(Source) = .empty;
-    errdefer {
-        for (list.items) |s| {
-            alloc.free(s.name);
-            alloc.free(s.owner);
-            alloc.free(s.repo_name);
-            alloc.free(s.branch);
-            alloc.free(s.repo_path);
-            alloc.free(s.requirements);
-            alloc.free(s.channel);
-            alloc.free(s.origin);
-            alloc.free(s.pinned_version);
-            alloc.free(s.pinned_remote_version);
-            alloc.free(s.pinned_hash);
-            alloc.free(s.pinned_remote_hash);
-            alloc.free(s.rollback_ref);
-        }
-        list.deinit(alloc);
-    }
     const system_on = cfg.getBoolean("update_manager", "enable_system_updates") catch true;
-    if (system_on) try list.append(alloc, try ownSource(alloc, default_sources[0]));
-    try list.append(alloc, try ownSource(alloc, default_sources[1]));
-    try list.append(alloc, try ownSource(alloc, default_sources[2]));
+    if (system_on) try list.append(arena, default_sources[0]);
+    try list.appendSlice(arena, default_sources[1..]);
 
-    const names = cfg.sectionNames(alloc) catch return list.toOwnedSlice(alloc);
-    defer alloc.free(names);
+    const names = cfg.sectionNames(arena) catch return list.items;
     const prefix = "update_manager ";
     for (names) |sect| {
         if (!std.mem.startsWith(u8, sect, prefix)) continue;
@@ -223,24 +167,18 @@ pub fn sourcesFromConfig(alloc: std.mem.Allocator, cfg: *const config_helper.Con
         const branch = cfg.get(sect, "primary_branch") orelse if (stype == .git_repo) "master" else "";
         const channel = cfg.get(sect, "channel") orelse if (stype == .git_repo) "dev" else "stable";
         const path = cfg.get(sect, "path") orelse "";
-        try list.append(alloc, .{
-            .name = try dupeField(alloc, name),
+        try list.append(arena, .{
+            .name = try arena.dupe(u8, name),
             .type = stype,
-            .owner = try dupeField(alloc, owner),
-            .repo_name = try dupeField(alloc, repo_name),
-            .branch = try dupeField(alloc, branch),
-            .repo_path = try dupeField(alloc, path),
-            .requirements = try dupeField(alloc, ""),
-            .channel = try dupeField(alloc, channel),
-            .origin = try dupeField(alloc, origin),
-            .pinned_version = try dupeField(alloc, ""),
-            .pinned_remote_version = try dupeField(alloc, ""),
-            .pinned_hash = try dupeField(alloc, ""),
-            .pinned_remote_hash = try dupeField(alloc, ""),
-            .rollback_ref = try dupeField(alloc, ""),
+            .owner = try arena.dupe(u8, owner),
+            .repo_name = try arena.dupe(u8, repo_name),
+            .branch = try arena.dupe(u8, branch),
+            .repo_path = try arena.dupe(u8, path),
+            .channel = try arena.dupe(u8, channel),
+            .origin = try arena.dupe(u8, origin),
         });
     }
-    return list.toOwnedSlice(alloc);
+    return list.items;
 }
 
 test "sourcesFromConfig: forge-x clients and system updates off" {
@@ -271,8 +209,12 @@ test "sourcesFromConfig: forge-x clients and system updates off" {
     var cfg = config_helper.ConfigParser.init(alloc);
     defer cfg.deinit();
     try cfg.parseString(body, "<test>");
-    const sources = try sourcesFromConfig(alloc, &cfg);
-    defer freeSources(alloc, sources);
+    var sources_arena = std.heap.ArenaAllocator.init(alloc);
+    defer sources_arena.deinit();
+    const sources = try sourcesFromConfig(sources_arena.allocator(), &cfg);
+    // Sources must not borrow the parser's strings.
+    cfg.deinit();
+    cfg = config_helper.ConfigParser.init(alloc);
 
     var saw_system = false;
     var forge: ?Source = null;
@@ -324,8 +266,8 @@ pub const UpdateCtx = struct {
     /// setIo). Emission is a no-op while absent.
     io: ?std.Io = null,
     /// Tracks whether an update is currently in progress (CommandHelper.busy).
-    /// phobos updates are stubbed and synchronous, so this is only ever briefly
-    /// true within a handler; it is reported in the status `busy` field.
+    /// Updates run synchronously under Core, so this is true only inside an
+    /// update handler; it is reported in the status `busy` field.
     busy: bool = false,
     /// Optional printing-state check. When it returns true, mutating update
     /// operations are refused (Moonraker: 503 "Update Refused: Klippy is
@@ -342,7 +284,9 @@ pub const UpdateCtx = struct {
     auto_refresh: bool = false,
     /// Hours between refreshes. Moonraker default 168.
     refresh_interval_hours: i64 = 168,
-    /// Inclusive start hour and exclusive end hour, local time. Default 0-5.
+    /// Inclusive start hour and exclusive end hour, in UTC (`autoRefreshThread`
+    /// derives the hour from wall-clock seconds; Moonraker uses local time and
+    /// phobos reads no time zone). Default 0-5.
     refresh_window_start: i64 = 0,
     refresh_window_end: i64 = 5,
     /// Moonraker's first auto-refresh ignores the window. Later ones do not.
@@ -484,14 +428,35 @@ fn getBool(params: std.json.Value, field: []const u8, default_val: bool) bool {
 // Git child-process helper
 // ---------------------------------------------------------------------------
 
+/// Kill bound for a local git command, in seconds (Moonraker `_run_git_cmd`).
+const git_local_timeout_s = 20;
+/// Kill bound for `git fetch`, in seconds. Moonraker's 300 s is an idle
+/// timeout on a fetch outside its event loop; here the whole fetch holds Core.
+pub const git_fetch_timeout_s = 60;
+/// Cap on the stdout and on the stderr bytes one git command may buffer.
+const git_output_limit = 512 * 1024;
+
+/// Run `git -C <repo_path> <args...>` killed after `timeout_s` seconds, with
+/// stdout and stderr capped at `git_output_limit` (error.StreamTooLong).
+/// Caller owns the result's stdout and stderr.
+pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64) !std.process.RunResult {
+    const args = try std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv });
+    defer alloc.free(args);
+    return std.process.run(alloc, io, .{
+        .argv = args,
+        .stdout_limit = .limited(git_output_limit),
+        .stderr_limit = .limited(git_output_limit),
+        .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(timeout_s), .clock = .awake }) },
+    });
+}
+
 /// Run `git -C <repo_path> <args...>` and return stdout (trimmed, caller owns).
-/// Returns null on any error (spawn failure, non-zero exit, empty stdout).
+/// Returns null on any error (spawn failure, timeout, oversized output,
+/// non-zero exit, empty stdout).
 fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) ?[]const u8 {
     if (repo_path.len == 0) return null;
 
-    const args = std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv }) catch return null;
-    defer alloc.free(args);
-    const result = std.process.run(alloc, io, .{ .argv = args }) catch return null;
+    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s) catch return null;
     defer alloc.free(result.stderr);
 
     if (result.term != .exited or result.term.exited != 0) {
@@ -522,24 +487,26 @@ fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: 
 /// Run `git -C <repo_path> <args...>` and return true on exit 0, false otherwise.
 fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8) bool {
     if (repo_path.len == 0) return false;
+    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s) catch return false;
+    return exitedZero(alloc, result);
+}
 
-    const args = std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv }) catch return false;
-    defer alloc.free(args);
-    const result = std.process.run(alloc, io, .{ .argv = args }) catch return false;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-
+/// True when `result` exited 0. Frees its output.
+fn exitedZero(alloc: std.mem.Allocator, result: std.process.RunResult) bool {
+    alloc.free(result.stdout);
+    alloc.free(result.stderr);
     return result.term == .exited and result.term.exited == 0;
 }
 
-/// Run `git fetch origin --prune` in a repo to update remote tracking refs.
-/// Safe: fetch never modifies the working tree or local branches. Returns true
-/// on success, false when a repo_path is empty, io is unavailable, or fetch
-/// fails (non-zero exit, spawn failure). No-op without io (unit tests).
+/// Run `git fetch origin --prune` in a repo to update remote tracking refs,
+/// killed after `git_fetch_timeout_s`. Fetch never modifies the working tree or
+/// local branches. Returns true on success, false when a repo_path is empty,
+/// io is unavailable, or fetch fails (non-zero exit, spawn failure, timeout).
 fn gitFetch(io: ?std.Io, alloc: std.mem.Allocator, repo_path: []const u8) bool {
-    if (repo_path.len == 0) return false;
     const live_io = io orelse return false;
-    return gitCheck(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" });
+    if (repo_path.len == 0) return false;
+    const result = gitRun(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" }, git_fetch_timeout_s) catch return false;
+    return exitedZero(alloc, result);
 }
 
 /// Run `git reset --hard <ref>` in a repo. Destructive: overwrites local
@@ -625,9 +592,14 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source) !std.json.
                 remote_hash = rh;
             }
 
-            // is_dirty: git status --porcelain has any output
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" })) |porcelain| {
-                is_dirty = porcelain.len > 0;
+            // is_dirty: git status --porcelain has any output. Output past
+            // the cap is output too, so a large change set stays dirty.
+            if (gitRun(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" }, git_local_timeout_s)) |porcelain| {
+                defer alloc.free(porcelain.stdout);
+                defer alloc.free(porcelain.stderr);
+                is_dirty = porcelain.term == .exited and porcelain.term.exited == 0 and porcelain.stdout.len > 0;
+            } else |err| {
+                is_dirty = err == error.StreamTooLong;
             }
 
             // detached: git symbolic-ref -q HEAD fails
@@ -915,14 +887,15 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// (unit tests) or repo_path is empty (dev workstation).
 pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
-    if (getOptStr(params, "name")) |name| {
-        if (ctx.findSource(name) == null) return error.InvalidParams;
+    const name = getOptStr(params, "name");
+    if (name) |n| {
+        if (ctx.findSource(n) == null) return error.InvalidParams;
     }
-    // Run git fetch for git_repo sources so the status reflects live remotes.
+    // Fetch the named source, or every git_repo source, so the status
+    // reflects live remotes.
     for (ctx.sources) |src| {
-        if (src.type == .git_repo and src.repo_path.len > 0) {
-            _ = gitFetch(ctx.io, alloc, src.repo_path);
-        }
+        if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
+        if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path);
     }
     const payload = try buildStatusPayload(ctx, alloc);
     emitRefreshed(ctx, alloc, payload);
@@ -933,36 +906,53 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 // Update handlers
 // ---------------------------------------------------------------------------
 
-/// Run a single-target update for `app`. For git_repo sources with a configured
-/// repo_path, runs `git fetch origin --prune` + `git reset --hard origin/<branch>`.
-/// System sources run apt-get. Git sources with a requirements file run pip.
+/// Send one `notify_update_response` line. Allocation failure drops the line;
+/// the handler's own result still reaches the client.
+fn notifyLine(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8, proc_id: i64, complete: bool, comptime fmt: []const u8, args: anytype) void {
+    const msg = std.fmt.allocPrint(alloc, fmt, args) catch return;
+    emitResponse(ctx, alloc, buildResponseNotification(alloc, app, proc_id, msg, complete) catch return);
+}
+
+/// Run a single-target update for `app`. With io and a repo_path, a git_repo
+/// source runs `git fetch origin --prune` then `git reset --hard
+/// origin/<branch>`; either failing is error.GitFailed. The system source runs
+/// apt-get through `shell`, and a source with `requirements` runs pip. A
+/// failure after the start line sends Moonraker's "Error updating <app>: <err>"
+/// completion line.
 fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerror!std.json.Value {
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     const src = ctx.findSource(app) orelse return error.NotFound;
-    if (src.type == .system and ctx.shell == null) return error.NoPackageProvider;
+    if ((src.type == .system or src.requirements.len > 0) and ctx.shell == null) return error.NoPackageProvider;
     const proc_id = nextProcId();
     ctx.busy = true;
     defer ctx.busy = false;
 
-    const start_msg = try std.fmt.allocPrint(alloc, "Updating {s}...", .{app});
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, start_msg, false));
+    notifyLine(ctx, alloc, app, proc_id, false, "Updating {s}...", .{app});
+    updateSource(ctx, alloc, src) catch |err| {
+        notifyLine(ctx, alloc, app, proc_id, true, "Error updating {s}: {s}", .{ app, @errorName(err) });
+        return err;
+    };
+    notifyLine(ctx, alloc, app, proc_id, true, "{s} update finished", .{app});
+    return .{ .string = "ok" };
+}
 
-    if (src.type == .system) {
-        try upgradePackages(ctx, alloc);
-    } else if (src.type == .git_repo and src.repo_path.len > 0) {
+/// The commands of one single-target update (see `runUpdate`).
+fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    if (src.type == .git_repo and src.repo_path.len > 0) {
         if (ctx.io) |io| {
-            // Fetch latest remotes, then hard-reset to origin/<branch>.
-            _ = gitFetch(ctx.io, alloc, src.repo_path);
+            if (!gitFetch(io, alloc, src.repo_path)) return error.GitFailed;
             const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
             defer alloc.free(ref);
-            _ = gitReset(io, alloc, src.repo_path, ref);
+            if (!gitReset(io, alloc, src.repo_path, ref)) return error.GitFailed;
         }
     }
-    if (src.requirements.len > 0) try pipInstallRequirements(ctx, alloc, src.requirements);
+    try updatePackages(ctx, alloc, src);
+}
 
-    const done_msg = try std.fmt.allocPrint(alloc, "{s} update finished", .{app});
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done_msg, true));
-    return .{ .string = "ok" };
+/// apt-get for the system source, then pip for a source with `requirements`.
+fn updatePackages(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    if (src.type == .system) try upgradePackages(ctx, alloc);
+    if (src.requirements.len > 0) try pipInstallRequirements(ctx, alloc, src.requirements);
 }
 
 /// POST /machine/update/moonraker → "ok".
@@ -1018,29 +1008,31 @@ pub fn handleUpgrade(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     return runUpdate(ctx, alloc, name);
 }
 
-/// Full update across every source. The system source runs apt-get; other
-/// sources emit the same progress lines Moonraker does.
+/// Full update across every source: apt-get for the system source and pip for
+/// sources with `requirements`. Git sources only report progress lines; no
+/// git command runs. A failure sends "Error updating <source>: <err>".
 fn runFullUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator) anyerror!std.json.Value {
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
     for (ctx.sources) |src| {
-        if (src.type == .system and ctx.shell == null) return error.NoPackageProvider;
+        if ((src.type == .system or src.requirements.len > 0) and ctx.shell == null) return error.NoPackageProvider;
     }
     const proc_id = nextProcId();
     ctx.busy = true;
     defer ctx.busy = false;
 
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, "full", proc_id, "Preparing full software update...", false));
+    notifyLine(ctx, alloc, "full", proc_id, false, "Preparing full software update...", .{});
     for (ctx.sources) |src| {
-        const msg = try std.fmt.allocPrint(alloc, "Updating {s}...", .{src.name});
-        emitResponse(ctx, alloc, try buildResponseNotification(alloc, "full", proc_id, msg, false));
-        if (src.type == .system) try upgradePackages(ctx, alloc);
-        if (src.requirements.len > 0) try pipInstallRequirements(ctx, alloc, src.requirements);
+        notifyLine(ctx, alloc, "full", proc_id, false, "Updating {s}...", .{src.name});
+        updatePackages(ctx, alloc, src) catch |err| {
+            notifyLine(ctx, alloc, "full", proc_id, true, "Error updating {s}: {s}", .{ src.name, @errorName(err) });
+            return err;
+        };
     }
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, "full", proc_id, "Full Update Complete", true));
+    notifyLine(ctx, alloc, "full", proc_id, true, "Full Update Complete", .{});
     return .{ .string = "ok" };
 }
 
-/// POST /machine/update/full → "ok". STUB.
+/// POST /machine/update/full → "ok". See `runFullUpdate`.
 pub fn handleFull(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     return runFullUpdate(ctx, alloc);
@@ -1050,10 +1042,11 @@ pub fn handleFull(ctx_ptr: *anyopaque, _: std.json.Value, alloc: std.mem.Allocat
 // POST /machine/update/recover → machine.update.recover
 // ---------------------------------------------------------------------------
 
-/// Recover a corrupted git repo. STUB: validates `name` refers to a git source,
-/// emits the recovery `notify_update_response` pair, returns "ok". A real
-/// implementation re-clones or `git reset`s the repo. Mirrors
-/// `_handle_repo_recovery`.
+/// Recover a git source (`_handle_repo_recovery`). With io and a repo_path,
+/// a hard recover runs `git reset --hard HEAD` and `git clean -fd`; a soft one
+/// runs `git checkout <branch>` and `git reset --hard origin/<branch>`. There
+/// is no reclone. A failure sends "Error Recovering <app>" and the error as
+/// the completion line.
 pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
@@ -1067,33 +1060,39 @@ pub fn handleRecover(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
     ctx.busy = true;
     defer ctx.busy = false;
 
-    const msg = try std.fmt.allocPrint(alloc, "Recovering {s}...", .{app});
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, msg, false));
+    notifyLine(ctx, alloc, app, proc_id, false, "Recovering {s}...", .{app});
     // Git runs only when io and a repo path are set. Unit tests leave io null.
     if (ctx.io) |io| {
-        if (src.repo_path.len > 0) {
-            if (hard) {
-                if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" })) return error.GitFailed;
-                if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" })) return error.GitFailed;
-            } else {
-                const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
-                if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch })) return error.GitFailed;
-                if (!gitReset(io, alloc, src.repo_path, ref)) return error.GitFailed;
-            }
-        }
+        if (src.repo_path.len > 0) recoverRepo(io, alloc, src, hard) catch |err| {
+            notifyLine(ctx, alloc, app, proc_id, false, "Error Recovering {s}", .{app});
+            notifyLine(ctx, alloc, app, proc_id, true, "{s}", .{@errorName(err)});
+            return err;
+        };
     }
-    const done = try std.fmt.allocPrint(alloc, "{s} recovery finished", .{app});
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done, true));
+    notifyLine(ctx, alloc, app, proc_id, true, "{s} recovery finished", .{app});
     return .{ .string = "ok" };
+}
+
+fn recoverRepo(io: std.Io, alloc: std.mem.Allocator, src: Source, hard: bool) !void {
+    if (hard) {
+        if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" })) return error.GitFailed;
+        if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" })) return error.GitFailed;
+    } else {
+        const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
+        defer alloc.free(ref);
+        if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch })) return error.GitFailed;
+        if (!gitReset(io, alloc, src.repo_path, ref)) return error.GitFailed;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // POST /machine/update/rollback → machine.update.rollback
 // ---------------------------------------------------------------------------
 
-/// Roll a source back to its previous version. STUB: validates `name`, emits the
-/// rollback `notify_update_response` pair, returns "ok". Mirrors
-/// `_handle_rollback`.
+/// Roll a git source back (`_handle_rollback`): with io and a repo_path,
+/// `git reset --hard <rollback_ref>`. An empty `rollback_ref` runs nothing and
+/// completes with "Rollback not performed". A failure sends "Error Rolling
+/// Back <app>" and the error as the completion line.
 pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
     if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
@@ -1105,19 +1104,19 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
     ctx.busy = true;
     defer ctx.busy = false;
 
-    const msg = try std.fmt.allocPrint(alloc, "Rolling Back {s}...", .{app});
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, msg, false));
+    notifyLine(ctx, alloc, app, proc_id, false, "Rolling Back {s}...", .{app});
     if (src.rollback_ref.len == 0) {
-        emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, "Rollback not performed", true));
+        notifyLine(ctx, alloc, app, proc_id, true, "Rollback not performed", .{});
         return .{ .string = "ok" };
     }
     if (ctx.io) |io| {
-        if (src.repo_path.len > 0) {
-            if (!gitReset(io, alloc, src.repo_path, src.rollback_ref)) return error.GitFailed;
+        if (src.repo_path.len > 0 and !gitReset(io, alloc, src.repo_path, src.rollback_ref)) {
+            notifyLine(ctx, alloc, app, proc_id, false, "Error Rolling Back {s}", .{app});
+            notifyLine(ctx, alloc, app, proc_id, true, "GitFailed", .{});
+            return error.GitFailed;
         }
     }
-    const done = try std.fmt.allocPrint(alloc, "{s} rollback finished", .{app});
-    emitResponse(ctx, alloc, try buildResponseNotification(alloc, app, proc_id, done, true));
+    notifyLine(ctx, alloc, app, proc_id, true, "{s} rollback finished", .{app});
     return .{ .string = "ok" };
 }
 
@@ -1852,23 +1851,127 @@ test "gitCheck: returns false for nonexistent path" {
     try testing.expectEqual(false, gitCheck(io, testing.allocator, "/nonexistent/path/repo", &.{ "rev-parse", "HEAD" }));
 }
 
-test "gitOutput: special characters in repo_path safe" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    // Paths with spaces, quotes, etc. should not cause crashes.
-    _ = gitOutput(io, testing.allocator, "/path with spaces/repo", &.{});
-    _ = gitOutput(io, testing.allocator, "/p'ath/qu\"oted", &.{});
-    _ = gitOutput(io, testing.allocator, "/p\x00ath/null", &.{});
+test "git helpers pass a repo path with shell metacharacters as one argument" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const name = "re po 'q\"$(x);";
+    try tmp.dir.createDirPath(testing.io, name);
+    const path = try tmp.dir.realPathFileAlloc(testing.io, name, testing.allocator);
+    defer testing.allocator.free(path);
+    try testing.expect(gitCheck(testing.io, testing.allocator, path, &.{"init"}));
+    const inside = gitOutput(testing.io, testing.allocator, path, &.{ "rev-parse", "--is-inside-work-tree" }) orelse return error.MissingGitOutput;
+    defer testing.allocator.free(inside);
+    try testing.expectEqualStrings("true", inside);
+    // A NUL byte cannot reach argv: the spawn fails instead.
+    try testing.expect(gitOutput(testing.io, testing.allocator, "/p\x00ath/null", &.{"status"}) == null);
+    try testing.expect(!gitCheck(testing.io, testing.allocator, "/p\x00ath/null", &.{"status"}));
 }
 
-test "gitCheck: special characters in repo_path safe" {
+test "update failures send Moonraker's completion lines" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-    _ = gitCheck(io, testing.allocator, "/path with spaces/repo", &.{});
-    _ = gitCheck(io, testing.allocator, "/p'ath/qu\"oted", &.{});
-    _ = gitCheck(io, testing.allocator, "/p\x00ath/null", &.{});
+    const Rec = struct {
+        frames: std.ArrayList([]u8) = .empty,
+        fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            try self.frames.append(testing.allocator, try testing.allocator.dupe(u8, bytes));
+        }
+        fn deinit(self: *@This()) void {
+            for (self.frames.items) |f| testing.allocator.free(f);
+            self.frames.deinit(testing.allocator);
+        }
+        /// `params[0]` of frame `i` from the end, as (message, complete).
+        fn line(self: *@This(), a: std.mem.Allocator, from_end: usize) !struct { []const u8, bool } {
+            const frame = self.frames.items[self.frames.items.len - 1 - from_end];
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, a, frame, .{});
+            const n = v.object.get("params").?.array.items[0].object;
+            return .{ n.get("message").?.string, n.get("complete").?.bool };
+        }
+        fn failShell(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror!void {
+            return error.ShellFailed;
+        }
+    };
+    var rec: Rec = .{};
+    defer rec.deinit();
+    var core: @import("../server/core.zig").Core = .init();
+    var conns = @import("../server/connections.zig").Connections.init(testing.allocator, &core);
+    defer conns.deinit(io);
+    conns.attachWriter(io, try conns.add(io), &rec, Rec.write);
+    var bus = NotifyBus.init(&core, &conns);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    const sources = [_]Source{
+        .{ .name = "system", .type = .system },
+        // origin/missing does not exist, so the reset after the fetch fails.
+        .{ .name = "moonraker", .type = .git_repo, .repo_path = repo.path, .branch = "missing", .rollback_ref = "missing" },
+    };
+    var dummy: u8 = 0;
+    var ctx: UpdateCtx = .{ .clock_io = io, .gpa = testing.allocator, .sources = &sources, .bus = &bus, .io = io, .shell = Rec.failShell, .shell_ctx = &dummy };
+
+    try testing.expectError(error.ShellFailed, handleUpdateSystem(&ctx, .null, a));
+    var l = try rec.line(a, 0);
+    try testing.expectEqualStrings("Error updating system: ShellFailed", l[0]);
+    try testing.expect(l[1]);
+
+    try testing.expectError(error.GitFailed, handleUpdateMoonraker(&ctx, .null, a));
+    l = try rec.line(a, 0);
+    try testing.expectEqualStrings("Error updating moonraker: GitFailed", l[0]);
+    try testing.expect(l[1]);
+    try testing.expect(!ctx.busy);
+
+    try testing.expectError(error.GitFailed, handleRollback(&ctx, try objParams(a, "{\"name\":\"moonraker\"}"), a));
+    l = try rec.line(a, 1);
+    try testing.expectEqualStrings("Error Rolling Back moonraker", l[0]);
+    try testing.expect(!l[1]);
+    l = try rec.line(a, 0);
+    try testing.expectEqualStrings("GitFailed", l[0]);
+    try testing.expect(l[1]);
+}
+
+test "refresh with a name fetches only that source" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var first = try TestRepo.init();
+    defer first.deinit();
+    var second = try TestRepo.init();
+    defer second.deinit();
+    const sources = [_]Source{
+        .{ .name = "first", .type = .git_repo, .repo_path = first.path, .branch = "main" },
+        .{ .name = "second", .type = .git_repo, .repo_path = second.path, .branch = "main" },
+    };
+    var ctx: UpdateCtx = .{ .clock_io = io, .gpa = testing.allocator, .sources = &sources, .bus = null, .io = io };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try handleRefresh(&ctx, try objParams(a, "{\"name\":\"second\"}"), a);
+    try testing.expect(gitCheck(io, testing.allocator, second.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+    try testing.expect(!gitCheck(io, testing.allocator, first.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }));
+}
+
+test "is_dirty: oversized status output still reads as dirty" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    // Each untracked file is one porcelain line; enough of them pass the cap.
+    var name_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i * 40 <= git_output_limit) : (i += 1) {
+        const name = try std.fmt.bufPrint(&name_buf, "untracked-file-with-a-long-name-{d:0>6}", .{i});
+        try repo.tmp.dir.writeFile(io, .{ .sub_path = name, .data = "" });
+    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const src: Source = .{ .name = "moonraker", .type = .git_repo, .repo_path = repo.path, .branch = "main" };
+    const status = try buildGitStatus(io, arena.allocator(), src);
+    try testing.expect(status.object.get("is_dirty").?.bool);
 }
 
 test "gitReset: returns false for empty repo_path" {
