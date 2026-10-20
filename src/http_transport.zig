@@ -851,6 +851,10 @@ fn handleUploadStreaming(
             const res = file_manager.resolveRequestPath(fctx, alloc, req_path) catch
                 return bad(req, alloc, headers, "Invalid upload path");
             if (!res.root.full_access or res.rel.len == 0) return bad(req, alloc, headers, "Invalid upload path");
+            srv.core.run(io, file_manager.FileCtx.checkInUse, .{ fctx, res, false }) catch {
+                const b = try errorBody(alloc, 403, "File currently in use");
+                return req.respond(b, .{ .status = .forbidden, .extra_headers = headers });
+            };
             var parent = res.parent(io, alloc, .{ .make_path = true }) catch return bad(req, alloc, headers, "Invalid upload path");
             defer parent.close(io);
             var output = parent.dir.createFileAtomic(io, parent.name, .{ .replace = true }) catch return bad(req, alloc, headers, "Write error");

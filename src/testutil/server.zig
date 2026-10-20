@@ -2174,3 +2174,27 @@ test "files: notify_filelist_changed emitted on upload with correct payload" {
     }
     try std.testing.expect(saw);
 }
+
+test "files: upload refuses to overwrite the gcode of an active print" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    const first = try ts.uploadFile(alloc, "gcodes", null, "busy.gcode", "G28\n");
+    defer alloc.free(first);
+    var ps: std.json.ObjectMap = .empty;
+    defer ps.deinit(alloc);
+    try ps.put(alloc, "state", .{ .string = "printing" });
+    try ps.put(alloc, "filename", .{ .string = "busy.gcode" });
+    const JobStateCtx = @import("../components/job_state.zig").JobStateCtx;
+    ts.app.core.run(ts.io, JobStateCtx.statusUpdate, .{ ts.app.job_state_ctx, std.json.Value{ .object = ps } });
+    const refused = try ts.uploadFile(alloc, "gcodes", null, "busy.gcode", "G1 X1\n");
+    defer alloc.free(refused);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, refused, .{});
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 403), err.get("code").?.integer);
+    try std.testing.expectEqualStrings("File currently in use", err.get("message").?.string);
+    const contents = try ts.get(alloc, "/server/files/gcodes/busy.gcode");
+    defer alloc.free(contents);
+    try std.testing.expectEqualStrings("G28\n", contents);
+}

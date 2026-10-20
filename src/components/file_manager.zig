@@ -50,6 +50,7 @@ const notify = @import("../server/notify.zig");
 const jv = @import("../json/value.zig");
 const NotifyBus = @import("../server/notify.zig").NotifyBus;
 const gcode_metadata = @import("gcode_metadata.zig");
+const job_state_component = @import("job_state.zig");
 
 const Registry = registry.Registry;
 const Dir = std.Io.Dir;
@@ -121,6 +122,8 @@ pub const FileCtx = struct {
     /// `root/relative` paths omitted from listings. Forge-X `excludes`.
     excludes: [][]const u8 = &.{},
     excludes_owned: bool = false,
+    /// print_stats source for `checkInUse`. Borrowed; set by the App.
+    job_state: ?*job_state_component.JobStateCtx = null,
 
     pub fn setIo(self: *FileCtx, io: std.Io) void {
         self.io = io;
@@ -264,6 +267,23 @@ pub const FileCtx = struct {
     pub fn gcodeExistsErased(ctx: *anyopaque, filename: []const u8) bool {
         const self: *const FileCtx = @ptrCast(@alignCast(ctx));
         return self.fileExists("gcodes", filename);
+    }
+
+    /// Moonraker `_handle_operation_check`: while a print is active (printing
+    /// or paused), refuse to change the loaded gcode file or, when `is_dir`,
+    /// a directory holding it. Reads job_state's snapshot, so call under Core.
+    pub fn checkInUse(self: *const FileCtx, path: Resolved, is_dir: bool) error{FileInUse}!void {
+        if (!std.mem.eql(u8, path.root.name, "gcodes")) return;
+        const js = self.job_state orelse return;
+        if (!js.isActive()) return;
+        const loaded = js.getLastStats().get("filename") orelse return;
+        if (loaded != .string or loaded.string.len == 0) return;
+        const name = std.mem.trimStart(u8, loaded.string, "/");
+        const in_use = if (is_dir)
+            path.rel.len == 0 or (std.mem.startsWith(u8, name, path.rel) and name.len > path.rel.len and name[path.rel.len] == '/')
+        else
+            std.mem.eql(u8, name, path.rel);
+        if (in_use) return error.FileInUse;
     }
 };
 
@@ -825,6 +845,7 @@ pub fn handleDeleteDirectory(ctx_ptr: *anyopaque, params: std.json.Value, alloc:
     if (!resolved.root.full_access) return error.Forbidden;
     if (resolved.rel.len == 0) return error.Forbidden; // cannot delete root
     if (try resolvedKind(io, alloc, resolved) != .dir) return error.NotFound;
+    if (force) try ctx.checkInUse(resolved, true);
     var parent = resolved.parent(io, alloc, .{}) catch |err| return accessError(err);
     defer parent.close(io);
     if (force) {
@@ -860,8 +881,15 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     if (!dst.root.full_access) return error.Forbidden;
     const src_kind = try resolvedKind(io, alloc, src);
     if (src_kind == .missing) return error.NotFound;
+    // file_manager.py checks the requested destination, then a moved source.
+    const dst_kind = try resolvedKind(io, alloc, dst);
+    if (dst_kind != .missing) try ctx.checkInUse(dst, dst_kind == .dir);
+    if (is_move) {
+        if (!src.root.full_access) return error.Forbidden;
+        try ctx.checkInUse(src, src_kind == .dir);
+    }
     var target = dst;
-    if (try resolvedKind(io, alloc, dst) == .dir) {
+    if (dst_kind == .dir) {
         const base = std.fs.path.basename(src.abs);
         target.rel = try std.fs.path.join(alloc, &.{ dst.rel, base });
         target.abs = try std.fs.path.join(alloc, &.{ dst.abs, base });
@@ -872,7 +900,6 @@ fn moveOrCopy(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
 
     var action: []const u8 = undefined;
     if (is_move) {
-        if (!src.root.full_access) return error.Forbidden;
         var sp = src.parent(io, alloc, .{}) catch |err| return accessError(err);
         defer sp.close(io);
         var dp = target.parent(io, alloc, .{}) catch |err| return accessError(err);
@@ -960,6 +987,7 @@ pub fn deleteFileImpl(ctx: *FileCtx, alloc: std.mem.Allocator, path: []const u8)
     const resolved = try resolveRequestPath(ctx, alloc, path);
     if (!resolved.root.full_access) return error.Forbidden;
     if (try resolvedKind(io, alloc, resolved) != .file) return error.NotFound;
+    try ctx.checkInUse(resolved, false);
     var parent = resolved.parent(io, alloc, .{}) catch |err| return accessError(err);
     defer parent.close(io);
     parent.dir.deleteFile(io, parent.name) catch |err| return accessError(err);
@@ -1792,6 +1820,76 @@ test "handleDeleteFile: deletes and emits delete_file" {
     const result = try handleDeleteFile(@ptrCast(&c), try objParams(a, "{\"path\":\"gcodes/del.gcode\"}"), a);
     try testing.expectEqualStrings("delete_file", result.object.get("action").?.string);
     try testing.expectEqual(StatKind.missing, tr.exists("gcodes/del.gcode"));
+}
+
+test "file changes refuse the gcode loaded by an active print" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tr = try TestRoots.init(a);
+    defer tr.deinit();
+    try tr.writeFile("gcodes/sub/print.gcode", "G28\n");
+    try tr.writeFile("gcodes/other.gcode", "G1\n");
+    try tr.writeFile("config/print.gcode", "G1\n");
+    var js = job_state_component.JobStateCtx.init(testing.allocator);
+    defer js.deinit();
+    var c = tr.ctx();
+    c.job_state = &js;
+    var ps: std.json.ObjectMap = .empty;
+    try ps.put(a, "state", .{ .string = "printing" });
+    try ps.put(a, "filename", .{ .string = "sub/print.gcode" });
+    js.statusUpdate(.{ .object = ps });
+
+    const refused = .{
+        .{ handleDeleteFile, "{\"path\":\"gcodes/sub/print.gcode\"}" },
+        .{ handleDeleteDirectory, "{\"path\":\"gcodes/sub\",\"force\":true}" },
+        .{ handleMove, "{\"source\":\"gcodes/sub/print.gcode\",\"dest\":\"gcodes/moved.gcode\"}" },
+        .{ handleMove, "{\"source\":\"gcodes/sub\",\"dest\":\"gcodes/moved\"}" },
+        .{ handleCopy, "{\"source\":\"gcodes/other.gcode\",\"dest\":\"gcodes/sub/print.gcode\"}" },
+        .{ handleCopy, "{\"source\":\"gcodes/other.gcode\",\"dest\":\"gcodes/sub\"}" },
+    };
+    inline for (refused) |case| try testing.expectError(error.FileInUse, case[0](@ptrCast(&c), try objParams(a, case[1]), a));
+    try testing.expectEqual(StatKind.file, tr.exists("gcodes/sub/print.gcode"));
+    try testing.expectEqual(StatKind.missing, tr.exists("gcodes/sub/other.gcode"));
+    // Other roots and other files stay writable.
+    _ = try handleDeleteFile(@ptrCast(&c), try objParams(a, "{\"path\":\"config/print.gcode\"}"), a);
+    _ = try handleCopy(@ptrCast(&c), try objParams(a, "{\"source\":\"gcodes/other.gcode\",\"dest\":\"gcodes/copy.gcode\"}"), a);
+
+    ps.getPtr("state").?.* = .{ .string = "complete" };
+    js.statusUpdate(.{ .object = ps });
+    _ = try handleDeleteFile(@ptrCast(&c), try objParams(a, "{\"path\":\"gcodes/sub/print.gcode\"}"), a);
+}
+
+test "fuzz checkInUse: only an active print blocks its file and parent directories" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var js = job_state_component.JobStateCtx.init(testing.allocator);
+            defer js.deinit();
+            const roots = [_]Root{.{ .name = "gcodes", .path = "/srv/gcodes", .full_access = true }};
+            const c: FileCtx = .{ .gpa = testing.allocator, .roots = &roots, .bus = null, .job_state = &js };
+            const alphabet = "ab/";
+            var lbuf: [6]u8 = undefined;
+            var rbuf: [6]u8 = undefined;
+            for (&lbuf) |*ch| ch.* = alphabet[smith.value(u8) % alphabet.len];
+            for (&rbuf) |*ch| ch.* = alphabet[smith.value(u8) % alphabet.len];
+            const loaded = lbuf[0 .. smith.value(u8) % (lbuf.len + 1)];
+            const rel = rbuf[0 .. smith.value(u8) % (rbuf.len + 1)];
+            const states = [_][]const u8{ "printing", "paused", "standby", "complete" };
+            const state = states[smith.value(u8) % states.len];
+            var ps: std.json.ObjectMap = .empty;
+            defer ps.deinit(testing.allocator);
+            try ps.put(testing.allocator, "state", .{ .string = state });
+            try ps.put(testing.allocator, "filename", .{ .string = loaded });
+            js.statusUpdate(.{ .object = ps });
+            const is_dir = smith.value(bool);
+            const blocked = if (c.checkInUse(.{ .root = roots[0], .rel = rel, .abs = "" }, is_dir)) |_| false else |_| true;
+            const name = std.mem.trimStart(u8, loaded, "/");
+            if (!js.isActive() or name.len == 0) return testing.expect(!blocked);
+            if (!is_dir) return testing.expectEqual(std.mem.eql(u8, name, rel), blocked);
+            if (blocked and rel.len > 0) try testing.expect(std.mem.startsWith(u8, name, rel));
+            if (std.mem.eql(u8, name, rel)) try testing.expect(!blocked);
+        }
+    }.run, .{});
 }
 
 test "handleDeleteFile: missing file → NotFound" {
