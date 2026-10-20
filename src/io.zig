@@ -1,40 +1,19 @@
 //! Io bootstrap: a thin listener over `std.Io.net` running on the
-//! `std.Io.Threaded` backend. Owns accept/serve loops and per-connection
-//! task spawning. No raw socket syscalls — everything goes through `std.Io`.
+//! `std.Io.Threaded` backend. Owns the accept loop and per-connection task
+//! spawning. No raw socket syscalls — everything goes through `std.Io`.
 
 const std = @import("std");
 const Io = std.Io;
 const net = std.Io.net;
-
-/// A connection handler. Receives the active `Io` and an accepted stream.
-/// The handler owns the stream lifecycle decision via `serveOnce`/`serve`,
-/// which close it after the handler returns.
-pub const Handler = *const fn (io: Io, stream: net.Stream) void;
 
 /// A connection handler carrying an opaque context pointer. Used to wire the
 /// HTTP transport (`serveConn`) — which needs the shared server state — into the
 /// accept loop without globals.
 pub const CtxHandler = *const fn (ctx: *anyopaque, io: Io, stream: net.Stream) void;
 
-/// Line framing used by the echo handler / fuzz harness: read one '\n'
-/// delimited line and write back "echo:" ++ line ++ "\n".
-/// Factored out so the fuzz test can exercise the framing without sockets
-/// having to be the unit under test, but it is also the real handler body.
-fn echoLine(io: Io, stream: net.Stream) !void {
-    var rbuf: [256]u8 = undefined;
-    var r = stream.reader(io, &rbuf);
-    const line = try r.interface.takeDelimiterExclusive('\n');
-
-    var wbuf: [256]u8 = undefined;
-    var w = stream.writer(io, &wbuf);
-    try w.interface.print("echo:{s}\n", .{line});
-    try w.interface.flush();
-}
-
-/// In-file echo handler used by tests and as the default smoke handler.
-pub fn echoHandler(io: Io, stream: net.Stream) void {
-    echoLine(io, stream) catch {};
-}
+/// Wait after an accept failure caused by descriptor or memory exhaustion, so
+/// the loop does not spin while connections close and free resources.
+const accept_retry_delay: Io.Duration = .fromSeconds(1);
 
 pub const Listener = struct {
     server: net.Server,
@@ -50,42 +29,6 @@ pub const Listener = struct {
     /// The actual bound port, resolving the ephemeral port when 0 was passed.
     pub fn port(self: *const Listener) u16 {
         return self.server.socket.address.getPort();
-    }
-
-    /// Accept exactly one connection, run `handler`, close the stream, return.
-    pub fn serveOnce(self: *Listener, io: Io, handler: Handler) !void {
-        const stream = try self.server.accept(io);
-        defer stream.close(io);
-        handler(io, stream);
-    }
-
-    /// Per-connection task body: run the handler then close the stream.
-    /// Lives at module scope so `io.async` can take its address.
-    fn connTask(io: Io, stream: net.Stream, handler: Handler) void {
-        defer stream.close(io);
-        handler(io, stream);
-    }
-
-    /// Accept loop: spawn one async task per accepted connection.
-    /// All accepted connection tasks run concurrently via a `Group`; the loop
-    /// exits (and the group is awaited) when `accept` fails due to shutdown or
-    /// cancellation.  Memory is bounded: `Group` releases each task's resources
-    /// as soon as the individual task returns, not at group-await time.
-    pub fn serve(self: *Listener, io: Io, handler: Handler) !void {
-        var group: Io.Group = .init;
-        defer group.await(io) catch {};
-        while (true) {
-            const stream = self.server.accept(io) catch |err| switch (err) {
-                error.SocketNotListening, error.Canceled => return,
-                else => return err,
-            };
-            // Use `concurrent` so each connection task runs on its own OS thread
-            // and cannot block the accept loop by running inline.  If the backend
-            // cannot provide concurrency (single-threaded builds or resource
-            // exhaustion), fall back to the sequential `group.async` path.
-            group.concurrent(io, connTask, .{ io, stream, handler }) catch
-                group.async(io, connTask, .{ io, stream, handler });
-        }
     }
 
     /// Upper bound on connection handlers running at once. `std.Io.Threaded`
@@ -110,18 +53,24 @@ pub const Listener = struct {
         handler(ctx, io, stream);
     }
 
-    /// Accept loop variant that threads an opaque context to each connection
-    /// handler. This is how the HTTP transport's `serveConn` is wired in: the
-    /// context is the shared `http_transport.Server`. Concurrency is capped at
-    /// `max_concurrent_conns` (see above).
+    /// Accept loop: run `handler` with `ctx` for each connection on its own
+    /// task, at most `max_concurrent_conns` at once. A failed accept of one
+    /// connection does not stop the loop; descriptor or memory exhaustion
+    /// waits `accept_retry_delay` first. Returns when the listener shuts down
+    /// or the loop is canceled, after canceling and joining live connections.
     pub fn serveWith(self: *Listener, io: Io, ctx: *anyopaque, handler: CtxHandler) !void {
         var group: Io.Group = .init;
-        defer group.await(io) catch {};
+        defer group.cancel(io);
         var sem: Io.Semaphore = .{ .permits = max_concurrent_conns };
         while (true) {
             const stream = self.server.accept(io) catch |err| switch (err) {
                 error.SocketNotListening, error.Canceled => return,
-                else => return err,
+                error.ConnectionAborted, error.ProtocolFailure, error.BlockedByFirewall => continue,
+                error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => {
+                    try io.sleep(accept_retry_delay, .awake);
+                    continue;
+                },
+                error.NetworkDown, error.WouldBlock, error.Unexpected => return err,
             };
             // Acquire a slot before spawning; blocks once `max_concurrent_conns`
             // handlers are in flight, so the worker pool can't grow past the cap.
@@ -138,126 +87,18 @@ pub const Listener = struct {
 
 // --- tests ---------------------------------------------------------------
 
-fn sendLine(io: Io, bound_port: u16, payload: []const u8, out: *[256]u8, out_len: *usize) void {
-    var caddr = net.IpAddress.parseIp4("127.0.0.1", bound_port) catch return;
-    const cs = caddr.connect(io, .{ .mode = .stream }) catch return;
+fn sendLine(io: Io, address: net.IpAddress, payload: []const u8, out: *[256]u8) ![]const u8 {
+    const cs = try address.connect(io, .{ .mode = .stream });
     defer cs.close(io);
 
     var wbuf: [256]u8 = undefined;
     var w = cs.writer(io, &wbuf);
-    w.interface.writeAll(payload) catch return;
-    w.interface.writeByte('\n') catch return;
-    w.interface.flush() catch return;
+    try w.interface.writeAll(payload);
+    try w.interface.writeByte('\n');
+    try w.interface.flush();
 
-    var rbuf: [256]u8 = undefined;
-    var r = cs.reader(io, &rbuf);
-    const resp = r.interface.takeDelimiterExclusive('\n') catch return;
-    @memcpy(out[0..resp.len], resp);
-    out_len.* = resp.len;
-}
-
-test "listener accepts and a registered handler echoes a line" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var lst = try Listener.bind(io, "127.0.0.1", 0);
-    defer lst.deinit(io);
-
-    const bound_port = lst.port();
-    try std.testing.expect(bound_port != 0);
-
-    var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
-
-    var out: [256]u8 = undefined;
-    var out_len: usize = 0;
-    sendLine(io, bound_port, "hello", &out, &out_len);
-
-    srv_fut.await(io) catch {};
-
-    try std.testing.expectEqualStrings("echo:hello", out[0..out_len]);
-}
-
-test "listener accepts IPv6 using the bound socket address" {
-    var threaded = Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var listener = try Listener.bind(io, "::1", 0);
-    defer listener.deinit(io);
-    var future = io.async(Listener.serveOnce, .{ &listener, io, @as(Handler, echoHandler) });
-    defer future.await(io) catch {};
-    const client = try (try net.IpAddress.parse("::1", listener.port())).connect(io, .{ .mode = .stream });
-    defer client.close(io);
-    var wbuf: [128]u8 = undefined;
-    var writer = client.writer(io, &wbuf);
-    try writer.interface.writeAll("ipv6\n");
-    try writer.interface.flush();
-    var rbuf: [128]u8 = undefined;
-    var reader = client.reader(io, &rbuf);
-    try std.testing.expectEqualStrings("echo:ipv6", try reader.interface.takeDelimiterExclusive('\n'));
-}
-
-test "serve smoke: spawns per-connection task and echoes" {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var lst = try Listener.bind(io, "127.0.0.1", 0);
-    defer lst.deinit(io);
-    const bound_port = lst.port();
-
-    // Run a single accept+handle through serveOnce (serve is the same body
-    // looped); this exercises the per-connection close + handler path.
-    var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
-
-    var out: [256]u8 = undefined;
-    var out_len: usize = 0;
-    sendLine(io, bound_port, "smoke", &out, &out_len);
-    srv_fut.await(io) catch {};
-
-    try std.testing.expectEqualStrings("echo:smoke", out[0..out_len]);
-}
-
-test "serve handles two connections concurrently" {
-    // Verify that `serve`'s Group-based accept loop accepts and handles
-    // multiple connections.  Two connections are made sequentially from the
-    // main thread (using sendLine), and both echo responses must be correct.
-    // The concurrent accept loop must remain running between the first and
-    // second connections; a deadlocked or single-shot implementation would
-    // fail to respond to the second connection.
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var lst = try Listener.bind(io, "127.0.0.1", 0);
-    const bound_port = lst.port();
-
-    // Serve in the background; deinit() below will shut the loop down.
-    const serveIgnoringErrors = struct {
-        fn f(l: *Listener, pio: Io, h: Handler) void {
-            l.serve(pio, h) catch {};
-        }
-    }.f;
-    var srv_fut = io.async(serveIgnoringErrors, .{ &lst, io, @as(Handler, echoHandler) });
-
-    var out_a: [256]u8 = undefined;
-    var out_b: [256]u8 = undefined;
-    var len_a: usize = 0;
-    var len_b: usize = 0;
-
-    // Two sequential connections from the main thread.
-    sendLine(io, bound_port, "ping_a", &out_a, &len_a);
-    sendLine(io, bound_port, "ping_b", &out_b, &len_b);
-
-    // Cancel the serve task to stop the accept loop cleanly, then free the
-    // listener socket.  Cancellation causes accept to return error.Canceled
-    // which the serve loop handles by returning; this avoids the EBADF that
-    // would occur if we closed the socket while accept4 is in progress.
-    srv_fut.cancel(io);
-    lst.deinit(io);
-
-    try std.testing.expectEqualStrings("echo:ping_a", out_a[0..len_a]);
-    try std.testing.expectEqualStrings("echo:ping_b", out_b[0..len_b]);
+    var r = cs.reader(io, out);
+    return r.interface.takeDelimiterExclusive('\n');
 }
 
 // Context-carrying echo handler: prefixes the echo with a per-context tag so the
@@ -275,68 +116,80 @@ fn taggedEcho(ctx: *anyopaque, io: Io, stream: net.Stream) void {
     w.interface.flush() catch return;
 }
 
-test "serveWith threads context to per-connection handler" {
+fn serveIgnoring(l: *Listener, io: Io, c: *anyopaque, h: CtxHandler) void {
+    l.serveWith(io, c, h) catch {};
+}
+
+test "serveWith threads context to per-connection handlers on both IP families" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
 
-    var lst = try Listener.bind(io, "127.0.0.1", 0);
-    const bound_port = lst.port();
-
-    var ctx = TagCtx{ .tag = 'X' };
-    const serveIgnoring = struct {
-        fn f(l: *Listener, pio: Io, c: *anyopaque, h: CtxHandler) void {
-            l.serveWith(pio, c, h) catch {};
-        }
-    }.f;
-    var srv_fut = io.async(serveIgnoring, .{ &lst, io, @as(*anyopaque, @ptrCast(&ctx)), @as(CtxHandler, taggedEcho) });
-
-    var out: [256]u8 = undefined;
-    var out_len: usize = 0;
-    sendLine(io, bound_port, "hi", &out, &out_len);
-
-    srv_fut.cancel(io);
-    lst.deinit(io);
-
-    try std.testing.expectEqualStrings("X:hi", out[0..out_len]);
+    for ([_][]const u8{ "127.0.0.1", "::1" }) |host| {
+        var lst = try Listener.bind(io, host, 0);
+        try std.testing.expect(lst.port() != 0);
+        var ctx = TagCtx{ .tag = 'X' };
+        var srv_fut = io.async(serveIgnoring, .{ &lst, io, @as(*anyopaque, @ptrCast(&ctx)), @as(CtxHandler, taggedEcho) });
+        const address = try net.IpAddress.parse(host, lst.port());
+        var out_a: [256]u8 = undefined;
+        var out_b: [256]u8 = undefined;
+        // Two sequential connections: the loop keeps accepting.
+        const a = sendLine(io, address, "hi", &out_a);
+        const b = sendLine(io, address, "again", &out_b);
+        srv_fut.cancel(io);
+        lst.deinit(io);
+        try std.testing.expectEqualStrings("X:hi", try a);
+        try std.testing.expectEqualStrings("X:again", try b);
+    }
 }
 
-test "fuzz_listener: random payload round-trips through the echo path" {
-    try std.testing.fuzz({}, struct {
-        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
-            var raw: [200]u8 = undefined;
-            smith.bytesWithHash(&raw, 0);
+/// Handler that blocks until the peer closes, like an idle WebSocket session.
+fn holdOpen(_: *anyopaque, io: Io, stream: net.Stream) void {
+    var rbuf: [16]u8 = undefined;
+    var r = stream.reader(io, &rbuf);
+    _ = r.interface.discardRemaining() catch {};
+}
 
-            // Bound length and strip '\n' so the payload is a single line.
-            const n = @as(usize, raw[0]) % raw.len;
-            var payload_buf: [200]u8 = undefined;
-            var len: usize = 0;
-            for (raw[0..n]) |b| {
-                if (b == '\n') continue;
-                payload_buf[len] = b;
-                len += 1;
-            }
-            const payload = payload_buf[0..len];
+test "canceling serveWith cancels live connections instead of waiting for them" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var lst = try Listener.bind(io, "127.0.0.1", 0);
+    defer lst.deinit(io);
+    var ctx = TagCtx{ .tag = 'X' };
+    var srv_fut = io.async(serveIgnoring, .{ &lst, io, @as(*anyopaque, @ptrCast(&ctx)), @as(CtxHandler, holdOpen) });
+    const client = try (try net.IpAddress.parse("127.0.0.1", lst.port())).connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    // Let the server accept the connection and start the handler.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    srv_fut.cancel(io);
+    try std.testing.expect(start.untilNow(io).raw.toMilliseconds() < 1000);
+}
 
-            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
-
-            var lst = try Listener.bind(io, "127.0.0.1", 0);
-            defer lst.deinit(io);
-            const bound_port = lst.port();
-
-            var srv_fut = io.async(Listener.serveOnce, .{ &lst, io, @as(Handler, echoHandler) });
-
+test "fuzz_listener: random payload round-trips through serveWith" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var lst = try Listener.bind(io, "127.0.0.1", 0);
+    var ctx = TagCtx{ .tag = 'F' };
+    var srv_fut = io.async(serveIgnoring, .{ &lst, io, @as(*anyopaque, @ptrCast(&ctx)), @as(CtxHandler, taggedEcho) });
+    defer {
+        srv_fut.cancel(io);
+        lst.deinit(io);
+    }
+    const Ctx = struct { io: Io, address: net.IpAddress };
+    try std.testing.fuzz(Ctx{ .io = io, .address = try net.IpAddress.parse("127.0.0.1", lst.port()) }, struct {
+        fn run(c: Ctx, smith: *std.testing.Smith) anyerror!void {
+            var payload: [200]u8 = undefined;
+            const n = smith.valueRangeAtMostWithHash(u8, 0, payload.len, 0);
+            smith.bytesWithHash(payload[0..n], 1);
+            // A single line: no '\n' in the payload.
+            std.mem.replaceScalar(u8, payload[0..n], '\n', ' ');
             var out: [256]u8 = undefined;
-            var out_len: usize = 0;
-            sendLine(io, bound_port, payload, &out, &out_len);
-            srv_fut.await(io) catch {};
-
-            var expected: [256]u8 = undefined;
-            @memcpy(expected[0..5], "echo:");
-            @memcpy(expected[5 .. 5 + payload.len], payload);
-            try std.testing.expectEqualStrings(expected[0 .. 5 + payload.len], out[0..out_len]);
+            const echoed = try sendLine(c.io, c.address, payload[0..n], &out);
+            try std.testing.expectEqualStrings("F:", echoed[0..2]);
+            try std.testing.expectEqualStrings(payload[0..n], echoed[2..]);
         }
     }.run, .{});
 }

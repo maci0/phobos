@@ -393,7 +393,7 @@ fn serveConnInner(srv: *Server, stream: net.Stream) !void {
             .websocket => |key| {
                 // /klippysocket is the bridge; any other path is the client
                 // socket. The session consumes the connection.
-                serveUpgrade(srv, &req, key orelse "", path, creds, headers, alloc);
+                serveUpgrade(srv, &req, key orelse "", path, creds, headers, alloc, stream, &wbuf);
                 return;
             },
             .other, .none => {},
@@ -476,6 +476,9 @@ fn serveUpgrade(
     creds: HttpCreds,
     headers: []const std.http.Header,
     alloc: std.mem.Allocator,
+    stream: net.Stream,
+    /// The HTTP writer buffer, free once the handshake is flushed.
+    out_buf: []u8,
 ) void {
     const refuse = struct {
         fn f(r: *std.http.Server.Request, a: std.mem.Allocator, h: []const std.http.Header, status: std.http.Status, msg: []const u8) void {
@@ -498,6 +501,8 @@ fn serveUpgrade(
 
     var web_socket = req.respondWebSocket(.{ .key = key }) catch return;
     web_socket.flush() catch return;
+    var out = ws.DeadlineWriter.init(srv.io, stream, out_buf);
+    web_socket.output = &out.interface;
     var ws_srv = ws.WsServer{
         .io = srv.io,
         .dispatcher = srv.dispatcher,

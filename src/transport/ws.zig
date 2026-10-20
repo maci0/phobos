@@ -211,6 +211,55 @@ pub fn serveWebSocket(srv: *WsServer, ws: *std.http.Server.WebSocket, upgrade: U
     serveLoop(srv, ws, conn);
 }
 
+/// Longest a WebSocket send waits for socket buffer space. Notification
+/// fan-out writes under the Core lock, so a client that stops reading holds
+/// Core for at most this long per frame before it is dropped.
+pub const write_timeout: Io.Duration = .fromSeconds(5);
+
+/// Largest single send. After poll reports buffer space, a send this small
+/// fits without blocking on the default TCP send buffer.
+const max_send_chunk = 4096;
+
+/// Socket writer for a WebSocket session (Moonraker never blocks its loop on
+/// a slow client; a plain stream writer blocks without limit). Each send of
+/// at most `max_send_chunk` bytes waits at most `timeout` for buffer space.
+/// On timeout or failure the socket is shut down, which ends the session's
+/// read loop, and the write fails.
+pub const DeadlineWriter = struct {
+    io: Io,
+    stream: std.Io.net.Stream,
+    timeout: Io.Duration = write_timeout,
+    interface: Io.Writer,
+
+    pub fn init(io: Io, stream: std.Io.net.Stream, buffer: []u8) DeadlineWriter {
+        return .{ .io = io, .stream = stream, .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *DeadlineWriter = @alignCast(@fieldParentPtr("interface", w));
+        const buffered = w.buffered();
+        if (buffered.len != 0) return w.consume(try self.send(buffered));
+        for (data[0 .. data.len - 1]) |d| if (d.len != 0) return self.send(d);
+        const pattern = data[data.len - 1];
+        if (pattern.len == 0 or splat == 0) return 0;
+        return self.send(pattern);
+    }
+
+    fn send(self: *DeadlineWriter, bytes: []const u8) Io.Writer.Error!usize {
+        const chunk = [_][]const u8{bytes[0..@min(bytes.len, max_send_chunk)]};
+        const result = self.io.operateTimeout(.{ .net_write = .{
+            .socket_handle = self.stream.socket.handle,
+            .data = &chunk,
+        } }, .{ .duration = .{ .raw = self.timeout, .clock = .awake } }) catch return self.fail();
+        return result.net_write catch self.fail();
+    }
+
+    fn fail(self: *DeadlineWriter) error{WriteFailed} {
+        self.stream.shutdown(self.io, .both) catch {};
+        return error.WriteFailed;
+    }
+};
+
 /// Serve the `/klippysocket` bridge socket (Moonraker's `BridgeSocket`) on its
 /// own Klippy connection; see `KlippyCtx.serveBridge`.
 pub fn serveBridge(io: Io, ws: *std.http.Server.WebSocket, klippy: *klippy_connection.KlippyCtx) void {
@@ -544,6 +593,80 @@ test "fuzz_ws_getstr: getStr never crashes on arbitrary params" {
             _ = getStr(params, "type");
             _ = getStr(params, "missing");
             _ = getStr(.null, "type");
+        }
+    }.run, .{});
+}
+
+/// A connected TCP pair over loopback: `server` is the accepted end.
+const LoopbackPair = struct {
+    listener: std.Io.net.Server,
+    client: std.Io.net.Stream,
+    server: std.Io.net.Stream,
+
+    fn init(io: Io) !LoopbackPair {
+        var addr = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var listener = try addr.listen(io, .{});
+        errdefer listener.deinit(io);
+        const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+        errdefer client.close(io);
+        return .{ .listener = listener, .client = client, .server = try listener.accept(io) };
+    }
+
+    fn deinit(self: *LoopbackPair, io: Io) void {
+        self.server.close(io);
+        self.client.close(io);
+        self.listener.deinit(io);
+    }
+};
+
+test "DeadlineWriter gives up on a peer that stops reading and shuts the socket down" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pair = try LoopbackPair.init(io);
+    defer pair.deinit(io);
+
+    var buf: [1024]u8 = undefined;
+    var out = DeadlineWriter.init(io, pair.server, &buf);
+    out.timeout = .fromMilliseconds(100);
+    const chunk: [64 * 1024]u8 = @splat('x');
+    const start = Io.Clock.Timestamp.now(io, .awake);
+    // The client never reads: the socket buffers fill, then a send times out.
+    const failed = for (0..1024) |_| {
+        out.interface.writeAll(&chunk) catch break true;
+    } else false;
+    try std.testing.expect(failed);
+    try std.testing.expect(start.untilNow(io).raw.toMilliseconds() < 5000);
+    // The shutdown reaches the peer as end of stream once it drains.
+    var rbuf: [64 * 1024]u8 = undefined;
+    var r = pair.client.reader(io, &rbuf);
+    _ = try r.interface.discardRemaining();
+}
+
+test "fuzz DeadlineWriter delivers every byte to a reading peer" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    try std.testing.fuzz(io, struct {
+        fn run(tio: Io, smith: *std.testing.Smith) anyerror!void {
+            var pair = try LoopbackPair.init(tio);
+            defer pair.deinit(tio);
+            var payload: [9000]u8 = undefined;
+            const n = smith.valueRangeAtMostWithHash(u16, 0, payload.len, 0);
+            smith.bytesWithHash(payload[0..n], 1);
+            var buf: [100]u8 = undefined;
+            var out = DeadlineWriter.init(tio, pair.server, &buf);
+            try out.interface.writeAll(payload[0..n]);
+            try out.interface.splatByteAll('z', 3);
+            try out.interface.flush();
+            try pair.server.shutdown(tio, .send);
+            var rbuf: [16 * 1024]u8 = undefined;
+            var r = pair.client.reader(tio, &rbuf);
+            var got: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer got.deinit();
+            _ = try r.interface.streamRemaining(&got.writer);
+            try std.testing.expectEqualSlices(u8, payload[0..n], got.written()[0..n]);
+            try std.testing.expectEqualStrings("zzz", got.written()[n..]);
         }
     }.run, .{});
 }

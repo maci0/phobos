@@ -33,14 +33,12 @@
 //! other notification broadcasts to all live connections. `emitStatus` applies
 //! the per-topic gate; `emit` broadcasts.
 //!
-//! Backpressure / slow clients: Moonraker's per-connection `message_buf` is an
-//! UNBOUNDED list (websockets.py / common.py — no maxlen); it never drops or
-//! closes a client for being slow, it only marks a connection closed when a
-//! write raises `WebSocketClosedError`. We replicate that: writes go straight to
-//! the socket under the write mutex (the blocked-reader model gives us natural
-//! backpressure), and a failed write flags the connection `dead` (mirroring
-//! `is_closed = True`) so its serve loop tears it down. No artificial queue
-//! bound is imposed, to stay faithful to upstream behaviour.
+//! Backpressure / slow clients: Moonraker queues messages per connection
+//! without bound and never blocks its loop. Here fan-out writes straight to
+//! the socket under the Core lock, so each WebSocket send waits at most
+//! `ws.write_timeout` for buffer space (`ws.DeadlineWriter`). A failed or
+//! timed-out write flags the connection `dead` (later writes are skipped) and
+//! shuts the socket down, which ends its serve loop. No message queue is kept.
 
 const std = @import("std");
 const Io = std.Io;
@@ -157,9 +155,9 @@ pub const NotifyBus = struct {
 
     /// Broadcast a notification to ALL live connections in FIFO total order.
     /// `params` must be a JSON array (or `.null` for no payload). Frames are
-    /// built once and fanned out; dead connections are skipped (their serve
-    /// loop reaps them). The whole emission runs under the `Core` lock so
-    /// concurrent emits have one deterministic order.
+    /// built once and fanned out; dead connections are skipped. The whole
+    /// emission runs under the `Core` lock so concurrent emits have one
+    /// deterministic order.
     pub fn emit(
         self: *NotifyBus,
         io: Io,

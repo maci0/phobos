@@ -58,8 +58,9 @@ pub const Connection = struct {
     /// already torn down); writes are dropped.
     write_ctx: ?*anyopaque = null,
     write_fn: ?WriteFn = null,
-    /// Set once a write to this connection has failed; the serve loop checks it
-    /// to tear the session down. Guarded by `write_mutex`.
+    /// Set once a write to this connection has failed; later writes are
+    /// skipped. The transport writer shuts the socket down on failure, which
+    /// ends the serve loop. Guarded by `write_mutex`.
     dead: bool = false,
     /// Subscription topic set for status updates (`printer.objects.subscribe`).
     /// Empty => not subscribed. Owned by `Connections.alloc`; guarded by the
