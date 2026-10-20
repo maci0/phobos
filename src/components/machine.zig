@@ -48,6 +48,7 @@ const sleep = @import("../util/sleep.zig");
 const process = @import("../util/process.zig");
 const Core = @import("../server/core.zig").Core;
 const video_modes = @import("video_modes.zig");
+const canbus = @import("canbus.zig");
 
 const Registry = registry.Registry;
 const NotifyBus = notify.NotifyBus;
@@ -157,6 +158,7 @@ pub const MachineCtx = struct {
     /// Runtime handlers hold Core; command execution releases it while waiting.
     core: ?*Core = null,
     service_mutex: std.Io.Mutex = .init,
+    peripheral_mutex: std.Io.Mutex = .init,
     service_poll_enabled: std.atomic.Value(bool) = .init(false),
     /// Optional reference to the live connection registry for websocket_connections count.
     conns: ?*@import("../server/connections.zig").Connections = null,
@@ -1144,7 +1146,6 @@ fn discoverServices(ctx: *MachineCtx, alloc: std.mem.Allocator) !void {
         .supervisord => &.{ "supervisorctl", "status" },
         .simple, .none => return,
     };
-    ctx.services_discovered = true;
     const result = ctx.runServiceCmd(alloc, argv, cmd_timeout_s) catch return;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
@@ -1158,6 +1159,7 @@ fn discoverServices(ctx: *MachineCtx, alloc: std.mem.Allocator) !void {
         errdefer ctx.gpa.free(key);
         try ctx.services.put(ctx.gpa, key, .active("unknown", "unknown"));
     }
+    ctx.services_discovered = true;
 }
 
 /// Update every discovered service from `systemctl show -p
@@ -2241,12 +2243,24 @@ fn videoIndex(name: []const u8) i64 {
 }
 
 /// GET /machine/peripherals/canbus → { "can_uuids": [...] }
-/// Querying CAN UUIDs requires opening a SocketCAN socket and running the
-/// Klipper admin protocol; phobos returns an empty list (no CAN bus probe).
-pub fn handleCanbus(_: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-    _ = ((try webreq.optional([]const u8, params, "interface")) orelse "can0"); // accepted, unused (stub)
+/// Only the unassigned-node query is transmitted. Missing interfaces remain [].
+pub fn handleCanbus(raw: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+    const ctx: *MachineCtx = @ptrCast(@alignCast(raw));
+    const interface = (try webreq.optional([]const u8, params, "interface")) orelse "can0";
+    var nodes: std.json.Array = .init(alloc);
+    if (ctx.io) |io| {
+        try ctx.peripheral_mutex.lock(io);
+        defer ctx.peripheral_mutex.unlock(io);
+        if (try canbus.open(io, interface)) |file| {
+            defer file.close(io);
+            nodes = canbus.query(io, file, alloc, canbus.query_timeout) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => return err,
+                else => .init(alloc),
+            };
+        }
+    }
     var obj: std.json.ObjectMap = .empty;
-    try obj.put(alloc, "can_uuids", .{ .array = .init(alloc) });
+    try obj.put(alloc, "can_uuids", .{ .array = nodes });
     return .{ .object = obj };
 }
 
@@ -2275,7 +2289,7 @@ pub fn registerMachine(reg: *Registry, ctx: *MachineCtx) !void {
     try reg.registerEndpoint(.{ .path = "/machine/peripherals/usb", .methods = &.{.GET} }, c, handleUsb);
     try reg.registerEndpoint(.{ .path = "/machine/peripherals/serial", .methods = &.{.GET} }, c, handleSerial);
     try reg.registerEndpoint(.{ .path = "/machine/peripherals/video", .methods = &.{.GET} }, c, handleVideo);
-    try reg.registerEndpoint(.{ .path = "/machine/peripherals/canbus", .methods = &.{.GET} }, c, handleCanbus);
+    try reg.registerEndpoint(.{ .path = "/machine/peripherals/canbus", .methods = &.{.GET}, .off_core = true }, c, handleCanbus);
 }
 
 // ===========================================================================
@@ -3128,6 +3142,30 @@ test "fuzz service polling parses bounded provider replies without host commands
             try testing.expectEqual(@as(usize, 1), ctx.services.count());
         }
     }.run, .{});
+}
+
+test "service polling retries discovery after a transient provider failure" {
+    const Mock = struct {
+        fail: bool = true,
+        fn run(raw: *anyopaque, alloc: std.mem.Allocator, argv: []const []const u8) !MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fail) return error.CommandFailed;
+            return .{ .stdout = try alloc.dupe(u8, if (std.mem.eql(u8, argv[1], "list-units")) "klipper.service loaded active running\n" else "active\nrunning\n"), .stderr = &.{} };
+        }
+    };
+    var mock: Mock = .{};
+    var ctx = testCtx(testing.allocator);
+    defer ctx.deinit();
+    ctx.setRunCmdFn(Mock.run, &mock);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try ctx.pollServices(arena.allocator());
+    try testing.expect(!ctx.services_discovered);
+    try testing.expectEqual(@as(usize, 0), ctx.services.count());
+    mock.fail = false;
+    try ctx.pollServices(arena.allocator());
+    try testing.expect(ctx.services_discovered);
+    try testing.expectEqualStrings("running", ctx.services.get("klipper").?.sub_state);
 }
 
 test "provider abstraction: service action dispatches to the right manager" {

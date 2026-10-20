@@ -25,3 +25,14 @@ Video devices enumerate formats and discrete resolutions with typed
 `std.Io.operate(.device_io_control)`. Each list is capped at Moonraker's 128
 entries. Modes with no discrete resolutions are omitted. Descriptions must be
 UTF-8; the fourcc decoder drops non-ASCII bytes like Moonraker.
+
+CAN discovery sends Klipper's unassigned-node query (admin ID `0x3f0`, command
+`0x00`) and collects replies for two seconds. It returns UUIDs and Klipper,
+Katapult, or Unknown application names, up to 256 replies. Calls are serialized
+and run outside Core. Unavailable interfaces still return an empty list.
+
+`std.Io.net.Interface.Name.resolve` finds the interface index. Zig 0.17 exposes
+no SocketCAN constructor or address variant, so only socket creation and bind
+use libc with the typed Linux `sockaddr_can` layout. Reads, writes, deadlines,
+and close use `std.Io`. Unit tests exchange the native CAN frames over loopback
+datagrams; no test opens a hardware CAN interface.
