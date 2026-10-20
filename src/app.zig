@@ -146,6 +146,8 @@ fn featherKlippySend(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const 
 
 /// Pending Klipper remote-method calls; further calls are dropped with a warning.
 const remote_call_queue_len = 16;
+/// Bound active remote calls independently of the pending reader queue.
+const max_concurrent_remote_calls = 16;
 
 /// Remote methods registered with Klippy: Feather's, plus the component
 /// methods Moonraker registers (power, WLED, Spoolman, MQTT and notifiers).
@@ -229,10 +231,28 @@ fn devicePowerAction(state: std.json.Value) ?[]const u8 {
     }
 }
 
-/// Run queued Klipper remote-method requests until the queue closes or the
-/// task is canceled.
+/// Run bounded independent calls; cancel and join every child on exit.
 fn remoteWorker(app: *App, io: std.Io) void {
-    while (app.remote_calls.getOne(io)) |req| runRemoteCall(app, io, req) else |_| {}
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    var permits: std.Io.Semaphore = .{ .permits = max_concurrent_remote_calls };
+    while (true) {
+        permits.wait(io) catch return;
+        const req = app.remote_calls.getOne(io) catch {
+            permits.post(io);
+            return;
+        };
+        group.concurrent(io, runRemoteCallBounded, .{ app, io, req, &permits }) catch |err| {
+            app.alloc.free(req);
+            permits.post(io);
+            std.debug.print("phobos: warning: Klipper remote method dropped: {}\n", .{err});
+        };
+    }
+}
+
+fn runRemoteCallBounded(app: *App, io: std.Io, req: []u8, permits: *std.Io.Semaphore) void {
+    defer permits.post(io);
+    runRemoteCall(app, io, req);
 }
 
 /// Run one queued request and free it. Feather commands run outside Core;
@@ -1247,10 +1267,10 @@ pub const App = struct {
     pub fn deinit(self: *App, io: std.Io) void {
         self.remote_calls.close(io);
         if (self.remote_worker) |*w| {
-            // Cancel an in-flight device or broker request.
+            // Cancel and join the worker's calls before component teardown.
             w.cancel(io);
         }
-        while (self.remote_calls.getOne(io)) |req| self.alloc.free(req) else |_| {}
+        while (self.remote_calls.getOneUncancelable(io)) |req| self.alloc.free(req) else |_| {}
         self.update_ctx.deinit();
         self.data_store_ctx.stopSampler();
         self.klippy_ctx.stop(io);
@@ -3091,4 +3111,234 @@ test "setParsedConfig consumes the parser when path allocation fails" {
     try std.testing.expect(app.cfg == null);
     try std.testing.expect(app.info.cfg == null);
     try std.testing.expect(app.use_xheaders);
+}
+
+const RemoteCallGate = struct {
+    io: std.Io,
+    ready: std.Io.Semaphore = .{},
+    release: std.Io.Event = .unset,
+    fast_done: std.Io.Event = .unset,
+    active: std.atomic.Value(usize) = .init(0),
+    started: std.atomic.Value(usize) = .init(0),
+    finished: std.atomic.Value(usize) = .init(0),
+    exceeded_limit: std.atomic.Value(bool) = .init(false),
+
+    fn handle(ctx: *anyopaque, params: std.json.Value, _: std.mem.Allocator) anyerror!std.json.Value {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const active = self.active.fetchAdd(1, .seq_cst) + 1;
+        defer _ = self.active.fetchSub(1, .seq_cst);
+        defer _ = self.finished.fetchAdd(1, .seq_cst);
+        if (active > 16) self.exceeded_limit.store(true, .seq_cst);
+        _ = self.started.fetchAdd(1, .seq_cst);
+        self.ready.post(self.io);
+        const block = params.object.get("block").?.bool;
+        if (block) try self.release.waitTimeout(self.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) else self.fast_done.set(self.io);
+        return .null;
+    }
+
+    fn enqueue(self: *@This(), app: *App, block: bool) !void {
+        const request = try std.json.Stringify.valueAlloc(app.alloc, .{
+            .jsonrpc = "2.0",
+            .method = "test.remote",
+            .params = .{ .block = block },
+            .id = 0,
+        }, .{});
+        errdefer app.alloc.free(request);
+        try app.remote_calls.putOne(self.io, request);
+    }
+
+    fn start(self: *@This(), app: *App) !void {
+        try app.dispatcher.registerEntry("test.remote", .{ .ctx = self, .handler = handle, .off_core = true });
+        app.dispatcher.setRuntime(app.core, self.io);
+        app.remote_calls = .init(&app.remote_call_buf);
+        app.remote_worker = try self.io.concurrent(remoteWorker, .{ app, self.io });
+    }
+};
+
+test "remote worker runs a second call while the first is stalled and joins on teardown" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var owned = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
+    defer std.debug.assert(owned.deinit() == 0);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(owned.allocator(), io, &tmp);
+    var live = true;
+    defer if (live) app.deinit(io);
+    var gate: RemoteCallGate = .{ .io = io };
+    try gate.start(&app);
+    try gate.enqueue(&app, true);
+    try gate.ready.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+    try gate.enqueue(&app, false);
+    try gate.fast_done.waitTimeout(io, .{ .duration = .{ .raw = .fromMilliseconds(250), .clock = .awake } });
+    try std.testing.expect(gate.active.load(.seq_cst) >= 1);
+    app.deinit(io);
+    live = false;
+    try std.testing.expectEqual(@as(usize, 0), gate.active.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 2), gate.finished.load(.seq_cst));
+}
+
+test "remote worker bounds active calls and queued ownership during cancellation" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var owned = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
+    defer std.debug.assert(owned.deinit() == 0);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(owned.allocator(), io, &tmp);
+    var live = true;
+    defer if (live) app.deinit(io);
+    var gate: RemoteCallGate = .{ .io = io };
+    try gate.start(&app);
+    for (0..16) |_| try gate.enqueue(&app, true);
+    for (0..16) |_| try gate.ready.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+    try std.testing.expectEqual(@as(usize, 16), gate.active.load(.seq_cst));
+    for (0..remote_call_queue_len) |_| try gate.enqueue(&app, true);
+    const extra = try app.alloc.dupe(u8, "not queued");
+    const inserted = try app.remote_calls.put(io, &.{extra}, 0);
+    if (inserted == 0) app.alloc.free(extra);
+    try std.testing.expectEqual(@as(usize, 0), inserted);
+    app.deinit(io);
+    live = false;
+    try std.testing.expect(!gate.exceeded_limit.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 0), gate.active.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 16), gate.finished.load(.seq_cst));
+}
+
+test "remote worker frees rejected tasks when native concurrency is exhausted" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20, .concurrent_limit = .limited(1) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var owned = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
+    defer std.debug.assert(owned.deinit() == 0);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(owned.allocator(), io, &tmp);
+    defer app.deinit(io);
+    var gate: RemoteCallGate = .{ .io = io };
+    try gate.start(&app);
+    for (0..remote_call_queue_len) |_| try gate.enqueue(&app, false);
+    app.remote_calls.close(io);
+    app.remote_worker.?.await(io);
+    app.remote_worker = null;
+    try std.testing.expectEqual(@as(usize, 0), gate.started.load(.seq_cst));
+}
+
+test "fuzz remote worker shutdown joins tasks and drains every owned request" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            const count = smith.valueRangeAtMostWithHash(u8, 0, 8, 0);
+            const concurrency = smith.valueRangeAtMostWithHash(u8, 1, 5, 1);
+            var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20, .concurrent_limit = .limited(concurrency) });
+            defer threaded.deinit();
+            const io = threaded.io();
+            var owned = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
+            defer std.debug.assert(owned.deinit() == 0);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var app = try testApp(owned.allocator(), io, &tmp);
+            var live = true;
+            defer if (live) app.deinit(io);
+            var gate: RemoteCallGate = .{ .io = io };
+            try gate.start(&app);
+            for (0..count) |index| try gate.enqueue(&app, index % 2 == 0);
+            app.deinit(io);
+            live = false;
+            try std.testing.expectEqual(@as(usize, 0), gate.active.load(.seq_cst));
+            try std.testing.expectEqual(gate.started.load(.seq_cst), gate.finished.load(.seq_cst));
+            try std.testing.expect(!gate.exceeded_limit.load(.seq_cst));
+        }
+    }.run, .{});
+}
+
+test "remote worker reuses permits after calls finish" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var owned = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
+    defer std.debug.assert(owned.deinit() == 0);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(owned.allocator(), io, &tmp);
+    defer app.deinit(io);
+    var gate: RemoteCallGate = .{ .io = io };
+    try gate.start(&app);
+    for (0..16) |_| try gate.enqueue(&app, true);
+    for (0..16) |_| try gate.ready.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+    for (0..8) |_| try gate.enqueue(&app, false);
+    gate.release.set(io);
+    for (0..8) |_| try gate.ready.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } });
+    app.remote_calls.close(io);
+    app.remote_worker.?.await(io);
+    app.remote_worker = null;
+    try std.testing.expectEqual(@as(usize, 24), gate.finished.load(.seq_cst));
+    try std.testing.expect(!gate.exceeded_limit.load(.seq_cst));
+}
+
+test "remote worker teardown drains pending calls under canceled lock contention" {
+    const Probe = struct {
+        io: std.Io,
+        app: *App,
+        live: *bool,
+        kick: std.Io.Event = .unset,
+        locked: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        ready: std.Io.Event = .unset,
+        park: std.Io.Event = .unset,
+        const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(2), .clock = .awake } };
+
+        fn hold(self: *@This()) void {
+            self.kick.waitTimeout(self.io, timeout) catch return;
+            self.app.remote_calls.type_erased.mutex.lockUncancelable(self.io);
+            defer self.app.remote_calls.type_erased.mutex.unlock(self.io);
+            self.locked.set(self.io);
+            self.release.waitTimeout(self.io, timeout) catch return;
+        }
+        fn worker(self: *@This()) void {
+            self.park.waitTimeout(self.io, timeout) catch {};
+            self.kick.set(self.io);
+            self.locked.waitTimeout(self.io, timeout) catch return;
+        }
+        fn releaseAfterLock(self: *@This()) void {
+            self.locked.waitTimeout(self.io, timeout) catch return;
+            self.io.sleep(.fromMilliseconds(20), .awake) catch return;
+            self.release.set(self.io);
+        }
+        fn teardown(self: *@This()) void {
+            self.ready.set(self.io);
+            self.park.waitTimeout(self.io, timeout) catch |err| {
+                if (err == error.Canceled) self.io.recancel();
+            };
+            self.app.deinit(self.io);
+            self.live.* = false;
+        }
+    };
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var owned = std.heap.SafeAllocator.init(std.heap.smp_allocator, .{});
+    defer std.debug.assert(owned.deinit() == 0);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var app = try testApp(owned.allocator(), io, &tmp);
+    var live = true;
+    defer if (live) app.deinit(io);
+    app.remote_calls = .init(&app.remote_call_buf);
+    const req = try app.alloc.dupe(u8, "owned pending call");
+    try app.remote_calls.putOne(io, req);
+    var probe: Probe = .{ .io = io, .app = &app, .live = &live };
+    var holder = try io.concurrent(Probe.hold, .{&probe});
+    defer holder.cancel(io);
+    var releaser = try io.concurrent(Probe.releaseAfterLock, .{&probe});
+    defer releaser.cancel(io);
+    app.remote_worker = try io.concurrent(Probe.worker, .{&probe});
+    var teardown = try io.concurrent(Probe.teardown, .{&probe});
+    defer teardown.cancel(io);
+    defer probe.release.set(io);
+    try probe.ready.waitTimeout(io, Probe.timeout);
+    teardown.cancel(io);
+    holder.await(io);
+    releaser.await(io);
 }
