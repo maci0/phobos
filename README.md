@@ -85,7 +85,7 @@ SQLite 3.54.1 from the verified amalgamation in `vendor/sqlite/`.
 
 ```sh
 # Test suite (musl-static by default)
-zig build test --summary all
+scripts/test.sh Debug
 
 # Print the API surface phobos registers
 zig build && zig-out/bin/phobos --data-path "$PWD/.scratch/api-dump-data" --dump-api | less
@@ -125,6 +125,7 @@ Change and verification history: [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 - [`TODO.md`](TODO.md): implemented work and remaining behavior limits.
 - [`DEVELOPMENT.md`](DEVELOPMENT.md): building, testing, adding a component.
 - [`docs/BUILDS.md`](docs/BUILDS.md): static Linux release profiles and host selection.
+- [`docs/CI.md`](docs/CI.md): automated tests, native/cross builds and tag-based releases.
 - [`docs/api/API_SURFACE.md`](docs/api/API_SURFACE.md): the Moonraker API phobos must match.
 - [`docs/api/COVERAGE_HEATMAP.md`](docs/api/COVERAGE_HEATMAP.md): coverage method and verification limits.
 - [`docs/MEMORY.md`](docs/MEMORY.md), [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): measurements and how to reproduce them.

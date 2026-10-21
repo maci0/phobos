@@ -26,3 +26,6 @@ d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c  vendor/sqlite/
 Both files retain the upstream copyright disclaimer and blessing. The header's
 opening notice disclaims copyright; the amalgamation retains the same notices
 for its constituent files.
+
+CI verifies the tracked `SHA256SUMS` before building. Recheck it locally with
+`cd vendor/sqlite && sha256sum --check SHA256SUMS`.

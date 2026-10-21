@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     test_opts.addOptionPath("local_time_probe", timezone_probe.getEmittedBin());
     const unit = b.addTest(.{ .root_module = mkmod(b, target, optimize, test_opts, false, softfp) });
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(unit).step);
-    b.step("test-artifact", "Build test binary (no run)").dependOn(&unit.step);
+    b.step("test-artifact", "Install test binary without running it").dependOn(&b.addInstallBinFile(unit.getEmittedBin(), "phobos-tests").step);
 }
 
 /// Compile the vendored SQLite amalgamation into `module`. Built with

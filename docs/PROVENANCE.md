@@ -913,3 +913,60 @@ and RSS, or lower at matched throughput is better for CPU. Tables repeat those
 directions and identify measured host winners. Printer results explicitly state
 that the short transport-sensitive comparison has no clear overall winner.
 The 22 measurement-tool tests pass after the label update.
+
+## 2026-10-21: production v0.2.1 and hosted build/release checks
+
+Requested by the user: deploy v0.2.1 and provide CI for builds and releases.
+The printer was ready, the last print complete and both heater targets zero
+immediately before installation. The exact downloaded Cortex-A7 release asset
+was checked against SHA-256
+`5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf`.
+The previous running executable and launcher were copied to
+`/data/phobos-backups/v0.2.1-20261021T040155Z/`. After the old daemon stopped,
+the database and any remaining WAL/SHM files were copied through the chroot
+paths. The new executable and launcher were installed by rename. No printer
+configuration or init script was changed, and no board/firmware/Klipper restart
+was sent. PID 2243 now serves port 7125 from `/data/phobos-v0.2.1`; its hash
+matches the published asset. Twenty read-only HTTP checks and three WebSocket
+checks passed, including live objects and directory capacity. Klippy is ready,
+there are no failed components or warnings, the last print remains complete,
+heater targets are zero and boot ID `6213a6c1-a3b6-4b38-b637-5aa9a116a117`
+is unchanged. Boot persistence was not tested.
+
+The repository had no hosted workflows. `.github/workflows/ci.yml` now checks
+main pushes, pull requests, annotated version tags and manual dispatches.
+Compiler archives are pinned to Zig 0.17.0 and official SHA-256 values for
+x86-64/AArch64 Linux. Python 3.12 development dependencies and transitive
+hashes are locked by `uv.lock`. Workflow actions use full commit references;
+ordinary jobs have read-only repository access and checkout does not retain
+credentials. Only the final tag publisher can write repository contents.
+
+CI runs formatting, build-policy tests, vendored SQLite source hashes, all
+Python tool tests, API registration and generated-table checks. It runs the
+complete daemon suite in x86-64 Debug/ReleaseSafe and native AArch64
+ReleaseSafe. Each of the seven release profiles builds and validates separately.
+Exact x86-64/AArch64 assets and C/Zig floating-point probes execute natively.
+All profile artifacts are combined into a checked release bundle. Tag
+publication requires matching package/versioned notes, an annotated tag at
+the checked commit and reachability from main. Only a tag-push event publishes.
+The publisher first uploads a draft, downloads its assets, checks ELF/checksums
+and both manifests, then publishes. Existing releases are never clobbered.
+CI has no printer credentials and performs no physical deployment or QEMU work.
+
+The test-artifact build step now installs `bin/phobos-tests` under its chosen
+prefix. `scripts/test.sh` runs that exact artifact under a timeout instead of
+selecting a cached file by modification time or using the build-listen runner.
+Local Debug verification passed 1718 tests, one gated skip, zero failures and
+325 bounded fuzz harnesses. Four build-policy tests pass, including two fuzz
+harnesses. All 109 Python tests pass, including nine new release preparation
+checks for complete assembly, corrupt/missing data, profile/version/name
+validation, output containment and release-note targets. The tests caught an
+asset-name regex that omitted the x86-64 underscore and an invalid dotted
+repository owner; both were fixed before CI publication.
+
+Local release preparation assembled the seven exact published artifacts and
+passed the existing ELF/ABI/checksum verifier. Zig formatting, Bash syntax,
+ShellCheck/actionlint, Ruff, Black and the changed Python tools' type checks
+passed. The CI installer downloaded and verified the official x86-64 compiler
+archive successfully. Hosted workflow results are verified after pushing these
+workflow files; these local checks do not claim hosted execution in advance.

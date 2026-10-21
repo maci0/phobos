@@ -217,10 +217,11 @@ primitives are gone, so use `std.Io.Mutex`.
   checksums are in `vendor/sqlite/README.md`. The file backend stores JSON
   through Zig I/O; the binary still links SQLite.
 - Test binary without the build runner's `--listen=-` hang:
-  `zig build test-artifact -Doptimize=Debug`, then run the newest standalone
-  `.zig-cache/o/<hash>/test --cache-dir=./.zig-cache` under a timeout. Do not pass
+  `scripts/test.sh Debug` or `scripts/test.sh ReleaseSafe`. The build's
+  `test-artifact` step installs `bin/phobos-tests` under its prefix. Do not pass
   `--test-filter` to the standalone runner or expand all cached test binaries.
-- Full suite: `timeout 220 zig build test --summary all`
+- CI and tag publication: `.github/workflows/ci.yml`, documented in `docs/CI.md`.
+  Python tooling uses `uv sync --locked`; the daemon is still a Zig package.
 - `schema` prints a CLI Spec 0.3 document without loading config or binding a
   socket. `-o`/`--output` take `auto`, `text`, or `json`; `auto` is text on a
   pipe. `--dump-api` stdout is the API document. `--version` prints the

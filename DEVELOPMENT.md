@@ -41,7 +41,8 @@ open work; this file covers how to work in the codebase.
 
 ```sh
 # Full suite (the first compile of the SQLite amalgamation is slow, so wrap in a timeout)
-timeout 220 zig build test --summary all
+scripts/test.sh Debug
+scripts/test.sh ReleaseSafe
 
 # A single file with no ../ imports (e.g. config, jsonrpc, store):
 zig test -target x86_64-linux-musl src/config/confighelper.zig
@@ -56,10 +57,10 @@ scripts/build-release.sh --verify-only
 ```
 
 Notes:
-- Standalone runner: `zig build test-artifact -Doptimize=Debug`, then run the
-  newest `.zig-cache/o/<hash>/test --cache-dir=./.zig-cache` under a timeout.
-  Select exactly one newly built artifact; do not expand every cached binary or
-  pass the unsupported runtime `--test-filter` option.
+- `scripts/test.sh` installs and runs the exact standalone artifact under
+  `.scratch/tests-<mode>/bin/phobos-tests`, with bounded build/run timeouts.
+  Manual `zig build test-artifact` installs `bin/phobos-tests` under its prefix.
+  Do not pass the unsupported runtime `--test-filter` option.
   After an ARM build, restore the host `zig-out/bin/phobos` with
   `zig build -Doptimize=Debug` before running the host suite.
 - Files under `src/components/`, `src/testutil/`, and `src/transport/` use `../`
@@ -78,6 +79,8 @@ Notes:
 - [Performance](docs/PERFORMANCE.md) and [memory](docs/MEMORY.md) record the
   versioned host and printer measurements. Plots consume checked-in measured
   JSON summaries; raw captures and private configurations stay in `.scratch/`.
+- [CI and releases](docs/CI.md) documents the hosted test/build matrix,
+  `uv.lock`, tag requirements, verified draft publication and local commands.
 
 ## 3. Zig 0.17 cheat sheet (checked against the installed std)
 

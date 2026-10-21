@@ -1,0 +1,21 @@
+[project]
+name = "phobos-tools"
+version = "0.0.0"
+requires-python = ">=3.12"
+
+[dependency-groups]
+dev = [
+    "black",
+    "matplotlib",
+    "mypy",
+    "pytest",
+    "pyyaml",
+    "ruff",
+    "tree-sitter",
+    "tree-sitter-cpp",
+    "tree-sitter-python",
+    "tree-sitter-typescript",
+]
+
+[tool.uv]
+package = false

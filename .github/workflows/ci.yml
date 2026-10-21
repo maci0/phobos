@@ -1,0 +1,207 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      profiles: ${{ steps.profiles.outputs.profiles }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - run: uv sync --locked
+      - run: zig fmt --check build.zig build.zig.zon src tests/fixtures/float_abi_probe.zig
+      - run: zig test -target native-native-musl build.zig
+      - run: sha256sum --check SHA256SUMS
+        working-directory: vendor/sqlite
+      - run: uv run --locked python -m pytest tools/api_scanner/tests tools/client_api_scanner/tests tools/perf_harness/tests tools/release/tests --basetemp=.scratch/ci-pytest
+      - run: uv run --locked ruff check tools/perf_harness/plot_perf.py tools/perf_harness/report.py tools/perf_harness/tests tools/release
+      - run: uv run --locked black --check tools/perf_harness/plot_perf.py tools/perf_harness/report.py tools/perf_harness/tests tools/release
+      - run: uv run --locked mypy --explicit-package-bases --ignore-missing-imports tools/perf_harness/plot_perf.py tools/perf_harness/report.py tools/perf_harness/tests/test_plot_perf.py tools/release
+      - run: timeout 90 bash tools/perf_harness/tests/smoke.sh
+      - name: API coverage and generated table
+        env:
+          PYTHONPATH: tools
+        run: |
+          zig build -Doptimize=Debug -j2
+          zig-out/bin/phobos -d "$PWD/.scratch/ci-api-data" --dump-api > .scratch/ci-api.json
+          uv run --locked python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/ci-api.json
+          uv run --locked python -m api_scanner table --phobos .scratch/ci-api.json --check
+      - name: Require matching annotated release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(awk -F '"' '/^[[:space:]]*\.version[[:space:]]*=/ {print $2; exit}' build.zig.zon)
+          test "$TAG" = "v$version"
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor HEAD origin/main
+          test -s "docs/releases/$TAG.md"
+      - id: profiles
+        run: printf 'profiles=%s\n' "$(scripts/build-release.sh --list | jq -Rsc 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            mode: Debug
+          - runner: ubuntu-24.04
+            mode: ReleaseSafe
+          - runner: ubuntu-24.04-arm
+            mode: ReleaseSafe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: scripts/test.sh "$TEST_MODE" > .scratch/tests.log 2>&1
+        env:
+          TEST_MODE: ${{ matrix.mode }}
+      - if: always()
+        run: tail -40 .scratch/tests.log
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tests-${{ matrix.runner }}-${{ matrix.mode }}
+          path: .scratch/tests.log
+          include-hidden-files: true
+          if-no-files-found: error
+
+  build:
+    needs: [checks, tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.checks.outputs.profiles) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Build and validate static profile
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          scripts/build-release.sh --output .scratch/release-artifacts "$PROFILE"
+          IFS=$'\t' read -r profile target cpu softfp asset < <(tail -1 .scratch/release-artifacts/profiles.tsv)
+          test "$profile" = "$PROFILE"
+          test -s ".scratch/release-artifacts/$asset"
+          zig build float-abi-probe -Dtarget="$target" -Dcpu="$cpu" -Dsoftfp="$softfp" -Doptimize=ReleaseSmall -j2 --prefix .scratch/float-probe
+          cp .scratch/float-probe/bin/float-abi-probe .scratch/release-artifacts/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.profile }}
+          include-hidden-files: true
+          path: |
+            .scratch/release-artifacts/phobos-v*
+            .scratch/release-artifacts/SHA256SUMS
+            .scratch/release-artifacts/profiles.tsv
+            .scratch/release-artifacts/float-abi-probe
+          if-no-files-found: error
+
+  native-smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            profile: x86_64
+          - runner: ubuntu-24.04-arm
+            profile: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-${{ matrix.profile }}
+          path: .scratch/native
+      - name: Execute matching release asset and C ABI check
+        env:
+          PYTHONPATH: tools
+        run: |
+          binary=(.scratch/native/phobos-v*-linux-musl)
+          test "${#binary[@]}" -eq 1
+          chmod +x "${binary[0]}" .scratch/native/float-abi-probe
+          .scratch/native/float-abi-probe
+          "${binary[0]}" -o json --version
+          "${binary[0]}" -d "$PWD/.scratch/native-data" --dump-api > .scratch/native-api.json
+          uv run --locked python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/native-api.json
+
+  package:
+    needs: [build, native-smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: .scratch/matrix
+      - run: uv run --locked python tools/release/prepare.py --input .scratch/matrix --output .scratch/bundle --repository "$GITHUB_REPOSITORY"
+      - run: scripts/build-release.sh --verify-only --output .scratch/bundle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-bundle
+          include-hidden-files: true
+          path: .scratch/bundle/*
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-bundle
+          path: .scratch/bundle
+      - name: Upload draft, verify uploaded assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --verify-tag --draft --title "phobos $TAG" --notes-file .scratch/bundle/release-notes.md .scratch/bundle/phobos-v* .scratch/bundle/SHA256SUMS .scratch/bundle/profiles.tsv
+          gh release download "$TAG" --dir .scratch/published
+          scripts/build-release.sh --verify-only --output .scratch/published
+          cmp .scratch/bundle/SHA256SUMS .scratch/published/SHA256SUMS
+          cmp .scratch/bundle/profiles.tsv .scratch/published/profiles.tsv
+          gh release edit "$TAG" --draft=false --latest
