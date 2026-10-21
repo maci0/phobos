@@ -610,7 +610,9 @@ test "mqtt status oversized updates and merged cache fail without changing prior
 }
 
 test "mqtt status releases all partial allocations" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+    // Arena growth must allocate consistently rather than depend on heap remaps.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn run(alloc: std.mem.Allocator) !void {
             var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
             defer arena.deinit();

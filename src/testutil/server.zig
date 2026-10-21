@@ -94,7 +94,8 @@ pub const TestServer = struct {
         errdefer alloc.destroy(self.threaded);
         // Handlers run on the deployed handler stack size, so a stack
         // regression fails here instead of only on the printer.
-        self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = ioz.Listener.handler_stack_size });
+        // Force async work inline so fixtures must request concurrent progress.
+        self.threaded.* = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = ioz.Listener.handler_stack_size, .async_limit = .nothing });
         errdefer self.threaded.deinit();
         self.io = self.threaded.io();
 
@@ -130,9 +131,10 @@ pub const TestServer = struct {
         self.conns = self.app.conns;
 
         self.listener = try ioz.Listener.bind(self.io, "127.0.0.1", 0);
+        errdefer self.listener.deinit(self.io);
         self.bound_port = self.listener.port();
 
-        self.serve_fut = self.io.async(serveLoop, .{ &self.listener, self.io, @as(*anyopaque, @ptrCast(self.srv)) });
+        self.serve_fut = try self.io.concurrent(serveLoop, .{ &self.listener, self.io, @as(*anyopaque, @ptrCast(self.srv)) });
         return self;
     }
 

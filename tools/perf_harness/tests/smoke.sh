@@ -156,6 +156,11 @@ if PERF_FAKE_LOAD_FAIL=1 bash tools/perf_harness/bench_local.sh > "$TEST_DIR/loa
     exit 1
 fi
 check_cleanup
+if bash tools/perf_harness/tests/cleanup_failure.sh > "$TEST_DIR/exit-cleanup.log" 2>&1; then
+    echo 'cleanup fixture did not fail' >&2
+    exit 1
+fi
+check_cleanup
 if PERF_FAKE_BUSY=1 bash scripts/measure-memory.sh > "$TEST_DIR/busy.log" 2>&1; then
     echo 'existing HTTP listener was accepted' >&2
     exit 1

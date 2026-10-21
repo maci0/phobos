@@ -975,3 +975,31 @@ The first hosted check passed all 109 Python tests and lint/type gates, then
 failed the shell smoke step because the Ubuntu image lacked `rg`. The checks
 job now installs ripgrep and ShellCheck explicitly and lints the shell helpers;
 the smoke requirement was preserved.
+
+## 2026-10-21: hosted fixture progress and failure cleanup
+
+Continuing the requested build/release CI verification, hosted run 39544079023
+exposed two fixture bugs. Bash 5.2 inherited the failed measurement's exit status
+through a bare `return` in `stop_child`, so errexit stopped cleanup after the
+first child. Returning explicit success preserves cleanup of the remaining
+owned children. A focused two-child EXIT-failure fixture now runs in the smoke
+suite. The full smoke suite passes with Ubuntu's Bash 5.2.21 as well as the host
+shell; ShellCheck and actionlint pass. Expensive CI tests now depend on the fast
+checks job, and every shell fixture is included in ShellCheck.
+
+All three hosted daemon suites timed out at the MQTT HTTP integration test.
+`Io.async` can run inline after the CPU-based async worker budget is exhausted;
+the fixture's blocking accept loop therefore prevented initialization from
+returning on two-core runners with MQTT workers already active. The HTTP fixture
+now requests `Io.concurrent`, closes its listener if scheduling fails, and sets
+its async budget to zero so this mistake cannot be hidden by a larger host.
+Its WebSocket emitter also requests concurrent progress. The existing MQTT HTTP
+test reproduced the old hang under `taskset -c 0,1` with an eight-second timeout;
+the fixed fixture passed the same compiler-filtered test under two CPUs.
+
+Full-suite execution also exposed nondeterministic allocation counts in the
+MQTT status failure fixture. An outer `FailingAllocator` rejects resizing and
+remapping so arena growth must allocate consistently. The test still injects
+each allocation failure and checks all releases through the testing allocator;
+the ReleaseSafe compiler-filtered regression passes. No production MQTT logic
+or CI gate was disabled.

@@ -975,7 +975,7 @@ test "WS: response and notifications never interleave (each frame is intact vali
     // notification or the request response — must be a complete, valid JSON-RPC
     // object; if writes interleaved, JSON parsing would fail.
     var ectx = EmitterCtx{ .ts = ts, .n = notif_count, .alloc = alloc };
-    var fut = ts.io.async(emitterTask, .{&ectx});
+    var fut = try ts.io.concurrent(emitterTask, .{&ectx});
     // Joins the emitter if the test fails before `await`; its error is reported there.
     defer fut.cancel(ts.io) catch {};
 

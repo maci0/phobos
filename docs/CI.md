@@ -71,6 +71,11 @@ scripts/build-release.sh --verify-only
 artifact with separate build/run timeouts. It does not discover a test binary
 by cache timestamp or use the build runner's listen protocol.
 
+The HTTP fixture disables spare async workers and uses `Io.concurrent` for its
+accept loop and WebSocket emitter. Blocking peers must make concurrent progress
+even on a two-core runner. The measurement smoke suite also checks that an EXIT
+trap triggered by a failure stops both owned children, including on Bash 5.2.
+
 When dependencies change, run `uv lock --python 3.12`, review the dependency
 and hash changes, and rerun the Python checks. Keep the Zig archive URL/hash,
 package minimum compiler and build-profile assumptions in step.

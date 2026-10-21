@@ -34,7 +34,7 @@ stop_child() {
             done
             wait "$pid" 2>/dev/null || true
             unset 'PERF_CHILDREN[index]'
-            return
+            return 0
         fi
     done
     return 1

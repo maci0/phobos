@@ -35,7 +35,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ripgrep shellcheck
-      - run: shellcheck scripts/build-release.sh scripts/setup-ci-zig.sh scripts/test.sh tools/perf_harness/*.sh tools/perf_harness/tests/smoke.sh
+      - run: shellcheck scripts/build-release.sh scripts/setup-ci-zig.sh scripts/test.sh tools/perf_harness/*.sh tools/perf_harness/tests/*.sh
       - run: zig fmt --check build.zig build.zig.zon src tests/fixtures/float_abi_probe.zig
       - run: zig test -target native-native-musl build.zig
       - run: sha256sum --check SHA256SUMS
@@ -68,6 +68,7 @@ jobs:
         run: printf 'profiles=%s\n' "$(scripts/build-release.sh --list | jq -Rsc 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
 
   tests:
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
