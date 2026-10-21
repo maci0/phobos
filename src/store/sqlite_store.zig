@@ -378,9 +378,22 @@ pub const SqliteStore = struct {
             selected = selected[0..@min(std.math.lossyCast(usize, page.limit), selected.len)];
         }
         const result = try arena.alloc(ds.HistoryJob, selected.len);
+        var table_row: ?*c.sqlite3_stmt = null;
+        defer if (table_row) |stmt| {
+            _ = c.sqlite3_finalize(stmt);
+        };
         for (selected, result) |entry, *job| {
-            const key = entry.key orelse try std.fmt.allocPrint(arena, "{X:0>6}", .{entry.id});
-            job.* = .{ .key = key, .val = (try self.getRecord(arena, "history", key)) orelse return Error.BackendError };
+            if (entry.key) |key| {
+                job.* = .{ .key = key, .val = (try self.getRecord(arena, "history", key)) orelse return Error.BackendError };
+            } else {
+                if (table_row == null) table_row = try self.prepare(job_history_select ++ " WHERE job_id=?1");
+                const stmt = table_row.?;
+                if (c.sqlite3_reset(stmt) != c.SQLITE_OK) return Error.BackendError;
+                if (c.sqlite3_bind_int64(stmt, 1, @intCast(entry.id)) != c.SQLITE_OK) return Error.BackendError;
+                if (c.sqlite3_step(stmt) != c.SQLITE_ROW) return Error.BackendError;
+                const row = (try mapJobRow(arena, stmt)) orelse return Error.BackendError;
+                job.* = .{ .key = row.key, .val = row.value };
+            }
         }
         return result;
     }
@@ -785,6 +798,33 @@ test "SqliteStore history pages preserve namespace ordering overrides and filter
     try testing.expectError(Error.BackendError, history.handleList(&ctx, .null, a));
 }
 
+test "SqliteStore history pages own interleaved table and KV rows" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    try s.execSql(
+        \\UPDATE job_history SET metadata='{"payload":"second"}' WHERE job_id=2;
+        \\INSERT INTO job_history VALUES
+        \\ (3,'me','shadow.gcode','completed',400.0,NULL,0.0,0.0,0.0,'{}','[]','default'),
+        \\ (4,'me','fourth.gcode','completed',500.0,NULL,0.0,0.0,0.0,'{"payload":"fourth"}','[]','default');
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const stored = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"kv.gcode\",\"metadata\":{\"payload\":\"kv\"}}", .{});
+    try s.insertItem(a, "history", "000001", stored);
+    try s.insertItem(a, "history", "000003", stored);
+    const page = (try s.getHistoryPage(a, .{ .limit = 4, .start = 0, .ascending = true })).?;
+    try testing.expectEqual(@as(usize, 4), page.len);
+    try s.execSql("UPDATE job_history SET filename='replaced',metadata='{}'; DELETE FROM namespace_store WHERE namespace='history';");
+    for (page, [_][]const u8{ "000001", "000002", "000003", "000004" }, [_][]const u8{ "kv", "second", "kv", "fourth" }) |job, key, payload| {
+        try testing.expectEqualStrings(key, job.key);
+        try testing.expectEqualStrings(payload, job.val.object.get("metadata").?.object.get("payload").?.string);
+    }
+    try testing.expectEqualStrings("fourth.gcode", page[3].val.object.get("filename").?.string);
+    try testing.expect(page[3].val.object.get("end_time").? == .null);
+}
+
 test "SqliteStore history preserves nullable end times" {
     var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
@@ -822,9 +862,10 @@ test "SqliteStore history pages release every partial request allocation" {
         fn run(alloc: std.mem.Allocator, store: *SqliteStore) !void {
             var arena = std.heap.ArenaAllocator.init(alloc);
             defer arena.deinit();
-            const page = (try store.dataStore().getHistoryPage(arena.allocator(), .{ .limit = 1, .start = 1, .ascending = true })).?;
-            try testing.expectEqual(@as(usize, 1), page.len);
-            try testing.expectEqualStrings("000002", page[0].key);
+            const page = (try store.dataStore().getHistoryPage(arena.allocator(), .{ .limit = 2, .start = 0, .ascending = true })).?;
+            try testing.expectEqual(@as(usize, 2), page.len);
+            try testing.expectEqualStrings("000001", page[0].key);
+            try testing.expectEqualStrings("000002", page[1].key);
         }
     }.run, .{&s});
 }
@@ -837,6 +878,11 @@ test "fuzz SqliteStore history pages match namespace pagination" {
             var s = try SqliteStore.open(testing.io, ":memory:");
             defer s.deinit();
             try createJobHistory(&s);
+            try s.execSql(
+                \\INSERT INTO job_history VALUES
+                \\ (4,'me','four.gcode','completed',400.0,500.0,0.0,0.0,0.0,'{"name":"four"}','[]','default'),
+                \\ (5,'me','five.gcode','completed',500.0,NULL,0.0,0.0,0.0,'{"name":"five"}','[]','default');
+            );
             if (bits[5] & 1 != 0) try s.execSql("UPDATE job_history SET end_time=NULL WHERE job_id=2");
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();

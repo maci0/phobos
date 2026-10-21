@@ -33,6 +33,7 @@ pub extern "c" fn sqlite3_exec(db: ?*sqlite3, sql: [*:0]const u8, cb: ?*const an
 pub extern "c" fn sqlite3_prepare_v2(db: ?*sqlite3, zSql: [*]const u8, nByte: c_int, ppStmt: *?*sqlite3_stmt, pzTail: ?*?[*:0]const u8) c_int;
 pub extern "c" fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
 pub extern "c" fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_reset(stmt: ?*sqlite3_stmt) c_int;
 
 pub extern "c" fn sqlite3_bind_text(stmt: ?*sqlite3_stmt, idx: c_int, text: [*]const u8, n: c_int, destructor: ?*const anyopaque) c_int;
 pub extern "c" fn sqlite3_bind_blob(stmt: ?*sqlite3_stmt, idx: c_int, blob: ?*const anyopaque, n: c_int, destructor: ?*const anyopaque) c_int;

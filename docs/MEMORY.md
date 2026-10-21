@@ -193,3 +193,8 @@ Moonraker for all 266 copied jobs, seven null end times, both page orders,
 offsets, time filters and a single unfinished job. The
 [parity record](perf/history-memory-20261021/nullable-history-parity.json)
 contains counts and response hashes without publishing job data.
+
+The subsequent page reader reuses one legacy-row statement within a request.
+Each row is decoded into the request arena before the statement is reset, and
+the statement is finalized on return. KV overrides and namespace fallbacks are
+preserved. No statement cache or additional long-lived state is introduced.

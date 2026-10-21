@@ -1245,3 +1245,23 @@ database mutation, configuration change or experimental deployment occurred.
 
 `graphify-out/graph.json` exists, but `graphify` is not on PATH, so its update
 step was skipped. The graph output is not part of the deliverable.
+
+## 2026-10-21: tuning round 1, reuse the page's legacy-row lookup
+
+First of the user's three additional tuning rounds. The profile's remaining
+SQL preparation work corresponds to repeated KV misses, table-existence checks
+and legacy-row statement preparation for every selected table job. The page
+reader already knows each selected job's source under its store lock. It now
+reuses one lazily prepared table lookup for the page and uses the mapped row's
+existing key. The statement is reset between rows and finalized on every exit;
+KV reads retain their existing path. No persistent cache or schema change was
+added. `sqlite3_reset` matches the vendored header at line 5705.
+
+A mixed KV/table regression verifies all response payloads after statement
+resets and subsequent database replacement. The differential fuzzer includes
+several legacy rows, KV shadows and nullable times; allocation-failure coverage
+now crosses two legacy rows. Debug and ReleaseSafe each pass 1,727 tests,
+one real-Klippy skip and zero failures, with 326 fuzz harnesses. Formatting and
+diff checks pass. Portable x86-64 and Cortex-A7 ReleaseSmall builds complete in
+isolated prefixes. Baseline runtime is 0ec73fa; matched measurements follow this
+verified code change and will retain the build hashes and actual source commits.
