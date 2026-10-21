@@ -26,6 +26,10 @@ printer credentials and does not deploy to a printer.
   wrong-version assets fail preparation. Relative release-note links become
   versioned repository links.
 
+After checks pass, daemon tests and profile builds run independently. Packaging
+waits for every test, build and native smoke job; a failed suite blocks both the
+bundle and publication.
+
 The workflow actions are pinned to full commits. Ordinary jobs have read-only
 repository permissions; checkout does not persist credentials. Only the final
 tag publication job receives `contents: write`. New main/PR runs cancel older

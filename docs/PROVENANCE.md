@@ -1071,3 +1071,19 @@ that a Zig-only job had never created. Dependency caching is disabled in the
 shared setup action so Zig-only jobs have no Python cache post-step dependency.
 Actionlint passes after both workflow corrections. Native AArch64 execution
 found no daemon failures in that run.
+
+Hosted run 39547485348 executed both TLS fixtures successfully on x86-64 and
+AArch64. ReleaseSafe on both architectures exposed a file-listing fixture that
+assumed the real directory was visited before its in-root alias. `RootWalker`
+deliberately keeps the first canonical directory it encounters, as the adjacent
+linked-directory test already permits. The fixture now accepts either complete
+representative path set while still asserting exact count, sorted paths,
+deduplication, every file size and linked-file permissions. Escaping/dangling
+link checks and copy-content checks are preserved. The ReleaseSafe
+compiler-filtered regression passes locally. Production traversal is unchanged.
+
+Profile builds now run independently of daemon suites after checks pass, so
+cross-compilation does not wait on unrelated test compilation. Packaging has an
+explicit dependency on all suites as well as builds and native smoke checks;
+any failure still blocks both the combined bundle and tag publication.
+Actionlint validates the revised dependency graph.

@@ -102,7 +102,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: [checks, tests]
+    needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
@@ -169,7 +169,7 @@ jobs:
           uv run --locked python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/native-api.json
 
   package:
-    needs: [build, native-smoke]
+    needs: [tests, build, native-smoke]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

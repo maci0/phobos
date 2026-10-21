@@ -1869,13 +1869,19 @@ test "listings follow in-root links and skip escaping or dangling ones" {
         try testing.expect(std.mem.indexOf(u8, names.items, hidden) == null);
     }
 
-    // Directory aliases are visited once; gcode paths are sorted case-insensitively.
+    // The first directory alias wins; returned paths sort case-insensitively.
     const list = try handleList(@ptrCast(&ctx), try objParams(alloc, "{\"root\":\"gcodes\"}"), alloc);
-    const expected = [_][]const u8{ "link.gcode", "real/file.gcode", "real/inner.gcode", "Zeta.gcode" };
-    try testing.expectEqual(expected.len, list.array.items.len);
-    for (expected, list.array.items) |want, got| try testing.expectEqualStrings(want, got.object.get("path").?.string);
-    try testing.expectEqual(@as(i64, 3), list.array.items[2].object.get("size").?.integer);
-    try testing.expectEqualStrings("r", list.array.items[0].object.get("permissions").?.string);
+    try testing.expectEqual(@as(usize, 4), list.array.items.len);
+    const alias_first = std.mem.startsWith(u8, list.array.items[0].object.get("path").?.string, "alias/");
+    const expected: [4][]const u8 = if (alias_first)
+        .{ "alias/file.gcode", "alias/inner.gcode", "link.gcode", "Zeta.gcode" }
+    else
+        .{ "link.gcode", "real/file.gcode", "real/inner.gcode", "Zeta.gcode" };
+    for (expected, list.array.items) |want, got| {
+        try testing.expectEqualStrings(want, got.object.get("path").?.string);
+        try testing.expectEqual(@as(i64, 3), got.object.get("size").?.integer);
+        if (std.mem.eql(u8, want, "link.gcode")) try testing.expectEqualStrings("r", got.object.get("permissions").?.string);
+    }
 
     _ = try handleCopy(@ptrCast(&ctx), try objParams(alloc, "{\"source\":\"gcodes/real\",\"dest\":\"gcodes/copied\"}"), alloc);
     const inner = try std.fs.path.join(alloc, &.{ tr.roots[0].path, "copied/inner.gcode" });
