@@ -337,7 +337,7 @@ pub const SqliteStore = struct {
     pub fn getHistoryPage(self: *SqliteStore, arena: std.mem.Allocator, page: ds.HistoryPage) Error!?[]ds.HistoryJob {
         self.lockRmw();
         defer self.unlockRmw();
-        const Key = struct { id: u64, key: ?[]const u8 = null };
+        const Key = struct { id: u64, from_kv: bool = false };
         var keys: std.ArrayList(Key) = .empty;
         var shadows: std.AutoHashMapUnmanaged(u64, void) = .empty;
         const kv = try self.prepare("SELECT key, value FROM namespace_store WHERE namespace='history'");
@@ -354,7 +354,7 @@ pub const SqliteStore = struct {
             const bytes = @as([*]const u8, @ptrCast(ptr))[0..size];
             if (size == 0 or bytes[0] != '{' or !try json.validate(arena, bytes)) return null;
             try shadows.put(arena, id, {});
-            try keys.append(arena, .{ .id = id, .key = try arena.dupe(u8, key) });
+            try keys.append(arena, .{ .id = id, .from_kv = true });
         }
         if (rc != c.SQLITE_DONE) return Error.BackendError;
         if (try self.hasTable("job_history")) {
@@ -383,7 +383,8 @@ pub const SqliteStore = struct {
             _ = c.sqlite3_finalize(stmt);
         };
         for (selected, result) |entry, *job| {
-            if (entry.key) |key| {
+            if (entry.from_kv) {
+                const key = try arena.print("{X:0>6}", .{entry.id});
                 job.* = .{ .key = key, .val = (try self.getRecord(arena, "history", key)) orelse return Error.BackendError };
             } else {
                 if (table_row == null) table_row = try self.prepare(job_history_select ++ " WHERE job_id=?1");
@@ -798,6 +799,34 @@ test "SqliteStore history pages preserve namespace ordering overrides and filter
     try testing.expectError(Error.BackendError, history.handleList(&ctx, .null, a));
 }
 
+test "SqliteStore history page key indexes retain scalar IDs" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    var seed = std.heap.ArenaAllocator.init(testing.allocator);
+    defer seed.deinit();
+    const a = seed.allocator();
+    for (1..1025) |id| {
+        var buf: [16]u8 = undefined;
+        try s.insertItem(a, "history", try std.fmt.bufPrint(&buf, "{X:0>6}", .{id}), .{ .object = .empty });
+    }
+    for ([_][]const u8{ "000000", "7FFFFFFFFFFFFFFF", "8000000000000000", "FFFFFFFFFFFFFFFF" }) |key|
+        try s.insertItem(a, "history", key, .{ .object = .empty });
+    var tracked = testing.FailingAllocator.init(testing.allocator, .{});
+    var response = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer response.deinit();
+    const page = (try s.getHistoryPage(response.allocator(), .{ .limit = 20, .start = 0, .ascending = false })).?;
+    try testing.expectEqual(@as(usize, 20), page.len);
+    try testing.expectEqualStrings("FFFFFFFFFFFFFFFF", page[0].key);
+    try testing.expectEqualStrings("8000000000000000", page[1].key);
+    try testing.expectEqualStrings("7FFFFFFFFFFFFFFF", page[2].key);
+    try testing.expectEqualStrings("0003F0", page[19].key);
+    const retained = tracked.allocated_bytes - tracked.freed_bytes;
+    std.debug.print("history key index retained request storage: {d} bytes\n", .{retained});
+    try testing.expect(retained < 96 * 1024);
+    const first = (try s.getHistoryPage(a, .{ .limit = 1, .start = 0, .ascending = true })).?;
+    try testing.expectEqualStrings("000000", first[0].key);
+}
+
 test "SqliteStore history pages own interleaved table and KV rows" {
     var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
@@ -889,6 +918,7 @@ test "fuzz SqliteStore history pages match namespace pagination" {
             const a = arena.allocator();
             if (bits[5] & 1 != 0) try testing.expect((try s.getItem(a, "history", "000002")).?.object.get("end_time").? == .null);
             const job = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"new.gcode\",\"metadata\":{\"layers\":20}}", .{});
+            if (bits[7] & 1 != 0) try s.insertItem(a, "history", "FFFFFFFFFFFFFFFF", job);
             if (bits[0] & 1 != 0) try s.insertItem(a, "history", "000001", job);
             try s.insertItem(a, "history", if (bits[0] & 2 != 0) "000003" else "3", if (bits[0] & 4 != 0) job else .null);
             var params: json.ObjectMap = .empty;

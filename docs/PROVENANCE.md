@@ -1265,3 +1265,21 @@ one real-Klippy skip and zero failures, with 326 fuzz harnesses. Formatting and
 diff checks pass. Portable x86-64 and Cortex-A7 ReleaseSmall builds complete in
 isolated prefixes. Baseline runtime is 0ec73fa; matched measurements follow this
 verified code change and will retain the build hashes and actual source commits.
+
+## 2026-10-21: tuning round 2, retain scalar history keys
+
+The user requested three further rounds after the interrupted tuning session.
+This first resumed round replaces duplicated canonical KV key strings in the
+history index with numeric IDs and a source flag. Selected keys alone are
+formatted. The 1,028-record allocation regression failed before the change
+(186,830 retained bytes) and passes afterward (95,326). Zero, signed-range
+boundaries and maximum unsigned IDs are checked; the differential fuzzer now
+also includes the maximum unsigned key. Existing allocation-failure coverage
+crosses both sources.
+
+The interrupted Debug log ended with a login timeout without a final summary.
+The isolated wrong-password test passes, and a complete rerun passes without
+changing authentication or deadlines. Debug and ReleaseSafe each pass 1,728
+tests, one existing real-Klippy skip, zero failures and 326 fuzz harnesses.
+The interrupted timeout's cause remains unconfirmed. Matched portable and
+Cortex-A7 ReleaseSmall binaries are frozen for the subsequent measurements.
