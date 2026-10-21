@@ -195,11 +195,11 @@ pub const DataStoreCtx = struct {
         self.temp_capacity = capacity;
     }
 
-    fn ensureSensor(self: *DataStoreCtx, sensor: *SensorStore) !void {
+    fn ensureSensor(self: *DataStoreCtx, sensor: *SensorStore, target: ?f64, power: ?f64, speed: ?f64) !void {
         try sensor.temperatures.ensure(self.gpa, self.temp_capacity);
-        try sensor.targets.ensure(self.gpa, self.temp_capacity);
-        try sensor.powers.ensure(self.gpa, self.temp_capacity);
-        try sensor.speeds.ensure(self.gpa, self.temp_capacity);
+        if (sensor.has_target or target != null) try sensor.targets.ensure(self.gpa, self.temp_capacity);
+        if (sensor.has_power or power != null) try sensor.powers.ensure(self.gpa, self.temp_capacity);
+        if (sensor.has_speed or speed != null) try sensor.speeds.ensure(self.gpa, self.temp_capacity);
     }
 
     pub fn deinit(self: *DataStoreCtx) void {
@@ -246,7 +246,7 @@ pub const DataStoreCtx = struct {
             gop.value_ptr.* = .{};
         }
         const s = gop.value_ptr;
-        self.ensureSensor(s) catch return;
+        self.ensureSensor(s, target, power, speed) catch return;
         if (temperature) |t| s.temperature = @round(t * 100) / 100;
         if (s.temperatures.values.len == 0) s.temperatures.push(s.temperature);
         if (target) |t| {
@@ -365,8 +365,6 @@ pub fn handleTempStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
     const include_monitors = ((try webreq.optional(bool, params, "include_monitors")) orelse false);
 
     const io = c.io orelse return .{ .object = .empty };
-    const scratch = try alloc.alloc(f64, @max(c.temp_capacity, 1));
-    defer alloc.free(scratch);
     var result: std.json.ObjectMap = .empty;
 
     c.temp_mutex.lockUncancelable(io);
@@ -376,19 +374,18 @@ pub fn handleTempStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.A
         if (!include_monitors and c.monitors.contains(entry.key_ptr.*)) continue;
         const s = entry.value_ptr;
         var obj: std.json.ObjectMap = .empty;
-        try putRing(alloc, &obj, "temperatures", &s.temperatures, scratch);
-        if (s.has_target) try putRing(alloc, &obj, "targets", &s.targets, scratch);
-        if (s.has_power) try putRing(alloc, &obj, "powers", &s.powers, scratch);
-        if (s.has_speed) try putRing(alloc, &obj, "speeds", &s.speeds, scratch);
+        try putRing(alloc, &obj, "temperatures", &s.temperatures);
+        if (s.has_target) try putRing(alloc, &obj, "targets", &s.targets);
+        if (s.has_power) try putRing(alloc, &obj, "powers", &s.powers);
+        if (s.has_speed) try putRing(alloc, &obj, "speeds", &s.speeds);
         try result.put(alloc, try alloc.dupe(u8, entry.key_ptr.*), .{ .object = obj });
     }
     return .{ .object = result };
 }
 
-fn putRing(alloc: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, ring: *const FieldRing, scratch: []f64) !void {
-    const n = ring.snapshot(scratch);
-    var arr: std.json.Array = .init(alloc);
-    for (scratch[0..n]) |v| try arr.append(.{ .float = v });
+fn putRing(alloc: std.mem.Allocator, obj: *std.json.ObjectMap, key: []const u8, ring: *const FieldRing) !void {
+    var arr = try std.json.Array.initCapacity(alloc, ring.values.len);
+    for (0..ring.values.len) |i| arr.appendAssumeCapacity(.{ .float = ring.values.at(i) });
     try obj.put(alloc, key, .{ .array = arr });
 }
 
@@ -860,6 +857,57 @@ test "temperature updates cache readings without appending another sample" {
     try testing.expect(ctx.sampler_thread == null);
 }
 
+test "plain temperature sensors allocate only their reported field" {
+    var tracked = testing.FailingAllocator.init(testing.allocator, .{});
+    var ctx = try DataStoreCtx.init(tracked.allocator());
+    defer ctx.deinit();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    ctx.setIo(io);
+    const before = tracked.allocated_bytes;
+    ctx.pushTemp(io, "plain", 25, null, null, null);
+    const allocated = tracked.allocated_bytes - before;
+    std.debug.print("plain sensor requested storage: {d} bytes\n", .{allocated});
+    try testing.expect(allocated < 2 * temp_store_size * @sizeOf(f64));
+    ctx.sampleTemperatures(io);
+    ctx.pushTemp(io, "plain", null, 40, null, null);
+    ctx.sampleTemperatures(io);
+    var req_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer req_arena.deinit();
+    const response = try handleTempStore(&ctx, .null, req_arena.allocator());
+    const sensor = response.object.get("plain").?.object;
+    try testing.expectEqual(@as(usize, 3), sensor.get("temperatures").?.array.items.len);
+    try testing.expectEqual(@as(usize, 2), sensor.get("targets").?.array.items.len);
+    try testing.expectEqual(@as(f64, 40), sensor.get("targets").?.array.items[1].float);
+    try testing.expect(sensor.get("powers") == null and sensor.get("speeds") == null);
+}
+
+test "temperature response retains less than two full JSON windows" {
+    var ctx = try DataStoreCtx.init(testing.allocator);
+    defer ctx.deinit();
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    ctx.setIo(io);
+    ctx.pushTemp(io, "plain", 0, null, null, null);
+    for (1..temp_store_size + 50) |value| {
+        ctx.pushTemp(io, "plain", @floatFromInt(value), null, null, null);
+        ctx.sampleTemperatures(io);
+    }
+    var tracked = testing.FailingAllocator.init(testing.allocator, .{});
+    var req_arena = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer req_arena.deinit();
+    const response = try handleTempStore(&ctx, .null, req_arena.allocator());
+    const values = response.object.get("plain").?.object.get("temperatures").?.array.items;
+    try testing.expectEqual(temp_store_size, values.len);
+    try testing.expectEqual(@as(f64, 50), values[0].float);
+    try testing.expectEqual(@as(f64, temp_store_size + 49), values[values.len - 1].float);
+    const retained = tracked.allocated_bytes - tracked.freed_bytes;
+    std.debug.print("full temperature response request storage: {d} bytes\n", .{retained});
+    try testing.expect(retained < 2 * temp_store_size * @sizeOf(std.json.Value));
+}
+
 test "temperature store: buffers heater and sensor at sampler cadence" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -921,6 +969,7 @@ test "fuzz temperature sampling: bounded rings retain cached fields" {
             try testing.expectEqual(@min(@as(usize, ticks) + 1, capacity), s.temperatures.values.len);
             try testing.expectEqual(s.temperatures.values.len, s.targets.values.len);
             try testing.expectEqual(s.temperatures.values.len, s.powers.values.len);
+            try testing.expectEqual(@as(usize, 0), s.speeds.values.buffer.len);
             try testing.expect(ctx.sampler_thread == null);
             try testing.expectError(error.IoNotSet, ctx.startSampler());
         }

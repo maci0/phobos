@@ -1,0 +1,340 @@
+{
+  "date": "2026-10-21",
+  "platform": "Forge-X 1.4.2 chroot, Linux 5.4.61, Cortex-A7",
+  "build": "Zig 0.17.0, arm-linux-musleabihf, cortex_a7, ReleaseSmall",
+  "baseline": "v0.2.1 published Cortex-A7 asset",
+  "candidate": "post-v0.2.1 temperature-store memory changes",
+  "workload": "21 SSH /proc samples over 20 seconds after Klippy ready; temperature store at start/end; one config-directory read at end",
+  "fixture": "Separate copies of the existing probe database; identical settings except owned data paths; loopback port 7126; updates and automatic queue actions disabled",
+  "direction": "Lower RSS and allocation bytes are better",
+  "profiles": {
+    "baseline": {
+      "binary_sha256": "5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf",
+      "median_last_10_rss_kib": 2984.0,
+      "samples": [
+        {
+          "elapsed": 0.37048160399717744,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 1.2897717809973983,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 2.324122786987573,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 3.2988661149865948,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 4.328831612991053,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 5.385819514995092,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 6.293168028991204,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 7.3418905649887165,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 8.29562063299818,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 9.348142708986416,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 10.365133293991676,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 11.39430090499809,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 12.32209081799374,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 13.318310656992253,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 14.348150000994792,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 15.321835678987554,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 16.34182695799973,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 17.334015949993045,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 18.322600857994985,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 19.35886999098875,
+          "rss_kib": 2984,
+          "threads": 10
+        },
+        {
+          "elapsed": 20.332649588992354,
+          "rss_kib": 2984,
+          "threads": 10
+        }
+      ],
+      "field_counts_before": {
+        "temperature_sensor tvocValue": {
+          "temperatures": 1
+        },
+        "extruder": {
+          "temperatures": 1,
+          "targets": 1,
+          "powers": 1
+        },
+        "heater_bed": {
+          "temperatures": 1,
+          "targets": 1,
+          "powers": 1
+        },
+        "temperature_sensor weightValue": {
+          "temperatures": 1
+        }
+      },
+      "field_counts_after": {
+        "temperature_sensor tvocValue": {
+          "temperatures": 22
+        },
+        "extruder": {
+          "temperatures": 22,
+          "targets": 22,
+          "powers": 22
+        },
+        "heater_bed": {
+          "temperatures": 22,
+          "targets": 22,
+          "powers": 22
+        },
+        "temperature_sensor weightValue": {
+          "temperatures": 22
+        }
+      },
+      "config_sha256": "ca2187d3df68fafc0fe9dbc62bc46864de998625894d8aa8f85170eb173f4109"
+    },
+    "candidate": {
+      "binary_sha256": "999bcbe75d4bd73f01009f3d76af537e47fb59918267dbe35160b4af2eb51503",
+      "median_last_10_rss_kib": 2712.0,
+      "samples": [
+        {
+          "elapsed": 0.37695907198940404,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 1.3561976399942068,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 2.3252940550009953,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 3.3240168819902465,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 4.283191233989783,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 5.342173949989956,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 6.381712431990309,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 7.312825412998791,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 8.271200618997682,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 9.285434255987639,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 10.305306386988377,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 11.334941440989496,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 12.294822466996266,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 13.373118288000114,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 14.285052787992754,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 15.332059979991755,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 16.324335183991934,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 17.32742848599446,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 18.31316091599001,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 19.29588334899745,
+          "rss_kib": 2712,
+          "threads": 10
+        },
+        {
+          "elapsed": 20.28051266699913,
+          "rss_kib": 2712,
+          "threads": 10
+        }
+      ],
+      "field_counts_before": {
+        "temperature_sensor tvocValue": {
+          "temperatures": 1
+        },
+        "extruder": {
+          "temperatures": 1,
+          "targets": 1,
+          "powers": 1
+        },
+        "heater_bed": {
+          "temperatures": 1,
+          "targets": 1,
+          "powers": 1
+        },
+        "temperature_sensor weightValue": {
+          "temperatures": 1
+        }
+      },
+      "field_counts_after": {
+        "temperature_sensor tvocValue": {
+          "temperatures": 22
+        },
+        "extruder": {
+          "temperatures": 22,
+          "targets": 22,
+          "powers": 22
+        },
+        "heater_bed": {
+          "temperatures": 22,
+          "targets": 22,
+          "powers": 22
+        },
+        "temperature_sensor weightValue": {
+          "temperatures": 22
+        }
+      },
+      "config_sha256": "b53bdc48aea3d4084b8a7c55d6e9aac6b6944c8bb5dc5eb88799367406763c39"
+    }
+  },
+  "native_allocation_bytes": {
+    "plain_sensor": {
+      "before": 39909,
+      "after": 11109
+    },
+    "full_1200_response_retained_arena": {
+      "before": 135816,
+      "after": 100872
+    }
+  },
+  "calculated_unused_ring_payload_bytes_removed": 76800,
+  "limits": "One short pair, not a soak or general RSS guarantee; native allocation bytes are not RSS; full-window response checked in unit tests, not filled for 20 minutes on hardware",
+  "printer_after": {
+    "klippy_state": "ready",
+    "failed_components": [],
+    "warnings": [],
+    "status": {
+      "extruder": {
+        "temperature": 31.46,
+        "target": 0
+      },
+      "heater_bed": {
+        "temperature": 30.47,
+        "target": 0
+      },
+      "print_stats": {
+        "state": "complete"
+      }
+    }
+  },
+  "boot_id_before_and_after": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "production": "v0.2.1 unchanged, PID 2243 on 7125; private probes stopped"
+}

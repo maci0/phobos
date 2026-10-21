@@ -112,3 +112,53 @@ It uses an isolated scratch prefix and stops only its own process. Its
 configuration differs from the connected measurements above; do not compare
 those values as a storage-only change. Never point measurement helpers at a
 live printer database.
+
+## Temperature-store allocation review
+
+The post-v0.2.1 temperature store allocates optional target, power and speed
+rings only when Klippy reports those fields. Each ring retains the configured
+1,200-sample capacity. A late field still starts its own history, and omitted
+fields retain their last reading. Responses allocate JSON arrays at their final
+length and read the deque directly, avoiding a scratch copy and array growth
+inside the request arena.
+
+The allocation regressions use the same inputs and `std.testing.FailingAllocator`
+before and after the change on x86-64. These are requested/retained allocation
+bytes, not process RSS or printer-wide RAM:
+
+| Measurement | Before bytes ↓ | After bytes ↓ |
+| --- | ---: | ---: |
+| New plain sensor, including its map entry | 39,909 | 11,109 |
+| Arena retained by one full 1,200-value response | 135,816 | 100,872 |
+
+↓ Lower is better. The configured Forge-X reports two heaters with temperature,
+target and power, and two plain temperature sensors. Allocating only those eight
+fields removes eight unused rings: `8 × 1,200 × 8 = 76,800` bytes (75 KiB).
+That is a ring-payload calculation, not an asserted RSS reduction. The tests
+check a wrapped full window, late fields and unused buffers; the bounded sampler
+fuzzer also checks that an unreported speed field has no allocation.
+
+A private Cortex-A7 ReleaseSmall baseline/candidate pair used the same settings
+and separate copies of the existing probe database on loopback port 7126.
+Twenty-one `/proc` samples covered 20 seconds after Klippy became ready. Median
+RSS over the last ten samples was 2,984 KiB for the published v0.2.1 baseline
+and 2,712 KiB for the candidate (lower is better). Both returned the four expected
+sensor field sets and added about 20 samples per field. Directory capacity also
+passed. This single short pair is not a soak or a general RSS guarantee; a full
+1,200-sample response was checked in the unit suite. Exact hashes, samples,
+field counts and final printer state are in the
+[capture summary](perf/temperature-memory-20261021.json). Both probes stopped;
+production v0.2.1 on 7125 and the board boot ID were unchanged.
+
+The local MISRA-Zig handbook's allocator and resource rules (21.3, 22.1 and
+22.2) support explicit owners, matching frees and allocation-failure checks.
+They do not forbid dynamic allocation in this daemon. The local checker did
+not compile with Zig 0.17 because it references the removed `asterisk_asterisk`
+token; this review applies the handbook manually and makes no compliance claim.
+
+The next place to measure is history pagination: `loadAllJobs` reads and parses
+the entire namespace before the list handler filters, sorts and returns a page.
+Pushing selection into the store could reduce peak memory for large histories,
+but needs matching SQLite/file-backend ordering and pagination tests. Smaller
+thread stack reservations alone would reduce virtual address space, not prove
+lower RSS. Neither change is included in these temperature-store measurements.

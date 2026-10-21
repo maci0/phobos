@@ -1003,3 +1003,57 @@ remapping so arena growth must allocate consistently. The test still injects
 each allocation failure and checks all releases through the testing allocator;
 the ReleaseSafe compiler-filtered regression passes. No production MQTT logic
 or CI gate was disabled.
+
+## 2026-10-21: bounded temperature-store allocations
+
+Requested by the user: reduce memory further and assess the local MISRA-Zig
+rules. `DataStoreCtx.ensureSensor` now allocates target, power and speed rings
+only when those fields are reported or already tracked. `putRing` reserves the
+exact JSON array length and reads chronological deque entries directly. The
+handler's full-capacity floating-point scratch allocation and repeated array
+growth are removed. Sampling cadence, configured capacity, rounding, late-field
+history and optional response fields are preserved.
+
+Two allocation regressions were run before the fix and failed, along with the
+new unused-buffer assertion in the existing bounded fuzzer. Identical x86-64
+inputs under `std.testing.FailingAllocator` requested 39,909 bytes before and
+11,109 after for a plain sensor. A wrapped full 1,200-value response retained
+135,816 bytes before and 100,872 after in its request arena. The regression
+budget is architecture-aware and also checks first/last samples and late fields.
+The Forge-X field layout removes eight unused 1,200-element f64 rings, a
+calculated 76,800 bytes of payload. These allocation figures are not RSS claims.
+
+The static Cortex-A7 ReleaseSmall candidate SHA-256 is
+`999bcbe75d4bd73f01009f3d76af537e47fb59918267dbe35160b4af2eb51503`.
+It and the published v0.2.1 asset ran separately inside the Forge-X 1.4.2 chroot
+on loopback 7126, using separate copies of the existing probe database, equal
+settings and disabled automatic updates/queue actions. Each matched 20-second
+read probe returned all four expected sensor field sets, about 20 new samples
+and valid directory capacity. Median RSS over the final ten of 21 samples was
+2,984 KiB baseline and 2,712 KiB candidate. This is one short pair, not a general
+RSS guarantee or a full-window hardware soak. Exact sample/field counts and
+hashes are in `docs/perf/temperature-memory-20261021.json`.
+
+Both private probes stopped and their owned data directory was removed after
+capturing logs. Production v0.2.1 PID 2243 stayed on 7125 with its published hash,
+Klippy ready, no failed components or warnings, the last print complete and
+both heater targets zero. The board boot ID remained
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117`. No printer controls, board restart,
+live-database connection or production configuration changes were used.
+
+The local MISRA-Zig handbook's rules 21.3/22.1/22.2 support explicit allocator
+ownership and balanced resource release. Its checker failed to compile with
+Zig 0.17 at `tools/misra_lint.zig:480` (`asterisk_asterisk` token), so the review
+was manual and claims no compliance. No files in that project were changed.
+History's load-all-before-pagination path remains a measured-next candidate;
+its backend semantics were not changed without a matching fixture.
+
+Final local Debug and ReleaseSafe standalone suites each passed 1,720 tests,
+one existing real-Klippy skip, zero failures and 325 bounded fuzz harnesses.
+Four build-policy tests and all 109 Python tests pass. The host Debug executable
+was rebuilt after the isolated ARM build. Formatting, ShellCheck, actionlint,
+the Ubuntu Bash 5.2 smoke suite and the fresh API/table checks pass: 123/123
+endpoints, 130/130 methods and 27/27 notifications. Generated coverage docs
+needed no edits. `graphify-out/graph.json` exists but `graphify` is unavailable,
+so no graph update was run or treated as a deliverable. Hosted CI is rerun on
+the pushed fixes; publication remains restricted to a future annotated tag.
