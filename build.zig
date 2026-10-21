@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
     // Link-time optimization in release: lets the linker drop unreachable code
     // across the Zig + vendored-C boundary and inline across objects (smaller
     // binary, tighter code). Skipped in Debug (slow, and we want fast iteration).
-    if (release) exe.lto = releaseLtoMode(softfp);
+    exe.lto = releaseLtoMode(optimize, softfp);
     b.installArtifact(exe);
 
     const float_probe_module = b.createModule(.{
@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
         .flags = if (softfp) &.{ "-std=c11", "-mfloat-abi=softfp" } else &.{"-std=c11"},
     });
     const float_probe = b.addExecutable(.{ .name = "float-abi-probe", .root_module = float_probe_module });
-    if (release) float_probe.lto = releaseLtoMode(softfp);
+    float_probe.lto = releaseLtoMode(optimize, softfp);
     b.step("float-abi-probe", "Build the C/Zig floating-point ABI runtime check").dependOn(&b.addInstallArtifact(float_probe, .{}).step);
 
     // `zig build test --fuzz` runs the std.testing.fuzz harnesses in this
@@ -120,14 +120,16 @@ fn validateSoftfp(target: std.Target) error{ UnsupportedTarget, UnsupportedFloat
     if (!target.cpu.hasAll(.arm, &.{ .vfp3, .d32 }) or target.cpu.has(.arm, .soft_float)) return error.UnsupportedFloatFeatures;
 }
 
-fn releaseLtoMode(softfp: bool) std.zig.LtoMode {
+fn releaseLtoMode(optimize: std.builtin.Optimize, softfp: bool) std.zig.LtoMode {
     // Zig 0.17 full LTO changes C softfp calls to VFP registers while Zig keeps the base ABI.
-    return if (softfp) .none else .full;
+    return if (optimize == .debug or softfp) .none else .full;
 }
 
 test "release LTO preserves the mixed C softfp calling convention" {
-    try std.testing.expectEqual(std.zig.LtoMode.none, releaseLtoMode(true));
-    try std.testing.expectEqual(std.zig.LtoMode.full, releaseLtoMode(false));
+    for (std.enums.values(std.builtin.Optimize)) |optimize| {
+        try std.testing.expectEqual(std.zig.LtoMode.none, releaseLtoMode(optimize, true));
+        try std.testing.expectEqual(if (optimize == .debug) std.zig.LtoMode.none else .full, releaseLtoMode(optimize, false));
+    }
 }
 
 test "fuzz release LTO policy keeps every mixed C softfp build out of LTO" {
@@ -136,9 +138,11 @@ test "fuzz release LTO policy keeps every mixed C softfp build out of LTO" {
             var bytes: [1]u8 = undefined;
             smith.bytesWithHash(&bytes, 0);
             const softfp = bytes[0] & 1 != 0;
-            switch (releaseLtoMode(softfp)) {
-                .none => try std.testing.expect(softfp),
-                .full => try std.testing.expect(!softfp),
+            const modes = std.enums.values(std.builtin.Optimize);
+            const optimize = modes[bytes[0] % modes.len];
+            switch (releaseLtoMode(optimize, softfp)) {
+                .none => try std.testing.expect(softfp or optimize == .debug),
+                .full => try std.testing.expect(!softfp and optimize != .debug),
                 .thin => return error.UnexpectedThinLto,
             }
         }

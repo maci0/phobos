@@ -796,7 +796,7 @@ fn saveTotals(c: *HistoryCtx, alloc: std.mem.Allocator, totals: std.json.Value) 
 
 /// Collect all job records from the history namespace, sorted by job_id.
 /// Returns slice of {hex_key, job_value} pairs, sorted ascending by integer key.
-const JobEntry = struct { key: []const u8, val: std.json.Value };
+const JobEntry = ds.HistoryJob;
 
 /// A store error propagates: an empty list would make `nextJobId` reuse an
 /// existing id and overwrite that job.
@@ -872,7 +872,11 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     }
     const ascending = std.mem.eql(u8, order, "ASC");
 
-    const all_jobs = try loadAllJobs(c, alloc);
+    const page = if (since < 0 and before < 0)
+        try c.store.getHistoryPage(alloc, .{ .limit = limit_raw, .start = start, .ascending = ascending })
+    else
+        null;
+    const all_jobs = page orelse try loadAllJobs(c, alloc);
 
     // Filter by since/before
     var filtered: std.ArrayList(JobEntry) = .empty;
@@ -901,7 +905,7 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     }
 
     // Reverse if DESC
-    if (!ascending) {
+    if (!ascending and page == null) {
         std.mem.reverse(JobEntry, filtered.items);
     }
 
@@ -909,7 +913,7 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     // "LIMIT ? OFFSET ?"); SQLite treats a negative OFFSET as 0. lossyCast
     // clamps i64 values that a 32-bit usize cannot hold.
     var remaining = filtered.items;
-    if (limit_raw > 0) {
+    if (limit_raw > 0 and page == null) {
         remaining = remaining[@min(std.math.lossyCast(usize, start), remaining.len)..];
         remaining = remaining[0..@min(std.math.lossyCast(usize, limit_raw), remaining.len)];
     }
@@ -1439,6 +1443,40 @@ fn insertJob(mem: *MemStore, alloc: std.mem.Allocator, key: []const u8, job_json
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
+
+test "history pages retain only requested job metadata" {
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
+    defer db.deinit();
+    var seed = std.heap.ArenaAllocator.init(testing.allocator);
+    defer seed.deinit();
+    const a = seed.allocator();
+    var payload: [4096]u8 = undefined;
+    @memset(&payload, 'x');
+    var metadata: std.json.ObjectMap = .empty;
+    try metadata.put(a, "payload", .{ .string = &payload });
+    var job: std.json.ObjectMap = .empty;
+    try job.put(a, "filename", .{ .string = "bench.gcode" });
+    try job.put(a, "metadata", .{ .object = metadata });
+    for (1..201) |id| {
+        var key: [16]u8 = undefined;
+        try db.insertItem(a, ns_history, try std.fmt.bufPrint(&key, "{X:0>6}", .{id}), .{ .object = job });
+    }
+    var bus: NotifyBus = undefined;
+    var ctx: HistoryCtx = .{ .clock_io = testing.io, .store = db.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    var tracked = testing.FailingAllocator.init(testing.allocator, .{});
+    var response = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer response.deinit();
+    const params = try mkParams(a, "{\"limit\":20}");
+    const result = try handleList(&ctx, params, response.allocator());
+    const jobs = result.object.get("jobs").?.array.items;
+    try testing.expectEqual(@as(usize, 20), jobs.len);
+    try testing.expectEqualStrings("0000C8", jobs[0].object.get("job_id").?.string);
+    try testing.expectEqualStrings("0000B5", jobs[19].object.get("job_id").?.string);
+    try testing.expectEqualStrings(&payload, jobs[19].object.get("metadata").?.object.get("payload").?.string);
+    const retained = tracked.allocated_bytes - tracked.freed_bytes;
+    std.debug.print("history page retained request storage: {d} bytes\n", .{retained});
+    try testing.expect(retained < 512 * 1024);
+}
 
 test "handleList: empty store returns count=0 jobs=[]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

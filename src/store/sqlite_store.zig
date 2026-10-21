@@ -172,7 +172,7 @@ pub const SqliteStore = struct {
 
     // --- raw record get/put over namespace_store --------------------------
 
-    fn getRecordRaw(self: *SqliteStore, arena: std.mem.Allocator, namespace: []const u8, record_key: []const u8) Error!?[]u8 {
+    fn getStoredRecord(self: *SqliteStore, arena: std.mem.Allocator, namespace: []const u8, record_key: []const u8) Error!?json.Value {
         const stmt = try self.prepare("SELECT value FROM namespace_store WHERE namespace=?1 AND key=?2");
         defer _ = c.sqlite3_finalize(stmt);
         try bindText(stmt, 1, namespace);
@@ -181,16 +181,17 @@ pub const SqliteStore = struct {
         if (rc == c.SQLITE_DONE) return null;
         if (rc != c.SQLITE_ROW) return Error.BackendError;
         const n: usize = @intCast(c.sqlite3_column_bytes(stmt, 0));
-        if (n == 0) return try arena.alloc(u8, 0);
-        const ptr = c.sqlite3_column_blob(stmt, 0) orelse return try arena.alloc(u8, 0);
+        if (n == 0) return Error.BackendError;
+        const ptr = c.sqlite3_column_blob(stmt, 0) orelse return Error.BackendError;
         const src = @as([*]const u8, @ptrCast(ptr))[0..n];
-        return try arena.dupe(u8, src);
+        // Value parsing owns its strings before finalize invalidates the column.
+        return try decodeRecord(arena, src);
     }
 
     /// Load the same logical record for reads and mutations. A KV record
     /// shadows its migrated table row.
     fn getRecord(self: *SqliteStore, arena: std.mem.Allocator, namespace: []const u8, record_key: []const u8) Error!?json.Value {
-        if (try self.getRecordRaw(arena, namespace, record_key)) |raw| return try decodeRecord(arena, raw);
+        if (try self.getStoredRecord(arena, namespace, record_key)) |stored| return stored;
         if (std.mem.eql(u8, namespace, "history")) return self.historyJobFromTable(arena, record_key);
         if (std.mem.eql(u8, namespace, "history_totals")) {
             const totals = try self.totalsFromTable(arena);
@@ -331,6 +332,58 @@ pub const SqliteStore = struct {
         return .{ .object = obj };
     }
 
+    /// Select scalar IDs before decoding metadata. Noncanonical KV records use
+    /// the namespace path so its key/type/error semantics stay unchanged.
+    pub fn getHistoryPage(self: *SqliteStore, arena: std.mem.Allocator, page: ds.HistoryPage) Error!?[]ds.HistoryJob {
+        self.lockRmw();
+        defer self.unlockRmw();
+        const Key = struct { id: u64, key: ?[]const u8 = null };
+        var keys: std.ArrayList(Key) = .empty;
+        var shadows: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        const kv = try self.prepare("SELECT key, value, json_valid(CAST(value AS TEXT)) FROM namespace_store WHERE namespace='history'");
+        defer _ = c.sqlite3_finalize(kv);
+        var rc = c.sqlite3_step(kv);
+        while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(kv)) {
+            const key = colTextRaw(kv, 0) orelse return null;
+            const id = std.fmt.parseInt(u64, key, 16) catch return null;
+            var canonical: [16]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&canonical, "{X:0>6}", .{id}) catch unreachable;
+            if (!std.mem.eql(u8, key, formatted)) return null;
+            const size = c.sqlite3_column_bytes(kv, 1);
+            const ptr = c.sqlite3_column_blob(kv, 1) orelse return null;
+            if (size == 0 or @as([*]const u8, @ptrCast(ptr))[0] != '{' or c.sqlite3_column_int64(kv, 2) == 0) return null;
+            try shadows.put(arena, id, {});
+            try keys.append(arena, .{ .id = id, .key = try arena.dupe(u8, key) });
+        }
+        if (rc != c.SQLITE_DONE) return Error.BackendError;
+        if (try self.hasTable("job_history")) {
+            const ids = try self.prepare("SELECT job_id FROM job_history WHERE job_id >= 0");
+            defer _ = c.sqlite3_finalize(ids);
+            rc = c.sqlite3_step(ids);
+            while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(ids)) {
+                const id: u64 = @intCast(c.sqlite3_column_int64(ids, 0));
+                if (!shadows.contains(id)) try keys.append(arena, .{ .id = id });
+            }
+            if (rc != c.SQLITE_DONE) return Error.BackendError;
+        }
+        std.sort.pdq(Key, keys.items, page.ascending, struct {
+            fn lessThan(ascending: bool, left: Key, right: Key) bool {
+                return if (ascending) left.id < right.id else left.id > right.id;
+            }
+        }.lessThan);
+        var selected = keys.items;
+        if (page.limit > 0) {
+            selected = selected[@min(std.math.lossyCast(usize, page.start), selected.len)..];
+            selected = selected[0..@min(std.math.lossyCast(usize, page.limit), selected.len)];
+        }
+        const result = try arena.alloc(ds.HistoryJob, selected.len);
+        for (selected, result) |entry, *job| {
+            const key = entry.key orelse try std.fmt.allocPrint(arena, "{X:0>6}", .{entry.id});
+            job.* = .{ .key = key, .val = (try self.getRecord(arena, "history", key)) orelse return Error.BackendError };
+        }
+        return result;
+    }
+
     /// True when the database has a table named `name`. Distinguishes a fresh
     /// phobos database from a failing read of a migrated Moonraker table.
     fn hasTable(self: *SqliteStore, name: []const u8) Error!bool {
@@ -424,6 +477,7 @@ pub const SqliteStore = struct {
         .deleteItem = vtDeleteItem,
         .listNamespaces = vtListNamespaces,
         .getNamespace = vtGetNamespace,
+        .getHistoryPage = vtGetHistoryPage,
     };
 
     fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
@@ -443,6 +497,9 @@ pub const SqliteStore = struct {
     }
     fn vtGetNamespace(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8) Error!json.Value {
         return getNamespace(@ptrCast(@alignCast(ctx)), arena, namespace);
+    }
+    fn vtGetHistoryPage(ctx: *anyopaque, arena: std.mem.Allocator, page: ds.HistoryPage) Error!?[]ds.HistoryJob {
+        return getHistoryPage(@ptrCast(@alignCast(ctx)), arena, page);
     }
 };
 
@@ -685,6 +742,117 @@ fn createJobHistory(s: *SqliteStore) !void {
         \\ (2,'me','b.gcode','cancelled',300.0,350.0,40.0,50.0,10.0,NULL,'[]','default'),
         \\ (-5,'me','c.gcode','completed',1.0,2.0,1.0,1.0,0.0,NULL,'[]','default');
     );
+}
+
+test "SqliteStore history pages preserve namespace ordering overrides and filters" {
+    const HistoryCtx = @import("../components/history.zig").HistoryCtx;
+    const history = @import("../components/history.zig");
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"override.gcode\",\"metadata\":{},\"start_time\":250,\"end_time\":300}", .{});
+    try s.insertItem(a, "history", "000001", value);
+    try s.insertItem(a, "history", "000003", value);
+    var bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var ctx: HistoryCtx = .{ .clock_io = testing.io, .store = s.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    var fallback_vtable = SqliteStore.vtable;
+    fallback_vtable.getHistoryPage = null;
+    var fallback = ctx;
+    fallback.store.vtable = &fallback_vtable;
+    for ([_][]const u8{
+        "{}",                                          "{\"limit\":1,\"order\":\"asc\"}", "{\"limit\":1,\"start\":1}",
+        "{\"limit\":1,\"start\":-20}",                 "{\"limit\":0,\"start\":1}",       "{\"limit\":-1,\"start\":1}",
+        "{\"since\":100}",                             "{\"before\":350}",                "{\"since\":0,\"before\":400,\"order\":\"asc\"}",
+        "{\"limit\":1,\"start\":9223372036854775807}",
+    }) |input| {
+        const params = try json.parseFromSliceLeaky(json.Value, a, input, .{});
+        const expected = try history.handleList(&fallback, params, a);
+        const actual = try history.handleList(&ctx, params, a);
+        try testing.expectEqualStrings(try json.Stringify.valueAlloc(a, expected, .{}), try json.Stringify.valueAlloc(a, actual, .{}));
+    }
+    try s.insertItem(a, "history", "3", value);
+    try testing.expect((try s.getHistoryPage(a, .{ .limit = 20, .start = 0, .ascending = false })) == null);
+    try testing.expectEqualStrings(try json.Stringify.valueAlloc(a, try history.handleList(&fallback, .null, a), .{}), try json.Stringify.valueAlloc(a, try history.handleList(&ctx, .null, a), .{}));
+    _ = try s.deleteItem(a, "history", "3");
+    try s.insertItem(a, "history", "000004", .null);
+    try testing.expect((try s.getHistoryPage(a, .{ .limit = 20, .start = 0, .ascending = false })) == null);
+    try testing.expectEqualStrings(try json.Stringify.valueAlloc(a, try history.handleList(&fallback, .null, a), .{}), try json.Stringify.valueAlloc(a, try history.handleList(&ctx, .null, a), .{}));
+    try s.execSql("INSERT INTO namespace_store VALUES ('history','000005',x'7b00');");
+    try testing.expectError(Error.BackendError, history.handleList(&ctx, .null, a));
+}
+
+test "SqliteStore history pages release every partial request allocation" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
+        fn run(alloc: std.mem.Allocator, store: *SqliteStore) !void {
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            defer arena.deinit();
+            const page = (try store.dataStore().getHistoryPage(arena.allocator(), .{ .limit = 1, .start = 1, .ascending = true })).?;
+            try testing.expectEqual(@as(usize, 1), page.len);
+            try testing.expectEqualStrings("000002", page[0].key);
+        }
+    }.run, .{&s});
+}
+
+test "fuzz SqliteStore history pages match namespace pagination" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var bits: [8]u8 = undefined;
+            smith.bytesWithHash(&bits, 0);
+            var s = try SqliteStore.open(testing.io, ":memory:");
+            defer s.deinit();
+            try createJobHistory(&s);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const job = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"new.gcode\",\"metadata\":{\"layers\":20}}", .{});
+            if (bits[0] & 1 != 0) try s.insertItem(a, "history", "000001", job);
+            try s.insertItem(a, "history", if (bits[0] & 2 != 0) "000003" else "3", if (bits[0] & 4 != 0) job else .null);
+            var params: json.ObjectMap = .empty;
+            try params.put(a, "limit", .{ .integer = @as(i64, bits[1] % 7) - 2 });
+            try params.put(a, "start", .{ .integer = @as(i64, bits[2] % 7) - 2 });
+            try params.put(a, "order", .{ .string = if (bits[3] & 1 == 0) "asc" else "desc" });
+            if (bits[4] & 1 != 0) try params.put(a, "since", .{ .integer = bits[5] });
+            const history = @import("../components/history.zig");
+            var bus: @import("../server/notify.zig").NotifyBus = undefined;
+            var ctx: history.HistoryCtx = .{ .clock_io = testing.io, .store = s.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+            var fallback_vtable = SqliteStore.vtable;
+            fallback_vtable.getHistoryPage = null;
+            var fallback = ctx;
+            fallback.store.vtable = &fallback_vtable;
+            const expected = try history.handleList(&fallback, .{ .object = params }, a);
+            const actual = try history.handleList(&ctx, .{ .object = params }, a);
+            try testing.expectEqualStrings(try json.Stringify.valueAlloc(a, expected, .{}), try json.Stringify.valueAlloc(a, actual, .{}));
+        }
+    }.run, .{});
+}
+
+test "SqliteStore JSON reads own their bytes without a retained encoded copy" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    var seed = std.heap.ArenaAllocator.init(testing.allocator);
+    defer seed.deinit();
+    const a = seed.allocator();
+    var payload: [64 * 1024]u8 = undefined;
+    @memset(&payload, 'x');
+    var record: json.ObjectMap = .empty;
+    try record.put(a, "payload", .{ .string = &payload });
+    try s.insertItem(a, "test", "large", .{ .object = record });
+    var tracked = testing.FailingAllocator.init(testing.allocator, .{});
+    var request = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer request.deinit();
+    const result = (try s.getItem(request.allocator(), "test", "large")).?;
+    try s.insertItem(a, "test", "large", .{ .string = "replacement" });
+    try testing.expectEqualStrings(&payload, result.object.get("payload").?.string);
+    const retained = tracked.allocated_bytes - tracked.freed_bytes;
+    std.debug.print("large database read retained request storage: {d} bytes\n", .{retained});
+    try testing.expect(retained < 3 * payload.len);
 }
 
 test "SqliteStore: migrated job_history stays visible beside new KV jobs" {

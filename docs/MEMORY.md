@@ -156,9 +156,27 @@ They do not forbid dynamic allocation in this daemon. The local checker did
 not compile with Zig 0.17 because it references the removed `asterisk_asterisk`
 token; this review applies the handbook manually and makes no compliance claim.
 
-The next place to measure is history pagination: `loadAllJobs` reads and parses
-the entire namespace before the list handler filters, sorts and returns a page.
-Pushing selection into the store could reduce peak memory for large histories,
-but needs matching SQLite/file-backend ordering and pagination tests. Smaller
-thread stack reservations alone would reduce virtual address space, not prove
-lower RSS. Neither change is included in these temperature-store measurements.
+## History pages and SQLite reads
+
+Unfiltered SQLite history pages now select and order scalar job IDs before
+decoding the requested records. KV records still override migrated table rows.
+Noncanonical keys, non-object records and time-filtered queries use the existing
+namespace implementation, as does the file backend. Their ordering, offset,
+limit and error behavior remains covered against that implementation.
+
+SQLite JSON reads also decode the current column directly, before the statement
+is finalized. The JSON value owns its strings, so retaining a second encoded
+record is unnecessary. A regression overwrites the database record after the
+read and verifies that the returned payload remains intact.
+
+| Native allocation fixture | Before retained bytes ↓ | After retained bytes ↓ |
+| --- | ---: | ---: |
+| 20-job page from 200 KV jobs, 4 KiB metadata each | 1,396,192 | 235,698 |
+| Read one 64 KiB JSON payload | 393,638 | 149,834 |
+
+These are x86-64 request-arena allocations measured with
+`std.testing.FailingAllocator`, not process RSS. Both fixtures failed their
+allocation budgets before the change. Pagination tests compare the real history
+handler with the namespace path, including overrides, filters, unusual keys,
+negative/large offsets and unlimited requests. Allocation-failure injection and
+a bounded differential fuzzer cover the optimized store operation.

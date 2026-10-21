@@ -49,9 +49,9 @@ case "$COMMAND" in
         [[ ${PERF_FAKE_LOAD_FAIL:-0} == 0 ]] || exit 43
         if [[ $1 == attack ]]; then
             [[ "$*" == *-targets=* ]] || cat >/dev/null
-            printf '{"throughput":12,"success":0.5,"latencies":{"50th":1000000,"99th":2000000}}\n'
+            printf '{"throughput":12,"requests":12,"success":%s,"latencies":{"50th":1000000,"99th":2000000}}\n' "${PERF_FAKE_SUCCESS:-0.5}"
         elif [[ "$*" == *-type=json* ]]; then
-            cat
+            if [[ $# -gt 2 ]]; then cat "${@: -1}"; else cat; fi
         else
             [[ $# -ne 2 ]] || cat >/dev/null
             printf 'mock report\n'
@@ -130,11 +130,23 @@ rg -q '^klippy_uds_address: .scratch/bench-.*/k.sock$' "$BENCH_DIR/phobos.conf"
 rg -q 'thru=12 succ=50.0% p50=1.00ms p99=2.00ms' "$BENCH_DIR/report.txt"
 check_cleanup
 
-bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/profile.log"
+PERF_FAKE_SUCCESS=1 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/profile.log"
 PROFILE_DIR=$(awk '$1 == "captures:" {print $2}' "$TEST_DIR/profile.log")
 [[ -s "$PROFILE_DIR/flamegraph.svg" && -f "$PROFILE_DIR/phobos.perf" ]]
+[[ -s "$PROFILE_DIR/report.txt" && -s "$PROFILE_DIR/folded.txt" && -s "$PROFILE_DIR/stacks.txt" ]]
+jq -e '.success == 1 and .requests == 12' "$PROFILE_DIR/vegeta.json" >/dev/null
 check_cleanup
-USE_BPFTRACE=1 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/bpf.log"
+USE_BPFTRACE=1 PERF_FAKE_SUCCESS=1 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/bpf.log"
+check_cleanup
+if PERF_FAKE_SUCCESS=0.5 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/profile-errors.log" 2>&1; then
+    echo 'profile accepted failed requests' >&2
+    exit 1
+fi
+check_cleanup
+if PERF_FAKE_LOAD_FAIL=1 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/profile-load-fail.log" 2>&1; then
+    echo 'profile ignored a failed load process' >&2
+    exit 1
+fi
 check_cleanup
 
 bash scripts/measure-memory.sh > "$TEST_DIR/memory.log"

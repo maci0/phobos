@@ -15,7 +15,7 @@ limits are in [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) and
 | `compare.sh` | `compare.sh <hostA:portA> <labelA> <hostB:portB> <labelB> [rate] [dur]`: side-by-side run. |
 | `bench_local.sh` | Builds an isolated ReleaseFast binary, runs both servers against `klippy_stub.py`, and writes a report below `.scratch/bench-*/`. |
 | `klippy_stub.py` | Answers the Klipper API protocol from canned data so Klippy latency drops out of the measurement. |
-| `profile.sh` | Builds with `-Doptimize=ReleaseFast -Dprofile` (unstripped, frame pointers), loads it through the stub, and renders a `perf` (or `USE_BPFTRACE=1` bpftrace) on-CPU flamegraph. |
+| `profile.sh` | Builds with `-Doptimize=ReleaseSmall -Dprofile` (release LTO policy, symbols, frame pointers), loads it through the stub, and renders a `perf` (or `USE_BPFTRACE=1` bpftrace) on-CPU flamegraph. |
 | `plot_perf.py` | Renders throughput, p99 latency, process RSS and CPU from explicit measured trial JSON. Writes only the selected output directory. |
 
 Requires [`vegeta`](https://github.com/tsenart/vegeta) for load and `perf` or
@@ -46,7 +46,12 @@ tools/perf_harness/loadtest.sh 127.0.0.1:7140 local 200 15s
 
 `profile.sh` accepts endpoint, rate, seconds and an optional SVG output path. The
 default SVG stays in the run directory. `USE_BPFTRACE=1` selects a timed bpftrace
-capture. `loadtest.sh` keeps its binary capture below `.scratch/load-*/`; its
+capture. Profiling starts after two seconds of load warmup, waits for the load
+process to finish and rejects failed or empty request sets. The capture includes
+the Vegeta JSON report, folded stacks and, with perf, raw stacks and a flat CPU
+report. Perf samples user-space cycles; frame-pointer profiling changes code
+generation and is separate from uninstrumented latency/CPU comparisons.
+`loadtest.sh` keeps its binary capture below `.scratch/load-*/`; its
 label is display text, not a filename.
 
 `plot_perf.py --input <capture>/summary.json --output-dir <capture>/plots` reads

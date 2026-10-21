@@ -1087,3 +1087,47 @@ cross-compilation does not wait on unrelated test compilation. Packaging has an
 explicit dependency on all suites as well as builds and native smoke checks;
 any failure still blocks both the combined bundle and tag publication.
 Actionlint validates the revised dependency graph.
+
+## 2026-10-21: history-page and encoded-record allocation reduction
+
+Continuing the user's memory/performance goal, the copied printer database has
+266 legacy history rows. An exploratory optimized, symbolized host CPU profile
+of the independent read mix found allocation, resizing and copying dominating
+the populated-history path. Unfiltered SQLite history pages now order scalar
+IDs first and decode only selected records. KV shadows preserve migrated-row
+precedence. Noncanonical/non-object KV data, time filters and other backends
+retain the namespace path. SQLite record reads decode the column before
+finalization rather than retaining a duplicate encoded blob; the returned JSON
+owns its strings. No database schema or wire format changed.
+
+Both allocation regressions failed before the fixes. The 20-job page from 200
+KV jobs with 4 KiB payloads retained 1,396,192 bytes before and 235,698 after;
+one 64 KiB JSON read retained 393,638 before and 149,834 after. These are native
+request-arena bytes, not RSS. The SQLite read fixture verifies owned payloads
+after replacing the database record. Real-handler differential tests exercise
+legacy/KV precedence, filters, both orders, negative/large offsets, unlimited
+queries, noncanonical keys, non-object values and corrupt JSON. The new store
+operation also passes allocation-failure injection and bounded differential
+fuzzing. Debug and ReleaseSafe each pass 1,725 tests, one real-Klippy skip and
+zero failures, with 326 fuzz harnesses. API registration remains 123/123
+endpoints, 130/130 methods and 27/27 notifications.
+
+The profiling build flag previously suppressed LTO with symbols. It now retains
+the selected release LTO policy, including the existing mixed softfp exception;
+Debug still disables LTO. Four build-policy tests, including two fuzz harnesses,
+pass across all optimization modes. The profile helper now uses ReleaseSmall,
+user-space cycle sampling, a load warmup, load-process completion and a nonempty
+100%-success gate. It retains load reports, flat CPU reports, raw/folded stacks
+and the SVG. Smoke tests cover both profiler branches and rejection of failed
+loads/requests; ShellCheck and the full smoke suite pass.
+
+A private Forge-X Moonraker smoke probe reached Klippy-ready on loopback 7126
+and returned 20 history records using a copy of the existing probe database.
+Its RSS was about 35 MiB and board available memory remained above 16 MiB.
+The probe used owned config/log/gcode directories, no update components and
+disabled queue transitions. Its chroot Python symlink initially prevented the
+owned-process stop check; resolving that symlink inside the chroot corrected
+cleanup and the probe stopped. Production phobos stayed ready on 7125 and the
+boot ID was unchanged. `/proc/config.gz` reports `CONFIG_PERF_EVENTS` disabled,
+so hardware comparisons use process CPU/RSS counters; resolved CPU sampling is
+performed on the host. Final matched load measurements follow these fixes.

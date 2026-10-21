@@ -273,6 +273,9 @@ pub fn deletePath(
 /// A DataStore is a backend-agnostic handle to a namespaced JSON store. Each
 /// backend (SQLite / file) provides one via `dataStore()`. All ops allocate
 /// results in the supplied `arena`.
+pub const HistoryJob = struct { key: []const u8, val: json.Value };
+pub const HistoryPage = struct { limit: i64, start: i64, ascending: bool };
+
 pub const VTable = struct {
     getItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value,
     insertItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void,
@@ -280,6 +283,8 @@ pub const VTable = struct {
     deleteItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value,
     listNamespaces: *const fn (ctx: *anyopaque, arena: std.mem.Allocator) Error![][]const u8,
     getNamespace: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8) Error!json.Value,
+    /// Optional unfiltered history page. Null selects the namespace fallback.
+    getHistoryPage: ?*const fn (ctx: *anyopaque, arena: std.mem.Allocator, page: HistoryPage) Error!?[]HistoryJob = null,
 };
 
 pub const DataStore = struct {
@@ -303,6 +308,10 @@ pub const DataStore = struct {
     }
     pub fn getNamespace(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8) Error!json.Value {
         return self.vtable.getNamespace(self.ctx, arena, namespace);
+    }
+    pub fn getHistoryPage(self: DataStore, arena: std.mem.Allocator, page: HistoryPage) Error!?[]HistoryJob {
+        const get_page = self.vtable.getHistoryPage orelse return null;
+        return get_page(self.ctx, arena, page);
     }
 };
 
