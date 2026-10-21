@@ -191,3 +191,11 @@ history does not prepare a SQL JSON-validation expression. Scalar ID storage
 still grows with total job count; filtered and unlimited responses can still
 decode the full history. These changes reduce ordinary page cost without
 changing the API's unlimited-query behavior.
+
+The copied printer history also exposed nullable SQL end times being read as
+zero. The row mapper now preserves `NULL`, which also lets the existing `before`
+filter exclude unfinished rows correctly. The final ARM probe matches Forge-X
+Moonraker for all 266 copied jobs, seven null end times, both page orders,
+offsets, time filters and a single unfinished job. The
+[parity record](perf/history-memory-20261021/nullable-history-parity.json)
+contains counts and response hashes without publishing job data.

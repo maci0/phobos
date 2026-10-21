@@ -1158,3 +1158,31 @@ input and matching-free rules informed this review; syntax findings were not
 treated as confirmed bugs or a compliance score. Memory documentation records
 the checker update, allocation measurements and the remaining full-history
 fallback costs. No unrelated rule rewrites were made.
+
+## 2026-10-21: preserve nullable migrated history end times
+
+The real-printer comparison found two records in the first 20 whose SQL NULL
+end times became zero. The shared SQLite row mapper now checks the column's
+storage class before reading a double. The existing minimal SQLite binding
+adds `SQLITE_NULL` and `sqlite3_column_type`, matching the vendored header at
+lines 5408 and 5638. No schema or stored value changed.
+
+The new regression failed with `0` instead of `null` before the fix. It checks
+NULL, real zero and a fractional timestamp through single reads, namespace
+reads, pages and the public history filter handler. The bounded differential
+fuzzer now includes nullable times and `before` filters. Debug and ReleaseSafe
+each pass 1,726 tests, one real-Klippy skip and zero failures, with 326 fuzz
+harnesses. Formatting and API coverage pass (123/123 endpoints, 130/130 methods,
+27/27 notifications). The host Debug executable was restored after the isolated
+Cortex-A7 ReleaseSmall build.
+
+The final static ARM binary has SHA256
+`c3afd1bcdb905ccb2661689d2e1762550c4dc67fa3670ecfd61bf0c5388cb755`.
+Private chroot probes on loopback 7126 match the actual Forge-X Moonraker in
+seven semantic response comparisons: default and ascending pages, a huge
+offset, `since`, `before`, all 266 jobs and one unfinished job. All seven null
+end times survive; `before` returns 259 completed rows. The portable parity
+record stores counts and response hashes, not private job payloads. Both
+probes stopped, production remained ready with zero heater targets, and the
+board boot ID stayed unchanged. A final load comparison follows this fix;
+the earlier optimized host CPU profile remains tied to commit a6a3aef.

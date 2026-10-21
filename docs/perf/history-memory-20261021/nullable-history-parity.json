@@ -1,0 +1,74 @@
+{
+  "candidate_binary_sha256": "c3afd1bcdb905ccb2661689d2e1762550c4dc67fa3670ecfd61bf0c5388cb755",
+  "comparison": "same object keys, list order, string/null/bool values and numeric values; integer and float JSON numbers compare numerically; bool is not a number",
+  "cases": [
+    {
+      "case": "default",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "2a2e8828b88787e59d0237b7097d4f4d297e27459c6f80159d9b95cb66350785",
+        "candidate": "8cb14943bd08bd1fbd1046d36735fd03146e4dfc8d592afe8e81aa54fc2ce979"
+      },
+      "count": 20,
+      "null_end_times": 2
+    },
+    {
+      "case": "ascending",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "25cbc29555e451840f50ca894cdc07f4c04f20231f588a4584235ef9f5045119",
+        "candidate": "b7ade7ecbe17253b1e6a2df9fb72cbe4591d8c3fd7cd07ceb3f157707fecdfc4"
+      },
+      "count": 7,
+      "null_end_times": 0
+    },
+    {
+      "case": "large-offset",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "e38784f237f07ba91756baff3e58d167cdff830ae9748395369aab95c21d3e4e",
+        "candidate": "e38784f237f07ba91756baff3e58d167cdff830ae9748395369aab95c21d3e4e"
+      },
+      "count": 0,
+      "null_end_times": 0
+    },
+    {
+      "case": "filtered",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "2a2e8828b88787e59d0237b7097d4f4d297e27459c6f80159d9b95cb66350785",
+        "candidate": "8cb14943bd08bd1fbd1046d36735fd03146e4dfc8d592afe8e81aa54fc2ce979"
+      },
+      "count": 20,
+      "null_end_times": 2
+    },
+    {
+      "case": "before",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "5fa87e3abe0f38ecc803870dbc52b4c1fbf3fc368d17e1ca5ad77ab5bd50e2de",
+        "candidate": "4fb66a2b32f462873f3104d9adbb9d5ab2c27ff1c7247b47afccaa4770ac24a1"
+      },
+      "count": 259,
+      "null_end_times": 0
+    },
+    {
+      "case": "all",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "0ec143767df88340d521addcba66e56703b72eaba274c4dbb4a58920400a745e",
+        "candidate": "3d660d7b6b70fdf891169bbe834b11e956983ff134be6f0b3bb60619ececd674"
+      },
+      "count": 266,
+      "null_end_times": 7
+    },
+    {
+      "case": "single",
+      "semantic_match": true,
+      "source_sha256": {
+        "moonraker": "e081e9d1e6aa7a82156255eac8d014374e16427ff14b2fb818159d32f3bc30f0",
+        "candidate": "9c73b3c80d10d635524fa493b484e5817cbc1bbba19837efbed67b460c399b78"
+      }
+    }
+  ]
+}

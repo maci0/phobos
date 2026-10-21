@@ -553,7 +553,7 @@ fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!?MappedJob {
     try job.put(arena, "status", .{ .string = try colText(arena, stmt, 3) });
     try job.put(arena, "user", .{ .string = try colText(arena, stmt, 1) });
     try job.put(arena, "start_time", .{ .float = c.sqlite3_column_double(stmt, 4) });
-    try job.put(arena, "end_time", .{ .float = c.sqlite3_column_double(stmt, 5) });
+    try job.put(arena, "end_time", if (c.sqlite3_column_type(stmt, 5) == c.SQLITE_NULL) .null else .{ .float = c.sqlite3_column_double(stmt, 5) });
     try job.put(arena, "print_duration", .{ .float = c.sqlite3_column_double(stmt, 6) });
     try job.put(arena, "total_duration", .{ .float = c.sqlite3_column_double(stmt, 7) });
     try job.put(arena, "filament_used", .{ .float = c.sqlite3_column_double(stmt, 8) });
@@ -785,6 +785,33 @@ test "SqliteStore history pages preserve namespace ordering overrides and filter
     try testing.expectError(Error.BackendError, history.handleList(&ctx, .null, a));
 }
 
+test "SqliteStore history preserves nullable end times" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var bus: @import("../server/notify.zig").NotifyBus = undefined;
+    var ctx: @import("../components/history.zig").HistoryCtx = .{ .clock_io = testing.io, .store = s.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    const before = try json.parseFromSliceLeaky(json.Value, a, "{\"before\":350,\"limit\":0}", .{});
+    for ([_]struct { sql: []const u8, expected: json.Value }{
+        .{ .sql = "NULL", .expected = .null },
+        .{ .sql = "0.0", .expected = .{ .float = 0 } },
+        .{ .sql = "350.25", .expected = .{ .float = 350.25 } },
+    }) |case| {
+        try s.execSql(try std.fmt.allocPrintSentinel(a, "UPDATE job_history SET end_time={s} WHERE job_id=2", .{case.sql}, 0));
+        const direct = (try s.getItem(a, "history", "000002")).?.object.get("end_time").?;
+        const namespace = (try s.getNamespace(a, "history")).object.get("000002").?.object.get("end_time").?;
+        const page = (try s.getHistoryPage(a, .{ .limit = 1, .start = 0, .ascending = false })).?[0].val.object.get("end_time").?;
+        for ([_]json.Value{ direct, namespace, page }) |actual| {
+            try testing.expectEqualStrings(try json.Stringify.valueAlloc(a, case.expected, .{}), try json.Stringify.valueAlloc(a, actual, .{}));
+        }
+        const filtered = try @import("../components/history.zig").handleList(&ctx, before, a);
+        try testing.expectEqual(@as(i64, if (std.mem.eql(u8, case.sql, "0.0")) 2 else 1), filtered.object.get("count").?.integer);
+    }
+}
+
 test "SqliteStore history pages release every partial request allocation" {
     var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
@@ -810,9 +837,11 @@ test "fuzz SqliteStore history pages match namespace pagination" {
             var s = try SqliteStore.open(testing.io, ":memory:");
             defer s.deinit();
             try createJobHistory(&s);
+            if (bits[5] & 1 != 0) try s.execSql("UPDATE job_history SET end_time=NULL WHERE job_id=2");
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
             const a = arena.allocator();
+            if (bits[5] & 1 != 0) try testing.expect((try s.getItem(a, "history", "000002")).?.object.get("end_time").? == .null);
             const job = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"new.gcode\",\"metadata\":{\"layers\":20}}", .{});
             if (bits[0] & 1 != 0) try s.insertItem(a, "history", "000001", job);
             try s.insertItem(a, "history", if (bits[0] & 2 != 0) "000003" else "3", if (bits[0] & 4 != 0) job else .null);
@@ -821,6 +850,7 @@ test "fuzz SqliteStore history pages match namespace pagination" {
             try params.put(a, "start", .{ .integer = @as(i64, bits[2] % 7) - 2 });
             try params.put(a, "order", .{ .string = if (bits[3] & 1 == 0) "asc" else "desc" });
             if (bits[4] & 1 != 0) try params.put(a, "since", .{ .integer = bits[5] });
+            if (bits[6] & 1 != 0) try params.put(a, "before", .{ .integer = 400 });
             const history = @import("../components/history.zig");
             var bus: @import("../server/notify.zig").NotifyBus = undefined;
             var ctx: history.HistoryCtx = .{ .clock_io = testing.io, .store = s.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
