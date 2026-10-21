@@ -1,0 +1,33 @@
+{
+  "source_commit": "296526ed6f589d81b7e73e385f0ed23d2f684c98",
+  "binaries": {
+    "before": {
+      "sha256": "634ecada188b408ac2179db06d1d2157f2ec8b15152547985a4ccf7edab4ca0f",
+      "bytes": 2752024
+    },
+    "after": {
+      "sha256": "9150e916d8ec0ab704003e4f7ab2da12046e2cb3f7d3cfac53b4f37decd9bb19",
+      "bytes": 2751384
+    }
+  },
+  "duration_seconds": 6,
+  "repetitions": 3,
+  "workers": 8,
+  "server_cpus": [
+    2,
+    4
+  ],
+  "generator_cpus": [
+    8,
+    10
+  ],
+  "stub_cpu": 6,
+  "controller_cpus": [
+    12,
+    14
+  ],
+  "seed_sha256": "efb48c2e2a3606d18a55ba8d96e546e283926a3432ae5449d053135dff175079",
+  "timestamp_utc": "2026-10-21T12:42:43Z",
+  "clock_ticks_per_second": 100,
+  "vegeta": "Version: 12.13.0\nCommit: 507c4f0\nRuntime: go1.25.5 X:nodwarf5 linux/amd64\nDate: NOTSET"
+}

@@ -1,0 +1,68 @@
+{
+  "seed_sha256": "d8c08f1cbe34f38851f85f554afc70222e5ee358ed203dfdd617f72636a1d010",
+  "legacy_rows": 267,
+  "kv_overrides": 17,
+  "kv_only_rows": 1,
+  "cases": {
+    "r3:limit=20": {
+      "count": 20,
+      "sha256": "a34e1cd1455d3629d5fc5c368538f65660ad42d32145fb67de4687ad557ccc02",
+      "matches": true
+    },
+    "r3:limit=7&start=3&order=asc": {
+      "count": 7,
+      "sha256": "e20a5011502ef3f38b677f755144445928bb901d001209a208b17d138178c453",
+      "matches": true
+    },
+    "r3:limit=0": {
+      "count": 268,
+      "sha256": "79aba33cffe96e15fb25699b696b26ff44bb946a257bfaf160e0b700f723fe16",
+      "matches": true
+    },
+    "r3:limit=20&since=0": {
+      "count": 20,
+      "sha256": "a34e1cd1455d3629d5fc5c368538f65660ad42d32145fb67de4687ad557ccc02",
+      "matches": true
+    },
+    "r3:limit=0&before=2000000000": {
+      "count": 243,
+      "sha256": "cc68c6e46bcd19ee37c47859868505d5d516c50edfd1b654adcdecc75fb32ed3",
+      "matches": true
+    },
+    "r3:limit=1&start=9223372036854775807": {
+      "count": 0,
+      "sha256": "f52e881166fe762b7bc62757d1952deaa7876f4ce737933c0177d47651188938",
+      "matches": true
+    },
+    "r4:limit=20": {
+      "count": 20,
+      "sha256": "a34e1cd1455d3629d5fc5c368538f65660ad42d32145fb67de4687ad557ccc02",
+      "matches": true
+    },
+    "r4:limit=7&start=3&order=asc": {
+      "count": 7,
+      "sha256": "e20a5011502ef3f38b677f755144445928bb901d001209a208b17d138178c453",
+      "matches": true
+    },
+    "r4:limit=0": {
+      "count": 268,
+      "sha256": "79aba33cffe96e15fb25699b696b26ff44bb946a257bfaf160e0b700f723fe16",
+      "matches": true
+    },
+    "r4:limit=20&since=0": {
+      "count": 20,
+      "sha256": "a34e1cd1455d3629d5fc5c368538f65660ad42d32145fb67de4687ad557ccc02",
+      "matches": true
+    },
+    "r4:limit=0&before=2000000000": {
+      "count": 243,
+      "sha256": "cc68c6e46bcd19ee37c47859868505d5d516c50edfd1b654adcdecc75fb32ed3",
+      "matches": true
+    },
+    "r4:limit=1&start=9223372036854775807": {
+      "count": 0,
+      "sha256": "f52e881166fe762b7bc62757d1952deaa7876f4ce737933c0177d47651188938",
+      "matches": true
+    }
+  }
+}

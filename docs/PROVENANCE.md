@@ -1322,3 +1322,50 @@ and 326 fuzz harnesses. Portable and Cortex-A7 ReleaseSmall builds complete;
 the ARM binary is static ELF32 ARM EABI5 with hard-float ABI. Formatting and
 diff checks pass. Timing, mixed-store and physical validation follow this
 verified source commit. Production remains unchanged.
+
+## 2026-10-21: verify and publish three resumed tuning rounds
+
+The user's three further rounds are complete: scalar key selection `68a36ef`,
+legacy JSON field reservation `720f5c1` and indexed override exclusion
+`296526e`. `docs/PERFORMANCE.md` and `docs/MEMORY.md` distinguish deterministic
+arena reductions from variable CPU, latency and RSS measurements. Retained
+key-index storage falls 186,830 → 95,326 → 43,992 bytes; the separate legacy-row
+fixture falls 858,758 → 517,988. Rejected response-container experiments remain
+recorded above.
+
+Matched ReleaseSmall host runs cover 102 trials and 723,560 requests for these
+three rounds, all successful, with six-query parity preflights at every
+startup. The first R2 KV timing regression is retained alongside its stable
+six-trial repeat. R4 mixed-store CPU medians are equal; latency and RSS
+regressions are retained. The preceding statement-reuse round's 30 trials are
+also archived. Source commits, executable hashes, seed hashes, CPU affinity,
+load reports and full metric ranges are stored under
+`docs/perf/history-tuning-20261021/`. SVG/PNG charts were inspected; all metric
+directions are labeled. These are allocation improvements, not universal CPU,
+RSS or latency wins.
+
+Physical validation runs the four frozen ARM executables in the Forge-X
+chroot, bound only to loopback 7126, against copied data. All 36 trials and
+12,960 requests succeed; all 72 history comparisons match. A report-label bug
+in the scratch harness was fixed, and saved responses were independently
+compared after the completed captures. An additional mixed-store seed initially
+copied stale main-file contents while its edits remained in a WAL sidecar.
+Closing the private SQLite connection before copying and checking the remote
+file hash corrected the harness. The corrected ARM check passes all 12
+comparisons, including wide IDs and 268 expected visible jobs. Neither harness
+failure changed production or required a phobos code change.
+
+The 16 MiB memory floor and ready/idle/zero-target guards remained satisfied.
+Minimum sampled available memory is 57,088 KiB; probes report no swapped pages.
+Existing production swap is reported separately. Owned probes and their
+directory are removed. Final production remains v0.2.1 as PID 2243 with the
+same executable hash and boot ID, ready, print complete and both heater targets
+zero. Port 7126 has no listener. No reboot, printer control, live database
+mutation, swap adjustment or experimental deployment occurred.
+
+Final Debug and ReleaseSafe each pass 1,730 tests, one existing real-Klippy skip,
+zero failures and 326 fuzz harnesses. The host Debug binary is restored after
+cross-compilation. API coverage passes at 123/123 endpoints, 130/130 methods and
+27/27 notifications; the generated table check passes without regeneration.
+Formatting and diff checks pass. `graphify` remains unavailable, so its update
+is skipped and graph output is excluded.

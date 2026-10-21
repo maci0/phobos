@@ -215,3 +215,5 @@ legacy IDs when KV jobs exist. It no longer builds a second in-memory hash map
 of the same IDs. Legacy-only pages retain their simpler ID query. The key-index
 fixture above falls further to 43,992 retained bytes. `%06llX` preserves the
 full signed legacy ID range; KV-only IDs still support unsigned 64-bit values.
+The [matched tuning report](PERFORMANCE.md#further-history-tuning-2026-10-21)
+records host and physical measurements, including timing and RSS regressions.

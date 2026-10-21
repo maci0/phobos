@@ -1,0 +1,22 @@
+{
+  "production_pid": 2243,
+  "production_version": "v0.2.1",
+  "sha256": "5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf",
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "klippy_state": "ready",
+  "failed_components": [],
+  "print_state": "complete",
+  "heater_targets": {
+    "extruder": 0,
+    "heater_bed": 0
+  },
+  "private_port_7126_listening": false,
+  "production_memory": {
+    "VmRSS": "3176 kB",
+    "VmSwap": "984 kB"
+  },
+  "board_memory": {
+    "MemAvailable": "59752 kB",
+    "SwapFree": "2056 kB"
+  }
+}

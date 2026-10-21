@@ -221,3 +221,117 @@ profiles; real-printer load here covers Cortex-A7 only. Historical v0.2.1
 [host](perf/host-v0.2.1/summary.json) and
 [printer](perf/printer-v0.2.1.json) release captures retain their original
 fixtures and version labels. They are not substituted for these runs.
+
+## Further history tuning, 2026-10-21
+
+Three further rounds start from the scoped statement reuse in `8f9bd37`.
+They retain API validation, KV overrides, fallback behavior and request-owned
+JSON. No cache, dependency, schema change or experimental production deployment
+is introduced.
+
+| Round | Source | Native fixture | Before retained bytes ↓ | After retained bytes ↓ |
+| --- | --- | --- | ---: | ---: |
+| R2: scalar KV keys | `68a36ef` | 20 of 1,028 empty KV jobs | 186,830 | 95,326 |
+| R3: reserve legacy fields | `720f5c1` | 200 legacy rows with small metadata | 858,758 | 517,988 |
+| R4: indexed overrides | `296526e` | Same KV fixture as R2 | 95,326 | 43,992 |
+
+These are x86-64 request-arena backing allocations from
+`std.testing.FailingAllocator`, not RSS. The combined key-index reduction is
+76.5%; the separate legacy-row fixture falls 39.7%. Response-object cloning,
+field reservation and response-array reservation did not lower the 200-row
+response fixture's arena backing storage and were discarded.
+
+### Host matched pairs
+
+Portable x86-64 ReleaseSmall builds use the same seed, configuration, routes,
+collectors and CPU affinity within each pair. Each trial lasts six seconds,
+with three alternating before/after repetitions, eight fixed load workers,
+server CPUs 2/4, generator CPUs 8/10 and stub CPU 6. The rich fixture is the
+copied 266-row printer database plus a 64 KiB database payload. The KV fixture
+contains 512 jobs with 1 KiB metadata each; the empty fixture has no history.
+Every startup compares six history queries before timed load. Host CPU uses
+process ticks; p99 includes scheduling. Other host workloads remain active.
+
+| Workload | R2 CPU µs/request ↓ before → after | R3 ↓ before → after | R4 ↓ before → after |
+| --- | ---: | ---: | ---: |
+| Info, 4,000 requests/s | 10.0 → 9.2 | 8.8 → 8.8 | 8.3 → 8.8 |
+| Rich independent mix, 1,200/s | 80.6 → 86.1 | 80.6 → 79.2 | 75.0 → 86.1 |
+| Rich history page, 200/s | 375.0 → 408.3 | 416.7 → 391.7 | 400.0 → 383.3 |
+| KV history page, 50/s | 1,233 → 2,233 | 1,067 → 1,033 | 1,067 → 1,033 |
+| Empty independent mix, 1,200/s | 30.6 → 31.9 | 20.8 → 20.8 | 23.6 → 23.6 |
+
+Values are medians of three trials, not chained estimates across rounds.
+R2's large KV timing regression did not reproduce in a separate matched
+six-trial repeat: CPU 1,200 → 1,167 µs/request and p99 2.41 → 2.36 ms. Both
+captures remain published. R4's mixed fixture overlays 16 legacy jobs with KV
+records and adds a maximum unsigned KV ID. Its six trials report equal median
+CPU of 567 µs/request, with before/after ranges 533–650 and 483–650; median p99
+is 1.46 → 2.07 ms. There is no general latency or CPU speedup claim.
+
+RSS also varies substantially. R4 rich-mix sampled peak RSS medians rise from
+6,744 to 12,880 KiB; its CPU ranges are 75.0–75.0 and 73.6–112.5 µs/request.
+That legacy-only workload retains the same ID query, while the empty control
+has essentially unchanged median CPU. The results describe a contended host,
+including worker-pool residency and timing variation. Arena allocation wins
+do not establish a process-RSS win.
+
+The three new rounds total 102 host trials and 723,560 successful requests,
+including the KV repeat and mixed-store check. The earlier statement-reuse
+round's 30 trials are archived separately as reference evidence.
+
+![Host paired CPU medians and ranges](perf/history-tuning-20261021/host-cpu.svg)
+
+### Forge-X validation
+
+The four frozen Cortex-A7 ReleaseSmall builds run sequentially inside the
+Forge-X chroot on `127.0.0.1:7126`. Each startup restores the same private
+database copy. Three repetitions alternate profile order; each workload lasts
+eight seconds after an eight-second idle period. Two load workers, at most
+eight, send GET requests through SSH forwarding and WiFi. Process counters use
+100 Hz ticks and 250 ms samples. CPU includes daemon background work; latency
+includes transport and host scheduling. The kernel lacks `CONFIG_PERF_EVENTS`.
+
+| Workload | R1 reference CPU µs/request ↓ | R2 ↓ | R3 ↓ | R4 ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Info, 50 requests/s | 500 | 525 | 500 | 525 |
+| Independent mix, 75/s | 3,267 | 3,433 | 3,317 | 3,400 |
+| History page, 10/s | 14,625 | 15,125 | 14,625 | 14,375 |
+
+| Workload | R1 median sampled peak RSS KiB ↓ | R2 ↓ | R3 ↓ | R4 ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Info | 3,352 | 3,388 | 3,316 | 3,488 |
+| Independent mix | 3,472 | 3,412 | 3,388 | 3,488 |
+| History | 3,444 | 3,384 | 3,356 | 3,448 |
+
+All 36 trials and 12,960 requests succeed. CPU and RSS ranges overlap. R4's mix
+CPU median is 4.1% higher than R1, and its measured mix p99 rises from 41.15 to
+78.75 ms. The latency change is observed; its cause is unproven. The accepted
+benefit is lower request-arena retention, with no claim of uniformly faster
+execution, lower RSS or improved WiFi latency. Throughput is rate-limited and
+all offered requests succeed, so these are not saturation rankings.
+
+![Printer CPU medians and ranges](perf/history-tuning-20261021/printer-cpu.svg)
+
+All 72 history comparisons match across the four builds and three repetitions:
+ordinary/ascending pages, unlimited results, large offsets and both time
+filters. A separate ARM check uses 267 legacy rows, 17 KV overrides and one
+KV-only row. All 12 before/after comparisons match, including maximum signed
+legacy IDs, maximum unsigned KV IDs and the expected 268 visible jobs. Only
+counts and hashes from this synthetic overlay are published.
+
+Minimum sampled available memory is 57,088 KiB, above the 16 MiB stop floor.
+No probe reports swapped pages. Production has pre-existing swap and finishes
+at VmRSS/VmSwap 3,176/984 KiB, with board available memory 59,752 KiB and free
+swap 2,056 KiB. No swap controls changed. The probes are stopped, port 7126 has
+no listener, and the owned probe directory is removed. Production remains
+v0.2.1, PID 2243, with unchanged executable SHA256 and boot ID, Klippy ready,
+print complete and both heater targets zero. No printer control, live database
+write or production deployment occurred.
+
+[Raw trials, environments, hashes and summaries](perf/history-tuning-20261021/summary.json)
+retain all repetitions, including regressions. Neighboring files contain each
+round's host trials, the physical trials, parity records and
+[final printer state](perf/history-tuning-20261021/printer-final-state.json).
+CPU, RSS and latency are lower-is-better metrics; throughput is
+higher-is-better. Whiskers show full trial ranges, not confidence intervals.
+No isolated-host result, saturation limit or long soak is claimed.

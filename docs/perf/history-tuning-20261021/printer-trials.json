@@ -1,0 +1,2882 @@
+[
+  {
+    "backend": "r1",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1777346825,
+        "mean": 4443367,
+        "50th": 3614107,
+        "90th": 6396875,
+        "95th": 7556616,
+        "99th": 16106850,
+        "max": 35512723,
+        "min": 2752605
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:44:39.218936559+08:00",
+      "latest": "2026-10-21T20:44:47.199678393+08:00",
+      "end": "2026-10-21T20:44:47.215034573+08:00",
+      "duration": 7980741834,
+      "wait": 15356180,
+      "requests": 400,
+      "rate": 50.120653984307296,
+      "throughput": 50.024399313222325,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.2,
+      "cpu_percent_one_core": 2.383790226456102,
+      "cpu_us_per_request": 500.0,
+      "before": {
+        "uptime": 270851.79,
+        "ticks": 57,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58204,
+        "SwapFree": 1360
+      },
+      "after": {
+        "uptime": 270860.18,
+        "ticks": 77,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58180,
+        "SwapFree": 1360
+      },
+      "rss_kib_max": 3352,
+      "threads_max": 12,
+      "available_min_kib": 58288,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r1/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 5884846235,
+        "mean": 9808077,
+        "50th": 6142536,
+        "90th": 22326081,
+        "95th": 25943080,
+        "99th": 41150306,
+        "max": 58402173,
+        "min": 2675590
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:44:48.495548143+08:00",
+      "latest": "2026-10-21T20:44:56.481766545+08:00",
+      "end": "2026-10-21T20:44:56.500773577+08:00",
+      "duration": 7986218402,
+      "wait": 19007032,
+      "requests": 600,
+      "rate": 75.1294254424273,
+      "throughput": 74.95104353359801,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.96,
+      "cpu_percent_one_core": 23.22274881515947,
+      "cpu_us_per_request": 3266.6666666666665,
+      "before": {
+        "uptime": 270861.07,
+        "ticks": 77,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58188,
+        "SwapFree": 1360
+      },
+      "after": {
+        "uptime": 270869.51,
+        "ticks": 273,
+        "VmRSS": 3444,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 58092,
+        "SwapFree": 1360
+      },
+      "rss_kib_max": 3444,
+      "threads_max": 13,
+      "available_min_kib": 58100,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r1/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 2026624226,
+        "mean": 25332802,
+        "50th": 23123481,
+        "90th": 36949574,
+        "95th": 45694448,
+        "99th": 48845938,
+        "max": 49346259,
+        "min": 19122019
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:44:57.899230304+08:00",
+      "latest": "2026-10-21T20:45:05.798883289+08:00",
+      "end": "2026-10-21T20:45:05.829592481+08:00",
+      "duration": 7899652985,
+      "wait": 30709192,
+      "requests": 80,
+      "rate": 10.127027117761426,
+      "throughput": 10.08781165531376,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.2,
+      "cpu_percent_one_core": 14.234875444851653,
+      "cpu_us_per_request": 15000.0,
+      "before": {
+        "uptime": 270870.38,
+        "ticks": 273,
+        "VmRSS": 3444,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 58060,
+        "SwapFree": 1360
+      },
+      "after": {
+        "uptime": 270878.81,
+        "ticks": 393,
+        "VmRSS": 3444,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 58096,
+        "SwapFree": 1364
+      },
+      "rss_kib_max": 3444,
+      "threads_max": 13,
+      "available_min_kib": 58236,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r1/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1668605325,
+        "mean": 4171513,
+        "50th": 3405926,
+        "90th": 6279553,
+        "95th": 7897942,
+        "99th": 12646816,
+        "max": 19163045,
+        "min": 2629704
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:45:22.4828506+08:00",
+      "latest": "2026-10-21T20:45:30.462965148+08:00",
+      "end": "2026-10-21T20:45:30.469041471+08:00",
+      "duration": 7980114548,
+      "wait": 6076323,
+      "requests": 400,
+      "rate": 50.124593775442634,
+      "throughput": 50.08645629201116,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.21,
+      "cpu_percent_one_core": 2.5059665871107795,
+      "cpu_us_per_request": 525.0,
+      "before": {
+        "uptime": 270895.04,
+        "ticks": 60,
+        "VmRSS": 3388,
+        "VmHWM": 5232,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58160,
+        "SwapFree": 1364
+      },
+      "after": {
+        "uptime": 270903.42,
+        "ticks": 81,
+        "VmRSS": 3388,
+        "VmHWM": 5232,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58124,
+        "SwapFree": 1372
+      },
+      "rss_kib_max": 3388,
+      "threads_max": 12,
+      "available_min_kib": 58192,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r1/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 6382317029,
+        "mean": 10637195,
+        "50th": 6496243,
+        "90th": 23276286,
+        "95th": 28819859,
+        "99th": 47148973,
+        "max": 99910987,
+        "min": 2731024
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:45:31.751861051+08:00",
+      "latest": "2026-10-21T20:45:39.738426258+08:00",
+      "end": "2026-10-21T20:45:39.771227383+08:00",
+      "duration": 7986565207,
+      "wait": 32801125,
+      "requests": 600,
+      "rate": 75.12616305619302,
+      "throughput": 74.81887909345105,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 2.09,
+      "cpu_percent_one_core": 24.763033175348617,
+      "cpu_us_per_request": 3483.3333333333335,
+      "before": {
+        "uptime": 270904.32,
+        "ticks": 82,
+        "VmRSS": 3388,
+        "VmHWM": 5232,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58072,
+        "SwapFree": 1372
+      },
+      "after": {
+        "uptime": 270912.76,
+        "ticks": 291,
+        "VmRSS": 3500,
+        "VmHWM": 5232,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57852,
+        "SwapFree": 1372
+      },
+      "rss_kib_max": 3500,
+      "threads_max": 15,
+      "available_min_kib": 57920,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r1/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1985387624,
+        "mean": 24817345,
+        "50th": 23017867,
+        "90th": 31643523,
+        "95th": 33438453,
+        "99th": 50968202,
+        "max": 57133949,
+        "min": 18526058
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:45:41.146548069+08:00",
+      "latest": "2026-10-21T20:45:49.046761031+08:00",
+      "end": "2026-10-21T20:45:49.07973995+08:00",
+      "duration": 7900212962,
+      "wait": 32978919,
+      "requests": 80,
+      "rate": 10.126309301382095,
+      "throughput": 10.08421341624171,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.24,
+      "cpu_percent_one_core": 14.726840855135395,
+      "cpu_us_per_request": 15500.0,
+      "before": {
+        "uptime": 270913.63,
+        "ticks": 292,
+        "VmRSS": 3500,
+        "VmHWM": 5232,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57852,
+        "SwapFree": 1372
+      },
+      "after": {
+        "uptime": 270922.05,
+        "ticks": 416,
+        "VmRSS": 3500,
+        "VmHWM": 5232,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57852,
+        "SwapFree": 1372
+      },
+      "rss_kib_max": 3500,
+      "threads_max": 15,
+      "available_min_kib": 57816,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r1/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1700731497,
+        "mean": 4251828,
+        "50th": 3497973,
+        "90th": 6541294,
+        "95th": 8347232,
+        "99th": 13474521,
+        "max": 16042088,
+        "min": 2724822
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:46:05.980760116+08:00",
+      "latest": "2026-10-21T20:46:13.961017098+08:00",
+      "end": "2026-10-21T20:46:13.96467776+08:00",
+      "duration": 7980256982,
+      "wait": 3660662,
+      "requests": 400,
+      "rate": 50.12369913678552,
+      "throughput": 50.10071719622563,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.2,
+      "cpu_percent_one_core": 2.4009603841489637,
+      "cpu_us_per_request": 500.0,
+      "before": {
+        "uptime": 270938.55,
+        "ticks": 65,
+        "VmRSS": 3316,
+        "VmHWM": 5240,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 58156,
+        "SwapFree": 1380
+      },
+      "after": {
+        "uptime": 270946.88,
+        "ticks": 85,
+        "VmRSS": 3316,
+        "VmHWM": 5240,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 58140,
+        "SwapFree": 1384
+      },
+      "rss_kib_max": 3316,
+      "threads_max": 11,
+      "available_min_kib": 58188,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r1/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 6768337688,
+        "mean": 11280562,
+        "50th": 6588071,
+        "90th": 24611258,
+        "95th": 33299007,
+        "99th": 53925903,
+        "max": 83402622,
+        "min": 2634072
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:46:15.231647677+08:00",
+      "latest": "2026-10-21T20:46:23.217635516+08:00",
+      "end": "2026-10-21T20:46:23.243089488+08:00",
+      "duration": 7985987839,
+      "wait": 25453972,
+      "requests": 600,
+      "rate": 75.13159449978973,
+      "throughput": 74.89288621882996,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 2.02,
+      "cpu_percent_one_core": 23.848878394247716,
+      "cpu_us_per_request": 3366.6666666666665,
+      "before": {
+        "uptime": 270947.8,
+        "ticks": 85,
+        "VmRSS": 3316,
+        "VmHWM": 5240,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 58116,
+        "SwapFree": 1384
+      },
+      "after": {
+        "uptime": 270956.27,
+        "ticks": 287,
+        "VmRSS": 3476,
+        "VmHWM": 5240,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57784,
+        "SwapFree": 1384
+      },
+      "rss_kib_max": 3476,
+      "threads_max": 15,
+      "available_min_kib": 58080,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r1/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 2138976413,
+        "mean": 26737205,
+        "50th": 24116007,
+        "90th": 40594450,
+        "95th": 46479153,
+        "99th": 66777351,
+        "max": 68082071,
+        "min": 17682823
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:46:24.876455449+08:00",
+      "latest": "2026-10-21T20:46:32.776636158+08:00",
+      "end": "2026-10-21T20:46:32.822442171+08:00",
+      "duration": 7900180709,
+      "wait": 45806013,
+      "requests": 80,
+      "rate": 10.12635064269642,
+      "throughput": 10.06797554525287,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.21,
+      "cpu_percent_one_core": 14.285714285663236,
+      "cpu_us_per_request": 15125.0,
+      "before": {
+        "uptime": 270957.36,
+        "ticks": 288,
+        "VmRSS": 3476,
+        "VmHWM": 5240,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57756,
+        "SwapFree": 1384
+      },
+      "after": {
+        "uptime": 270965.83,
+        "ticks": 409,
+        "VmRSS": 3476,
+        "VmHWM": 5240,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57724,
+        "SwapFree": 1384
+      },
+      "rss_kib_max": 3476,
+      "threads_max": 15,
+      "available_min_kib": 57832,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r1/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 2703337777,
+        "mean": 6758344,
+        "50th": 3657102,
+        "90th": 8060086,
+        "95th": 19942646,
+        "99th": 76974798,
+        "max": 141018026,
+        "min": 2650302
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:46:49.855904393+08:00",
+      "latest": "2026-10-21T20:46:57.835822896+08:00",
+      "end": "2026-10-21T20:46:57.856340829+08:00",
+      "duration": 7979918503,
+      "wait": 20517933,
+      "requests": 400,
+      "rate": 50.12582520104967,
+      "throughput": 49.99727242380156,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.22,
+      "cpu_percent_one_core": 2.5912838633715114,
+      "cpu_us_per_request": 550.0,
+      "before": {
+        "uptime": 270982.43,
+        "ticks": 68,
+        "VmRSS": 3072,
+        "VmHWM": 4916,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58020,
+        "SwapFree": 1396
+      },
+      "after": {
+        "uptime": 270990.92,
+        "ticks": 90,
+        "VmRSS": 3500,
+        "VmHWM": 4916,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57688,
+        "SwapFree": 1396
+      },
+      "rss_kib_max": 3500,
+      "threads_max": 16,
+      "available_min_kib": 58004,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r1/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 8308611521,
+        "mean": 13847685,
+        "50th": 6955812,
+        "90th": 29845693,
+        "95th": 44551038,
+        "99th": 84249469,
+        "max": 122518848,
+        "min": 2690027
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:46:59.454109815+08:00",
+      "latest": "2026-10-21T20:47:07.440423946+08:00",
+      "end": "2026-10-21T20:47:07.47530475+08:00",
+      "duration": 7986314131,
+      "wait": 34880804,
+      "requests": 600,
+      "rate": 75.12852489373236,
+      "throughput": 74.8018225292015,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 2.04,
+      "cpu_percent_one_core": 24.343675417816662,
+      "cpu_us_per_request": 3400.0,
+      "before": {
+        "uptime": 270992.03,
+        "ticks": 90,
+        "VmRSS": 3500,
+        "VmHWM": 4916,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57692,
+        "SwapFree": 1396
+      },
+      "after": {
+        "uptime": 271000.41,
+        "ticks": 294,
+        "VmRSS": 3672,
+        "VmHWM": 4916,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57616,
+        "SwapFree": 1396
+      },
+      "rss_kib_max": 3672,
+      "threads_max": 16,
+      "available_min_kib": 57984,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r1/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 2039935369,
+        "mean": 25499192,
+        "50th": 22175599,
+        "90th": 32200445,
+        "95th": 52294376,
+        "99th": 73501436,
+        "max": 75471412,
+        "min": 18224070
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:47:08.815613764+08:00",
+      "latest": "2026-10-21T20:47:16.715630254+08:00",
+      "end": "2026-10-21T20:47:16.744262+08:00",
+      "duration": 7900016490,
+      "wait": 28631746,
+      "requests": 80,
+      "rate": 10.126561140886935,
+      "throughput": 10.089992344061914,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.22,
+      "cpu_percent_one_core": 14.575866188777523,
+      "cpu_us_per_request": 15250.0,
+      "before": {
+        "uptime": 271001.3,
+        "ticks": 294,
+        "VmRSS": 3672,
+        "VmHWM": 4916,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57628,
+        "SwapFree": 1396
+      },
+      "after": {
+        "uptime": 271009.67,
+        "ticks": 416,
+        "VmRSS": 3672,
+        "VmHWM": 4916,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57576,
+        "SwapFree": 1396
+      },
+      "rss_kib_max": 3672,
+      "threads_max": 16,
+      "available_min_kib": 57752,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r1/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 2,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1877293763,
+        "mean": 23466172,
+        "50th": 21785170,
+        "90th": 29562796,
+        "95th": 32631355,
+        "99th": 62281989,
+        "max": 72197477,
+        "min": 18016169
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:47:33.613759724+08:00",
+      "latest": "2026-10-21T20:47:41.513264436+08:00",
+      "end": "2026-10-21T20:47:41.541839515+08:00",
+      "duration": 7899504712,
+      "wait": 28575079,
+      "requests": 80,
+      "rate": 10.127217201158624,
+      "throughput": 10.090715798649812,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.15,
+      "cpu_percent_one_core": 13.7231503579876,
+      "cpu_us_per_request": 14375.0,
+      "before": {
+        "uptime": 271026.1,
+        "ticks": 59,
+        "VmRSS": 3340,
+        "VmHWM": 5180,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57904,
+        "SwapFree": 1404
+      },
+      "after": {
+        "uptime": 271034.48,
+        "ticks": 174,
+        "VmRSS": 3340,
+        "VmHWM": 5180,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57944,
+        "SwapFree": 1404
+      },
+      "rss_kib_max": 3340,
+      "threads_max": 12,
+      "available_min_kib": 57972,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r2/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 2,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 8474141178,
+        "mean": 14123568,
+        "50th": 7525539,
+        "90th": 30883655,
+        "95th": 42892277,
+        "99th": 78745411,
+        "max": 119880608,
+        "min": 3271841
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:47:42.832343055+08:00",
+      "latest": "2026-10-21T20:47:50.819026111+08:00",
+      "end": "2026-10-21T20:47:50.849237005+08:00",
+      "duration": 7986683056,
+      "wait": 30210894,
+      "requests": 600,
+      "rate": 75.12505451800165,
+      "throughput": 74.84195297357027,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 2.05,
+      "cpu_percent_one_core": 24.375743162975542,
+      "cpu_us_per_request": 3416.6666666666665,
+      "before": {
+        "uptime": 271035.4,
+        "ticks": 174,
+        "VmRSS": 3340,
+        "VmHWM": 5180,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57944,
+        "SwapFree": 1404
+      },
+      "after": {
+        "uptime": 271043.81,
+        "ticks": 379,
+        "VmRSS": 3488,
+        "VmHWM": 5180,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57564,
+        "SwapFree": 1404
+      },
+      "rss_kib_max": 3488,
+      "threads_max": 16,
+      "available_min_kib": 57556,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r2/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 2,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1858795486,
+        "mean": 4646988,
+        "50th": 3962449,
+        "90th": 6995551,
+        "95th": 8397366,
+        "99th": 14604095,
+        "max": 34195466,
+        "min": 2687262
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:47:52.123991186+08:00",
+      "latest": "2026-10-21T20:48:00.104095659+08:00",
+      "end": "2026-10-21T20:48:00.111152876+08:00",
+      "duration": 7980104473,
+      "wait": 7057217,
+      "requests": 400,
+      "rate": 50.124657058484104,
+      "throughput": 50.08036841182315,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.21,
+      "cpu_percent_one_core": 2.5059665871107795,
+      "cpu_us_per_request": 525.0,
+      "before": {
+        "uptime": 271044.69,
+        "ticks": 379,
+        "VmRSS": 3488,
+        "VmHWM": 5180,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57552,
+        "SwapFree": 1404
+      },
+      "after": {
+        "uptime": 271053.07,
+        "ticks": 400,
+        "VmRSS": 3488,
+        "VmHWM": 5180,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57544,
+        "SwapFree": 1412
+      },
+      "rss_kib_max": 3488,
+      "threads_max": 16,
+      "available_min_kib": 57668,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r2/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 2,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1888253831,
+        "mean": 23603172,
+        "50th": 21723839,
+        "90th": 31920789,
+        "95th": 35586731,
+        "99th": 55176166,
+        "max": 60323725,
+        "min": 18072074
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:48:16.783754651+08:00",
+      "latest": "2026-10-21T20:48:24.683764446+08:00",
+      "end": "2026-10-21T20:48:24.725708458+08:00",
+      "duration": 7900009795,
+      "wait": 41944012,
+      "requests": 80,
+      "rate": 10.1265697228164,
+      "throughput": 10.073088051643966,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.17,
+      "cpu_percent_one_core": 13.912009512527504,
+      "cpu_us_per_request": 14625.0,
+      "before": {
+        "uptime": 271069.27,
+        "ticks": 55,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57924,
+        "SwapFree": 1420
+      },
+      "after": {
+        "uptime": 271077.68,
+        "ticks": 172,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57928,
+        "SwapFree": 1420
+      },
+      "rss_kib_max": 3352,
+      "threads_max": 12,
+      "available_min_kib": 57964,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r2/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 2,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 6183397508,
+        "mean": 10305662,
+        "50th": 6678951,
+        "90th": 22710065,
+        "95th": 27155618,
+        "99th": 43686167,
+        "max": 84124789,
+        "min": 3305584
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:48:26.06411578+08:00",
+      "latest": "2026-10-21T20:48:34.050616648+08:00",
+      "end": "2026-10-21T20:48:34.076508713+08:00",
+      "duration": 7986500868,
+      "wait": 25892065,
+      "requests": 600,
+      "rate": 75.12676827020161,
+      "throughput": 74.88399595691672,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.99,
+      "cpu_percent_one_core": 23.747016706430717,
+      "cpu_us_per_request": 3316.6666666666665,
+      "before": {
+        "uptime": 271078.64,
+        "ticks": 172,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57884,
+        "SwapFree": 1420
+      },
+      "after": {
+        "uptime": 271087.02,
+        "ticks": 371,
+        "VmRSS": 3388,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 57740,
+        "SwapFree": 1420
+      },
+      "rss_kib_max": 3388,
+      "threads_max": 14,
+      "available_min_kib": 58040,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r2/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 2,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1850148760,
+        "mean": 4625371,
+        "50th": 3909956,
+        "90th": 6536616,
+        "95th": 8206968,
+        "99th": 13759492,
+        "max": 35465512,
+        "min": 2768434
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:48:35.331683302+08:00",
+      "latest": "2026-10-21T20:48:43.311685827+08:00",
+      "end": "2026-10-21T20:48:43.316279202+08:00",
+      "duration": 7980002525,
+      "wait": 4593375,
+      "requests": 400,
+      "rate": 50.1252974227599,
+      "throughput": 50.096461362559374,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.22,
+      "cpu_percent_one_core": 2.6378896882597105,
+      "cpu_us_per_request": 550.0,
+      "before": {
+        "uptime": 271087.9,
+        "ticks": 371,
+        "VmRSS": 3388,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 57716,
+        "SwapFree": 1424
+      },
+      "after": {
+        "uptime": 271096.24,
+        "ticks": 393,
+        "VmRSS": 3388,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 57712,
+        "SwapFree": 1428
+      },
+      "rss_kib_max": 3388,
+      "threads_max": 14,
+      "available_min_kib": 57816,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r2/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 2,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1981942105,
+        "mean": 24774276,
+        "50th": 22820450,
+        "90th": 34179089,
+        "95th": 36797366,
+        "99th": 45478862,
+        "max": 48660328,
+        "min": 18169187
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:48:59.990677212+08:00",
+      "latest": "2026-10-21T20:49:07.890762325+08:00",
+      "end": "2026-10-21T20:49:07.913684407+08:00",
+      "duration": 7900085113,
+      "wait": 22922082,
+      "requests": 80,
+      "rate": 10.126473177909924,
+      "throughput": 10.097176240163694,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.21,
+      "cpu_percent_one_core": 14.302600472777812,
+      "cpu_us_per_request": 15125.0,
+      "before": {
+        "uptime": 271112.48,
+        "ticks": 58,
+        "VmRSS": 3316,
+        "VmHWM": 5220,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57976,
+        "SwapFree": 1428
+      },
+      "after": {
+        "uptime": 271120.94,
+        "ticks": 179,
+        "VmRSS": 3316,
+        "VmHWM": 5220,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 58156,
+        "SwapFree": 1428
+      },
+      "rss_kib_max": 3316,
+      "threads_max": 11,
+      "available_min_kib": 58112,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r2/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 2,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 6173084126,
+        "mean": 10288473,
+        "50th": 6351526,
+        "90th": 23746949,
+        "95th": 27730431,
+        "99th": 46398586,
+        "max": 61360845,
+        "min": 2787590
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:49:09.468731724+08:00",
+      "latest": "2026-10-21T20:49:17.455129714+08:00",
+      "end": "2026-10-21T20:49:17.492319358+08:00",
+      "duration": 7986397990,
+      "wait": 37189644,
+      "requests": 600,
+      "rate": 75.12773602708972,
+      "throughput": 74.77951601818324,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 2.06,
+      "cpu_percent_one_core": 24.465558194652573,
+      "cpu_us_per_request": 3433.3333333333335,
+      "before": {
+        "uptime": 271122.04,
+        "ticks": 179,
+        "VmRSS": 3316,
+        "VmHWM": 5220,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 58144,
+        "SwapFree": 1428
+      },
+      "after": {
+        "uptime": 271130.46,
+        "ticks": 385,
+        "VmRSS": 3412,
+        "VmHWM": 5220,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57996,
+        "SwapFree": 1432
+      },
+      "rss_kib_max": 3412,
+      "threads_max": 12,
+      "available_min_kib": 58100,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r2/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 2,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1815480795,
+        "mean": 4538701,
+        "50th": 3632678,
+        "90th": 5880303,
+        "95th": 7158482,
+        "99th": 19153857,
+        "max": 66198478,
+        "min": 2658127
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:49:18.766399424+08:00",
+      "latest": "2026-10-21T20:49:26.746676111+08:00",
+      "end": "2026-10-21T20:49:26.756230603+08:00",
+      "duration": 7980276687,
+      "wait": 9554492,
+      "requests": 400,
+      "rate": 50.12357537071446,
+      "throughput": 50.063636019160995,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.21,
+      "cpu_percent_one_core": 2.4764150943450622,
+      "cpu_us_per_request": 525.0,
+      "before": {
+        "uptime": 271131.33,
+        "ticks": 385,
+        "VmRSS": 3412,
+        "VmHWM": 5220,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58020,
+        "SwapFree": 1432
+      },
+      "after": {
+        "uptime": 271139.81,
+        "ticks": 406,
+        "VmRSS": 3412,
+        "VmHWM": 5220,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57976,
+        "SwapFree": 1436
+      },
+      "rss_kib_max": 3412,
+      "threads_max": 12,
+      "available_min_kib": 58096,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r2/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 2,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1880497043,
+        "mean": 23506213,
+        "50th": 21746361,
+        "90th": 29407905,
+        "95th": 35118871,
+        "99th": 44993066,
+        "max": 48532298,
+        "min": 18314780
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:49:43.682246139+08:00",
+      "latest": "2026-10-21T20:49:51.582441727+08:00",
+      "end": "2026-10-21T20:49:51.618557813+08:00",
+      "duration": 7900195588,
+      "wait": 36116086,
+      "requests": 80,
+      "rate": 10.12633157102034,
+      "throughput": 10.080249275250427,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.16,
+      "cpu_percent_one_core": 13.859020310640924,
+      "cpu_us_per_request": 14500.0,
+      "before": {
+        "uptime": 271156.17,
+        "ticks": 60,
+        "VmRSS": 3360,
+        "VmHWM": 5200,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58056,
+        "SwapFree": 1436
+      },
+      "after": {
+        "uptime": 271164.54,
+        "ticks": 176,
+        "VmRSS": 3360,
+        "VmHWM": 5200,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58048,
+        "SwapFree": 1436
+      },
+      "rss_kib_max": 3360,
+      "threads_max": 12,
+      "available_min_kib": 58088,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r2/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 2,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 5913206733,
+        "mean": 9855344,
+        "50th": 6397481,
+        "90th": 21993251,
+        "95th": 26207434,
+        "99th": 38752972,
+        "max": 73374600,
+        "min": 2528954
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:49:52.891559278+08:00",
+      "latest": "2026-10-21T20:50:00.877901762+08:00",
+      "end": "2026-10-21T20:50:00.907334544+08:00",
+      "duration": 7986342484,
+      "wait": 29432782,
+      "requests": 600,
+      "rate": 75.1282581735071,
+      "throughput": 74.85239793897186,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.98,
+      "cpu_percent_one_core": 23.459715639803957,
+      "cpu_us_per_request": 3300.0,
+      "before": {
+        "uptime": 271165.46,
+        "ticks": 176,
+        "VmRSS": 3360,
+        "VmHWM": 5200,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 58032,
+        "SwapFree": 1440
+      },
+      "after": {
+        "uptime": 271173.9,
+        "ticks": 374,
+        "VmRSS": 3472,
+        "VmHWM": 5200,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 57804,
+        "SwapFree": 1440
+      },
+      "rss_kib_max": 3472,
+      "threads_max": 14,
+      "available_min_kib": 57864,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r2/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 2,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1869330568,
+        "mean": 4673326,
+        "50th": 3924850,
+        "90th": 7039489,
+        "95th": 8368743,
+        "99th": 15553439,
+        "max": 30049110,
+        "min": 2729050
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:50:02.201350895+08:00",
+      "latest": "2026-10-21T20:50:10.181473842+08:00",
+      "end": "2026-10-21T20:50:10.189223551+08:00",
+      "duration": 7980122947,
+      "wait": 7749709,
+      "requests": 400,
+      "rate": 50.12454101980642,
+      "throughput": 50.07591097481311,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.21,
+      "cpu_percent_one_core": 2.5000000000103944,
+      "cpu_us_per_request": 525.0,
+      "before": {
+        "uptime": 271174.77,
+        "ticks": 374,
+        "VmRSS": 3472,
+        "VmHWM": 5200,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 57776,
+        "SwapFree": 1440
+      },
+      "after": {
+        "uptime": 271183.17,
+        "ticks": 395,
+        "VmRSS": 3472,
+        "VmHWM": 5200,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 57820,
+        "SwapFree": 1440
+      },
+      "rss_kib_max": 3472,
+      "threads_max": 14,
+      "available_min_kib": 57912,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r2/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 3,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1815818098,
+        "mean": 4539545,
+        "50th": 3803762,
+        "90th": 6746449,
+        "95th": 8141179,
+        "99th": 14937361,
+        "max": 20264756,
+        "min": 2630585
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:50:26.864083618+08:00",
+      "latest": "2026-10-21T20:50:34.844241198+08:00",
+      "end": "2026-10-21T20:50:34.849393715+08:00",
+      "duration": 7980157580,
+      "wait": 5152517,
+      "requests": 400,
+      "rate": 50.12432348485028,
+      "throughput": 50.09198079236471,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.2,
+      "cpu_percent_one_core": 2.3894862604553317,
+      "cpu_us_per_request": 500.0,
+      "before": {
+        "uptime": 271199.43,
+        "ticks": 59,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57524,
+        "SwapFree": 2000
+      },
+      "after": {
+        "uptime": 271207.8,
+        "ticks": 79,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57452,
+        "SwapFree": 2004
+      },
+      "rss_kib_max": 3352,
+      "threads_max": 12,
+      "available_min_kib": 57524,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r3/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 3,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 5868727507,
+        "mean": 9781212,
+        "50th": 6350027,
+        "90th": 22147267,
+        "95th": 25993627,
+        "99th": 37231172,
+        "max": 61492492,
+        "min": 2602242
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:50:36.114250385+08:00",
+      "latest": "2026-10-21T20:50:44.100331918+08:00",
+      "end": "2026-10-21T20:50:44.108223985+08:00",
+      "duration": 7986081533,
+      "wait": 7892067,
+      "requests": 600,
+      "rate": 75.13071304377328,
+      "throughput": 75.05654009165104,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.91,
+      "cpu_percent_one_core": 22.63033175354826,
+      "cpu_us_per_request": 3183.3333333333335,
+      "before": {
+        "uptime": 271208.68,
+        "ticks": 79,
+        "VmRSS": 3352,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57456,
+        "SwapFree": 2004
+      },
+      "after": {
+        "uptime": 271217.12,
+        "ticks": 270,
+        "VmRSS": 3384,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 57380,
+        "SwapFree": 2004
+      },
+      "rss_kib_max": 3384,
+      "threads_max": 13,
+      "available_min_kib": 57452,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r3/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r2",
+    "repetition": 3,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1851161833,
+        "mean": 23139522,
+        "50th": 22401137,
+        "90th": 28084892,
+        "95th": 31085684,
+        "99th": 34492308,
+        "max": 34653546,
+        "min": 18588536
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:50:45.600869401+08:00",
+      "latest": "2026-10-21T20:50:53.500748506+08:00",
+      "end": "2026-10-21T20:50:53.525460823+08:00",
+      "duration": 7899879105,
+      "wait": 24712317,
+      "requests": 80,
+      "rate": 10.126737249607569,
+      "throughput": 10.095157685720746,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.16,
+      "cpu_percent_one_core": 13.90887290173302,
+      "cpu_us_per_request": 14500.0,
+      "before": {
+        "uptime": 271218.09,
+        "ticks": 270,
+        "VmRSS": 3384,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 57372,
+        "SwapFree": 2004
+      },
+      "after": {
+        "uptime": 271226.43,
+        "ticks": 386,
+        "VmRSS": 3384,
+        "VmHWM": 5196,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 57420,
+        "SwapFree": 2004
+      },
+      "rss_kib_max": 3384,
+      "threads_max": 13,
+      "available_min_kib": 57480,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r2-r3/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 3,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 2174803259,
+        "mean": 5437008,
+        "50th": 3968522,
+        "90th": 7825345,
+        "95th": 11532215,
+        "99th": 36910734,
+        "max": 68586167,
+        "min": 2716527
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:51:10.121928669+08:00",
+      "latest": "2026-10-21T20:51:18.102755869+08:00",
+      "end": "2026-10-21T20:51:18.108056815+08:00",
+      "duration": 7980827200,
+      "wait": 5300946,
+      "requests": 400,
+      "rate": 50.12011787449802,
+      "throughput": 50.086849683265775,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.2,
+      "cpu_percent_one_core": 2.3952095808450022,
+      "cpu_us_per_request": 500.0,
+      "before": {
+        "uptime": 271242.69,
+        "ticks": 60,
+        "VmRSS": 3300,
+        "VmHWM": 5212,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57528,
+        "SwapFree": 2008
+      },
+      "after": {
+        "uptime": 271251.04,
+        "ticks": 80,
+        "VmRSS": 3300,
+        "VmHWM": 5212,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57524,
+        "SwapFree": 2012
+      },
+      "rss_kib_max": 3300,
+      "threads_max": 11,
+      "available_min_kib": 57656,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r3/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 3,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 6617417421,
+        "mean": 11029029,
+        "50th": 6817581,
+        "90th": 23310452,
+        "95th": 28896117,
+        "99th": 52086073,
+        "max": 97027925,
+        "min": 2645844
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:51:19.347867408+08:00",
+      "latest": "2026-10-21T20:51:27.33380962+08:00",
+      "end": "2026-10-21T20:51:27.34447498+08:00",
+      "duration": 7985942212,
+      "wait": 10665360,
+      "requests": 600,
+      "rate": 75.13202375774968,
+      "throughput": 75.03181750482428,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.92,
+      "cpu_percent_one_core": 22.775800711762646,
+      "cpu_us_per_request": 3200.0,
+      "before": {
+        "uptime": 271251.92,
+        "ticks": 80,
+        "VmRSS": 3300,
+        "VmHWM": 5212,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57524,
+        "SwapFree": 2012
+      },
+      "after": {
+        "uptime": 271260.35,
+        "ticks": 272,
+        "VmRSS": 3448,
+        "VmHWM": 5212,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57152,
+        "SwapFree": 2012
+      },
+      "rss_kib_max": 3448,
+      "threads_max": 15,
+      "available_min_kib": 57572,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r3/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r4",
+    "repetition": 3,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1873939194,
+        "mean": 23424239,
+        "50th": 22020271,
+        "90th": 30173679,
+        "95th": 31640341,
+        "99th": 50629524,
+        "max": 53832872,
+        "min": 18554922
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:51:28.741265603+08:00",
+      "latest": "2026-10-21T20:51:36.641608282+08:00",
+      "end": "2026-10-21T20:51:36.67450222+08:00",
+      "duration": 7900342679,
+      "wait": 32893938,
+      "requests": 80,
+      "rate": 10.126143035877293,
+      "throughput": 10.084156550753741,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.14,
+      "cpu_percent_one_core": 13.620071684595391,
+      "cpu_us_per_request": 14250.0,
+      "before": {
+        "uptime": 271261.23,
+        "ticks": 272,
+        "VmRSS": 3448,
+        "VmHWM": 5212,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57172,
+        "SwapFree": 2012
+      },
+      "after": {
+        "uptime": 271269.6,
+        "ticks": 386,
+        "VmRSS": 3448,
+        "VmHWM": 5212,
+        "VmSwap": 0,
+        "Threads": 15,
+        "MemAvailable": 57132,
+        "SwapFree": 2012
+      },
+      "rss_kib_max": 3448,
+      "threads_max": 15,
+      "available_min_kib": 57520,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r4-r3/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 3,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1953820404,
+        "mean": 4884551,
+        "50th": 4014134,
+        "90th": 7139945,
+        "95th": 8950080,
+        "99th": 17693442,
+        "max": 37896403,
+        "min": 2768845
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:51:53.259598631+08:00",
+      "latest": "2026-10-21T20:52:01.240191844+08:00",
+      "end": "2026-10-21T20:52:01.243960519+08:00",
+      "duration": 7980593213,
+      "wait": 3768675,
+      "requests": 400,
+      "rate": 50.12158737127704,
+      "throughput": 50.09792962931391,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.2,
+      "cpu_percent_one_core": 2.3952095808450022,
+      "cpu_us_per_request": 500.0,
+      "before": {
+        "uptime": 271285.82,
+        "ticks": 56,
+        "VmRSS": 3104,
+        "VmHWM": 4948,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57420,
+        "SwapFree": 2024
+      },
+      "after": {
+        "uptime": 271294.17,
+        "ticks": 76,
+        "VmRSS": 3104,
+        "VmHWM": 4948,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57404,
+        "SwapFree": 2024
+      },
+      "rss_kib_max": 3104,
+      "threads_max": 12,
+      "available_min_kib": 57468,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r3/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 3,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 6422778481,
+        "mean": 10704630,
+        "50th": 6253212,
+        "90th": 22671129,
+        "95th": 27807714,
+        "99th": 57209945,
+        "max": 112419530,
+        "min": 2733038
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:52:02.571238612+08:00",
+      "latest": "2026-10-21T20:52:10.557470492+08:00",
+      "end": "2026-10-21T20:52:10.57043799+08:00",
+      "duration": 7986231880,
+      "wait": 12967498,
+      "requests": 600,
+      "rate": 75.12929864991598,
+      "throughput": 75.00750658249189,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.91,
+      "cpu_percent_one_core": 22.550177095706026,
+      "cpu_us_per_request": 3183.3333333333335,
+      "before": {
+        "uptime": 271295.15,
+        "ticks": 76,
+        "VmRSS": 3104,
+        "VmHWM": 4948,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 57428,
+        "SwapFree": 2024
+      },
+      "after": {
+        "uptime": 271303.62,
+        "ticks": 267,
+        "VmRSS": 3600,
+        "VmHWM": 4948,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57068,
+        "SwapFree": 2024
+      },
+      "rss_kib_max": 3600,
+      "threads_max": 16,
+      "available_min_kib": 57240,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r3/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r1",
+    "repetition": 3,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 2117171765,
+        "mean": 26464647,
+        "50th": 22914983,
+        "90th": 32115876,
+        "95th": 40097139,
+        "99th": 99408280,
+        "max": 101484974,
+        "min": 18800994
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:52:12.177759681+08:00",
+      "latest": "2026-10-21T20:52:20.078253357+08:00",
+      "end": "2026-10-21T20:52:20.109221865+08:00",
+      "duration": 7900493676,
+      "wait": 30968508,
+      "requests": 80,
+      "rate": 10.125949501487836,
+      "throughput": 10.086412586241993,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.17,
+      "cpu_percent_one_core": 14.011976047845586,
+      "cpu_us_per_request": 14625.0,
+      "before": {
+        "uptime": 271304.66,
+        "ticks": 268,
+        "VmRSS": 3600,
+        "VmHWM": 4948,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57116,
+        "SwapFree": 2024
+      },
+      "after": {
+        "uptime": 271313.01,
+        "ticks": 385,
+        "VmRSS": 3632,
+        "VmHWM": 4948,
+        "VmSwap": 0,
+        "Threads": 16,
+        "MemAvailable": 57048,
+        "SwapFree": 2024
+      },
+      "rss_kib_max": 3632,
+      "threads_max": 16,
+      "available_min_kib": 57088,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r1-r3/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 3,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1753101592,
+        "mean": 4382753,
+        "50th": 3673149,
+        "90th": 6467104,
+        "95th": 8127063,
+        "99th": 14686770,
+        "max": 24691268,
+        "min": 2668877
+      },
+      "bytes_in": {
+        "total": 266000,
+        "mean": 665
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:52:36.67479997+08:00",
+      "latest": "2026-10-21T20:52:44.655284213+08:00",
+      "end": "2026-10-21T20:52:44.659490751+08:00",
+      "duration": 7980484243,
+      "wait": 4206538,
+      "requests": 400,
+      "rate": 50.12227175949328,
+      "throughput": 50.095866073088445,
+      "success": 1,
+      "status_codes": {
+        "200": 400
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 0.19,
+      "cpu_percent_one_core": 2.27544910178689,
+      "cpu_us_per_request": 475.0,
+      "before": {
+        "uptime": 271329.24,
+        "ticks": 57,
+        "VmRSS": 3312,
+        "VmHWM": 5224,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57404,
+        "SwapFree": 2036
+      },
+      "after": {
+        "uptime": 271337.59,
+        "ticks": 76,
+        "VmRSS": 3312,
+        "VmHWM": 5224,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57468,
+        "SwapFree": 2036
+      },
+      "rss_kib_max": 3312,
+      "threads_max": 11,
+      "available_min_kib": 57608,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r3/info50.targets",
+      "-rate=50",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 3,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 5590136020,
+        "mean": 9316893,
+        "50th": 6391851,
+        "90th": 21343236,
+        "95th": 24648919,
+        "99th": 29858882,
+        "max": 50917280,
+        "min": 2502305
+      },
+      "bytes_in": {
+        "total": 2543500,
+        "mean": 4239.166666666667
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:52:45.948009587+08:00",
+      "latest": "2026-10-21T20:52:53.934824387+08:00",
+      "end": "2026-10-21T20:52:53.944156641+08:00",
+      "duration": 7986814800,
+      "wait": 9332254,
+      "requests": 600,
+      "rate": 75.12381531621341,
+      "throughput": 75.03613877384302,
+      "success": 1,
+      "status_codes": {
+        "200": 600
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.91,
+      "cpu_percent_one_core": 22.657176749722215,
+      "cpu_us_per_request": 3183.3333333333335,
+      "before": {
+        "uptime": 271338.52,
+        "ticks": 77,
+        "VmRSS": 3312,
+        "VmHWM": 5224,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57472,
+        "SwapFree": 2036
+      },
+      "after": {
+        "uptime": 271346.95,
+        "ticks": 268,
+        "VmRSS": 3356,
+        "VmHWM": 5224,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57400,
+        "SwapFree": 2036
+      },
+      "rss_kib_max": 3356,
+      "threads_max": 11,
+      "available_min_kib": 57568,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r3/independent75.targets",
+      "-rate=75",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  },
+  {
+    "backend": "r3",
+    "repetition": 3,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 8,
+    "vegeta": {
+      "latencies": {
+        "total": 1820303829,
+        "mean": 22753797,
+        "50th": 21930958,
+        "90th": 27744608,
+        "95th": 29323370,
+        "99th": 37059536,
+        "max": 37837312,
+        "min": 18467928
+      },
+      "bytes_in": {
+        "total": 1702880,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:52:55.36161915+08:00",
+      "latest": "2026-10-21T20:53:03.261752072+08:00",
+      "end": "2026-10-21T20:53:03.289232453+08:00",
+      "duration": 7900132922,
+      "wait": 27480381,
+      "requests": 80,
+      "rate": 10.126411895832655,
+      "throughput": 10.091309571031431,
+      "success": 1,
+      "status_codes": {
+        "200": 80
+      },
+      "errors": []
+    },
+    "process": {
+      "cpu_seconds": 1.13,
+      "cpu_percent_one_core": 13.43638525559596,
+      "cpu_us_per_request": 14125.0,
+      "before": {
+        "uptime": 271347.85,
+        "ticks": 268,
+        "VmRSS": 3356,
+        "VmHWM": 5224,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57404,
+        "SwapFree": 2036
+      },
+      "after": {
+        "uptime": 271356.26,
+        "ticks": 381,
+        "VmRSS": 3356,
+        "VmHWM": 5224,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 57428,
+        "SwapFree": 2036
+      },
+      "rss_kib_max": 3356,
+      "threads_max": 11,
+      "available_min_kib": 57460,
+      "swap_kib_max": 0
+    },
+    "command": [
+      "vegeta",
+      "attack",
+      "-targets=/home/maci/Desktop/Projects/flashforge/phobos/.scratch/tune3/printer/printer-r3-r3/history10.targets",
+      "-rate=10",
+      "-duration=8s",
+      "-timeout=3s",
+      "-workers=2",
+      "-max-workers=8",
+      "-connections=8"
+    ]
+  }
+]

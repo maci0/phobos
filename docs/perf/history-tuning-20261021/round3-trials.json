@@ -1,0 +1,1892 @@
+[
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 1,
+    "workload": "info-4000",
+    "requested_rate": 4000,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      12.4228515625,
+      13.888671875,
+      14.04345703125
+    ],
+    "loadavg_after": [
+      12.54931640625,
+      13.890625,
+      14.04296875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.026612537010806,
+      "cpu_seconds": 0.26,
+      "cpu_percent_one_core": 4.314198040827755,
+      "rss_kib_min": 8308,
+      "rss_kib_median": 10584,
+      "rss_kib_max": 10604,
+      "threads_min": 12,
+      "threads_max": 17,
+      "vmhwm_kib": 10604
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1459592906,
+        "mean": 60821,
+        "50th": 48527,
+        "90th": 80853,
+        "95th": 101297,
+        "99th": 387621,
+        "max": 1643890,
+        "min": 20068
+      },
+      "bytes_in": {
+        "total": 15358720,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:26:33.744870867+08:00",
+      "latest": "2026-10-21T20:26:39.744078308+08:00",
+      "end": "2026-10-21T20:26:39.74412725+08:00",
+      "duration": 5999207441,
+      "wait": 48942,
+      "requests": 23998,
+      "rate": 4000.1950651001,
+      "throughput": 4000.1624314644664,
+      "success": 1,
+      "status_codes": {
+        "200": 23998
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 1,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      12.54931640625,
+      13.890625,
+      14.04296875
+    ],
+    "loadavg_after": [
+      12.66552734375,
+      13.892578125,
+      14.04248046875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.026162097026827,
+      "cpu_seconds": 0.71,
+      "cpu_percent_one_core": 11.781959870450516,
+      "rss_kib_min": 10604,
+      "rss_kib_median": 10788,
+      "rss_kib_max": 10868,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 10828
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1172106656,
+        "mean": 162792,
+        "50th": 80111,
+        "90th": 468123,
+        "95th": 532015,
+        "99th": 677316,
+        "max": 1440668,
+        "min": 21971
+      },
+      "bytes_in": {
+        "total": 32392800,
+        "mean": 4499
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:26:39.806890672+08:00",
+      "latest": "2026-10-21T20:26:45.806203709+08:00",
+      "end": "2026-10-21T20:26:45.806232703+08:00",
+      "duration": 5999313037,
+      "wait": 28994,
+      "requests": 7200,
+      "rate": 1200.1374083324067,
+      "throughput": 1200.131608232356,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 1,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      12.66552734375,
+      13.892578125,
+      14.04248046875
+    ],
+    "loadavg_after": [
+      12.61181640625,
+      13.86083984375,
+      14.03125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.029934516001958,
+      "cpu_seconds": 0.54,
+      "cpu_percent_one_core": 8.955321132708377,
+      "rss_kib_min": 10828,
+      "rss_kib_median": 10840,
+      "rss_kib_max": 11036,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 10840
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 663448917,
+        "mean": 552874,
+        "50th": 515805,
+        "90th": 676314,
+        "95th": 736940,
+        "99th": 1188534,
+        "max": 1609445,
+        "min": 349287
+      },
+      "bytes_in": {
+        "total": 25543200,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:26:45.857436896+08:00",
+      "latest": "2026-10-21T20:26:51.853175821+08:00",
+      "end": "2026-10-21T20:26:51.853777883+08:00",
+      "duration": 5995738925,
+      "wait": 602062,
+      "requests": 1200,
+      "rate": 200.1421367759104,
+      "throughput": 200.1220415252546,
+      "success": 1,
+      "status_codes": {
+        "200": 1200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 1,
+    "workload": "info-4000",
+    "requested_rate": 4000,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      12.72314453125,
+      13.86328125,
+      14.03076171875
+    ],
+    "loadavg_after": [
+      12.3447265625,
+      13.765625,
+      13.998046875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.026145923999138,
+      "cpu_seconds": 0.27,
+      "cpu_percent_one_core": 4.480475637417349,
+      "rss_kib_min": 6292,
+      "rss_kib_median": 8520,
+      "rss_kib_max": 8556,
+      "threads_min": 12,
+      "threads_max": 16,
+      "vmhwm_kib": 8556
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1467881186,
+        "mean": 61161,
+        "50th": 49659,
+        "90th": 82586,
+        "95th": 103957,
+        "99th": 350845,
+        "max": 1700537,
+        "min": 20288
+      },
+      "bytes_in": {
+        "total": 15360000,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:26:55.046131498+08:00",
+      "latest": "2026-10-21T20:27:01.04609814+08:00",
+      "end": "2026-10-21T20:27:01.046161209+08:00",
+      "duration": 5999966642,
+      "wait": 63069,
+      "requests": 24000,
+      "rate": 4000.022238790307,
+      "throughput": 3999.980192764749,
+      "success": 1,
+      "status_codes": {
+        "200": 24000
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 1,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      12.3447265625,
+      13.765625,
+      13.998046875
+    ],
+    "loadavg_after": [
+      11.59619140625,
+      13.58642578125,
+      13.93896484375
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022792175994255,
+      "cpu_seconds": 0.5900000000000001,
+      "cpu_percent_one_core": 9.796120848260909,
+      "rss_kib_min": 8556,
+      "rss_kib_median": 8632,
+      "rss_kib_max": 8800,
+      "threads_min": 16,
+      "threads_max": 16,
+      "vmhwm_kib": 8924
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 920943939,
+        "mean": 127926,
+        "50th": 54174,
+        "90th": 380447,
+        "95th": 447593,
+        "99th": 609047,
+        "max": 1992646,
+        "min": 22653
+      },
+      "bytes_in": {
+        "total": 32392687,
+        "mean": 4499.609251284901
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:01.10780692+08:00",
+      "latest": "2026-10-21T20:27:07.106871393+08:00",
+      "end": "2026-10-21T20:27:07.107208767+08:00",
+      "duration": 5999064473,
+      "wait": 337374,
+      "requests": 7199,
+      "rate": 1200.0204419206616,
+      "throughput": 1199.9529592437384,
+      "success": 1,
+      "status_codes": {
+        "200": 7199
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 1,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      11.59619140625,
+      13.58642578125,
+      13.93896484375
+    ],
+    "loadavg_after": [
+      10.1943359375,
+      13.22119140625,
+      13.81591796875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.023019749991363,
+      "cpu_seconds": 0.4899999999999999,
+      "cpu_percent_one_core": 8.135453980550247,
+      "rss_kib_min": 8632,
+      "rss_kib_median": 8644,
+      "rss_kib_max": 8792,
+      "threads_min": 16,
+      "threads_max": 16,
+      "vmhwm_kib": 8924
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 559231924,
+        "mean": 466026,
+        "50th": 461111,
+        "90th": 545934,
+        "95th": 617338,
+        "99th": 880786,
+        "max": 2458782,
+        "min": 322937
+      },
+      "bytes_in": {
+        "total": 25543200,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:07.151750898+08:00",
+      "latest": "2026-10-21T20:27:13.146889387+08:00",
+      "end": "2026-10-21T20:27:13.14728441+08:00",
+      "duration": 5995138489,
+      "wait": 395023,
+      "requests": 1200,
+      "rate": 200.16218177474698,
+      "throughput": 200.14899384653796,
+      "success": 1,
+      "status_codes": {
+        "200": 1200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 2,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      10.1943359375,
+      13.22119140625,
+      13.81591796875
+    ],
+    "loadavg_after": [
+      9.6982421875,
+      13.06787109375,
+      13.76318359375
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022590153006604,
+      "cpu_seconds": 0.47,
+      "cpu_percent_one_core": 7.803951257838226,
+      "rss_kib_min": 6256,
+      "rss_kib_median": 6292,
+      "rss_kib_max": 6460,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8560
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 535268207,
+        "mean": 446056,
+        "50th": 428710,
+        "90th": 516888,
+        "95th": 601612,
+        "99th": 809421,
+        "max": 2048741,
+        "min": 321444
+      },
+      "bytes_in": {
+        "total": 25543200,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:16.327386316+08:00",
+      "latest": "2026-10-21T20:27:22.322671661+08:00",
+      "end": "2026-10-21T20:27:22.323082965+08:00",
+      "duration": 5995285345,
+      "wait": 411304,
+      "requests": 1200,
+      "rate": 200.15727875250948,
+      "throughput": 200.14354798956407,
+      "success": 1,
+      "status_codes": {
+        "200": 1200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 2,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      9.6982421875,
+      13.06787109375,
+      13.76318359375
+    ],
+    "loadavg_after": [
+      8.59423828125,
+      12.71923828125,
+      13.64208984375
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022710765973898,
+      "cpu_seconds": 0.5700000000000001,
+      "cpu_percent_one_core": 9.464176882281823,
+      "rss_kib_min": 6324,
+      "rss_kib_median": 6404,
+      "rss_kib_max": 6580,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8560
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 879250455,
+        "mean": 122118,
+        "50th": 53668,
+        "90th": 384625,
+        "95th": 421804,
+        "99th": 556667,
+        "max": 1347513,
+        "min": 21080
+      },
+      "bytes_in": {
+        "total": 32392800,
+        "mean": 4499
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:22.356210417+08:00",
+      "latest": "2026-10-21T20:27:28.355590446+08:00",
+      "end": "2026-10-21T20:27:28.355614502+08:00",
+      "duration": 5999380029,
+      "wait": 24056,
+      "requests": 7200,
+      "rate": 1200.1240070134586,
+      "throughput": 1200.119194838332,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 2,
+    "workload": "info-4000",
+    "requested_rate": 4000,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      8.59423828125,
+      12.71923828125,
+      13.64208984375
+    ],
+    "loadavg_after": [
+      8.46630859375,
+      12.6240234375,
+      13.60595703125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.021931847993983,
+      "cpu_seconds": 0.20999999999999996,
+      "cpu_percent_one_core": 3.487253016155519,
+      "rss_kib_min": 6424,
+      "rss_kib_median": 8692,
+      "rss_kib_max": 8708,
+      "threads_min": 12,
+      "threads_max": 17,
+      "vmhwm_kib": 8708
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 869318941,
+        "mean": 36224,
+        "50th": 29941,
+        "90th": 46732,
+        "95th": 57570,
+        "99th": 123446,
+        "max": 2531338,
+        "min": 18355
+      },
+      "bytes_in": {
+        "total": 15358720,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:28.396215482+08:00",
+      "latest": "2026-10-21T20:27:34.395578866+08:00",
+      "end": "2026-10-21T20:27:34.395604524+08:00",
+      "duration": 5999363384,
+      "wait": 25658,
+      "requests": 23998,
+      "rate": 4000.0910869979066,
+      "throughput": 4000.0739795330646,
+      "success": 1,
+      "status_codes": {
+        "200": 23998
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 2,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      8.46630859375,
+      12.6240234375,
+      13.60595703125
+    ],
+    "loadavg_after": [
+      8.16650390625,
+      12.421875,
+      13.529296875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.021892713994021,
+      "cpu_seconds": 0.5,
+      "cpu_percent_one_core": 8.303037329743043,
+      "rss_kib_min": 10288,
+      "rss_kib_median": 10288,
+      "rss_kib_max": 10484,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 10656
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 543082909,
+        "mean": 452569,
+        "50th": 443207,
+        "90th": 529928,
+        "95th": 564946,
+        "99th": 759373,
+        "max": 2302048,
+        "min": 338106
+      },
+      "bytes_in": {
+        "total": 25543200,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:37.597610068+08:00",
+      "latest": "2026-10-21T20:27:43.593083028+08:00",
+      "end": "2026-10-21T20:27:43.593433176+08:00",
+      "duration": 5995472960,
+      "wait": 350148,
+      "requests": 1200,
+      "rate": 200.15101527536538,
+      "throughput": 200.1393267254475,
+      "success": 1,
+      "status_codes": {
+        "200": 1200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 2,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      8.16650390625,
+      12.421875,
+      13.529296875
+    ],
+    "loadavg_after": [
+      7.67236328125,
+      12.24853515625,
+      13.46728515625
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022676313004922,
+      "cpu_seconds": 0.56,
+      "cpu_percent_one_core": 9.298191881751597,
+      "rss_kib_min": 10288,
+      "rss_kib_median": 10504,
+      "rss_kib_max": 10644,
+      "threads_min": 12,
+      "threads_max": 13,
+      "vmhwm_kib": 10884
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 858974862,
+        "mean": 119302,
+        "50th": 50404,
+        "90th": 377078,
+        "95th": 413274,
+        "99th": 536778,
+        "max": 1710426,
+        "min": 21931
+      },
+      "bytes_in": {
+        "total": 32392800,
+        "mean": 4499
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:43.62527368+08:00",
+      "latest": "2026-10-21T20:27:49.624331054+08:00",
+      "end": "2026-10-21T20:27:49.624359287+08:00",
+      "duration": 5999057374,
+      "wait": 28233,
+      "requests": 7200,
+      "rate": 1200.1885548227797,
+      "throughput": 1200.1829064747335,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 2,
+    "workload": "info-4000",
+    "requested_rate": 4000,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.67236328125,
+      12.24853515625,
+      13.46728515625
+    ],
+    "loadavg_after": [
+      7.2978515625,
+      12.0947265625,
+      13.41064453125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.024799901002552,
+      "cpu_seconds": 0.20999999999999996,
+      "cpu_percent_one_core": 3.485592940025362,
+      "rss_kib_min": 10520,
+      "rss_kib_median": 10756,
+      "rss_kib_max": 10788,
+      "threads_min": 13,
+      "threads_max": 17,
+      "vmhwm_kib": 10884
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1301049236,
+        "mean": 54210,
+        "50th": 30430,
+        "90th": 49293,
+        "95th": 61973,
+        "99th": 864655,
+        "max": 2572285,
+        "min": 19427
+      },
+      "bytes_in": {
+        "total": 15360000,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:49.665298004+08:00",
+      "latest": "2026-10-21T20:27:55.664943279+08:00",
+      "end": "2026-10-21T20:27:55.664971673+08:00",
+      "duration": 5999645275,
+      "wait": 28394,
+      "requests": 24000,
+      "rate": 4000.2364973152517,
+      "throughput": 4000.2175658330793,
+      "success": 1,
+      "status_codes": {
+        "200": 24000
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 3,
+    "workload": "info-4000",
+    "requested_rate": 4000,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      6.87353515625,
+      11.9267578125,
+      13.34912109375
+    ],
+    "loadavg_after": [
+      6.8837890625,
+      11.8447265625,
+      13.31494140625
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.021835066989297,
+      "cpu_seconds": 0.21000000000000002,
+      "cpu_percent_one_core": 3.4873090621691927,
+      "rss_kib_min": 6184,
+      "rss_kib_median": 8520,
+      "rss_kib_max": 8520,
+      "threads_min": 12,
+      "threads_max": 18,
+      "vmhwm_kib": 8520
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 878622999,
+        "mean": 36613,
+        "50th": 30191,
+        "90th": 46145,
+        "95th": 55399,
+        "99th": 150316,
+        "max": 1751131,
+        "min": 19347
+      },
+      "bytes_in": {
+        "total": 15358080,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:27:58.862359787+08:00",
+      "latest": "2026-10-21T20:28:04.861519208+08:00",
+      "end": "2026-10-21T20:28:04.861548833+08:00",
+      "duration": 5999159421,
+      "wait": 29625,
+      "requests": 23997,
+      "rate": 4000.0603944610525,
+      "throughput": 4000.040641493064,
+      "success": 1,
+      "status_codes": {
+        "200": 23997
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 3,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      6.8837890625,
+      11.8447265625,
+      13.31494140625
+    ],
+    "loadavg_after": [
+      7.1337890625,
+      11.81396484375,
+      13.296875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022176122991368,
+      "cpu_seconds": 0.5800000000000001,
+      "cpu_percent_one_core": 9.631070034396458,
+      "rss_kib_min": 8520,
+      "rss_kib_median": 8668,
+      "rss_kib_max": 8844,
+      "threads_min": 18,
+      "threads_max": 18,
+      "vmhwm_kib": 8948
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 882524141,
+        "mean": 122572,
+        "50th": 48602,
+        "90th": 383313,
+        "95th": 428183,
+        "99th": 588397,
+        "max": 1784023,
+        "min": 21230
+      },
+      "bytes_in": {
+        "total": 32392800,
+        "mean": 4499
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:04.915276812+08:00",
+      "latest": "2026-10-21T20:28:10.91483646+08:00",
+      "end": "2026-10-21T20:28:10.914867248+08:00",
+      "duration": 5999559648,
+      "wait": 30788,
+      "requests": 7200,
+      "rate": 1200.0880768641373,
+      "throughput": 1200.081918391804,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "rich",
+    "repetition": 3,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.1337890625,
+      11.81396484375,
+      13.296875
+    ],
+    "loadavg_after": [
+      7.44384765625,
+      11.80029296875,
+      13.2841796875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022294291993603,
+      "cpu_seconds": 0.49,
+      "cpu_percent_one_core": 8.136433994124717,
+      "rss_kib_min": 8668,
+      "rss_kib_median": 8668,
+      "rss_kib_max": 8860,
+      "threads_min": 18,
+      "threads_max": 18,
+      "vmhwm_kib": 9000
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 558353681,
+        "mean": 465294,
+        "50th": 440211,
+        "90th": 572904,
+        "95th": 664387,
+        "99th": 1038116,
+        "max": 1812137,
+        "min": 336212
+      },
+      "bytes_in": {
+        "total": 25543200,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:10.95872917+08:00",
+      "latest": "2026-10-21T20:28:16.953887391+08:00",
+      "end": "2026-10-21T20:28:16.954366813+08:00",
+      "duration": 5995158221,
+      "wait": 479422,
+      "requests": 1200,
+      "rate": 200.16152297642589,
+      "throughput": 200.1455177000262,
+      "success": 1,
+      "status_codes": {
+        "200": 1200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 3,
+    "workload": "info-4000",
+    "requested_rate": 4000,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.64892578125,
+      11.77001953125,
+      13.26611328125
+    ],
+    "loadavg_after": [
+      7.67724609375,
+      11.70703125,
+      13.23779296875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022521487990161,
+      "cpu_seconds": 0.2,
+      "cpu_percent_one_core": 3.320868184510938,
+      "rss_kib_min": 4268,
+      "rss_kib_median": 8580,
+      "rss_kib_max": 8620,
+      "threads_min": 12,
+      "threads_max": 17,
+      "vmhwm_kib": 8620
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 916766474,
+        "mean": 38198,
+        "50th": 30433,
+        "90th": 48412,
+        "95th": 58329,
+        "99th": 185235,
+        "max": 2708642,
+        "min": 18494
+      },
+      "bytes_in": {
+        "total": 15360000,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:20.13374881+08:00",
+      "latest": "2026-10-21T20:28:26.133557111+08:00",
+      "end": "2026-10-21T20:28:26.133605682+08:00",
+      "duration": 5999808301,
+      "wait": 48571,
+      "requests": 24000,
+      "rate": 4000.127803416631,
+      "throughput": 4000.095420942902,
+      "success": 1,
+      "status_codes": {
+        "200": 24000
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 3,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.67724609375,
+      11.70703125,
+      13.23779296875
+    ],
+    "loadavg_after": [
+      7.703125,
+      11.64501953125,
+      13.20947265625
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.021824702998856,
+      "cpu_seconds": 0.5700000000000001,
+      "cpu_percent_one_core": 9.465569459638061,
+      "rss_kib_min": 8620,
+      "rss_kib_median": 8760,
+      "rss_kib_max": 8816,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 8892
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 855799548,
+        "mean": 118861,
+        "50th": 48368,
+        "90th": 369999,
+        "95th": 403081,
+        "99th": 563651,
+        "max": 1514617,
+        "min": 21681
+      },
+      "bytes_in": {
+        "total": 32392800,
+        "mean": 4499
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:26.188066738+08:00",
+      "latest": "2026-10-21T20:28:32.187637348+08:00",
+      "end": "2026-10-21T20:28:32.187662445+08:00",
+      "duration": 5999570610,
+      "wait": 25097,
+      "requests": 7200,
+      "rate": 1200.085884146299,
+      "throughput": 1200.0808640487949,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "rich",
+    "repetition": 3,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.703125,
+      11.64501953125,
+      13.20947265625
+    ],
+    "loadavg_after": [
+      7.80322265625,
+      11.54052734375,
+      13.158203125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022324267978547,
+      "cpu_seconds": 0.44999999999999996,
+      "cpu_percent_one_core": 7.472198107841956,
+      "rss_kib_min": 8760,
+      "rss_kib_median": 8760,
+      "rss_kib_max": 8944,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 8892
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 521340154,
+        "mean": 434450,
+        "50th": 419347,
+        "90th": 515915,
+        "95th": 567030,
+        "99th": 884051,
+        "max": 1466156,
+        "min": 322035
+      },
+      "bytes_in": {
+        "total": 25543200,
+        "mean": 21286
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:32.231251715+08:00",
+      "latest": "2026-10-21T20:28:38.226150979+08:00",
+      "end": "2026-10-21T20:28:38.226495677+08:00",
+      "duration": 5994899264,
+      "wait": 344698,
+      "requests": 1200,
+      "rate": 200.17016919802575,
+      "throughput": 200.15866036578814,
+      "success": 1,
+      "status_codes": {
+        "200": 1200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "kv",
+    "repetition": 1,
+    "workload": "kv-history-50",
+    "requested_rate": 50,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.80322265625,
+      11.54052734375,
+      13.158203125
+    ],
+    "loadavg_after": [
+      7.73876953125,
+      11.46484375,
+      13.125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.024045472004218,
+      "cpu_seconds": 0.33999999999999997,
+      "cpu_percent_one_core": 5.644047701500516,
+      "rss_kib_min": 9100,
+      "rss_kib_median": 9136,
+      "rss_kib_max": 9136,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 10320
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 413492756,
+        "mean": 1378309,
+        "50th": 1275153,
+        "90th": 1710317,
+        "95th": 1963711,
+        "99th": 3222788,
+        "max": 4793741,
+        "min": 929256
+      },
+      "bytes_in": {
+        "total": 6681600,
+        "mean": 22272
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:41.432265398+08:00",
+      "latest": "2026-10-21T20:28:47.413034649+08:00",
+      "end": "2026-10-21T20:28:47.414281342+08:00",
+      "duration": 5980769251,
+      "wait": 1246693,
+      "requests": 300,
+      "rate": 50.1607715345044,
+      "throughput": 50.15031768694998,
+      "success": 1,
+      "status_codes": {
+        "200": 300
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "kv",
+    "repetition": 1,
+    "workload": "kv-history-50",
+    "requested_rate": 50,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.67919921875,
+      11.390625,
+      13.091796875
+    ],
+    "loadavg_after": [
+      7.62451171875,
+      11.3173828125,
+      13.05859375
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.024370640981942,
+      "cpu_seconds": 0.31000000000000005,
+      "cpu_percent_one_core": 5.14576573179554,
+      "rss_kib_min": 7120,
+      "rss_kib_median": 7120,
+      "rss_kib_max": 7156,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8408
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 374303327,
+        "mean": 1247677,
+        "50th": 1193447,
+        "90th": 1489602,
+        "95th": 1781844,
+        "99th": 3041998,
+        "max": 4076383,
+        "min": 842183
+      },
+      "bytes_in": {
+        "total": 6681600,
+        "mean": 22272
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:50.623017124+08:00",
+      "latest": "2026-10-21T20:28:56.603314736+08:00",
+      "end": "2026-10-21T20:28:56.604590093+08:00",
+      "duration": 5980297612,
+      "wait": 1275357,
+      "requests": 300,
+      "rate": 50.16472748747876,
+      "throughput": 50.154031649329525,
+      "success": 1,
+      "status_codes": {
+        "200": 300
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "kv",
+    "repetition": 2,
+    "workload": "kv-history-50",
+    "requested_rate": 50,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.494140625,
+      11.22900390625,
+      13.0205078125
+    ],
+    "loadavg_after": [
+      7.3740234375,
+      11.14208984375,
+      12.982421875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.023678708996158,
+      "cpu_seconds": 0.30000000000000004,
+      "cpu_percent_one_core": 4.980345308788802,
+      "rss_kib_min": 7088,
+      "rss_kib_median": 7088,
+      "rss_kib_max": 7116,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8572
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 348621030,
+        "mean": 1162070,
+        "50th": 1133339,
+        "90th": 1359257,
+        "95th": 1531163,
+        "99th": 2244439,
+        "max": 3118933,
+        "min": 847102
+      },
+      "bytes_in": {
+        "total": 6681600,
+        "mean": 22272
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:28:59.815421218+08:00",
+      "latest": "2026-10-21T20:29:05.795208078+08:00",
+      "end": "2026-10-21T20:29:05.796439122+08:00",
+      "duration": 5979786860,
+      "wait": 1231044,
+      "requests": 300,
+      "rate": 50.169012211247946,
+      "throughput": 50.15868616600617,
+      "success": 1,
+      "status_codes": {
+        "200": 300
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "kv",
+    "repetition": 2,
+    "workload": "kv-history-50",
+    "requested_rate": 50,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      7.103515625,
+      11.0234375,
+      12.93408203125
+    ],
+    "loadavg_after": [
+      6.85498046875,
+      10.90673828125,
+      12.8857421875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.0226522570010275,
+      "cpu_seconds": 0.32,
+      "cpu_percent_one_core": 5.313273726339027,
+      "rss_kib_min": 7072,
+      "rss_kib_median": 7072,
+      "rss_kib_max": 7136,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 7220
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 347495980,
+        "mean": 1158319,
+        "50th": 1142770,
+        "90th": 1340600,
+        "95th": 1440773,
+        "99th": 1721777,
+        "max": 2391886,
+        "min": 869875
+      },
+      "bytes_in": {
+        "total": 6681600,
+        "mean": 22272
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:29:09.052117896+08:00",
+      "latest": "2026-10-21T20:29:15.032169942+08:00",
+      "end": "2026-10-21T20:29:15.03359452+08:00",
+      "duration": 5980052046,
+      "wait": 1424578,
+      "requests": 300,
+      "rate": 50.166787461434744,
+      "throughput": 50.15483949168736,
+      "success": 1,
+      "status_codes": {
+        "200": 300
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "kv",
+    "repetition": 3,
+    "workload": "kv-history-50",
+    "requested_rate": 50,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      6.5458984375,
+      10.775390625,
+      12.83251953125
+    ],
+    "loadavg_after": [
+      6.421875,
+      10.67919921875,
+      12.7900390625
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.024058237002464,
+      "cpu_seconds": 0.32,
+      "cpu_percent_one_core": 5.312033639290149,
+      "rss_kib_min": 9072,
+      "rss_kib_median": 9072,
+      "rss_kib_max": 9160,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 10680
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 348183066,
+        "mean": 1160610,
+        "50th": 1138118,
+        "90th": 1334193,
+        "95th": 1442010,
+        "99th": 1904720,
+        "max": 1979962,
+        "min": 883350
+      },
+      "bytes_in": {
+        "total": 6681600,
+        "mean": 22272
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:29:18.28066706+08:00",
+      "latest": "2026-10-21T20:29:24.26072812+08:00",
+      "end": "2026-10-21T20:29:24.261953965+08:00",
+      "duration": 5980061060,
+      "wait": 1225845,
+      "requests": 300,
+      "rate": 50.1667118429055,
+      "throughput": 50.156430340971916,
+      "success": 1,
+      "status_codes": {
+        "200": 300
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "kv",
+    "repetition": 3,
+    "workload": "kv-history-50",
+    "requested_rate": 50,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      6.421875,
+      10.67919921875,
+      12.7900390625
+    ],
+    "loadavg_after": [
+      6.2763671875,
+      10.5078125,
+      12.71142578125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022402742994018,
+      "cpu_seconds": 0.32,
+      "cpu_percent_one_core": 5.313493860440709,
+      "rss_kib_min": 7104,
+      "rss_kib_median": 7140,
+      "rss_kib_max": 7216,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8620
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 357756605,
+        "mean": 1192522,
+        "50th": 1180768,
+        "90th": 1369865,
+        "95th": 1456002,
+        "99th": 1603635,
+        "max": 1931060,
+        "min": 912715
+      },
+      "bytes_in": {
+        "total": 6681600,
+        "mean": 22272
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:29:27.505298913+08:00",
+      "latest": "2026-10-21T20:29:33.485899295+08:00",
+      "end": "2026-10-21T20:29:33.487517828+08:00",
+      "duration": 5980600382,
+      "wait": 1618533,
+      "requests": 300,
+      "rate": 50.162187880487615,
+      "throughput": 50.148616134352885,
+      "success": 1,
+      "status_codes": {
+        "200": 300
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "empty",
+    "repetition": 1,
+    "workload": "empty-independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      6.2763671875,
+      10.5078125,
+      12.71142578125
+    ],
+    "loadavg_after": [
+      6.013671875,
+      10.3828125,
+      12.6591796875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022469405987067,
+      "cpu_seconds": 0.16,
+      "cpu_percent_one_core": 2.6567175225654203,
+      "rss_kib_min": 7764,
+      "rss_kib_median": 7792,
+      "rss_kib_max": 7820,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 7820
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 358748858,
+        "mean": 49826,
+        "50th": 42008,
+        "90th": 70830,
+        "95th": 85036,
+        "99th": 185140,
+        "max": 1919809,
+        "min": 19216
+      },
+      "bytes_in": {
+        "total": 6808800,
+        "mean": 945.6666666666666
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:29:36.675995839+08:00",
+      "latest": "2026-10-21T20:29:42.675516366+08:00",
+      "end": "2026-10-21T20:29:42.675543386+08:00",
+      "duration": 5999520527,
+      "wait": 27020,
+      "requests": 7200,
+      "rate": 1200.0959022637578,
+      "throughput": 1200.0904974243053,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "empty",
+    "repetition": 1,
+    "workload": "empty-independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      5.85205078125,
+      10.2763671875,
+      12.6123046875
+    ],
+    "loadavg_after": [
+      5.62353515625,
+      10.1552734375,
+      12.560546875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.02162640899769,
+      "cpu_seconds": 0.15,
+      "cpu_percent_one_core": 2.491021358878485,
+      "rss_kib_min": 3796,
+      "rss_kib_median": 3880,
+      "rss_kib_max": 3880,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 3880
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 327908534,
+        "mean": 45542,
+        "50th": 40968,
+        "90th": 63962,
+        "95th": 75921,
+        "99th": 116897,
+        "max": 1791428,
+        "min": 21841
+      },
+      "bytes_in": {
+        "total": 6808800,
+        "mean": 945.6666666666666
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:29:45.883520186+08:00",
+      "latest": "2026-10-21T20:29:51.883213504+08:00",
+      "end": "2026-10-21T20:29:51.883240124+08:00",
+      "duration": 5999693318,
+      "wait": 26620,
+      "requests": 7200,
+      "rate": 1200.0613395352884,
+      "throughput": 1200.0560150146127,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "empty",
+    "repetition": 2,
+    "workload": "empty-independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      5.3330078125,
+      10.01953125,
+      12.50341796875
+    ],
+    "loadavg_after": [
+      5.22607421875,
+      9.91943359375,
+      12.45751953125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022853130998556,
+      "cpu_seconds": 0.15,
+      "cpu_percent_one_core": 2.490513992911045,
+      "rss_kib_min": 5800,
+      "rss_kib_median": 7956,
+      "rss_kib_max": 7960,
+      "threads_min": 12,
+      "threads_max": 14,
+      "vmhwm_kib": 7960
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 475321219,
+        "mean": 66016,
+        "50th": 41574,
+        "90th": 70616,
+        "95th": 85689,
+        "99th": 934979,
+        "max": 3116970,
+        "min": 21320
+      },
+      "bytes_in": {
+        "total": 6808800,
+        "mean": 945.6666666666666
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:29:55.090969823+08:00",
+      "latest": "2026-10-21T20:30:01.090607073+08:00",
+      "end": "2026-10-21T20:30:01.090635206+08:00",
+      "duration": 5999637250,
+      "wait": 28133,
+      "requests": 7200,
+      "rate": 1200.0725543865174,
+      "throughput": 1200.0669271324928,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "empty",
+    "repetition": 2,
+    "workload": "empty-independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      5.12744140625,
+      9.82080078125,
+      12.41162109375
+    ],
+    "loadavg_after": [
+      5.35791015625,
+      9.79052734375,
+      12.3876953125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.022016976989107,
+      "cpu_seconds": 0.15,
+      "cpu_percent_one_core": 2.4908597995184847,
+      "rss_kib_min": 5784,
+      "rss_kib_median": 5824,
+      "rss_kib_max": 5824,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 5824
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 328895616,
+        "mean": 45679,
+        "50th": 41168,
+        "90th": 65906,
+        "95th": 74318,
+        "99th": 120648,
+        "max": 1151545,
+        "min": 19246
+      },
+      "bytes_in": {
+        "total": 6808800,
+        "mean": 945.6666666666666
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:30:04.301547782+08:00",
+      "latest": "2026-10-21T20:30:10.300895145+08:00",
+      "end": "2026-10-21T20:30:10.300922586+08:00",
+      "duration": 5999347363,
+      "wait": 27441,
+      "requests": 7200,
+      "rate": 1200.1305415993795,
+      "throughput": 1200.125052230359,
+      "success": 1,
+      "status_codes": {
+        "200": 7200
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "before",
+    "fixture": "empty",
+    "repetition": 3,
+    "workload": "empty-independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      5.2490234375,
+      9.6943359375,
+      12.34228515625
+    ],
+    "loadavg_after": [
+      5.06884765625,
+      9.5830078125,
+      12.2919921875
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.0218309039773885,
+      "cpu_seconds": 0.13,
+      "cpu_percent_one_core": 2.1588118642477268,
+      "rss_kib_min": 5796,
+      "rss_kib_median": 5836,
+      "rss_kib_max": 5836,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 5836
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 313091770,
+        "mean": 43491,
+        "50th": 40452,
+        "90th": 61280,
+        "95th": 70906,
+        "99th": 95847,
+        "max": 911083,
+        "min": 19076
+      },
+      "bytes_in": {
+        "total": 6808687,
+        "mean": 945.7823308792888
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:30:13.533457973+08:00",
+      "latest": "2026-10-21T20:30:19.532562075+08:00",
+      "end": "2026-10-21T20:30:19.532597221+08:00",
+      "duration": 5999104102,
+      "wait": 35146,
+      "requests": 7199,
+      "rate": 1200.0125148019977,
+      "throughput": 1200.0054845201353,
+      "success": 1,
+      "status_codes": {
+        "200": 7199
+      },
+      "errors": []
+    }
+  },
+  {
+    "backend": "after",
+    "fixture": "empty",
+    "repetition": 3,
+    "workload": "empty-independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 6,
+    "loadavg_before": [
+      5.06884765625,
+      9.5830078125,
+      12.2919921875
+    ],
+    "loadavg_after": [
+      4.984375,
+      9.41552734375,
+      12.2080078125
+    ],
+    "process": {
+      "sample_count": 63,
+      "observed_seconds": 6.021387627988588,
+      "cpu_seconds": 0.13,
+      "cpu_percent_one_core": 2.158970789319966,
+      "rss_kib_min": 7864,
+      "rss_kib_median": 7904,
+      "rss_kib_max": 7904,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 7904
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 303193821,
+        "mean": 42116,
+        "50th": 39779,
+        "90th": 58979,
+        "95th": 67818,
+        "99th": 89778,
+        "max": 1120867,
+        "min": 21991
+      },
+      "bytes_in": {
+        "total": 6808687,
+        "mean": 945.7823308792888
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T20:30:22.743185134+08:00",
+      "latest": "2026-10-21T20:30:28.742072876+08:00",
+      "end": "2026-10-21T20:30:28.742120396+08:00",
+      "duration": 5998887742,
+      "wait": 47520,
+      "requests": 7199,
+      "rate": 1200.055795276457,
+      "throughput": 1200.046289147636,
+      "success": 1,
+      "status_codes": {
+        "200": 7199
+      },
+      "errors": []
+    }
+  }
+]
