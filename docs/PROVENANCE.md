@@ -1138,3 +1138,23 @@ the owned server and generator keep the caller's identity. No host profiling
 sysctl or capability was changed. The helper documents this mode and its smoke
 fixture uses a sudo command double to check argument forwarding and cleanup.
 ShellCheck and the complete helper smoke suite pass with the new mode.
+
+## 2026-10-21: avoid preparing JSON validation for empty history
+
+The controlled memory/performance study exposed avoidable SQL preparation in
+the page path even without KV history. The query now selects key/value only;
+`std.json.validate` checks actual KV bytes before selecting the fast path.
+The malformed-record differential test remains, and the allocation-failure
+fixture now includes a nested KV record as well as migrated rows. Debug and
+ReleaseSafe each pass 1,725 tests, one real-Klippy skip and zero failures,
+including 326 bounded fuzz harnesses. The 200-KV-job allocation fixture retains
+235,146 bytes in Debug and 235,578 in ReleaseSafe; the 64 KiB read retains
+149,834 in both. Formatting and diff checks pass.
+
+Following the user's MISRA-Zig suggestion, the current local checker compiled
+with Zig 0.17 and scanned all 80 source files. Its 2,339 syntax findings include
+tests and arena-owned allocations. The handbook's explicit ownership, bounded
+input and matching-free rules informed this review; syntax findings were not
+treated as confirmed bugs or a compliance score. Memory documentation records
+the checker update, allocation measurements and the remaining full-history
+fallback costs. No unrelated rule rewrites were made.

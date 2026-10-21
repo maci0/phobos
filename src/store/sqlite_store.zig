@@ -340,7 +340,7 @@ pub const SqliteStore = struct {
         const Key = struct { id: u64, key: ?[]const u8 = null };
         var keys: std.ArrayList(Key) = .empty;
         var shadows: std.AutoHashMapUnmanaged(u64, void) = .empty;
-        const kv = try self.prepare("SELECT key, value, json_valid(CAST(value AS TEXT)) FROM namespace_store WHERE namespace='history'");
+        const kv = try self.prepare("SELECT key, value FROM namespace_store WHERE namespace='history'");
         defer _ = c.sqlite3_finalize(kv);
         var rc = c.sqlite3_step(kv);
         while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(kv)) {
@@ -349,9 +349,10 @@ pub const SqliteStore = struct {
             var canonical: [16]u8 = undefined;
             const formatted = std.fmt.bufPrint(&canonical, "{X:0>6}", .{id}) catch unreachable;
             if (!std.mem.eql(u8, key, formatted)) return null;
-            const size = c.sqlite3_column_bytes(kv, 1);
+            const size: usize = @intCast(c.sqlite3_column_bytes(kv, 1));
             const ptr = c.sqlite3_column_blob(kv, 1) orelse return null;
-            if (size == 0 or @as([*]const u8, @ptrCast(ptr))[0] != '{' or c.sqlite3_column_int64(kv, 2) == 0) return null;
+            const bytes = @as([*]const u8, @ptrCast(ptr))[0..size];
+            if (size == 0 or bytes[0] != '{' or !try json.validate(arena, bytes)) return null;
             try shadows.put(arena, id, {});
             try keys.append(arena, .{ .id = id, .key = try arena.dupe(u8, key) });
         }
@@ -788,6 +789,7 @@ test "SqliteStore history pages release every partial request allocation" {
     var s = try SqliteStore.open(testing.io, ":memory:");
     defer s.deinit();
     try createJobHistory(&s);
+    try s.execSql("INSERT INTO namespace_store VALUES ('history','000003',x'7b226d65746164617461223a7b226c6179657273223a32307d7d');");
     var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
     try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn run(alloc: std.mem.Allocator, store: *SqliteStore) !void {

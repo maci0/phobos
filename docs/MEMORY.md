@@ -150,11 +150,16 @@ field counts and final printer state are in the
 [capture summary](perf/temperature-memory-20261021.json). Both probes stopped;
 production v0.2.1 on 7125 and the board boot ID were unchanged.
 
-The local MISRA-Zig handbook's allocator and resource rules (21.3, 22.1 and
-22.2) support explicit owners, matching frees and allocation-failure checks.
-They do not forbid dynamic allocation in this daemon. The local checker did
-not compile with Zig 0.17 because it references the removed `asterisk_asterisk`
-token; this review applies the handbook manually and makes no compliance claim.
+The local MISRA-Zig handbook's allocator and resource rules (Dir 4.12,
+Dir 4.14, 21.3, 22.1 and 22.2) support explicit owners, bounded inputs,
+matching frees and allocation-failure checks. They do not forbid dynamic
+allocation in this daemon. A later checkout of the local checker compiled with
+Zig 0.17 and scanned all 80 source files: 2,339 syntax findings, including test
+code. These are review inputs, not confirmed defects or a compliance result.
+The memory review distinguishes request-arena cleanup, ownership transfer and
+streaming file copies from actual leaks or unlimited allocation. Bounded JSON
+recursion remains a deliberate difference from the handbook's no-recursion
+rule. No blanket suppressions or mechanical rewrites were applied.
 
 ## History pages and SQLite reads
 
@@ -171,7 +176,7 @@ read and verifies that the returned payload remains intact.
 
 | Native allocation fixture | Before retained bytes ↓ | After retained bytes ↓ |
 | --- | ---: | ---: |
-| 20-job page from 200 KV jobs, 4 KiB metadata each | 1,396,192 | 235,698 |
+| 20-job page from 200 KV jobs, 4 KiB metadata each | 1,396,192 | 235,146 to 235,578 |
 | Read one 64 KiB JSON payload | 393,638 | 149,834 |
 
 These are x86-64 request-arena allocations measured with
@@ -180,3 +185,9 @@ allocation budgets before the change. Pagination tests compare the real history
 handler with the namespace path, including overrides, filters, unusual keys,
 negative/large offsets and unlimited requests. Allocation-failure injection and
 a bounded differential fuzzer cover the optimized store operation.
+
+KV syntax checks use `std.json.validate` on actual rows. Empty or migrated-only
+history does not prepare a SQL JSON-validation expression. Scalar ID storage
+still grows with total job count; filtered and unlimited responses can still
+decode the full history. These changes reduce ordinary page cost without
+changing the API's unlimited-query behavior.
