@@ -9,7 +9,7 @@ def main() -> None:
     latency = report["latencies"]
     print(
         f"thru={report['throughput']:.0f} succ={report['success'] * 100:.1f}% "
-        f"p50={latency['50'] / 1e6:.2f}ms p99={latency['99'] / 1e6:.2f}ms"
+        f"p50={latency['50th'] / 1e6:.2f}ms p99={latency['99th'] / 1e6:.2f}ms"
     )
 
 

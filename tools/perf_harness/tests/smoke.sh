@@ -49,7 +49,7 @@ case "$COMMAND" in
         [[ ${PERF_FAKE_LOAD_FAIL:-0} == 0 ]] || exit 43
         if [[ $1 == attack ]]; then
             [[ "$*" == *-targets=* ]] || cat >/dev/null
-            printf '{"throughput":12,"success":0.5,"latencies":{"50":1000000,"99":2000000}}\n'
+            printf '{"throughput":12,"success":0.5,"latencies":{"50th":1000000,"99th":2000000}}\n'
         elif [[ "$*" == *-type=json* ]]; then
             cat
         else

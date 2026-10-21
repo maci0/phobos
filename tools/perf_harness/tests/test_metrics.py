@@ -15,7 +15,7 @@ def test_report_formats_observed_metrics(
     data = {
         "throughput": 12,
         "success": 0.5,
-        "latencies": {"50": 1_000_000, "99": 2_000_000},
+        "latencies": {"50th": 1_000_000, "99th": 2_000_000},
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
     report.main()

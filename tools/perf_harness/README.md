@@ -1,8 +1,9 @@
 # Performance harness
 
 Tools to compare phobos against stock Moonraker on identical hardware and to
-profile phobos's on-CPU hot path under load. Results and analysis:
-[`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md).
+profile phobos's on-CPU hot path under load. Current measurements and their
+limits are in [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) and
+[`docs/MEMORY.md`](../../docs/MEMORY.md).
 
 ## Layout
 
@@ -15,7 +16,7 @@ profile phobos's on-CPU hot path under load. Results and analysis:
 | `bench_local.sh` | Builds an isolated ReleaseFast binary, runs both servers against `klippy_stub.py`, and writes a report below `.scratch/bench-*/`. |
 | `klippy_stub.py` | Answers the Klipper API protocol from canned data so Klippy latency drops out of the measurement. |
 | `profile.sh` | Builds with `-Doptimize=ReleaseFast -Dprofile` (unstripped, frame pointers), loads it through the stub, and renders a `perf` (or `USE_BPFTRACE=1` bpftrace) on-CPU flamegraph. |
-| `plot_perf.py` | Renders `docs/perf/*.png` from the measured data points hardcoded in the script. |
+| `plot_perf.py` | Renders throughput, p99 latency, process RSS and CPU from explicit measured trial JSON. Writes only the selected output directory. |
 
 Requires [`vegeta`](https://github.com/tsenart/vegeta) for load and `perf` or
 `bpftrace` for profiling, plus `curl`, `jq`, `uv` and Zig. `profile.sh` also needs
@@ -48,6 +49,18 @@ default SVG stays in the run directory. `USE_BPFTRACE=1` selects a timed bpftrac
 capture. `loadtest.sh` keeps its binary capture below `.scratch/load-*/`; its
 label is display text, not a filename.
 
+`plot_perf.py --input <capture>/summary.json --output-dir <capture>/plots` reads
+trial records containing `backend`, `workload`, `repetition`, `requested_rate`,
+`duration_seconds`, the Vegeta JSON report in `vegeta`, and the process sample
+summary in `process` (`cpu_percent_one_core`, `rss_kib_max`). Both backends must
+have matching workloads, rates, durations and repetitions. Sibling
+`phobos/idle.json` and `moonraker/idle.json` supply `rss_kib_median` and
+`cpu_percent_one_core`. It rejects missing or invalid measurements, draws trial
+min/max ranges, and records input SHA256s beside the four PNGs. It contains no
+historical measurements and does not write to `docs/` automatically. Run it
+with `uv run tools/perf_harness/plot_perf.py` so its inline matplotlib dependency
+is available.
+
 ## On-printer method
 
 1. Prepare independent copies of the same database and equivalent configurations
@@ -56,39 +69,9 @@ label is display text, not a filename.
    running. Do not run a load comparison during printing.
 3. Sample `VmRSS`/`Threads` from `/proc/<pid>/status` during the run.
 
-## Historical printer results (armv7, 2× Cortex-A7, 107 MB RAM)
-
-Mixed read endpoints, keep-alive. Measured while every request still ran under
-the `Core` lock, before reads moved off it:
-
-| Load | phobos throughput, success | Moonraker throughput, success |
-|---|---|---|
-| 200 req/s, mixed | 107 req/s, 89% | 13 req/s, 11% |
-| 500 req/s, fast subset | 52 req/s, 17% | 15 req/s, 5% |
-
-- phobos sustained ~3-8× Moonraker's throughput with higher success ratios.
-- Unloaded single-request latency was ~57 µs p50. Under heavy concurrency the
-  ceiling was the shared Klippy round-trip (both backends proxy
-  `printer.objects.query` over one Klippy socket) plus phobos's serialized
-  `Core`.
-
-## Profiling notes
-
-`profile.sh` keeps frame pointers so `perf` stacks resolve; a `ReleaseSmall`
-build strips them and shows `[unknown]` frames. Under high concurrency the
-profile is dominated by syscall and futex time in the `Core` mutex and
-`std.Io.Threaded`'s per-connection workers. That profile predates the read
-path moving off `Core`. `std.Io.Threaded` grows its worker pool to the peak
-number of concurrent connection tasks and never shrinks it;
-`max_concurrent_conns = 128` in `src/io.zig` bounds that growth.
-
-Selected read handlers run off the `Core` lock; inspect dispatcher registration
-and component synchronization before changing that policy.
-Not done: reusing per-request buffers for JSON encoding on the hottest endpoints.
-
 ## Helper checks
 
 `timeout 90 bash tools/perf_harness/tests/smoke.sh` checks setup, capture paths,
 failure propagation and owned-process cleanup with command doubles. It runs no
 load or privileged profiler. The Python checks are
-`uv run --with pytest python -m pytest tools/perf_harness/tests --basetemp=.scratch/metrics-tests`.
+`uv run --with pytest --with matplotlib python -m pytest tools/perf_harness/tests --basetemp=.scratch/metrics-tests`.

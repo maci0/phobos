@@ -1,102 +1,230 @@
-#!/usr/bin/env python3
-"""Render the phobos vs Moonraker performance graphs into docs/perf/.
+# /// script
+# dependencies = ["matplotlib"]
+# ///
+"""Plot matched trials from measured Vegeta and process samples."""
 
-Data points are the measured results from the vegeta sweeps documented in
-docs/PERFORMANCE.md (Klippy stubbed, same 32-core host). Re-run after a fresh
-benchmark by updating the dicts below. Output: docs/perf/*.png.
-"""
-import os
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from __future__ import annotations
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "perf")
-os.makedirs(OUT, exist_ok=True)
+import argparse
+import hashlib
+import json
+import math
+import statistics
+from dataclasses import dataclass
+from pathlib import Path
 
-PHOBOS = "#2563eb"   # blue
-MOON = "#dc2626"     # red
-GREEN = "#16a34a"
-
-# server.info sweep: offered rate -> (throughput req/s, p50 ms)
-info_phobos = {5000: (5000, 0.05), 10000: (10000, 0.05), 20000: (19997, 0.07),
-               40000: (39972, 0.06), 80000: (79976, 0.05), 120000: (17320, 24.08)}
-info_moon = {5000: (5000, 0.37), 10000: (6767, 262.84), 20000: (5204, 270.94),
-             40000: (4334, 256.71), 80000: (6146, 225.87)}
+BACKENDS = ("phobos", "moonraker")
+COLORS = ("#2563eb", "#dc2626")
 
 
-def _style(ax):
-    ax.grid(True, ls="--", alpha=0.35)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+@dataclass(frozen=True)
+class Trial:
+    backend: str
+    workload: str
+    repetition: int
+    requested_rate: float
+    duration_seconds: float
+    throughput: float
+    success: float
+    p99_ms: float
+    cpu_percent: float
+    rss_mib: float
 
 
-# --- 1. Throughput vs offered load -----------------------------------------
-fig, ax = plt.subplots(figsize=(7, 4.3))
-xs = sorted(info_phobos)
-ax.plot(xs, [info_phobos[x][0] for x in xs], "o-", color=PHOBOS, lw=2.2, label="phobos")
-xm = sorted(info_moon)
-ax.plot(xm, [info_moon[x][0] for x in xm], "s-", color=MOON, lw=2.2, label="Moonraker")
-ax.plot([0, 80000], [0, 80000], ":", color="#94a3b8", lw=1.3, label="ideal (keeps up)")
-ax.set_xlabel("offered req/s")
-ax.set_ylabel("served req/s")
-ax.set_title("server.info — throughput vs offered load (Klippy stubbed)")
-ax.legend(frameon=False)
-_style(ax)
-fig.tight_layout(); fig.savefig(os.path.join(OUT, "throughput_vs_load.png"), dpi=130)
-plt.close(fig)
+def field(value: object, key: str) -> object:
+    if not isinstance(value, dict) or key not in value:
+        raise ValueError(f"missing measurement: {key}")
+    return value[key]
 
-# --- 2. p50 latency vs offered load (log y) --------------------------------
-fig, ax = plt.subplots(figsize=(7, 4.3))
-ax.plot(xs, [info_phobos[x][1] for x in xs], "o-", color=PHOBOS, lw=2.2, label="phobos")
-ax.plot(xm, [info_moon[x][1] for x in xm], "s-", color=MOON, lw=2.2, label="Moonraker")
-ax.set_yscale("log")
-ax.set_xlabel("offered req/s")
-ax.set_ylabel("p50 latency (ms, log)")
-ax.set_title("server.info — response time vs load: where Moonraker's loop backs up")
-ax.axvspan(7000, 11000, color=MOON, alpha=0.08)
-ax.annotate("Moonraker saturates\n(0.37 → 263 ms)", xy=(10000, 263), xytext=(22000, 60),
-            color=MOON, fontsize=9, arrowprops=dict(arrowstyle="->", color=MOON))
-ax.legend(frameon=False)
-_style(ax)
-fig.tight_layout(); fig.savefig(os.path.join(OUT, "latency_vs_load.png"), dpi=130)
-plt.close(fig)
 
-# --- 3. objects.query optimisation journey ---------------------------------
-fig, ax = plt.subplots(figsize=(7, 4.3))
-stages = ["original", "+smp_alloc", "+off-Core\n+no-copy"]
-thru = [1067, 2160, 3959]
-bars = ax.bar(stages, thru, color=[MOON, "#f59e0b", GREEN], width=0.6)
-for b, v in zip(bars, thru):
-    ax.text(b.get_x() + b.get_width() / 2, v + 60, f"{v}/s", ha="center", fontsize=10, weight="bold")
-ax.set_ylabel("objects.query req/s (sustained)")
-ax.set_title("objects.query — optimisation journey (Klippy proxy path)")
-ax.set_ylim(0, 4600)
-_style(ax)
-fig.tight_layout(); fig.savefig(os.path.join(OUT, "query_journey.png"), dpi=130)
-plt.close(fig)
+def number(value: object, key: str) -> float:
+    item = field(value, key)
+    if isinstance(item, bool) or not isinstance(item, (int, float)):
+        raise TypeError(f"measurement must be numeric: {key}")
+    result = float(item)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"measurement must be finite and nonnegative: {key}")
+    return result
 
-# --- 4. RSS + per-endpoint latency comparison ------------------------------
-fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 4.2))
-a1.bar(["phobos\nidle", "phobos\npost-spike", "Moonraker\nidle"], [3.4, 9.5, 57.0],
-       color=[PHOBOS, "#60a5fa", MOON], width=0.6)
-for i, v in enumerate([3.4, 9.5, 57.0]):
-    a1.text(i, v + 1, f"{v} MB", ha="center", fontsize=10, weight="bold")
-a1.set_ylabel("RSS (MB)")
-a1.set_title("Resident memory")
-_style(a1)
 
-eps = ["info", "config", "system_info"]
-p_lat = [0.05, 0.06, 0.06]
-m_lat = [0.43, 0.48, 0.22]
-x = range(len(eps))
-a2.bar([i - 0.2 for i in x], p_lat, width=0.4, color=PHOBOS, label="phobos")
-a2.bar([i + 0.2 for i in x], m_lat, width=0.4, color=MOON, label="Moonraker")
-a2.set_xticks(list(x)); a2.set_xticklabels(eps)
-a2.set_ylabel("p50 latency (ms)")
-a2.set_title("Local-read latency (at matched load)")
-a2.legend(frameon=False)
-_style(a2)
-fig.tight_layout(); fig.savefig(os.path.join(OUT, "memory_and_latency.png"), dpi=130)
-plt.close(fig)
+def text(value: object, key: str) -> str:
+    item = field(value, key)
+    if not isinstance(item, str) or not item:
+        raise ValueError(f"measurement must be a nonempty string: {key}")
+    return item
 
-print("wrote 4 graphs to docs/perf/")
+
+def load_trials(path: Path) -> list[Trial]:
+    values = json.loads(path.read_text())
+    if not isinstance(values, list) or not values:
+        raise ValueError("summary must contain measured trials")
+    trials = []
+    for value in values:
+        report = field(value, "vegeta")
+        latencies = field(report, "latencies")
+        process = field(value, "process")
+        repetition = number(value, "repetition")
+        duration = number(value, "duration_seconds")
+        success = number(report, "success")
+        if (
+            repetition != int(repetition)
+            or repetition < 1
+            or duration == 0
+            or success > 1
+        ):
+            raise ValueError("invalid repetition, duration or success fraction")
+        trials.append(
+            Trial(
+                backend=text(value, "backend"),
+                workload=text(value, "workload"),
+                repetition=int(repetition),
+                requested_rate=number(value, "requested_rate"),
+                duration_seconds=duration,
+                throughput=number(report, "throughput"),
+                success=success,
+                p99_ms=number(latencies, "99th") / 1e6,
+                cpu_percent=number(process, "cpu_percent_one_core"),
+                rss_mib=number(process, "rss_kib_max") / 1024,
+            )
+        )
+    if {trial.backend for trial in trials} != set(BACKENDS):
+        raise ValueError("both phobos and moonraker measurements are required")
+    seen: set[tuple[str, str, int]] = set()
+    for trial in trials:
+        key = (trial.backend, trial.workload, trial.repetition)
+        if key in seen:
+            raise ValueError("duplicate measured trial")
+        seen.add(key)
+    for workload in {trial.workload for trial in trials}:
+        rows = [trial for trial in trials if trial.workload == workload]
+        if len({(trial.requested_rate, trial.duration_seconds) for trial in rows}) != 1:
+            raise ValueError(f"unmatched rate or duration: {workload}")
+        repetitions = [
+            {trial.repetition for trial in rows if trial.backend == backend}
+            for backend in BACKENDS
+        ]
+        if not repetitions[0] or repetitions[0] != repetitions[1]:
+            raise ValueError(f"unmatched repetitions: {workload}")
+    return trials
+
+
+def render(input_path: Path, output: Path, title: str) -> None:
+    trials = load_trials(input_path)
+    idle_paths = [input_path.parent / backend / "idle.json" for backend in BACKENDS]
+    idle_values = [json.loads(path.read_text()) for path in idle_paths]
+    idle_rss = [number(value, "rss_kib_median") / 1024 for value in idle_values]
+    idle_cpu = [number(value, "cpu_percent_one_core") for value in idle_values]
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output.mkdir(parents=True, exist_ok=True)
+    workloads = sorted({trial.workload for trial in trials})
+    counts = sorted(
+        {
+            sum(
+                trial.backend == "phobos" and trial.workload == workload
+                for trial in trials
+            )
+            for workload in workloads
+        }
+    )
+    repetitions = "/".join(str(count) for count in counts)
+    success = min(trial.success for trial in trials)
+    footer = f"Median of {repetitions} trials; bars show trial min/max. Minimum request success: {success:.2%}."
+    specs = (
+        (
+            "throughput",
+            "throughput",
+            "Successful requests / second",
+            "Throughput",
+            None,
+        ),
+        ("latency", "p99_ms", "p99 latency (ms)", "Tail latency", None),
+        ("memory", "rss_mib", "Resident memory (MiB)", "Process RSS", idle_rss),
+        (
+            "cpu",
+            "cpu_percent",
+            "Process CPU (100% = one core)",
+            "Process CPU",
+            idle_cpu,
+        ),
+    )
+    for filename, attribute, ylabel, heading, idle in specs:
+        labels = (["idle"] if idle is not None else []) + workloads
+        fig, ax = plt.subplots(figsize=(11, 5.5))
+        for index, (backend, color) in enumerate(zip(BACKENDS, COLORS, strict=True)):
+            medians, lower, upper = [], [], []
+            if idle is not None:
+                medians.append(idle[index])
+                lower.append(0)
+                upper.append(0)
+            for workload in workloads:
+                values = [
+                    getattr(trial, attribute)
+                    for trial in trials
+                    if trial.backend == backend and trial.workload == workload
+                ]
+                median = statistics.median(values)
+                medians.append(median)
+                lower.append(median - min(values))
+                upper.append(max(values) - median)
+            xs = [position + (index - 0.5) * 0.38 for position in range(len(labels))]
+            ax.bar(
+                xs,
+                medians,
+                width=0.38,
+                color=color,
+                label="Moonraker" if backend == "moonraker" else backend,
+                yerr=[lower, upper],
+                capsize=3,
+            )
+        ax.set_xticks(
+            range(len(labels)),
+            [label.replace("-", "\n", 1) for label in labels],
+            fontsize=9,
+        )
+        ax.set_ylabel(ylabel)
+        ax.set_title(f"{heading}: {title}")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_axisbelow(True)
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend(frameon=False)
+        fig.text(
+            0.5,
+            0.015,
+            footer + (" Idle uses each recorded baseline." if idle is not None else ""),
+            ha="center",
+            fontsize=8,
+        )
+        fig.tight_layout(rect=(0, 0.045, 1, 1))
+        fig.savefig(output / f"{filename}.png", dpi=150)
+        plt.close(fig)
+    inputs = [input_path, *idle_paths]
+    manifest = {
+        path.relative_to(input_path.parent).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in inputs
+    }
+    (output / "plot-inputs.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="measured summary.json with Vegeta and process metrics",
+    )
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--title", default="host loopback, Klippy stub")
+    args = parser.parse_args()
+    render(args.input, args.output_dir, args.title)
+
+
+if __name__ == "__main__":
+    main()
