@@ -35,7 +35,7 @@ and Apprise are out of scope.
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
 record versioned host and Forge-X comparisons, including the newer history
 memory changes, actual Moonraker measurements and capture limits. The latest release is
-[v0.2.1](docs/releases/v0.2.1.md).
+[v0.2.2](docs/releases/v0.2.2.md).
 
 ## Architecture
 

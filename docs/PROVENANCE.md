@@ -1369,3 +1369,29 @@ cross-compilation. API coverage passes at 123/123 endpoints, 130/130 methods and
 27/27 notifications; the generated table check passes without regeneration.
 Formatting and diff checks pass. `graphify` remains unavailable, so its update
 is skipped and graph output is excluded.
+
+## 2026-10-21: prepare v0.2.2
+
+The user requested a new release and printer installation. Advance the package
+version and README release link to v0.2.2 and add versioned notes for changes
+since v0.2.1: lazy temperature fields, paged history reads, owned JSON decoding,
+nullable legacy end times, scoped statement reuse, scalar keys, field-map
+reservation and indexed override exclusion. Notes retain identity differences,
+feature limits and measured timing/RSS regressions. SQLite, compiler and
+Moonraker pins do not change.
+
+Source commit `7b70f96` passed local Debug/ReleaseSafe (1,730 passed, one skip,
+326 fuzz harnesses), API/table gates and complete CI run 39604186802, including
+all seven profiles, three native suites and both native release-asset smoke
+checks. Release metadata and packaging checks are repeated for the new version
+before the annotated tag. Initial production inspection finds v0.2.1 ready,
+print standby and both targets zero, with boot ID unchanged. Deployment will
+use the published Cortex-A7 asset, preserve the old executable/launcher and
+copy the stopped database before replacing the daemon. No board or Klipper
+restart is part of installation.
+
+The version-matched host Debug binary reports 0.2.2. Fresh API coverage remains
+100%, the generated-table check passes, and all nine release-helper tests pass.
+Relative release-note links resolve through the packaging helper. Formatting
+and diff checks pass. Full native suites and all release profiles are required
+again by main/tag CI before publication.
