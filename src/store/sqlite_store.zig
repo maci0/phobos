@@ -339,7 +339,6 @@ pub const SqliteStore = struct {
         defer self.unlockRmw();
         const Key = struct { id: u64, from_kv: bool = false };
         var keys: std.ArrayList(Key) = .empty;
-        var shadows: std.AutoHashMapUnmanaged(u64, void) = .empty;
         const kv = try self.prepare("SELECT key, value FROM namespace_store WHERE namespace='history'");
         defer _ = c.sqlite3_finalize(kv);
         var rc = c.sqlite3_step(kv);
@@ -353,17 +352,20 @@ pub const SqliteStore = struct {
             const ptr = c.sqlite3_column_blob(kv, 1) orelse return null;
             const bytes = @as([*]const u8, @ptrCast(ptr))[0..size];
             if (size == 0 or bytes[0] != '{' or !try json.validate(arena, bytes)) return null;
-            try shadows.put(arena, id, {});
             try keys.append(arena, .{ .id = id, .from_kv = true });
         }
         if (rc != c.SQLITE_DONE) return Error.BackendError;
         if (try self.hasTable("job_history")) {
-            const ids = try self.prepare("SELECT job_id FROM job_history WHERE job_id >= 0");
+            const ids = try self.prepare(if (keys.items.len == 0)
+                "SELECT job_id FROM job_history WHERE job_id >= 0"
+            else
+                "SELECT job_id FROM job_history WHERE job_id >= 0 AND NOT EXISTS " ++
+                    "(SELECT 1 FROM namespace_store WHERE namespace='history' AND key=printf('%06llX',job_history.job_id))");
             defer _ = c.sqlite3_finalize(ids);
             rc = c.sqlite3_step(ids);
             while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(ids)) {
                 const id: u64 = @intCast(c.sqlite3_column_int64(ids, 0));
-                if (!shadows.contains(id)) try keys.append(arena, .{ .id = id });
+                try keys.append(arena, .{ .id = id });
             }
             if (rc != c.SQLITE_DONE) return Error.BackendError;
         }
@@ -852,9 +854,34 @@ test "SqliteStore history page key indexes retain scalar IDs" {
     try testing.expectEqualStrings("0003F0", page[19].key);
     const retained = tracked.allocated_bytes - tracked.freed_bytes;
     std.debug.print("history key index retained request storage: {d} bytes\n", .{retained});
-    try testing.expect(retained < 96 * 1024);
+    try testing.expect(retained < 64 * 1024);
     const first = (try s.getHistoryPage(a, .{ .limit = 1, .start = 0, .ascending = true })).?;
     try testing.expectEqualStrings("000000", first[0].key);
+}
+
+test "SqliteStore history overrides preserve full-width legacy IDs" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    try s.execSql(
+        \\INSERT INTO job_history VALUES
+        \\ (2147483648,'me','wide.gcode','completed',100.0,NULL,0.0,0.0,0.0,'{}','[]','default'),
+        \\ (4294967296,'me','shadow.gcode','completed',100.0,NULL,0.0,0.0,0.0,'{}','[]','default'),
+        \\ (9223372036854775807,'me','shadow.gcode','completed',100.0,NULL,0.0,0.0,0.0,'{}','[]','default');
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const job = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"override.gcode\"}", .{});
+    for ([_][]const u8{ "100000000", "7FFFFFFFFFFFFFFF" }) |key|
+        try s.insertItem(a, "history", key, job);
+    const page = (try s.getHistoryPage(a, .{ .limit = 0, .start = 0, .ascending = false })).?;
+    try testing.expectEqual(@as(usize, 5), page.len);
+    for (page, [_][]const u8{ "7FFFFFFFFFFFFFFF", "100000000", "80000000", "000002", "000001" }) |row, key|
+        try testing.expectEqualStrings(key, row.key);
+    for (page[0..2]) |row|
+        try testing.expectEqualStrings("override.gcode", row.val.object.get("filename").?.string);
+    try testing.expectEqualStrings("wide.gcode", page[2].val.object.get("filename").?.string);
 }
 
 test "SqliteStore history pages own interleaved table and KV rows" {
@@ -942,6 +969,7 @@ test "fuzz SqliteStore history pages match namespace pagination" {
                 \\ (4,'me','four.gcode','completed',400.0,500.0,0.0,0.0,0.0,'{"name":"four"}','[]','default'),
                 \\ (5,'me','five.gcode','completed',500.0,NULL,0.0,0.0,0.0,'{"name":"five"}','[]','default');
             );
+            try s.execSql("INSERT INTO job_history SELECT 9223372036854775807,user,filename,status,start_time,end_time,print_duration,total_duration,filament_used,metadata,auxiliary_data,instance_id FROM job_history WHERE job_id=1;");
             if (bits[5] & 1 != 0) try s.execSql("UPDATE job_history SET end_time=NULL WHERE job_id=2");
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
@@ -949,6 +977,7 @@ test "fuzz SqliteStore history pages match namespace pagination" {
             if (bits[5] & 1 != 0) try testing.expect((try s.getItem(a, "history", "000002")).?.object.get("end_time").? == .null);
             const job = try json.parseFromSliceLeaky(json.Value, a, "{\"filename\":\"new.gcode\",\"metadata\":{\"layers\":20}}", .{});
             if (bits[7] & 1 != 0) try s.insertItem(a, "history", "FFFFFFFFFFFFFFFF", job);
+            if (bits[7] & 2 != 0) try s.insertItem(a, "history", "7FFFFFFFFFFFFFFF", job);
             if (bits[0] & 1 != 0) try s.insertItem(a, "history", "000001", job);
             try s.insertItem(a, "history", if (bits[0] & 2 != 0) "000003" else "3", if (bits[0] & 4 != 0) job else .null);
             var params: json.ObjectMap = .empty;

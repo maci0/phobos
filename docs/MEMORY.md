@@ -209,3 +209,9 @@ Legacy SQLite rows reserve their 11 JSON fields before copying column data.
 The 200-row fixture retains 517,988 bytes instead of 858,758 on x86-64. Reserving
 the field map once avoids retaining its earlier backing arrays between string
 and metadata allocations. Returned strings still belong to the request arena.
+
+The page reader also uses SQLite's namespace/key index to exclude overridden
+legacy IDs when KV jobs exist. It no longer builds a second in-memory hash map
+of the same IDs. Legacy-only pages retain their simpler ID query. The key-index
+fixture above falls further to 43,992 retained bytes. `%06llX` preserves the
+full signed legacy ID range; KV-only IDs still support unsigned 64-bit values.

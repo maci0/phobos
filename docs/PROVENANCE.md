@@ -1298,3 +1298,27 @@ Debug and ReleaseSafe each pass 1,729 tests, one real-Klippy skip, zero failures
 and 326 fuzz harnesses. Portable and Cortex-A7 ReleaseSmall builds complete.
 Formatting and diff checks pass. Matched timing measurements follow this
 verified source commit; production remains unchanged.
+
+## 2026-10-21: tuning round 4, reuse SQLite's override index
+
+Third resumed round requested by the user. The history page reader no longer
+duplicates canonical KV IDs in a hash map. With KV rows present, its legacy ID
+query excludes overridden rows through the existing namespace/key primary key.
+Legacy-only pages retain the original simple query. SQL `%06llX` matches the
+canonical key format without truncating 64-bit legacy IDs. A new regression
+checks overrides above 32 bits and at the signed maximum; the differential
+fuzzer includes a maximum signed table ID with optional KV replacement. Existing
+allocation-failure injection covers both query paths. The 64 KiB key-index
+budget fails before the change at 95,326 bytes and passes at 43,992 bytes.
+
+Earlier response-container experiments were rejected. The 200-row response
+retained 1,196,070 bytes before, 1,196,412 with `ObjectMap.clone`, 1,196,640 with
+exact field reservation and 1,196,070 with an exact response-array reservation.
+None reduced arena backing storage for that fixture; none of those source
+changes is retained.
+
+Debug and ReleaseSafe each pass 1,730 tests, one real-Klippy skip, zero failures
+and 326 fuzz harnesses. Portable and Cortex-A7 ReleaseSmall builds complete;
+the ARM binary is static ELF32 ARM EABI5 with hard-float ABI. Formatting and
+diff checks pass. Timing, mixed-store and physical validation follow this
+verified source commit. Production remains unchanged.
