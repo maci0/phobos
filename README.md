@@ -33,8 +33,9 @@ remain no-ops; package execution requires an injected runner. Full Jinja2, LDAP
 and Apprise are out of scope.
 
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
-identify their measurement conditions and limits. They do not describe the
-current checkout. The latest release is [v0.2.0](docs/releases/v0.2.0.md).
+record the v0.2.1 release candidate on an x86-64 host and the Forge-X printer,
+including their measurement conditions and limits. The latest release is
+[v0.2.1](docs/releases/v0.2.1.md).
 
 ## Architecture
 
@@ -72,7 +73,7 @@ conformance/              golden captures, normalization and replay against Moon
 tools/api_scanner/        Moonraker API extractor, drift and coverage checks
 tools/client_api_scanner/ client call scanner (Mainsail, Fluidd, KlipperScreen, GuppyScreen, HelixScreen)
 tools/perf_harness/       phobos vs Moonraker load tests and profiling
-scripts/                  memory measurement
+scripts/                  release matrix and memory measurement
 docs/                     API surface, coverage, memory, performance, release notes
 TODO.md                   status and remaining work
 ```
@@ -80,7 +81,7 @@ TODO.md                   status and remaining work
 ## Quick start
 
 Requires Zig 0.17.0, plus `uv` for the Python tooling. The default build compiles
-the pinned SQLite amalgamation from `vendor/sqlite/`.
+SQLite 3.54.1 from the verified amalgamation in `vendor/sqlite/`.
 
 ```sh
 # Test suite (musl-static by default)
@@ -95,10 +96,15 @@ tools/coverage.sh
 
 # Static binary for the Cortex-A7 target
 zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall
+
+# Build and validate the Linux release matrix in isolated scratch prefixes
+scripts/build-release.sh
 ```
 
 Some hosts, the deploy target included, cannot link their system glibc with Zig 0.17, so
 the build targets musl. Do not run a glibc `zig build`.
+The [build guide](docs/BUILDS.md) lists ARMv6, ARMv7 floating-point variants,
+Cortex-A7, AArch64 and x86-64 assets, their CPU requirements and verification scope.
 
 ## Tracking Moonraker
 
@@ -118,6 +124,7 @@ Change and verification history: [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 
 - [`TODO.md`](TODO.md): implemented work and remaining behavior limits.
 - [`DEVELOPMENT.md`](DEVELOPMENT.md): building, testing, adding a component.
+- [`docs/BUILDS.md`](docs/BUILDS.md): static Linux release profiles and host selection.
 - [`docs/api/API_SURFACE.md`](docs/api/API_SURFACE.md): the Moonraker API phobos must match.
 - [`docs/api/COVERAGE_HEATMAP.md`](docs/api/COVERAGE_HEATMAP.md): coverage method and verification limits.
 - [`docs/MEMORY.md`](docs/MEMORY.md), [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md): measurements and how to reproduce them.

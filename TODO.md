@@ -17,8 +17,9 @@ response keys and error codes. `conformance/replay.py` holds the normalization
 rules and replays `conformance/golden/capture.json` against a running server.
 The captured stream depends on its component configuration and host hardware;
 it is not a portable proof of byte-identical behavior. The last recorded run
-before this review passed 49/54 events: three component-list differences and
-two USB-device differences remained. See the ledger for later verification.
+for v0.2.0 passed 47/54 events: three component-list differences, two file-root
+normalization differences and two USB-device differences remained. These were
+also reproduced against v0.1.5; see the ledger for the capture conditions.
 
 Build the full suite with `zig build test-artifact -Doptimize=Debug` and run the
 newest standalone artifact under a timeout. The real-Klippy test skips when its
@@ -46,9 +47,11 @@ socket is absent. Test totals belong with the verified commit in
 Release notes: [v0.1.1](docs/releases/v0.1.1.md),
 [v0.1.2](docs/releases/v0.1.2.md), [v0.1.3](docs/releases/v0.1.3.md),
 [v0.1.4](docs/releases/v0.1.4.md), [v0.1.5](docs/releases/v0.1.5.md),
-[v0.2.0](docs/releases/v0.2.0.md).
-Historical footprint and load measurements live
+[v0.2.0](docs/releases/v0.2.0.md), [v0.2.1](docs/releases/v0.2.1.md).
+Versioned host and printer footprint/load measurements live
 in [MEMORY.md](docs/MEMORY.md) and [PERFORMANCE.md](docs/PERFORMANCE.md).
+The [Linux build guide](docs/BUILDS.md) records release profiles and their
+hardware verification scope. The default database embeds SQLite 3.54.1.
 
 ## Implemented review work
 
@@ -89,5 +92,6 @@ code and fixture coverage, not a new physical-printer conformance run.
 
 Hardware-specific behavior still needs verification on the configured devices.
 Unit, loopback, pseudo-terminal and temporary-filesystem fixtures do not replace
-that check. Historical measurements and printer captures retain their original
-scope; this review does not refresh them.
+that check. The v0.2.1 printer probes exercise ARM32 builds on Cortex-A7 and
+refresh bounded read-load measurements; they do not certify optional hardware
+drivers or other printer models.

@@ -34,6 +34,14 @@ ELF format and build target, without running foreign binaries or proving that
 every optional kernel interface exists on a board. Hardware measurements and
 their exact kernels are recorded separately in [PERFORMANCE.md](PERFORMANCE.md).
 
+For v0.2.1, all five ARM32 assets passed startup, real Klippy object queries,
+copied SQLite history/float-value comparisons and directory-stat checks inside
+the Forge-X 1.4.2 chroot on Cortex-A7/Linux 5.4.61. The
+[smoke record](perf/arm32-smoke-v0.2.1.json) identifies the exact asset hashes.
+Running the ARMv6 asset on ARMv7 does not certify native ARMv6 hardware.
+The x86-64 asset was executed in the host benchmark. AArch64 was built and
+ELF-checked without execution on 64-bit ARM hardware.
+
 ## Soft, softfp and hardfp
 
 Soft and softfp use the ARM base calling convention: floating-point arguments

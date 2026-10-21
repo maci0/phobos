@@ -1,0 +1,12 @@
+{
+  "sample_count": 101,
+  "observed_seconds": 10.024779804007267,
+  "cpu_seconds": 0.0,
+  "cpu_percent_one_core": 0.0,
+  "rss_kib_min": 6112,
+  "rss_kib_median": 6112,
+  "rss_kib_max": 6112,
+  "threads_min": 12,
+  "threads_max": 12,
+  "vmhwm_kib": 6112
+}

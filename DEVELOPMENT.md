@@ -30,7 +30,8 @@ open work; this file covers how to work in the codebase.
   git -C vendor/moonraker checkout 900848584374
   ```
 - `vendor/sqlite/` contains the pinned amalgamation compiled by the default
-  build. Its manifest records the upstream version, hashes and local patches.
+  build, currently SQLite 3.54.1. Its manifest records the upstream version,
+  source ID, archive/file hashes and absence of local patches.
 
 ## 2. Building & testing
 
@@ -48,6 +49,10 @@ zig test -target x86_64-linux-musl src/config/confighelper.zig
 # Cross-compile the deploy binary:
 zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall
 file zig-out/bin/phobos   # -> ELF 32-bit ARM, statically linked
+
+# Seven static Linux release profiles, with isolated prefixes and ELF/ABI checks:
+scripts/build-release.sh
+scripts/build-release.sh --verify-only
 ```
 
 Notes:
@@ -67,6 +72,12 @@ Notes:
   gate before returning, so immediate printer requests use the finished handshake.
 - DataStore backend: `[database] backend`, vendored SQLite (default) or the
   pure-Zig file backend.
+- [Linux build profiles](docs/BUILDS.md) documents the release matrix, CPU and
+  kernel requirements, and the C-only `-Dsoftfp` option. Building or validating
+  an artifact does not install it or establish compatibility with every printer.
+- [Performance](docs/PERFORMANCE.md) and [memory](docs/MEMORY.md) record the
+  versioned host and printer measurements. Plots consume checked-in measured
+  JSON summaries; raw captures and private configurations stay in `.scratch/`.
 
 ## 3. Zig 0.17 cheat sheet (checked against the installed std)
 

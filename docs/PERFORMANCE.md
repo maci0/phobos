@@ -1,265 +1,158 @@
-# Performance: phobos vs Moonraker
+# Performance
 
-Historical load tests of phobos and stock Moonraker on the same x86-64 host
-with Klippy replaced by a stub. The exact source revision and date were not
-recorded with every result. These values predate the current review and are not
-a baseline or performance guarantee for the current checkout.
-Memory at idle is covered in [`MEMORY.md`](MEMORY.md).
+Measured 2026-10-21 for phobos v0.2.1 with SQLite 3.54.1. These are short
+read-load comparisons with recorded fixtures, not printer compatibility or
+long-running stability guarantees. [Memory](MEMORY.md) records process RSS and
+CPU from the same runs. Historical values and unresolved-symbol flamegraphs
+were removed from the current report; their original files remain in Git history.
 
-## Recorded results
+**How to read the results:** throughput (requests/s) is higher-is-better;
+latency and RSS are lower-is-better. CPU is lower-is-better only at the same
+completed workload. For a fixed offered rate, keeping up with that rate is
+the goal; tiny throughput differences around the target do not decide a winner.
 
-| | phobos | Moonraker |
-|---|---|---|
-| Idle RSS (settled) | 3.4 MB | 57 MB (16× more) |
-| Binary / runtime | 2.2 MB static, no runtime | CPython + ~20 deps |
+## Host comparison with Moonraker
 
-Throughput and p50 latency, Klippy stubbed, same host, vegeta:
+AMD Ryzen 9 9950X, 16 cores / 32 logical CPUs, CachyOS x86-64,
+Linux 7.2.10-1-cachyos, performance governor, no isolated CPU set.
+The load generator, server and Klippy stub share this desktop. Cross-compiles
+and printer load generation were stopped during the capture.
 
-| Endpoint | phobos | Moonraker |
-|---|---|---|
-| `server.info` @9k | 9 000/s · 0.05 ms | 9 000/s · 0.43 ms |
-| `server.config` @5k | 5 000/s · 0.06 ms | 5 000/s · 0.48 ms |
-| `machine.system_info` @5k | 5 000/s · 0.04 ms (cached) | 2 000/s · 0.22 ms |
-| `server.database.get_item` @5k | 5 000/s · 0.08 ms | n/a: Moonraker's query path needs a fuller Klippy handshake than the stub gives |
-| `printer.objects.query` (Klippy-proxied) | ~4 000/s, scales with load | n/a (same reason) |
+The portable x86-64 static musl ReleaseSmall asset has SHA-256
+`ce21f105069d049e42ce5d40b8bc12b4fb6d9ba1ebb75e27588ced86165c1a93`.
+Zig is 0.17.0. Full Moonraker runs the unchanged reference pin
+`9008485843740c93e0154ccbdac1fc2b02b03aaa` on Python 3.12.12.
+Its environment uses Tornado 6.5.5 and SQLite 3.50.4; phobos embeds SQLite 3.54.1.
+The runtime source is `b5e353f`; the matrix asset is byte-identical to the
+independently built benchmark executable.
 
-Local reads run at ~5-8× lower latency than Moonraker's asyncio path, with a
-tighter tail. The Klippy-proxied `objects.query` path does ~4 000 req/s; it
-capped near 1 000 req/s while every request ran under the `Core` lock.
+Both servers use the same Klippy protocol stub, ready handshake and seeded
+`mainsail.settings` value in fresh independent SQLite stores. The independent
+mix cycles through server info, config, system info, that database item,
+access info and history list. It does not query Klippy. The query workload
+asks the stub for `heater_bed`, `toolhead` and `print_stats`.
 
-## Graphs
+Each backend ran three 10-second trials per workload, 30 measured trials
+total. Every request succeeded (3,796,280 requests). Values below are medians
+of the three trial statistics. A median p99 is not a pooled percentile.
+Success counts HTTP status; fixture response contents were checked before
+load. The same requests do not produce byte-identical payloads: server info
+was 640 bytes for phobos and 1,174 bytes for Moonraker. The stub provides
+canned replies and does not reproduce Klippy's continuous status flood.
 
-![throughput vs load](perf/throughput_vs_load.png)
-![latency vs load](perf/latency_vs_load.png)
-![query optimisation journey](perf/query_journey.png)
-![memory and latency](perf/memory_and_latency.png)
+| Workload / offered rate | phobos req/s ↑ | phobos p50 / p99 ms ↓ | Moonraker req/s ↑ | Moonraker p50 / p99 ms ↓ | Better in this capture |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Info, unlimited / 8 workers | 109,645.7 | 0.034 / 0.380 | 11,065.6 | 0.675 / 1.317 | phobos: 9.9× throughput, lower latency |
+| Info, 5,000/s | 5,000.0 | 0.033 / 0.178 | 5,000.4 | 0.325 / 0.833 | Same rate; phobos lower latency |
+| Independent mix, 200/s | 200.1 | 0.069 / 0.176 | 200.1 | 0.254 / 0.575 | Same rate; phobos lower latency |
+| Independent mix, 1,000/s | 1,000.0 | 0.042 / 0.096 | 1,000.0 | 0.181 / 0.452 | Same rate; phobos lower latency |
+| Stub query, 200/s | 200.1 | 0.106 / 0.245 | 200.1 | 0.274 / 0.611 | Same rate; phobos lower latency |
 
-phobos tracks the ideal throughput line to ~80 k req/s while Moonraker's single
-event loop flattens near 6 k. Moonraker's p50 jumps from 0.37 ms to ~260 ms once
-that loop backs up (~10 k req/s); phobos is still at 50 µs there. The graphs
-are rendered from data points hardcoded in
-[`tools/perf_harness/plot_perf.py`](../tools/perf_harness/plot_perf.py).
+↑ Higher is better. ↓ Lower is better. At 5,000/s, phobos's p99 is 4.7×
+lower and both servers keep up. The [resource results](MEMORY.md) also show
+lower phobos CPU at the matched rates and 9.7× lower idle RSS in this fixture.
 
-## Method
+The unlimited result uses exactly eight load-generator workers. Its trial
+throughput ranges were 87,351.6 to 110,832.0/s for phobos and 10,911.8 to
+11,419.7/s for Moonraker. This measures the complete shared-host setup at
+that concurrency, not a saturation ceiling. Paced trials begin with eight
+workers and allow up to 64. Keepalive and a two-second request timeout are
+enabled; the connection limit uses Vegeta's default.
 
-Both servers proxy printer queries to the same single Klippy over a unix
-socket, so a real Klippy is a shared bottleneck that hides each server's own
-cost. The harness removes it:
+HTTP readiness, successful fixture reads and three seconds of settling
+precede a ten-second idle sample. A two-second independent-mix warmup at
+200/s precedes load. Each server process is reused for its 15 measured
+trials; repetition 2 reverses workload order. Resident allocations retained
+from earlier workloads therefore contribute to later RSS measurements.
+Process samples are taken every 100 ms. CPU is user plus system ticks for
+the server process only, with 100% equal to one core; stub and load-generator
+CPU are excluded. Vegeta is 12.13.0.
 
-- **Klippy stub.** [`tools/perf_harness/klippy_stub.py`](../tools/perf_harness/klippy_stub.py)
-  speaks the Klipper API protocol (JSON-RPC frames delimited by `\x03`) and
-  answers `info`, `objects/list`, `objects/query` and `objects/subscribe` from
-  canned data. Both servers connect to it through `klippy_uds_address`. It stays
-  at ~1% CPU under load, in that capture; other workloads may differ. Generic HTTP mocking
-  tools do not apply because Klippy's protocol is not HTTP; if a test ever needs
-  a mock faster than the server, the ~80-line protocol can be ported to a
-  compiled language.
-- **Load.** [vegeta](https://github.com/tsenart/vegeta), keep-alive, constant
-  arrival rate, 6-12 s per point.
-- **Equal footing.** Same x86-64 host (32 cores), same stub, same endpoints, a
-  copy of a real `moonraker-sql.db`. phobos built `ReleaseFast`; Moonraker ran
-  from its own venv.
-- Reproduce with [`tools/perf_harness/bench_local.sh`](../tools/perf_harness/bench_local.sh).
-  The on-printer comparison uses `compare.sh`; see the
-  [perf harness README](../tools/perf_harness/README.md).
+![Host throughput](perf/host-v0.2.1/throughput.png)
+![Host p99 latency](perf/host-v0.2.1/latency.png)
 
-## Results (Klippy stubbed, local, vegeta)
+The [30 trial reports](perf/host-v0.2.1/summary.json),
+[environment and method](perf/host-v0.2.1/environment.json) and
+[plot input hashes](perf/host-v0.2.1/plot-inputs.json) accompany the figures.
+Whiskers show trial minima and maxima, not confidence intervals.
 
-```
-## phobos (ReleaseFast)   idle_RSS=3.5 MB   klippy=ready
-  info   @2000:  thru=2000/s  succ=100%  p50=0.05ms  p99=0.11ms
-  info   @5000:  thru=5000/s  succ=100%  p50=0.05ms  p99=0.21ms
-  info   @9000:  thru=8999/s  succ=100%  p50=0.05ms  p99=0.34ms
-  config @3000:  thru=3000/s  succ=100%  p50=0.06ms  p99=0.18ms
-  query  @2000+: thru=~4640/s succ=94%   p50=17ms    p99<=230ms (off-Core, scales)
+## Real Forge-X printer
 
-## moonraker (Python/asyncio)  idle_RSS=57 MB
-  info   @2000:  thru=2000/s  succ=100%  p50=0.24ms  p99=0.71ms
-  info   @5000:  thru=5001/s  succ=100%  p50=0.38ms  p99=2.09ms
-  config @3000:  thru=3000/s  succ=100%  p50=0.37ms  p99=0.92ms
-  query  @2000:  (needs a fuller Klippy "ready" handshake than the stub gives;
-                  Moonraker rejects printer queries while klippy_state=startup)
-```
+Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores, ARMv7,
+110,404 KiB RAM. Published v0.2.0 and the exact v0.2.1 Cortex-A7 asset ran
+sequentially on `127.0.0.1:7126`. Both used the real component configuration,
+independent copies of the same stable database/WAL snapshot, and the real
+Klippy socket. File observation was `none`, matching this kernel's disabled
+inotify support. Automatic queue loading/transition and update refresh were
+disabled. Production v0.2.0 stayed on port 7125.
 
-- **Memory:** 3.5 MB vs 57 MB. Moonraker loads CPython, tornado and ~20
-  packages before serving a request. [`MEMORY.md`](MEMORY.md) has the
-  per-backend breakdown (SQLite ~2.2 MB, file ~1.2 MB on armv7).
-- **Latency:** phobos answers local reads in ~50 µs, 5-7× faster than
-  Moonraker, with a tighter tail.
-- **Throughput:** both reach thousands of req/s on simple reads; phobos goes
-  higher (9 k vs 5 k) at a fraction of the latency.
+Vegeta ran on the desktop through SSH and WiFi. Reported latency includes
+that transport and, for object queries, the real Klippy round trip. It is
+not server-only latency. The independent mix uses info, config, system info,
+database namespace list, history list and access info; it excludes Klippy.
 
-## Upper bounds
+Three eight-second trials per workload and version produced 42 trials, all
+with 100% HTTP success. Both builds used two initial and at most eight
+workers, eight connections, keepalive and a two-second request timeout.
+The table shows trial medians. Exact paths, counts and trial ranges are in
+the [printer summary](perf/printer-v0.2.1.json).
 
-Each path pushed until it broke. vegeta, phobos and the stub share the 32-core
-host, so the top end measures the host as well as phobos.
+| Workload / offered rate | v0.2.0 req/s ↑ | v0.2.0 p50 / p99 ms ↓ | v0.2.1 req/s ↑ | v0.2.1 p50 / p99 ms ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Info, 10/s | 10.12 | 5.11 / 27.75 | 10.12 | 5.03 / 26.81 |
+| Info, 50/s | 50.09 | 4.78 / 35.62 | 50.09 | 4.73 / 28.75 |
+| Info, 100/s | 100.02 | 4.62 / 34.28 | 100.02 | 4.62 / 25.44 |
+| Independent mix, 25/s | 25.06 | 8.03 / 103.54 | 25.11 | 7.96 / 96.74 |
+| Independent mix, 100/s | 82.70 | 126.13 / 211.37 | 83.15 | 125.44 / 199.76 |
+| Real Klippy query, 20/s | 19.52 | 140.58 / 264.68 | 19.57 | 132.20 / 261.20 |
+| Config directory, 20/s | 20.11 | 6.76 / 30.13 | 20.11 | 7.05 / 33.58 |
 
-| Path | Flat, sub-ms | p99 starts climbing | Breaks |
-|---|---|---|---|
-| `server.info` (in-memory) | ≤ 20 k req/s (p99 < 1 ms) | 40-80 k (p99 10-15 ms, p50 still 0.05 ms) | ~120 k (70% success) |
-| `database.get_item` (SQLite) | ≤ 20 k req/s | 40 k (p99 11 ms) | > 40 k (not reached) |
-| `objects.query` (Klippy proxy) | n/a | from ~6 k offered | plateaus ~3.5 k/s |
+![Printer comparison](perf/printer-v0.2.1.png)
 
-- **Local reads** sustain ~80 000 req/s at 100% success with p50 at 50 µs. The
-  break at ~120 k comes from three processes contending for 32 cores, not from
-  phobos. A printer sees single-digit req/s in practice.
+↑ Higher is better. ↓ Lower is better. There is **no clear overall winner**
+between these releases on the printer: throughput is similar, latency ranges
+vary with the network, and the directory median favors v0.2.0 while other
+latency medians favor v0.2.1. The memory report gives the measured RSS difference.
 
-  The same `server.info` sweep against Moonraker:
+The 100/s independent mix reached about 83/s with the eight-worker bound;
+it did not keep up with the requested rate. These bounded trials are not a
+maximum-throughput test. Network variation and short repetitions do not
+establish a speedup or regression between the two releases.
 
-  | Offered | phobos p50 | Moonraker p50 |
-  |---|---|---|
-  | 5 k | 0.05 ms | 0.37 ms |
-  | 10 k | 0.05 ms | 263 ms (loop backs up) |
-  | 20 k | 0.07 ms | 271 ms |
-  | 80 k | 0.05 ms | 226 ms |
+The candidate's idle RSS was 3,100 KiB and measured load peak was 5,056 KiB.
+Available board memory stayed at or above 49,540 KiB across both versions.
+Production readiness, completed/standby print state, zero heater targets and
+a 16 MiB available-memory floor were checked during each trial. A lightweight
+shell sampler read process RSS, threads, CPU ticks and board memory about
+every 250 ms; the kernel clock tick rate was verified as 100 Hz.
 
-  Moonraker holds to ~5 k req/s; at ~7-10 k its p50 jumps to ~260 ms and
-  throughput stops at ~6 k/s, with CPU at ~55% because one event-loop thread
-  cannot use the other 31 cores. phobos holds 0.05 ms p50 to 80 k because
-  off-`Core` reads run across the thread pool: a ~12× higher read ceiling.
-- **`objects.query`** plateaus at ~3 000-3 500 req/s with the stub at 3% CPU
-  and phobos at 30%. The limit is the single Klippy socket: every query
-  multiplexes over one connection with serial round-trips, so past ~3.5 k/s
-  requests queue (p50 stays ~15 ms, p99 climbs to seconds). Moonraker has the
-  same one-socket constraint, and a real Klippy is slower than the stub.
+Both probes were stopped. Production PID and board boot ID were unchanged;
+Klippy remained ready, the last print complete and heater targets zero.
+No live database was opened for modification and no print or printer-control
+action was issued. A second full Moonraker was not started on this small board;
+the direct Moonraker comparison is the host run above.
 
-## Memory and threads under load
+## Reproduce and limits
 
-ReleaseFast, Klippy stubbed, vegeta:
+Build/validate the assets with [the release helper](BUILDS.md). The
+[performance harness](../tools/perf_harness/README.md) documents the stub,
+read target lists, setup checks and owned-process cleanup. Its general local
+benchmark and profiler use ReleaseFast by default; the results above used the
+explicit portable ReleaseSmall release assets and the protocol recorded here.
+Raw captures, private configurations and per-process samples remain below
+`.scratch/`; the portable measured summaries are checked in.
 
-| State | VmRSS | Threads |
-|---|---|---|
-| idle (settled) | 3.5 MB | 6 |
-| `server.info` @ 8 000 req/s (local, off-Core) | 12.4 MB | 63 |
-| `objects.query` @ 2 000 req/s (Klippy-proxied) | ~12 MB | 54 |
-
-`server.info` sustains 8 000 req/s at 100% success, p50 32 µs; `objects.query`
-is bounded by the Klippy socket (p50 ~12 ms). RSS growth comes from the
-`std.Io.Threaded` worker pool, which grows to the peak number of concurrent
-connection tasks and is not shrunk; `max_concurrent_conns = 128` in
-`src/io.zig` bounds it. The printer has 107 MB of RAM.
-
-## Virtual memory on 32-bit targets
-
-The connection-handler pool peaks at ~128 threads. With the runtime-default
-16 MB stack that reserved ~2.1 GB of VSZ, enough to exhaust the 3 GB user
-address space on armv7 under load. Handlers need ~120 KB of stack (the 64 KB
-file buffer plus bounded JSON depth), so on 32-bit targets `src/main.zig` owns
-its `std.Io.Threaded` with a 1 MB stack (`io.Listener.handler_stack_size`).
-VSZ drops to ~180 MB (≈12×) with no change in throughput; RSS is ~9 MB after a
-load spike either way because it counts touched pages, not the reservation. On
-64-bit targets (`ptrBitWidth() > 32`) the runtime-default backend is used.
-
-## Large G-code files
-
-Both directions of `/server/files/...` stream to or from disk in 64 KB chunks,
-so a large transfer runs in constant memory.
-
-- **Download** (`GET /server/files/<root>/<path>`): the handler resolves the
-  path and the transport streams it with `respondStreaming` (content length from
-  the file size), copying file to socket with `std.Io.Reader.streamRemaining`.
-- **Upload** (`POST /server/files/upload`): intercepted before the body is read.
-  A bounded multipart scanner (`streamUntilSeparator`, which holds back only
-  `boundary.len - 1` bytes between reads) parses the form incrementally and
-  writes the file part to disk, buffering only the small `root`/`path` fields.
-  The disk write runs off `Core`; `notify_filelist_changed` and the result build
-  stay under `Core`.
-
-Peak RSS during a 150 MB transfer:
-
-| | phobos, buffered | phobos, streaming | Moonraker |
-|---|---|---|---|
-| download | +150 MB spike | flat (+0.1 MB) | streams (flat) |
-| upload | +150 MB spike | flat (+0.14 MB) | streams (flat) |
-| baseline RSS | 3.4 MB | 3.4 MB | ~57 MB |
-
-Moonraker also streams both directions (tornado `StaticFileHandler` for
-downloads, `@stream_request_body` with `data_received` for uploads). Both
-transfers were verified byte-exact.
-
-## JSON nesting depth
-
-`std.json` parsing is iterative, so deep input parses without touching the
-stack. `std.json.Stringify` serializes with a fixed 256-level nesting stack: a
-deeper value panics, and corrupts memory in release builds where the bounds
-check is off. A client could store a deeply nested value through
-`server.database.item` and crash a later `GET`, or send deep `params` to a
-Klippy proxy.
-
-`jv.exceedsDepth` rejects values past `max_value_depth` (100 in
-`src/json/value.zig`; real Moonraker data is under 10 deep) with
-`InvalidParams`, on database insert and on Klippy request serialization, so
-over-deep values never reach `Stringify`. `src/test_stress.zig` runs the
-adversarial cases (20 k-deep arrays and objects, 1 M-wide arrays, depth at the
-limit) each on a fresh 1 MB-stack thread, to expose stack regressions in the host suite.
-
-## Hot-path profiling
-
-[`tools/perf_harness/profile.sh`](../tools/perf_harness/profile.sh) builds with
-frame pointers (`zig build -Doptimize=ReleaseFast -Dprofile`), runs a vegeta
-flood through the Klippy stub, captures with `perf record` (or bpftrace with
-`USE_BPFTRACE=1`, which needs root), and renders a
-[FlameGraph](https://github.com/brendangregg/FlameGraph). The perf path needs
-no privileges and produces the same on-CPU flamegraph.
-
-### Allocator stack traces
-
-Before the allocator change, the top of the profile was
-`debug.captureCurrentStackTrace` / `Dwarf.SelfUnwinder` /
-`getDebugInfoAllocator` at ~15-20%. `init.gpa` (std's `DebugAllocator`)
-captures a DWARF stack trace on every allocation for leak and use-after-free
-detection. [`src/main.zig`](../src/main.zig) uses the lock-sharded
-`std.heap.smp_allocator` in release builds and keeps the checked allocator for
-`Debug`.
-
-| Path | Before | After |
-|---|---|---|
-| `server.info` p99 | 4.57 ms | 0.34 ms |
-| `server.config` @3 k | saturates (p99 3.2 s) | 3 000/s, p99 0.18 ms |
-| `objects.query` p50 | 64 ms | ~5 ms |
-| `objects.query` throughput | ~1 070/s | ~2 160/s |
-
-### Flamegraphs
-
-**`objects.query`** ([SVG](perf/query_flamegraph.svg)):
-
-![objects.query flamegraph](perf/query_flamegraph.svg)
-
-The committed SVG has no resolved symbols (every frame is `[phobos]` or
-`[unknown]`), so it does not show the breakdown below, which was recorded from
-the original capture. Some frame names have since changed (`readFrame` no
-longer exists in `src/components/klippy_connection.zig`); rerun `profile.sh`
-to confirm. The recorded profile had two towers:
-
-- the Klippy reader thread (`readerLoop` → `readFrame` → `json.Scanner` /
-  `parseFromTokenSource` → arena allocations) decoding the status frame, and
-- the request thread (`handleParsedAuth` → `proxyReq` → `requestOffCore` →
-  `parseFromSliceLeaky`) translating it into the client response.
-
-On-CPU time is JSON parse and encode plus arena allocation of the status
-payload. Throughput is bounded by the single Klippy socket and reader.
-
-**`server.info`** ([SVG](perf/info_flamegraph.svg)) is nearly flat: a little
-arena allocation and the response write.
-
-**Pure dispatch** ([`perf/flamegraph-serverinfo.svg`](perf/flamegraph-serverinfo.svg))
-spends ~25% in `ArenaAllocator.alloc` and ~30% in `wrapResult` →
-`jsonStringify`, building and serializing the response. Caching immutable
-response bodies would help only synthetic single-endpoint floods, not the
-Klippy-bound workload, so it is not done.
-
-## Reproduce
+To regenerate host figures from those summaries:
 
 ```sh
-bash tools/perf_harness/bench_local.sh   # prints its .scratch/bench-*/ capture path
-
-# profile the hot path (needs perf; FlameGraph at $FLAMEGRAPH_DIR or ~/FlameGraph)
-tools/perf_harness/profile.sh            # or USE_BPFTRACE=1 for eBPF
+uv run tools/perf_harness/plot_perf.py \
+  --input docs/perf/host-v0.2.1/summary.json \
+  --output-dir docs/perf/host-v0.2.1 \
+  --title 'v0.2.1 vs pinned Moonraker, host loopback'
 ```
 
-Absolute numbers vary with host and kernel.
-
-The current helpers use isolated build prefixes and fresh datadirs. Their setup
-and cleanup were checked after this report was recorded; the historical load
-numbers were not rerun. See the [harness README](../tools/perf_harness/README.md)
-for dependencies, loopback ports and command-double checks.
+These runs do not test printing, motion, heating, firmware updates, optional
+hardware drivers, large-file transfer throughput, long soaks or every CPU
+profile under load. The separate ARM32 smoke checks cover startup, real
+object queries, copied SQLite floating-point history values and directory
+statistics on Cortex-A7. AArch64 has build/ELF verification only.

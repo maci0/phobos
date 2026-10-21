@@ -133,22 +133,34 @@ def render(input_path: Path, output: Path, title: str) -> None:
     )
     repetitions = "/".join(str(count) for count in counts)
     success = min(trial.success for trial in trials)
-    footer = f"Median of {repetitions} trials; bars show trial min/max. Minimum request success: {success:.2%}."
+    footer = f"Median of {repetitions} trials; whiskers show trial min/max. Minimum request success: {success:.2%}."
     specs = (
         (
             "throughput",
             "throughput",
             "Successful requests / second",
-            "Throughput",
+            "Throughput (higher is better)",
             None,
         ),
-        ("latency", "p99_ms", "p99 latency (ms)", "Tail latency", None),
-        ("memory", "rss_mib", "Resident memory (MiB)", "Process RSS", idle_rss),
+        (
+            "latency",
+            "p99_ms",
+            "p99 latency (ms)",
+            "Tail latency (lower is better)",
+            None,
+        ),
+        (
+            "memory",
+            "rss_mib",
+            "Resident memory (MiB)",
+            "Process RSS (lower is better)",
+            idle_rss,
+        ),
         (
             "cpu",
             "cpu_percent",
             "Process CPU (100% = one core)",
-            "Process CPU",
+            "Process CPU (lower at matched throughput is better)",
             idle_cpu,
         ),
     )
@@ -187,7 +199,7 @@ def render(input_path: Path, output: Path, title: str) -> None:
             fontsize=9,
         )
         ax.set_ylabel(ylabel)
-        ax.set_title(f"{heading}: {title}")
+        ax.set_title(f"{heading}\n{title}")
         ax.spines[["top", "right"]].set_visible(False)
         ax.set_axisbelow(True)
         ax.grid(axis="y", alpha=0.25)
@@ -204,9 +216,9 @@ def render(input_path: Path, output: Path, title: str) -> None:
         plt.close(fig)
     inputs = [input_path, *idle_paths]
     manifest = {
-        path.relative_to(input_path.parent).as_posix(): hashlib.sha256(
-            path.read_bytes()
-        ).hexdigest()
+        path.relative_to(input_path.parent)
+        .as_posix(): hashlib.sha256(path.read_bytes())
+        .hexdigest()
         for path in inputs
     }
     (output / "plot-inputs.json").write_text(json.dumps(manifest, indent=2) + "\n")

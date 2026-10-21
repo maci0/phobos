@@ -1,0 +1,1802 @@
+[
+  {
+    "backend": "phobos",
+    "repetition": 1,
+    "workload": "info-unlimited-8",
+    "requested_rate": 0,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-1-info-unlimited-8",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.030541204003384,
+      "cpu_seconds": 8.88,
+      "cpu_percent_one_core": 88.52961988188454,
+      "rss_kib_min": 6160,
+      "rss_kib_median": 8548,
+      "rss_kib_max": 8556,
+      "threads_min": 12,
+      "threads_max": 21,
+      "vmhwm_kib": 8556
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 61312444886,
+        "mean": 70190,
+        "50th": 47303,
+        "90th": 128261,
+        "95th": 212098,
+        "99th": 440941,
+        "max": 3756566,
+        "min": 12453
+      },
+      "bytes_in": {
+        "total": 559048960,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:18:39.927450501+08:00",
+      "latest": "2026-10-21T11:18:49.927394031+08:00",
+      "end": "2026-10-21T11:18:49.927423667+08:00",
+      "duration": 9999943530,
+      "wait": 29636,
+      "requests": 873514,
+      "rate": 87351.89327614133,
+      "throughput": 87351.63439937575,
+      "success": 1,
+      "status_codes": {
+        "200": 873514
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 8
+  },
+  {
+    "backend": "phobos",
+    "repetition": 1,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-1-info-5000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.02913366300345,
+      "cpu_seconds": 0.6500000000000004,
+      "cpu_percent_one_core": 6.481118128854843,
+      "rss_kib_min": 8556,
+      "rss_kib_median": 8572,
+      "rss_kib_max": 8600,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 8600
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 2799467322,
+        "mean": 55993,
+        "50th": 45263,
+        "90th": 85853,
+        "95th": 106961,
+        "99th": 254108,
+        "max": 1807045,
+        "min": 15079
+      },
+      "bytes_in": {
+        "total": 31997440,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:18:50.992117309+08:00",
+      "latest": "2026-10-21T11:19:00.991190387+08:00",
+      "end": "2026-10-21T11:19:00.991227537+08:00",
+      "duration": 9999073078,
+      "wait": 37150,
+      "requests": 49996,
+      "rate": 5000.063466882885,
+      "throughput": 5000.044889994187,
+      "success": 1,
+      "status_codes": {
+        "200": 49996
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 1,
+    "workload": "fast-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-1-fast-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027677395002684,
+      "cpu_seconds": 0.05999999999999872,
+      "cpu_percent_one_core": 0.5983439398429378,
+      "rss_kib_min": 8600,
+      "rss_kib_median": 8616,
+      "rss_kib_max": 8616,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 8616
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 148792586,
+        "mean": 74396,
+        "50th": 69919,
+        "90th": 106696,
+        "95th": 121469,
+        "99th": 163419,
+        "max": 494479,
+        "min": 24095
+      },
+      "bytes_in": {
+        "total": 1495865,
+        "mean": 747.9325
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:19:01.084731451+08:00",
+      "latest": "2026-10-21T11:19:11.079896857+08:00",
+      "end": "2026-10-21T11:19:11.079969443+08:00",
+      "duration": 9995165406,
+      "wait": 72586,
+      "requests": 2000,
+      "rate": 200.0967386492093,
+      "throughput": 200.09528553504802,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 1,
+    "workload": "fast-1000",
+    "requested_rate": 1000,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-1-fast-1000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027856549000717,
+      "cpu_seconds": 0.16999999999999993,
+      "cpu_percent_one_core": 1.6952775418086785,
+      "rss_kib_min": 8616,
+      "rss_kib_median": 8712,
+      "rss_kib_max": 8712,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 8712
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 440568905,
+        "mean": 44056,
+        "50th": 41099,
+        "90th": 64757,
+        "95th": 73100,
+        "99th": 95598,
+        "max": 427944,
+        "min": 15269
+      },
+      "bytes_in": {
+        "total": 7474683,
+        "mean": 747.4683
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:19:11.114480648+08:00",
+      "latest": "2026-10-21T11:19:21.114199734+08:00",
+      "end": "2026-10-21T11:19:21.114256752+08:00",
+      "duration": 9999719086,
+      "wait": 57018,
+      "requests": 10000,
+      "rate": 1000.0280921891489,
+      "throughput": 1000.0223901013054,
+      "success": 1,
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 1,
+    "workload": "query-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-1-query-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027184061997104,
+      "cpu_seconds": 0.08000000000000007,
+      "cpu_percent_one_core": 0.7978311707989785,
+      "rss_kib_min": 8712,
+      "rss_kib_median": 8920,
+      "rss_kib_max": 8920,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 8920
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 219584816,
+        "mean": 109792,
+        "50th": 105592,
+        "90th": 142057,
+        "95th": 156460,
+        "99th": 221083,
+        "max": 909388,
+        "min": 51497
+      },
+      "bytes_in": {
+        "total": 855775,
+        "mean": 427.8875
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:19:21.162563179+08:00",
+      "latest": "2026-10-21T11:19:31.157634181+08:00",
+      "end": "2026-10-21T11:19:31.157714081+08:00",
+      "duration": 9995071002,
+      "wait": 79900,
+      "requests": 2000,
+      "rate": 200.0986285740044,
+      "throughput": 200.09702901031798,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/printer/objects/query?heater_bed&toolhead&print_stats"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 2,
+    "workload": "query-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-2-query-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027428317000158,
+      "cpu_seconds": 0.08000000000000007,
+      "cpu_percent_one_core": 0.7978117366779957,
+      "rss_kib_min": 8920,
+      "rss_kib_median": 9240,
+      "rss_kib_max": 9732,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9732
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 215509017,
+        "mean": 107754,
+        "50th": 103558,
+        "90th": 140165,
+        "95th": 154512,
+        "99th": 245137,
+        "max": 461226,
+        "min": 50845
+      },
+      "bytes_in": {
+        "total": 855759,
+        "mean": 427.8795
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:19:31.195510427+08:00",
+      "latest": "2026-10-21T11:19:41.190449907+08:00",
+      "end": "2026-10-21T11:19:41.190562228+08:00",
+      "duration": 9994939480,
+      "wait": 112321,
+      "requests": 2000,
+      "rate": 200.1012616436573,
+      "throughput": 200.09901297358968,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/printer/objects/query?heater_bed&toolhead&print_stats"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 2,
+    "workload": "fast-1000",
+    "requested_rate": 1000,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-2-fast-1000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.0275917090039,
+      "cpu_seconds": 0.1800000000000015,
+      "cpu_percent_one_core": 1.795047158116512,
+      "rss_kib_min": 9732,
+      "rss_kib_median": 9768,
+      "rss_kib_max": 9772,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9772
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 451345641,
+        "mean": 45134,
+        "50th": 42226,
+        "90th": 66600,
+        "95th": 74376,
+        "99th": 93970,
+        "max": 584638,
+        "min": 16410
+      },
+      "bytes_in": {
+        "total": 7474683,
+        "mean": 747.4683
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:19:41.224719919+08:00",
+      "latest": "2026-10-21T11:19:51.224026247+08:00",
+      "end": "2026-10-21T11:19:51.224066382+08:00",
+      "duration": 9999306328,
+      "wait": 40135,
+      "requests": 10000,
+      "rate": 1000.0693720121423,
+      "throughput": 1000.0653579713852,
+      "success": 1,
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 2,
+    "workload": "fast-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-2-fast-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026257958001224,
+      "cpu_seconds": 0.05999999999999872,
+      "cpu_percent_one_core": 0.5984286485679047,
+      "rss_kib_min": 9772,
+      "rss_kib_median": 9772,
+      "rss_kib_max": 9772,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9772
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 145246077,
+        "mean": 72623,
+        "50th": 68361,
+        "90th": 102406,
+        "95th": 116910,
+        "99th": 176131,
+        "max": 345749,
+        "min": 18424
+      },
+      "bytes_in": {
+        "total": 1495865,
+        "mean": 747.9325
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:19:51.271668357+08:00",
+      "latest": "2026-10-21T11:20:01.266733643+08:00",
+      "end": "2026-10-21T11:20:01.266802653+08:00",
+      "duration": 9995065286,
+      "wait": 69010,
+      "requests": 2000,
+      "rate": 200.09874300684984,
+      "throughput": 200.09736145320124,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 2,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-2-info-5000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.02758784899197,
+      "cpu_seconds": 0.47000000000000064,
+      "cpu_percent_one_core": 4.687069383762593,
+      "rss_kib_min": 9772,
+      "rss_kib_median": 9780,
+      "rss_kib_max": 9780,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9780
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1870012858,
+        "mean": 37402,
+        "50th": 32378,
+        "90th": 51893,
+        "95th": 61826,
+        "99th": 175411,
+        "max": 539384,
+        "min": 13706
+      },
+      "bytes_in": {
+        "total": 31998080,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:20:01.299969533+08:00",
+      "latest": "2026-10-21T11:20:11.299188394+08:00",
+      "end": "2026-10-21T11:20:11.299232116+08:00",
+      "duration": 9999218861,
+      "wait": 43722,
+      "requests": 49997,
+      "rate": 5000.09057657529,
+      "throughput": 5000.068713567055,
+      "success": 1,
+      "status_codes": {
+        "200": 49997
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 2,
+    "workload": "info-unlimited-8",
+    "requested_rate": 0,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-2-info-unlimited-8",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027420297003118,
+      "cpu_seconds": 9.419999999999998,
+      "cpu_percent_one_core": 93.94240712953201,
+      "rss_kib_min": 9780,
+      "rss_kib_median": 9812,
+      "rss_kib_max": 9812,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9812
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 60299751849,
+        "mean": 54406,
+        "50th": 33970,
+        "90th": 100007,
+        "95th": 171895,
+        "99th": 375960,
+        "max": 1569128,
+        "min": 12363
+      },
+      "bytes_in": {
+        "total": 709325440,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:20:11.386880815+08:00",
+      "latest": "2026-10-21T11:20:21.386873833+08:00",
+      "end": "2026-10-21T11:20:21.386892208+08:00",
+      "duration": 9999993018,
+      "wait": 18375,
+      "requests": 1108321,
+      "rate": 110832.17738302625,
+      "throughput": 110831.97372913234,
+      "success": 1,
+      "status_codes": {
+        "200": 1108321
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 8
+  },
+  {
+    "backend": "phobos",
+    "repetition": 3,
+    "workload": "info-unlimited-8",
+    "requested_rate": 0,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-3-info-unlimited-8",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027274771011434,
+      "cpu_seconds": 9.360000000000003,
+      "cpu_percent_one_core": 93.34540255204232,
+      "rss_kib_min": 9812,
+      "rss_kib_median": 9820,
+      "rss_kib_max": 9820,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9820
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 60266111803,
+        "mean": 54964,
+        "50th": 34241,
+        "90th": 101567,
+        "95th": 173107,
+        "99th": 380010,
+        "max": 3047594,
+        "min": 12193
+      },
+      "bytes_in": {
+        "total": 701736960,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:20:22.660807766+08:00",
+      "latest": "2026-10-21T11:20:32.660795471+08:00",
+      "end": "2026-10-21T11:20:32.660872325+08:00",
+      "duration": 9999987705,
+      "wait": 76854,
+      "requests": 1096464,
+      "rate": 109646.53481041454,
+      "throughput": 109645.69213837612,
+      "success": 1,
+      "status_codes": {
+        "200": 1096464
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 8
+  },
+  {
+    "backend": "phobos",
+    "repetition": 3,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-3-info-5000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026079301009304,
+      "cpu_seconds": 0.4800000000000004,
+      "cpu_percent_one_core": 4.787514496835067,
+      "rss_kib_min": 9820,
+      "rss_kib_median": 9828,
+      "rss_kib_max": 9828,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9828
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1886176790,
+        "mean": 37727,
+        "50th": 32798,
+        "90th": 52238,
+        "95th": 61616,
+        "99th": 177831,
+        "max": 604987,
+        "min": 15058
+      },
+      "bytes_in": {
+        "total": 31996800,
+        "mean": 640
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:20:33.929185514+08:00",
+      "latest": "2026-10-21T11:20:43.928143089+08:00",
+      "end": "2026-10-21T11:20:43.92818094+08:00",
+      "duration": 9998957575,
+      "wait": 37851,
+      "requests": 49995,
+      "rate": 5000.021214711474,
+      "throughput": 5000.002287229769,
+      "success": 1,
+      "status_codes": {
+        "200": 49995
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 3,
+    "workload": "fast-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-3-fast-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.028775987011613,
+      "cpu_seconds": 0.05999999999999872,
+      "cpu_percent_one_core": 0.5982783948679822,
+      "rss_kib_min": 9828,
+      "rss_kib_median": 9840,
+      "rss_kib_max": 9840,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9840
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 146359753,
+        "mean": 73179,
+        "50th": 68688,
+        "90th": 105430,
+        "95th": 119748,
+        "99th": 176803,
+        "max": 365657,
+        "min": 18965
+      },
+      "bytes_in": {
+        "total": 1495865,
+        "mean": 747.9325
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:20:44.019836826+08:00",
+      "latest": "2026-10-21T11:20:54.015086237+08:00",
+      "end": "2026-10-21T11:20:54.01517309+08:00",
+      "duration": 9995249411,
+      "wait": 86853,
+      "requests": 2000,
+      "rate": 200.09505693764424,
+      "throughput": 200.09331824116407,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 3,
+    "workload": "fast-1000",
+    "requested_rate": 1000,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-3-fast-1000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027766049999627,
+      "cpu_seconds": 0.17999999999999972,
+      "cpu_percent_one_core": 1.795015949738939,
+      "rss_kib_min": 9840,
+      "rss_kib_median": 9888,
+      "rss_kib_max": 9888,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 9888
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 461847137,
+        "mean": 46184,
+        "50th": 42852,
+        "90th": 68160,
+        "95th": 76951,
+        "99th": 101341,
+        "max": 442841,
+        "min": 16591
+      },
+      "bytes_in": {
+        "total": 7474683,
+        "mean": 747.4683
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:20:54.050745781+08:00",
+      "latest": "2026-10-21T11:21:04.050361924+08:00",
+      "end": "2026-10-21T11:21:04.050414152+08:00",
+      "duration": 9999616143,
+      "wait": 52228,
+      "requests": 10000,
+      "rate": 1000.0383871735185,
+      "throughput": 1000.0331639998144,
+      "success": 1,
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "phobos",
+    "repetition": 3,
+    "workload": "query-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "phobos/rep-3-query-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027477238007123,
+      "cpu_seconds": 0.08999999999999986,
+      "cpu_percent_one_core": 0.8975338249472468,
+      "rss_kib_min": 9888,
+      "rss_kib_median": 10284,
+      "rss_kib_max": 10284,
+      "threads_min": 21,
+      "threads_max": 21,
+      "vmhwm_kib": 10284
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 229637467,
+        "mean": 114818,
+        "50th": 109918,
+        "90th": 145023,
+        "95th": 157925,
+        "99th": 263762,
+        "max": 596611,
+        "min": 51757
+      },
+      "bytes_in": {
+        "total": 855763,
+        "mean": 427.8815
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:21:04.098848442+08:00",
+      "latest": "2026-10-21T11:21:14.094609583+08:00",
+      "end": "2026-10-21T11:21:14.094756109+08:00",
+      "duration": 9995761141,
+      "wait": 146526,
+      "requests": 2000,
+      "rate": 200.0848131310904,
+      "throughput": 200.08188016809137,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/printer/objects/query?heater_bed&toolhead&print_stats"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "info-unlimited-8",
+    "requested_rate": 0,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-1-info-unlimited-8",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026600905999658,
+      "cpu_seconds": 9.6,
+      "cpu_percent_one_core": 95.7453088040595,
+      "rss_kib_min": 59480,
+      "rss_kib_median": 59484,
+      "rss_kib_max": 59488,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59488
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 79362603583,
+        "mean": 694895,
+        "50th": 668367,
+        "90th": 844317,
+        "95th": 961099,
+        "99th": 1244416,
+        "max": 3667961,
+        "min": 78607
+      },
+      "bytes_in": {
+        "total": 134080192,
+        "mean": 1174
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:21:30.090298893+08:00",
+      "latest": "2026-10-21T11:21:40.090494038+08:00",
+      "end": "2026-10-21T11:21:40.091255018+08:00",
+      "duration": 10000195145,
+      "wait": 760980,
+      "requests": 114208,
+      "rate": 11420.577133147535,
+      "throughput": 11419.708133156118,
+      "success": 1,
+      "status_codes": {
+        "200": 114208
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 8
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-1-info-5000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027331146004144,
+      "cpu_seconds": 4.9399999999999995,
+      "cpu_percent_one_core": 49.265352146753145,
+      "rss_kib_min": 59488,
+      "rss_kib_median": 59492,
+      "rss_kib_max": 59496,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59496
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 18395783272,
+        "mean": 367915,
+        "50th": 346140,
+        "90th": 634023,
+        "95th": 704832,
+        "99th": 973228,
+        "max": 2095276,
+        "min": 80731
+      },
+      "bytes_in": {
+        "total": 58700000,
+        "mean": 1174
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:21:40.316559664+08:00",
+      "latest": "2026-10-21T11:21:50.315456128+08:00",
+      "end": "2026-10-21T11:21:50.315722899+08:00",
+      "duration": 9998896464,
+      "wait": 266771,
+      "requests": 50000,
+      "rate": 5000.551828896306,
+      "throughput": 5000.418417511713,
+      "success": 1,
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "fast-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-1-fast-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026408962003188,
+      "cpu_seconds": 0.5300000000000011,
+      "cpu_percent_one_core": 5.286040116740978,
+      "rss_kib_min": 59496,
+      "rss_kib_median": 59580,
+      "rss_kib_max": 59580,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59580
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 539930575,
+        "mean": 269965,
+        "50th": 253823,
+        "90th": 380857,
+        "95th": 425253,
+        "99th": 589096,
+        "max": 1115195,
+        "min": 117120
+      },
+      "bytes_in": {
+        "total": 1630421,
+        "mean": 815.2105
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:21:50.438028861+08:00",
+      "latest": "2026-10-21T11:22:00.433584537+08:00",
+      "end": "2026-10-21T11:22:00.43391123+08:00",
+      "duration": 9995555676,
+      "wait": 326693,
+      "requests": 2000,
+      "rate": 200.0889260015963,
+      "throughput": 200.08238654373864,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "fast-1000",
+    "requested_rate": 1000,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-1-fast-1000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026560162004898,
+      "cpu_seconds": 1.6400000000000006,
+      "cpu_percent_one_core": 16.35655672036648,
+      "rss_kib_min": 59580,
+      "rss_kib_median": 59580,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1818335083,
+        "mean": 181833,
+        "50th": 172246,
+        "90th": 271917,
+        "95th": 307196,
+        "99th": 415340,
+        "max": 821262,
+        "min": 90610
+      },
+      "bytes_in": {
+        "total": 8146484,
+        "mean": 814.6484
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:22:00.46853586+08:00",
+      "latest": "2026-10-21T11:22:10.46798697+08:00",
+      "end": "2026-10-21T11:22:10.468162539+08:00",
+      "duration": 9999451110,
+      "wait": 175569,
+      "requests": 10000,
+      "rate": 1000.0548920129676,
+      "throughput": 1000.0373334937377,
+      "success": 1,
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "query-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-1-query-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.02692167799978,
+      "cpu_seconds": 0.509999999999998,
+      "cpu_percent_one_core": 5.086306808589088,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 570516760,
+        "mean": 285258,
+        "50th": 273989,
+        "90th": 358154,
+        "95th": 397969,
+        "99th": 576067,
+        "max": 1183203,
+        "min": 156794
+      },
+      "bytes_in": {
+        "total": 903765,
+        "mean": 451.8825
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:22:10.518924162+08:00",
+      "latest": "2026-10-21T11:22:20.514473047+08:00",
+      "end": "2026-10-21T11:22:20.514766929+08:00",
+      "duration": 9995548885,
+      "wait": 293882,
+      "requests": 2000,
+      "rate": 200.08906194249482,
+      "throughput": 200.08317923954797,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/printer/objects/query?heater_bed&toolhead&print_stats"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "query-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-2-query-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027087734997622,
+      "cpu_seconds": 0.5,
+      "cpu_percent_one_core": 4.9864927206615155,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 564865882,
+        "mean": 282432,
+        "50th": 271775,
+        "90th": 352937,
+        "95th": 394231,
+        "99th": 611327,
+        "max": 932682,
+        "min": 161222
+      },
+      "bytes_in": {
+        "total": 903783,
+        "mean": 451.8915
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:22:20.553330628+08:00",
+      "latest": "2026-10-21T11:22:30.548620293+08:00",
+      "end": "2026-10-21T11:22:30.548801884+08:00",
+      "duration": 9995289665,
+      "wait": 181591,
+      "requests": 2000,
+      "rate": 200.09425109542337,
+      "throughput": 200.09061591762932,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/printer/objects/query?heater_bed&toolhead&print_stats"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "fast-1000",
+    "requested_rate": 1000,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-2-fast-1000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027628746000119,
+      "cpu_seconds": 1.8300000000000018,
+      "cpu_percent_one_core": 18.249578702541847,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 2047466005,
+        "mean": 204746,
+        "50th": 183335,
+        "90th": 319558,
+        "95th": 387704,
+        "99th": 592688,
+        "max": 1389841,
+        "min": 92203
+      },
+      "bytes_in": {
+        "total": 8146484,
+        "mean": 814.6484
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:22:30.583345562+08:00",
+      "latest": "2026-10-21T11:22:40.583176291+08:00",
+      "end": "2026-10-21T11:22:40.58336762+08:00",
+      "duration": 9999830729,
+      "wait": 191329,
+      "requests": 10000,
+      "rate": 1000.0169273865316,
+      "throughput": 999.9977942048655,
+      "success": 1,
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "fast-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-2-fast-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027087914000731,
+      "cpu_seconds": 0.5,
+      "cpu_percent_one_core": 4.986492631642878,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 525538042,
+        "mean": 262769,
+        "50th": 245642,
+        "90th": 366859,
+        "95th": 400374,
+        "99th": 574752,
+        "max": 1259686,
+        "min": 111389
+      },
+      "bytes_in": {
+        "total": 1630421,
+        "mean": 815.2105
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:22:40.635579507+08:00",
+      "latest": "2026-10-21T11:22:50.631330016+08:00",
+      "end": "2026-10-21T11:22:50.631638396+08:00",
+      "duration": 9995750509,
+      "wait": 308380,
+      "requests": 2000,
+      "rate": 200.08502595170165,
+      "throughput": 200.0788532969596,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-2-info-5000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026997629989637,
+      "cpu_seconds": 4.640000000000001,
+      "cpu_percent_one_core": 46.27506828287538,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 16547897375,
+        "mean": 330957,
+        "50th": 322324,
+        "90th": 554173,
+        "95th": 633346,
+        "99th": 810637,
+        "max": 1908815,
+        "min": 80982
+      },
+      "bytes_in": {
+        "total": 58700000,
+        "mean": 1174
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:22:50.666352955+08:00",
+      "latest": "2026-10-21T11:23:00.66533541+08:00",
+      "end": "2026-10-21T11:23:00.665448823+08:00",
+      "duration": 9998982455,
+      "wait": 113413,
+      "requests": 50000,
+      "rate": 5000.50882427516,
+      "throughput": 5000.45210687643,
+      "success": 1,
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "info-unlimited-8",
+    "requested_rate": 0,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-2-info-unlimited-8",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026810541996383,
+      "cpu_seconds": 9.319999999999997,
+      "cpu_percent_one_core": 92.95079388369837,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 78963034017,
+        "mean": 723595,
+        "50th": 679956,
+        "90th": 933605,
+        "95th": 1067199,
+        "99th": 1361173,
+        "max": 2596697,
+        "min": 110418
+      },
+      "bytes_in": {
+        "total": 128113924,
+        "mean": 1174
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:23:00.782976692+08:00",
+      "latest": "2026-10-21T11:23:10.783274601+08:00",
+      "end": "2026-10-21T11:23:10.783693358+08:00",
+      "duration": 10000297909,
+      "wait": 418757,
+      "requests": 109126,
+      "rate": 10912.274913509278,
+      "throughput": 10911.817987105045,
+      "success": 1,
+      "status_codes": {
+        "200": 109126
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 8
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "info-unlimited-8",
+    "requested_rate": 0,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-3-info-unlimited-8",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026780550004332,
+      "cpu_seconds": 9.399999999999999,
+      "cpu_percent_one_core": 93.74893519531489,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 79027202507,
+        "mean": 714137,
+        "50th": 674565,
+        "90th": 912032,
+        "95th": 1041543,
+        "99th": 1317247,
+        "max": 2326049,
+        "min": 111098
+      },
+      "bytes_in": {
+        "total": 129916014,
+        "mean": 1174
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:23:10.995295661+08:00",
+      "latest": "2026-10-21T11:23:20.995514325+08:00",
+      "end": "2026-10-21T11:23:20.995748485+08:00",
+      "duration": 10000218664,
+      "wait": 234160,
+      "requests": 110661,
+      "rate": 11065.858029521984,
+      "throughput": 11065.598923123323,
+      "success": 1,
+      "status_codes": {
+        "200": 110661
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 8
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-3-info-5000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026620611999533,
+      "cpu_seconds": 4.690000000000005,
+      "cpu_percent_one_core": 46.77548080743342,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 16774271946,
+        "mean": 335498,
+        "50th": 324681,
+        "90th": 560914,
+        "95th": 647009,
+        "99th": 832554,
+        "max": 1724840,
+        "min": 81823
+      },
+      "bytes_in": {
+        "total": 58697652,
+        "mean": 1174
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:23:21.231284316+08:00",
+      "latest": "2026-10-21T11:23:31.23075576+08:00",
+      "end": "2026-10-21T11:23:31.230950826+08:00",
+      "duration": 9999471444,
+      "wait": 195066,
+      "requests": 49998,
+      "rate": 5000.064281397632,
+      "throughput": 4999.966743890942,
+      "success": 1,
+      "status_codes": {
+        "200": 49998
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "fast-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-3-fast-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027117026998894,
+      "cpu_seconds": 0.519999999999996,
+      "cpu_percent_one_core": 5.185937279876661,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 548134051,
+        "mean": 274067,
+        "50th": 255517,
+        "90th": 385035,
+        "95th": 424761,
+        "99th": 570283,
+        "max": 749999,
+        "min": 122319
+      },
+      "bytes_in": {
+        "total": 1630421,
+        "mean": 815.2105
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:23:31.351721277+08:00",
+      "latest": "2026-10-21T11:23:41.347594073+08:00",
+      "end": "2026-10-21T11:23:41.347993964+08:00",
+      "duration": 9995872796,
+      "wait": 399891,
+      "requests": 2000,
+      "rate": 200.0825781616919,
+      "throughput": 200.07457405608488,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "fast-1000",
+    "requested_rate": 1000,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-3-fast-1000",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.026449394994415,
+      "cpu_seconds": 1.7199999999999989,
+      "cpu_percent_one_core": 17.154627049319057,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1927053879,
+        "mean": 192705,
+        "50th": 181152,
+        "90th": 289707,
+        "95th": 329790,
+        "99th": 451715,
+        "max": 969221,
+        "min": 88526
+      },
+      "bytes_in": {
+        "total": 8146484,
+        "mean": 814.6484
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:23:41.382571857+08:00",
+      "latest": "2026-10-21T11:23:51.3819448+08:00",
+      "end": "2026-10-21T11:23:51.382132132+08:00",
+      "duration": 9999372943,
+      "wait": 187332,
+      "requests": 10000,
+      "rate": 1000.0627096322513,
+      "throughput": 1000.0439744336658,
+      "success": 1,
+      "status_codes": {
+        "200": 10000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/server/info",
+      "/server/config",
+      "/machine/system_info",
+      "/server/database/item?namespace=mainsail&key=settings",
+      "/access/info",
+      "/server/history/list?limit=20"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "query-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "capture": "moonraker/rep-3-query-200",
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.027367411006708,
+      "cpu_seconds": 0.5300000000000011,
+      "cpu_percent_one_core": 5.2855348595109595,
+      "rss_kib_min": 59584,
+      "rss_kib_median": 59584,
+      "rss_kib_max": 59584,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 59584
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 601113747,
+        "mean": 300556,
+        "50th": 286472,
+        "90th": 373739,
+        "95th": 433557,
+        "99th": 675932,
+        "max": 1175728,
+        "min": 172924
+      },
+      "bytes_in": {
+        "total": 903792,
+        "mean": 451.896
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T11:23:51.435732548+08:00",
+      "latest": "2026-10-21T11:24:01.431254568+08:00",
+      "end": "2026-10-21T11:24:01.431579108+08:00",
+      "duration": 9995522020,
+      "wait": 324540,
+      "requests": 2000,
+      "rate": 200.0895997225766,
+      "throughput": 200.08310331646388,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    },
+    "target_paths": [
+      "/printer/objects/query?heater_bed&toolhead&print_stats"
+    ],
+    "initial_workers": 8,
+    "maximum_workers": 64
+  }
+]

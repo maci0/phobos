@@ -1,108 +1,114 @@
 # Memory footprint
 
-phobos ships as one static binary with no interpreter, runtime or virtualenv,
-with the historical idle measurements below. They do not measure the current checkout.
-[`scripts/measure-memory.sh`](../scripts/measure-memory.sh) builds the release
-binary, starts an idle server, and samples `/proc/<pid>/status` next to a bare
-Python interpreter.
+Measured 2026-10-21 alongside the v0.2.1 [load comparisons](PERFORMANCE.md).
+Values are process RSS from `/proc`, in KiB (1,024 bytes) and MiB. The
+binary includes SQLite and musl; the file backend remains a runtime choice
+and does not remove linked SQLite code.
 
-## x86-64 host
+**Lower RSS is better:** it leaves more RAM for Klippy and the rest of the
+system. Lower CPU is better at matched throughput. Thread counts are diagnostic;
+fewer threads do not automatically mean better performance.
 
-Measured 2026-10-20 at `db010e3`: `zig build -Doptimize=ReleaseSmall` (LTO,
-stripped, static musl), SQLite backend, idle with no traffic, sampled after 6 s.
+## Host idle and load
 
-| | phobos | bare Python 3.14 (stdlib only) | Moonraker (typical) |
-|---|---|---|---|
-| On-disk | 2.43 MiB static binary | interpreter + `site-packages` | interpreter + deps |
-| Idle RSS | 3.0 MB | 21.4 MB | 50-80 MB |
-| Peak RSS (`VmHWM`) | 3.0 MB | n/a | n/a |
-| `Private_Dirty` | 0.86 MB | n/a | n/a |
-| Threads | 6 | n/a | n/a |
-| Runtime dependencies | none | CPython | CPython, tornado, sqlite, jinja2 and more |
+AMD Ryzen 9 9950X, CachyOS x86-64, Linux 7.2.10-1-cachyos.
+The exact portable ReleaseSmall x86-64 asset is 2,745,112 bytes (2.62 MiB).
+Full pinned Moonraker runs on Python 3.12.12 with its dependencies loaded;
+the comparison is not a bare interpreter or an estimated production range.
 
-The Python column is an interpreter that has imported only `json`, `asyncio`,
-`logging`, `pathlib` and `sqlite3`: the floor Moonraker starts from, before
-tornado, jinja2 and its ~30 components load. phobos idles below that floor. A
-full Moonraker cannot run on this host (its dependencies are not installed), so
-its column is the commonly reported production range, not a local measurement.
+Both servers are Klippy-ready against the same protocol stub. Their fresh
+databases contain the same seeded `mainsail.settings` value. After successful
+fixture reads and three seconds of settling, 101 samples span ten seconds.
+The file-backend measurement uses the same phobos executable, common config,
+stub and seeded value, with an independent file store.
 
-## armv7 printer, by storage backend
+| Process / store | Median idle KiB ↓ | MiB ↓ | Threads | CPU, one core ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| phobos / SQLite | 6,112 | 5.97 | 12 | 0.00% |
+| phobos / file | 5,448 | 5.32 | 12 | 0.00% |
+| Moonraker / SQLite | 59,468 | 58.07 | 5 | 0.10% |
 
-The DataStore backend is selected at runtime with `[database] backend`. These
-printer measurements predate the current review. Their exact source revision
-was not recorded, so they are not a baseline for comparing new changes:
+↓ Lower is better. In this fixture phobos/SQLite uses 9.7× less idle RSS
+than full Moonraker; phobos/file has the lowest measured idle RSS.
 
-| Backend | Idle RSS | Private_Dirty | VmData | Notes |
-|---|---|---|---|---|
-| `sqlite` (default) | 2.18 MB | 2.28 MB | 21.8 MB | Reads and writes Moonraker's `moonraker-sql.db` |
-| `file` (atomic rename) | 1.20 MB | 1.33 MB | 21.6 MB | Pure Zig, no C dependency |
+The SQLite/file difference is 664 KiB in this fixture. It is not a fixed
+SQLite cache cost or a universal saving. Zero measured CPU means no process
+ticks advanced within this short sampling window.
 
-The binary measured ~2.15 MB with either backend: SQLite is always linked so
-the backend stays a runtime choice. Before SQLite was vendored the binary was
-~1.2 MB; no build option drops it today.
+The SQLite phobos and Moonraker processes each run 15 load trials; the file
+backend has an idle measurement only. The table reports
+the maximum sampled RSS across three trials of each workload, the median
+whole-trial CPU percentage and peak thread count. Earlier workloads can leave
+resident allocations and worker threads behind. CPU excludes the stub and
+load generator; 100% is one core.
+The RSS figure shows the median of the three trial peaks and their range;
+the table keeps the maximum across all three.
 
-- The file backend uses about 1 MB less resident RAM. That megabyte is SQLite's
-  page cache and touched code. Pick the file backend when minimum memory matters
-  more than Moonraker database compatibility.
-- `VmData` is ~21.6 MB with either backend: the 1 MiB-capped thread stacks and
-  arenas. An earlier store reserved a 200 MiB mmap; that reservation no longer
-  exists.
+| Process | Workload | Peak RSS MiB ↓ | Median CPU ↓ at matched rate | Peak threads |
+| --- | --- | ---: | ---: | ---: |
+| phobos | Info, unlimited / 8 workers | 9.59 | 93.35% | 21 |
+| Moonraker | Info, unlimited / 8 workers | 58.19 | 93.75% | 5 |
+| phobos | Info, 5,000/s | 9.60 | 4.79% | 21 |
+| Moonraker | Info, 5,000/s | 58.19 | 46.78% | 5 |
+| phobos | Independent mix, 200/s | 9.61 | 0.60% | 21 |
+| Moonraker | Independent mix, 200/s | 58.19 | 5.19% | 5 |
+| phobos | Independent mix, 1,000/s | 9.66 | 1.80% | 21 |
+| Moonraker | Independent mix, 1,000/s | 58.19 | 17.15% | 5 |
+| phobos | Stub query, 200/s | 10.04 | 0.80% | 21 |
+| Moonraker | Stub query, 200/s | 58.19 | 5.09% | 5 |
 
-## What the resident set contains
+phobos uses less RSS in every measured workload and less CPU at every matched
+offered rate. The unlimited rows perform different amounts of work, so their
+CPU percentages alone do not decide which implementation is more efficient.
 
-From `/proc/<pid>/smaps_rollup`:
+![Host resident memory](perf/host-v0.2.1/memory.png)
+![Host process CPU](perf/host-v0.2.1/cpu.png)
 
-- **`Private_Dirty`** (0.86 MB on x86-64) is phobos's own committed RAM: heap
-  for the registry and dispatch tables, component state, and SQLite's internal
-  structures.
-- **`Private_Clean`** (2.1 MB on x86-64) is file-backed code and read-only data
-  of the binary, including SQLite. Under memory pressure the kernel drops these
-  pages and rereads them from disk, so they do not pin RAM.
+Idle JSON, trial measurements and source/tool metadata are in
+[the host capture summary](perf/host-v0.2.1/summary.json) and its neighboring
+files. These are short read workloads, not a leak or long-soak test.
 
-Per-request allocations live in arenas freed when the request ends. Long-lived
-state and the worker pool still affect resident memory under load.
+## Cortex-A7 printer
 
-## Why `VmSize` and `VmData` look large
+Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores, 110,404 KiB RAM.
+The candidate Cortex-A7 asset is 2,623,944 bytes (2.50 MiB), SHA-256
+`5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf`.
+Each private probe uses a database copy, the real configured components and
+Klippy connection; production v0.2.0 remains running separately. RSS below
+counts the probe only, not the complete board's resident memory.
 
-`VmSize`/`VmData` read tens of MB (48 MB and 45 MB in the x86-64 run above).
-That is reserved, uncommitted address space:
+| Probe version | Idle RSS KiB ↓ | Idle MiB ↓ | Idle threads | Peak load RSS KiB ↓ | Peak load MiB ↓ | Peak threads |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| v0.2.0 | 3,056 | 2.98 | 11 | 5,052 | 4.93 | 16 |
+| v0.2.1 | 3,100 | 3.03 | 11 | 5,056 | 4.94 | 16 |
 
-- **Thread stacks.** Background threads (Klippy bridge, proc-stat timer, MQTT
-  reader and flush, announcement, Spoolman and job-queue timers) spawn with a
-  1 MiB stack reservation instead of std's 16 MiB default, so five threads
-  reserve ~5 MB instead of ~80 MB. Only touched pages become resident.
-- **SQLite** uses a small resident page cache rather than a large reserved mmap,
-  so it adds little to `VmSize`.
+↓ Lower is better. v0.2.0 measured 44 KiB less idle RSS and 4 KiB less peak
+load RSS. These small differences do not establish a general memory regression.
 
-`VmRSS` reflects real RAM pressure.
+Idle uses the last ten seconds before load, excluding startup, with 37
+samples per version over about 9.8 seconds. Load comprises 42 eight-second
+read trials, including the real Klippy query and config directory paths.
+The shell sampler reads process and board memory about every 250 ms.
+Board MemAvailable stayed at or above 49,540 KiB; an automatic guard would stop
+load below 16 MiB. No new full Moonraker process was started on the board.
+No file-backend measurement was made on the printer in this release.
 
-## What keeps the footprint small
+See [the printer summary](perf/printer-v0.2.1.json) for exact samples,
+trial ranges, rates and transport limits. RSS is neither total allocated
+memory nor proof that all optional components fit on another printer.
 
-- No interpreter, garbage collector or event-loop runtime; async I/O goes
-  through `std.Io`.
-- `ReleaseSmall` with full LTO, stripped: unreachable code is dropped and no
-  debug info ships.
-- Per-request arena allocators; long-lived state uses the general allocator and
-  is bounded.
-- JSON-RPC method names are built at compile time as static strings, the
-  dispatch map is built once, and HTTP route lookup is an O(1) path index.
-- Reused buffers on hot paths. The MQTT inbound body buffer, for example, grows
-  to the largest packet seen and is reused for later messages.
+## Reservations and ownership
 
-## Method
+`VmSize` and `VmData` include reserved address space; RSS counts resident
+pages. Background workers use bounded stack reservations, and the 32-bit
+daemon owns a threaded I/O backend with 1 MiB handler stacks. Those are
+implementation settings, not fresh measurements of every mapping.
+Request arenas are freed on return, but long-lived component state, SQLite
+pages and the connection worker pool can remain resident after load.
 
-```sh
-scripts/measure-memory.sh 7188
-```
-
-The helper builds ReleaseSmall under a unique `.scratch/memory-*/` prefix,
-starts a fresh SQLite datadir on loopback, waits six seconds after HTTP readiness,
-and prints the commit, binary size and `/proc` values in KiB. Its configuration
-disables remote announcement fetching and update refresh and points Klippy at an
-unused owned socket path. It also prints the interpreter version and RSS after
-the baseline stdlib imports. Captures stay in that run directory, and cleanup
-stops only its own daemon. It does not overwrite `zig-out/bin/phobos`.
-
-Record the architecture, configuration and traffic beside a new result. Never
-point a measurement run at a live printer database. The historic measurements
-above were not rerun after these helper changes.
+`scripts/measure-memory.sh [port]` provides a separate, minimal idle
+ReleaseSmall fixture with no Klippy connection and a bare Python baseline.
+It uses an isolated scratch prefix and stops only its own process. Its
+configuration differs from the connected measurements above; do not compare
+those values as a storage-only change. Never point measurement helpers at a
+live printer database.

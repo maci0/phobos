@@ -1,0 +1,51 @@
+{
+  "source_commit": "b5e353f339ec1c03a4caea405264f48de71469c5",
+  "runtime_tree": "80e1463eddd06d325a463097eb6b077e9d0cecb0",
+  "package_manifest_blob": "46c950b38896b061dea935df1cd4623ef3985289",
+  "package_version": "0.2.1",
+  "moonraker_commit": "9008485843740c93e0154ccbdac1fc2b02b03aaa",
+  "binary_sha256": "ce21f105069d049e42ce5d40b8bc12b4fb6d9ba1ebb75e27588ced86165c1a93",
+  "binary_bytes": 2745112,
+  "sqlite_c_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+  "date_utc": "2026-10-21T03:18:24Z",
+  "controller_python": "3.12.12",
+  "moonraker_python": "Python 3.12.12",
+  "vegeta_version": "Version: 12.13.0\nCommit: 507c4f0\nRuntime: go1.25.5 X:nodwarf5 linux/amd64\nDate: NOTSET",
+  "zig_version": "0.17.0",
+  "cpu": "AMD Ryzen 9 9950X, 16 cores / 32 logical CPUs",
+  "kernel": "7.2.10-1-cachyos",
+  "system": "CachyOS x86-64",
+  "cpu_governor": "performance",
+  "affinity": "all 32 logical CPUs; no isolated CPU set",
+  "build_command": "zig build -Dtarget=x86_64-linux-musl -Dcpu=baseline -Doptimize=ReleaseSmall",
+  "sqlite_version": "3.54.1",
+  "transport": "host loopback HTTP, keepalive; controller and server share the desktop",
+  "method": {
+    "trials": 30,
+    "repetitions": 3,
+    "seconds_per_trial": 10,
+    "idle_seconds": 10,
+    "process_sample_seconds": 0.1,
+    "initial_workers": 8,
+    "maximum_workers": "8 for unlimited load, 64 for paced load",
+    "connection_limit": "Vegeta default; no explicit override",
+    "request_timeout_seconds": 2,
+    "warmup": "readiness, common database seed, successful GET of every target, 3 seconds settle before idle; 2 seconds fast mix at 200/s before load",
+    "order": "phobos then Moonraker; workload order reversed for repetition 2",
+    "database": "fresh independent SQLite stores with the same seeded mainsail value",
+    "klippy": "same protocol stub, full ready handshake and proxy endpoints",
+    "process_lifetime": "one process per backend reused for all 15 load trials",
+    "file_backend_idle": "same phobos asset, common config/stub and seeded value; separate store",
+    "cpu_scale": "100% is one CPU core",
+    "success": "HTTP status; fixture response values checked before load",
+    "server_info_response_bytes": {
+      "phobos": 640,
+      "moonraker": 1174
+    },
+    "klippy_status_flood": false
+  },
+  "moonraker_runtime_dependencies": {
+    "tornado": "6.5.5",
+    "sqlite": "3.50.4"
+  }
+}

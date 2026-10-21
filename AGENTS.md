@@ -7,8 +7,9 @@ The append-only change and verification ledger is `docs/PROVENANCE.md`.
 ## Project goals (weigh every change against these)
 
 - **Low memory use is a primary goal.** Target: a static musl binary on 32-bit
-  ARM (Cortex-A7). Historical measurements are in `docs/MEMORY.md`; they are not a current
-  performance guarantee. Reproduce with `scripts/measure-memory.sh`. Rules:
+  ARM (Cortex-A7). Versioned measurements are in `docs/MEMORY.md` and
+  `docs/PERFORMANCE.md`; they are not a universal performance guarantee.
+  Reproduce idle setup with `scripts/measure-memory.sh`. Rules:
     - prefer fixed, stack, and caller-provided buffers; use `std.heap`
       allocators only when a fixed buffer cannot bound the size
     - per-request work uses an arena freed on return; keep long-lived state
@@ -229,6 +230,10 @@ primitives are gone, so use `std.Io.Mutex`.
    PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/api-dump.json`
 - Release (LTO, stripped): add `-Doptimize=ReleaseSmall`.
 - Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
+- Release matrix: `scripts/build-release.sh` builds isolated static Linux
+  profiles and checks their ELF, ABI and checksums. `--verify-only` repeats
+  validation without compiling. See `docs/BUILDS.md` for CPU/kernel requirements
+  and the C-only softfp option. Never execute foreign assets on the build host.
 - Conformance oracle (normalized equality against vendored Moonraker):
   `conformance/replay.py` against `conformance/golden/`.
 - Gated real-Klippy integration test: boot the stack with `.testenv/run-klippy.sh`

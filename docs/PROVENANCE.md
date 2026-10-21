@@ -789,3 +789,127 @@ Native Debug was rebuilt after the cross-builds. Architecture-matrix checks,
 fresh host/printer performance measurements and final release evidence follow
 in later entries. No deployment, live database write, printer control action,
 board reboot, image mutation or QEMU execution was used for this change.
+
+## 2026-10-21: release profiles, measured performance and v0.2.1
+
+Requested by the user: build common ARM floating-point variants and AArch64,
+refresh owned documentation/API coverage, run independent host load tests and
+real-printer benchmarks, then publish a new release. The SQLite runtime update
+is recorded above. Existing v0.2.0 release assets and the production installation
+are preserved.
+
+`scripts/build-release.sh` builds seven static musl ReleaseSmall profiles in
+isolated scratch prefixes: ARMv6/VFPv2 hardfp, ARMv7 pure software float,
+ARMv7 mixed C softfp, generic ARMv7/VFPv3-D16 hardfp, Cortex-A7 hardfp,
+baseline AArch64 and baseline x86-64. ELF class, endian/machine, static linkage,
+ARM argument ABI and FPU/SIMD attributes are validated, then checksums checked.
+Negative checks rejected incompatible build options, wrong ELF/ABI/dynamic
+artifacts, damaged checksums and output outside the scratch root. The helper
+does not deploy or execute foreign targets. Native Debug was restored afterward.
+
+The pinned compiler lowers Zig `musleabi` math through software helpers.
+`-Dsoftfp=true` applies `-mfloat-abi=softfp` to all C sources, including the C
+test fixture, and requires VFPv3-D32. During physical history comparisons the
+initial mixed build returned zero for SQLite REAL columns. A five-case C/Zig
+probe reproduced a full-LTO calling-convention mismatch: C used VFP registers
+while Zig still used the base integer-register ABI. The LTO probe failed all
+five bit-pattern comparisons; the no-LTO probe passed all five on the printer.
+Only the mixed softfp release profile now disables LTO. The opt-in
+`float-abi-probe` build step preserves that executable regression check without
+building it during ordinary application builds. Its corrected probe passed
+on Cortex-A7 and native x86-64. Four build-policy tests pass, including two
+bounded fuzz harnesses. Six existing matrix hashes stayed byte-identical.
+The corrected softfp asset is 2,803,364 bytes, SHA-256
+`cec0c671958159744d421705c4afdf92cd267b52e5fa26fb02b285c4e914ce99`.
+
+The exact Cortex-A7 and portable x86-64 asset hashes are respectively
+`5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf`
+and `ce21f105069d049e42ce5d40b8bc12b4fb6d9ba1ebb75e27588ced86165c1a93`.
+The latter matches an independent build from the SQLite candidate source.
+All seven final assets passed the helper's verify-only mode and SHA-256 checks.
+The five ARM32 assets also passed startup, real object queries, 20 actual
+copied history rows and floating-point totals/field equality, directory
+capacity and JSON package-version checks inside the Forge-X chroot. ARMv6
+execution on ARMv7 is not a native ARMv6 certification. AArch64 was not run.
+Exact profile hashes and hardware scope are in `docs/perf/arm32-smoke-v0.2.1.json`.
+
+Fresh native API registration coverage remains 123/123 literal paths,
+130/130 JSON-RPC methods and 27/27 notifications. The source contains 125
+endpoint registration records, including two dynamic callsites; 117 records
+enable HTTP, with 116 literal HTTP paths. Documentation now distinguishes
+those counts from target/runtime support. Table generation/check passed;
+generated API and client artifacts are byte-identical, so none was rewritten.
+The client matrix retains its nine plugin/nonstandard gaps rather than
+claiming behavioral completeness. Moonraker pin `900848584374` is unchanged.
+The complete daemon suite is 1718 passed, one gated real-Klippy skip, zero
+failed and 325 bounded fuzz harnesses, as recorded in the preceding entry.
+All 100 Python scanner/measurement tests pass with the documented language
+grammars installed. An initial combined invocation omitted the TypeScript/C++
+grammars; that was a test-command dependency error, not a scanner code failure.
+Ruff, Black, explicit-package-base type checks and the complete shell-helper
+smoke checks pass. Zig formatting and first-party whitespace checks pass.
+
+Fresh host benchmarks used the exact portable x86-64 ReleaseSmall asset and
+full pinned Moonraker on Python 3.12.12/Tornado 6.5.5/SQLite 3.50.4, sharing
+one Klippy stub and equivalent seeded independent SQLite fixtures. The host
+was Ryzen 9 9950X, 16 cores/32 logical CPUs, CachyOS Linux 7.2.10-1-cachyos.
+No cross-compile or printer load generator ran during this quiet window.
+Thirty ten-second measured trials all returned successful HTTP status,
+3,796,280 requests total. Unlimited eight-worker server-info throughput had
+trial medians 109,645.7/s for phobos and 11,065.6/s for Moonraker. At matched
+5,000/s the median trial p99 was 0.178 ms and 0.833 ms. Those are complete
+loopback workloads with different response sizes, not server-only ceilings.
+The independent mix excludes Klippy; a separate query workload exercises the
+stub round trip. Idle RSS was 6,112 KiB for SQLite phobos, 5,448 KiB for its
+file backend and 59,468 KiB for full Moonraker. Samples and limitations are
+in the current PERFORMANCE/MEMORY reports and checked-in JSON summaries.
+
+The first host attempt exposed a report-format bug: actual Vegeta 12.13 uses
+`50th`/`99th` percentile keys, while the formatter and fake fixture expected
+`50`/`99`. The formatter and fixtures now use the real schema, with a regression
+test. The incomplete attempt was discarded from comparison, and all 30 trials
+were restarted. The plotter now accepts measured JSON, validates matched
+workloads/repetitions, shows trial ranges and writes portable input hashes.
+Old hardcoded graphs and unresolved-symbol flamegraphs were removed from the
+current report; Git history retains them. Five new figures were visually checked.
+
+The physical comparison ran published v0.2.0 and the exact v0.2.1 Cortex-A7
+asset sequentially on loopback 7126 inside Forge-X 1.4.2/Linux 5.4.61, two
+Cortex-A7 cores and 110,404 KiB RAM. Production v0.2.0 stayed on port 7125.
+Independent database/WAL copies were made from a stable snapshot without
+opening the live database for write. Automatic queue loading/transition and
+update refresh were disabled. Forty-two eight-second read trials completed
+with 100% HTTP success. The controller used SSH/WiFi, so timings include that
+transport; the bounded eight-worker mix at requested 100/s reached about 83/s.
+No speedup/regression claim is made from these short networked trials.
+Candidate idle RSS was 3,100 KiB, sampled peak load RSS 5,056 KiB; board
+MemAvailable remained at least 49,540 KiB. Production readiness, print state,
+heater targets and a 16 MiB available-memory floor were checked throughout.
+No second full Moonraker was started on this small board.
+
+The private printer directory, copied databases and owned binaries were removed
+after stopping all probe/sampler processes; the SSH tunnel was closed. No 7126
+listener remains. Production PID 10891 still maps `/data/phobos-v0.2.0`.
+Final HTTP checks report Klippy ready, no failed components or warnings, last
+print complete, extruder 31.27 C/target 0 and bed 30.23 C/target 0. Boot ID
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117` is unchanged. No motion, heating,
+print start, update, Klipper restart, firmware restart, host power action,
+board reboot, live configuration change, golden-image mutation or QEMU was used.
+
+Remaining differences are documented as identity (API 1.5.0, phobos software
+version and Python stub), deliberate behavior (empty CAN discovery, optional
+registered components and no-op power actions), or environment (host CPU,
+kernel, device set and filesystem). The mixed-softfp ABI mismatch and Vegeta
+formatter failure were code/build bugs and are fixed. Feature limits remain
+listed in TODO and the release notes. Long soaks, large transfers and optional
+peripheral hardware were not benchmarked anew. `graphify-out/graph.json` exists,
+but `graphify` is absent from PATH, so its update was skipped; that directory
+is not a release deliverable. v0.2.1 contains these verified changes and seven
+binary profiles; it is not installed on the printer.
+
+The user additionally requested explicit better-direction labels. Every new
+figure now says higher is better for throughput, lower is better for latency
+and RSS, or lower at matched throughput is better for CPU. Tables repeat those
+directions and identify measured host winners. Printer results explicitly state
+that the short transport-sensitive comparison has no clear overall winner.
+The 22 measurement-tool tests pass after the label update.

@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-21",
+  "hardware": "2 x Cortex-A7 ARMv7, Forge-X 1.4.2 chroot, Linux 5.4.61",
+  "probe_port": "127.0.0.1:7126",
+  "database": "private copy with real history rows, never the live database",
+  "checks": "startup, actual object query, 20 history rows and floating-point fields/totals equality, config-directory capacity, version",
+  "rows": [
+    {
+      "profile": "cortex-a7-hardfp",
+      "version": "0.2.1",
+      "klippy_state": "ready",
+      "failed_components": [],
+      "history_jobs": 20,
+      "history_and_float_totals_match_cortex_a7": true,
+      "directory_capacity": 1300103168,
+      "asset": "phobos-v0.2.1-arm-linux-musleabihf",
+      "sha256": "5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf"
+    },
+    {
+      "profile": "armv6-hardfp",
+      "version": "0.2.1",
+      "klippy_state": "ready",
+      "failed_components": [],
+      "history_jobs": 20,
+      "history_and_float_totals_match_cortex_a7": true,
+      "directory_capacity": 1300103168,
+      "asset": "phobos-v0.2.1-armv6-linux-musleabihf",
+      "sha256": "b3ce760d8b76269f4c241dc86e95e0ab27d9583cd45b15c555880e2bdbceb574"
+    },
+    {
+      "profile": "armv7-soft",
+      "version": "0.2.1",
+      "klippy_state": "ready",
+      "failed_components": [],
+      "history_jobs": 20,
+      "history_and_float_totals_match_cortex_a7": true,
+      "directory_capacity": 1300103168,
+      "asset": "phobos-v0.2.1-armv7-linux-musleabi-soft",
+      "sha256": "d5460e85cbfb8b875295a95df81856b663029288f53ce6431b74dcee0c9f2e83"
+    },
+    {
+      "profile": "armv7-softfp-c",
+      "version": "0.2.1",
+      "klippy_state": "ready",
+      "failed_components": [],
+      "history_jobs": 20,
+      "history_and_float_totals_match_cortex_a7": true,
+      "directory_capacity": 1300103168,
+      "asset": "phobos-v0.2.1-armv7-linux-musleabi-softfp-c",
+      "sha256": "cec0c671958159744d421705c4afdf92cd267b52e5fa26fb02b285c4e914ce99"
+    },
+    {
+      "profile": "armv7-hardfp",
+      "version": "0.2.1",
+      "klippy_state": "ready",
+      "failed_components": [],
+      "history_jobs": 20,
+      "history_and_float_totals_match_cortex_a7": true,
+      "directory_capacity": 1300103168,
+      "asset": "phobos-v0.2.1-armv7-linux-musleabihf",
+      "sha256": "763482cc3d4f8d4ee1c0b36a3931f243da2c517074c2d9151f49bc47528cea7d"
+    }
+  ],
+  "softfp_abi_probe": "all five exact C/Zig return and argument bit-pattern checks passed with LTO disabled",
+  "limits": "ARM32 execution on ARMv7 does not certify native ARMv6 hardware; no AArch64 runtime available",
+  "cleanup": "private probe files removed, no port 7126 listener; production PID and board boot ID unchanged"
+}

@@ -1,0 +1,793 @@
+{
+  "source": "b5e353f",
+  "candidate_version": "0.2.1",
+  "candidate_sha256": "5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf",
+  "sqlite": "3.54.1",
+  "baseline_version": "0.2.0",
+  "baseline_sha256": "5bb67a878c91f5fe16676460785ddafe61e42ab7b7e3bc75d0d587e75c58d370",
+  "clock_ticks_per_second": 100,
+  "transport": "host vegeta through SSH/WiFi to loopback7126",
+  "environment": {
+    "cpu": "2 x Cortex-A7 ARMv7",
+    "kernel": "5.4.61",
+    "distribution": "Forge-X 1.4.2 chroot",
+    "ram_kib": 110404,
+    "vegeta_version": "12.13.0",
+    "zig_version": "0.17.0",
+    "production": "phobos v0.2.0 remained on port 7125",
+    "probe": "127.0.0.1:7126; copied SQLite database; observer none"
+  },
+  "rows": [
+    {
+      "profile": "baseline",
+      "workload": "info10",
+      "offered_rps": 10,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 10.119063480002009,
+      "success_min": 1,
+      "p50_ms_median": 5.112004,
+      "p99_ms_median": 27.75057,
+      "rss_peak_kib": 3660,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 0.0,
+      "available_min_kib": 51200,
+      "paths": [
+        "/server/info"
+      ],
+      "requests_total": 240,
+      "throughput_min": 10.118723640931243,
+      "throughput_max": 10.121547464596148,
+      "p50_ms_min": 5.071808,
+      "p50_ms_max": 5.717154,
+      "p99_ms_min": 19.611065,
+      "p99_ms_max": 31.73847,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 80,
+          "throughput": 10.118723640931243,
+          "success": 1,
+          "p50_ms": 5.112004,
+          "p99_ms": 27.75057
+        },
+        {
+          "repeat": 2,
+          "requests": 80,
+          "throughput": 10.121547464596148,
+          "success": 1,
+          "p50_ms": 5.071808,
+          "p99_ms": 31.73847
+        },
+        {
+          "repeat": 3,
+          "requests": 80,
+          "throughput": 10.119063480002009,
+          "success": 1,
+          "p50_ms": 5.717154,
+          "p99_ms": 19.611065
+        }
+      ]
+    },
+    {
+      "profile": "baseline",
+      "workload": "info50",
+      "offered_rps": 50,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 50.093857353954085,
+      "success_min": 1,
+      "p50_ms_median": 4.782625,
+      "p99_ms_median": 35.622056,
+      "rss_peak_kib": 3660,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.57142857144342,
+      "available_min_kib": 51128,
+      "paths": [
+        "/server/info"
+      ],
+      "requests_total": 1200,
+      "throughput_min": 50.09164872617257,
+      "throughput_max": 50.09503348460243,
+      "p50_ms_min": 4.718053,
+      "p50_ms_max": 4.960182,
+      "p99_ms_min": 33.557381,
+      "p99_ms_max": 86.620359,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 400,
+          "throughput": 50.093857353954085,
+          "success": 1,
+          "p50_ms": 4.960182,
+          "p99_ms": 86.620359
+        },
+        {
+          "repeat": 2,
+          "requests": 400,
+          "throughput": 50.09164872617257,
+          "success": 1,
+          "p50_ms": 4.782625,
+          "p99_ms": 33.557381
+        },
+        {
+          "repeat": 3,
+          "requests": 400,
+          "throughput": 50.09503348460243,
+          "success": 1,
+          "p50_ms": 4.718053,
+          "p99_ms": 35.622056
+        }
+      ]
+    },
+    {
+      "profile": "baseline",
+      "workload": "info100",
+      "offered_rps": 100,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 100.01868806678586,
+      "success_min": 1,
+      "p50_ms_median": 4.62352,
+      "p99_ms_median": 34.284549,
+      "rss_peak_kib": 3660,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.7037037038474265,
+      "available_min_kib": 51116,
+      "paths": [
+        "/server/info"
+      ],
+      "requests_total": 2400,
+      "throughput_min": 99.95848314365263,
+      "throughput_max": 100.06067320255337,
+      "p50_ms_min": 4.615282,
+      "p50_ms_max": 4.640007,
+      "p99_ms_min": 27.182245,
+      "p99_ms_max": 36.850629,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 800,
+          "throughput": 100.06067320255337,
+          "success": 1,
+          "p50_ms": 4.62352,
+          "p99_ms": 36.850629
+        },
+        {
+          "repeat": 2,
+          "requests": 800,
+          "throughput": 99.95848314365263,
+          "success": 1,
+          "p50_ms": 4.615282,
+          "p99_ms": 34.284549
+        },
+        {
+          "repeat": 3,
+          "requests": 800,
+          "throughput": 100.01868806678586,
+          "success": 1,
+          "p50_ms": 4.640007,
+          "p99_ms": 27.182245
+        }
+      ]
+    },
+    {
+      "profile": "baseline",
+      "workload": "fast25",
+      "offered_rps": 25,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 25.06162430367818,
+      "success_min": 1,
+      "p50_ms_median": 8.032371,
+      "p99_ms_median": 103.543728,
+      "rss_peak_kib": 4976,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 25.925925926931985,
+      "available_min_kib": 50116,
+      "paths": [
+        "/server/info",
+        "/server/config",
+        "/machine/system_info",
+        "/server/database/list",
+        "/server/history/list?limit=20",
+        "/access/info"
+      ],
+      "requests_total": 600,
+      "throughput_min": 24.97997274400202,
+      "throughput_max": 25.083818718425896,
+      "p50_ms_min": 7.782613,
+      "p50_ms_max": 8.568444,
+      "p99_ms_min": 91.599087,
+      "p99_ms_max": 104.857588,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 200,
+          "throughput": 25.06162430367818,
+          "success": 1,
+          "p50_ms": 8.032371,
+          "p99_ms": 104.857588
+        },
+        {
+          "repeat": 2,
+          "requests": 200,
+          "throughput": 25.083818718425896,
+          "success": 1,
+          "p50_ms": 8.568444,
+          "p99_ms": 91.599087
+        },
+        {
+          "repeat": 3,
+          "requests": 200,
+          "throughput": 24.97997274400202,
+          "success": 1,
+          "p50_ms": 7.782613,
+          "p99_ms": 103.543728
+        }
+      ]
+    },
+    {
+      "profile": "baseline",
+      "workload": "fast100",
+      "offered_rps": 100,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 82.69590259740434,
+      "success_min": 1,
+      "p50_ms_median": 126.127775,
+      "p99_ms_median": 211.373273,
+      "rss_peak_kib": 5052,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 96.42857142897235,
+      "available_min_kib": 49540,
+      "paths": [
+        "/server/info",
+        "/server/config",
+        "/machine/system_info",
+        "/server/database/list",
+        "/server/history/list?limit=20",
+        "/access/info"
+      ],
+      "requests_total": 2020,
+      "throughput_min": 81.55586756492141,
+      "throughput_max": 83.04450402776556,
+      "p50_ms_min": 125.934456,
+      "p50_ms_max": 126.279484,
+      "p99_ms_min": 206.394002,
+      "p99_ms_max": 215.428447,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 665,
+          "throughput": 81.55586756492141,
+          "success": 1,
+          "p50_ms": 126.279484,
+          "p99_ms": 206.394002
+        },
+        {
+          "repeat": 2,
+          "requests": 678,
+          "throughput": 83.04450402776556,
+          "success": 1,
+          "p50_ms": 125.934456,
+          "p99_ms": 215.428447
+        },
+        {
+          "repeat": 3,
+          "requests": 677,
+          "throughput": 82.69590259740434,
+          "success": 1,
+          "p50_ms": 126.127775,
+          "p99_ms": 211.373273
+        }
+      ]
+    },
+    {
+      "profile": "baseline",
+      "workload": "query20",
+      "offered_rps": 20,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 19.51757034174985,
+      "success_min": 1,
+      "p50_ms_median": 140.577629,
+      "p99_ms_median": 264.680107,
+      "rss_peak_kib": 3736,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.57142857144342,
+      "available_min_kib": 51100,
+      "paths": [
+        "/printer/objects/query?extruder=temperature,target&heater_bed=temperature,target&print_stats=state"
+      ],
+      "requests_total": 480,
+      "throughput_min": 19.50705385235353,
+      "throughput_max": 19.597104970831104,
+      "p50_ms_min": 132.649883,
+      "p50_ms_max": 152.792747,
+      "p99_ms_min": 249.98246,
+      "p99_ms_max": 265.351188,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 160,
+          "throughput": 19.597104970831104,
+          "success": 1,
+          "p50_ms": 152.792747,
+          "p99_ms": 265.351188
+        },
+        {
+          "repeat": 2,
+          "requests": 160,
+          "throughput": 19.50705385235353,
+          "success": 1,
+          "p50_ms": 132.649883,
+          "p99_ms": 264.680107
+        },
+        {
+          "repeat": 3,
+          "requests": 160,
+          "throughput": 19.51757034174985,
+          "success": 1,
+          "p50_ms": 140.577629,
+          "p99_ms": 249.98246
+        }
+      ]
+    },
+    {
+      "profile": "baseline",
+      "workload": "directory20",
+      "offered_rps": 20,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 20.108984108174006,
+      "success_min": 1,
+      "p50_ms_median": 6.760301,
+      "p99_ms_median": 30.132418,
+      "rss_peak_kib": 3736,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.7037037038474265,
+      "available_min_kib": 51040,
+      "paths": [
+        "/server/files/directory?path=config"
+      ],
+      "requests_total": 480,
+      "throughput_min": 20.093762933209227,
+      "throughput_max": 20.109175430665413,
+      "p50_ms_min": 6.641826,
+      "p50_ms_max": 6.951847,
+      "p99_ms_min": 27.77527,
+      "p99_ms_max": 165.899117,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 160,
+          "throughput": 20.093762933209227,
+          "success": 1,
+          "p50_ms": 6.760301,
+          "p99_ms": 165.899117
+        },
+        {
+          "repeat": 2,
+          "requests": 160,
+          "throughput": 20.109175430665413,
+          "success": 1,
+          "p50_ms": 6.951847,
+          "p99_ms": 30.132418
+        },
+        {
+          "repeat": 3,
+          "requests": 160,
+          "throughput": 20.108984108174006,
+          "success": 1,
+          "p50_ms": 6.641826,
+          "p99_ms": 27.77527
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "info10",
+      "offered_rps": 10,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 10.119378248273378,
+      "success_min": 1,
+      "p50_ms_median": 5.029689,
+      "p99_ms_median": 26.809288,
+      "rss_peak_kib": 3732,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 0.0,
+      "available_min_kib": 51064,
+      "paths": [
+        "/server/info"
+      ],
+      "requests_total": 240,
+      "throughput_min": 10.116615908405274,
+      "throughput_max": 10.120056421586503,
+      "p50_ms_min": 4.591351,
+      "p50_ms_max": 5.21331,
+      "p99_ms_min": 15.511626,
+      "p99_ms_max": 31.861221,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 80,
+          "throughput": 10.116615908405274,
+          "success": 1,
+          "p50_ms": 4.591351,
+          "p99_ms": 31.861221
+        },
+        {
+          "repeat": 2,
+          "requests": 80,
+          "throughput": 10.119378248273378,
+          "success": 1,
+          "p50_ms": 5.029689,
+          "p99_ms": 26.809288
+        },
+        {
+          "repeat": 3,
+          "requests": 80,
+          "throughput": 10.120056421586503,
+          "success": 1,
+          "p50_ms": 5.21331,
+          "p99_ms": 15.511626
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "info50",
+      "offered_rps": 50,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 50.08616812468706,
+      "success_min": 1,
+      "p50_ms_median": 4.730156,
+      "p99_ms_median": 28.74686,
+      "rss_peak_kib": 3732,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.57142857144342,
+      "available_min_kib": 51140,
+      "paths": [
+        "/server/info"
+      ],
+      "requests_total": 1200,
+      "throughput_min": 50.06755469959708,
+      "throughput_max": 50.09877648865752,
+      "p50_ms_min": 4.579421,
+      "p50_ms_max": 4.840082,
+      "p99_ms_min": 24.485599,
+      "p99_ms_max": 36.64602,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 400,
+          "throughput": 50.09877648865752,
+          "success": 1,
+          "p50_ms": 4.840082,
+          "p99_ms": 36.64602
+        },
+        {
+          "repeat": 2,
+          "requests": 400,
+          "throughput": 50.08616812468706,
+          "success": 1,
+          "p50_ms": 4.579421,
+          "p99_ms": 24.485599
+        },
+        {
+          "repeat": 3,
+          "requests": 400,
+          "throughput": 50.06755469959708,
+          "success": 1,
+          "p50_ms": 4.730156,
+          "p99_ms": 28.74686
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "info100",
+      "offered_rps": 100,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 100.01881840315667,
+      "success_min": 1,
+      "p50_ms_median": 4.615932,
+      "p99_ms_median": 25.441574,
+      "rss_peak_kib": 3732,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.7037037038474265,
+      "available_min_kib": 51092,
+      "paths": [
+        "/server/info"
+      ],
+      "requests_total": 2400,
+      "throughput_min": 99.44179461100191,
+      "throughput_max": 100.06311825150682,
+      "p50_ms_min": 4.457365,
+      "p50_ms_max": 5.064144,
+      "p99_ms_min": 24.635293,
+      "p99_ms_max": 62.625883,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 800,
+          "throughput": 100.01881840315667,
+          "success": 1,
+          "p50_ms": 5.064144,
+          "p99_ms": 62.625883
+        },
+        {
+          "repeat": 2,
+          "requests": 800,
+          "throughput": 100.06311825150682,
+          "success": 1,
+          "p50_ms": 4.615932,
+          "p99_ms": 25.441574
+        },
+        {
+          "repeat": 3,
+          "requests": 800,
+          "throughput": 99.44179461100191,
+          "success": 1,
+          "p50_ms": 4.457365,
+          "p99_ms": 24.635293
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "fast25",
+      "offered_rps": 25,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 25.106122430910357,
+      "success_min": 1,
+      "p50_ms_median": 7.959889,
+      "p99_ms_median": 96.735298,
+      "rss_peak_kib": 5048,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 25.925925926931985,
+      "available_min_kib": 49756,
+      "paths": [
+        "/server/info",
+        "/server/config",
+        "/machine/system_info",
+        "/server/database/list",
+        "/server/history/list?limit=20",
+        "/access/info"
+      ],
+      "requests_total": 600,
+      "throughput_min": 25.10493011299158,
+      "throughput_max": 25.107227955428854,
+      "p50_ms_min": 7.300658,
+      "p50_ms_max": 8.768002,
+      "p99_ms_min": 94.765178,
+      "p99_ms_max": 102.814394,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 200,
+          "throughput": 25.10493011299158,
+          "success": 1,
+          "p50_ms": 7.300658,
+          "p99_ms": 94.765178
+        },
+        {
+          "repeat": 2,
+          "requests": 200,
+          "throughput": 25.106122430910357,
+          "success": 1,
+          "p50_ms": 7.959889,
+          "p99_ms": 102.814394
+        },
+        {
+          "repeat": 3,
+          "requests": 200,
+          "throughput": 25.107227955428854,
+          "success": 1,
+          "p50_ms": 8.768002,
+          "p99_ms": 96.735298
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "fast100",
+      "offered_rps": 100,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 83.14937674933293,
+      "success_min": 1,
+      "p50_ms_median": 125.444262,
+      "p99_ms_median": 199.762885,
+      "rss_peak_kib": 5056,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 96.60919540766274,
+      "available_min_kib": 49592,
+      "paths": [
+        "/server/info",
+        "/server/config",
+        "/machine/system_info",
+        "/server/database/list",
+        "/server/history/list?limit=20",
+        "/access/info"
+      ],
+      "requests_total": 2037,
+      "throughput_min": 83.08918989363022,
+      "throughput_max": 83.73795543026331,
+      "p50_ms_min": 124.829902,
+      "p50_ms_max": 125.824953,
+      "p99_ms_min": 198.942249,
+      "p99_ms_max": 203.285046,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 683,
+          "throughput": 83.73795543026331,
+          "success": 1,
+          "p50_ms": 125.824953,
+          "p99_ms": 198.942249
+        },
+        {
+          "repeat": 2,
+          "requests": 677,
+          "throughput": 83.08918989363022,
+          "success": 1,
+          "p50_ms": 125.444262,
+          "p99_ms": 199.762885
+        },
+        {
+          "repeat": 3,
+          "requests": 677,
+          "throughput": 83.14937674933293,
+          "success": 1,
+          "p50_ms": 124.829902,
+          "p99_ms": 203.285046
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "query20",
+      "offered_rps": 20,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 19.570839517274706,
+      "success_min": 1,
+      "p50_ms_median": 132.197608,
+      "p99_ms_median": 261.203172,
+      "rss_peak_kib": 3740,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.57142857144342,
+      "available_min_kib": 50960,
+      "paths": [
+        "/printer/objects/query?extruder=temperature,target&heater_bed=temperature,target&print_stats=state"
+      ],
+      "requests_total": 480,
+      "throughput_min": 19.507542261476978,
+      "throughput_max": 20.00969246992339,
+      "p50_ms_min": 130.98296,
+      "p50_ms_max": 141.953309,
+      "p99_ms_min": 251.406945,
+      "p99_ms_max": 264.986835,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 160,
+          "throughput": 19.507542261476978,
+          "success": 1,
+          "p50_ms": 141.953309,
+          "p99_ms": 251.406945
+        },
+        {
+          "repeat": 2,
+          "requests": 160,
+          "throughput": 19.570839517274706,
+          "success": 1,
+          "p50_ms": 130.98296,
+          "p99_ms": 264.986835
+        },
+        {
+          "repeat": 3,
+          "requests": 160,
+          "throughput": 20.00969246992339,
+          "success": 1,
+          "p50_ms": 132.197608,
+          "p99_ms": 261.203172
+        }
+      ]
+    },
+    {
+      "profile": "candidate",
+      "workload": "directory20",
+      "offered_rps": 20,
+      "repeats": 3,
+      "duration_seconds": 8,
+      "throughput_median": 20.105186826608566,
+      "success_min": 1,
+      "p50_ms_median": 7.048931,
+      "p99_ms_median": 33.583398,
+      "rss_peak_kib": 3740,
+      "threads_peak": 16,
+      "cpu_one_core_percent_median": 3.703703703448197,
+      "available_min_kib": 50980,
+      "paths": [
+        "/server/files/directory?path=config"
+      ],
+      "requests_total": 480,
+      "throughput_min": 20.102977860920422,
+      "throughput_max": 20.109362470300063,
+      "p50_ms_min": 6.759384,
+      "p50_ms_max": 7.143845,
+      "p99_ms_min": 22.52598,
+      "p99_ms_max": 120.64799,
+      "trial_reports": [
+        {
+          "repeat": 1,
+          "requests": 160,
+          "throughput": 20.105186826608566,
+          "success": 1,
+          "p50_ms": 7.048931,
+          "p99_ms": 22.52598
+        },
+        {
+          "repeat": 2,
+          "requests": 160,
+          "throughput": 20.109362470300063,
+          "success": 1,
+          "p50_ms": 7.143845,
+          "p99_ms": 120.64799
+        },
+        {
+          "repeat": 3,
+          "requests": 160,
+          "throughput": 20.102977860920422,
+          "success": 1,
+          "p50_ms": 6.759384,
+          "p99_ms": 33.583398
+        }
+      ]
+    }
+  ],
+  "method": {
+    "trials": 42,
+    "seconds_per_trial": 8,
+    "repetitions": 3,
+    "initial_workers": 2,
+    "maximum_workers": 8,
+    "connections": 8,
+    "request_timeout_seconds": 2,
+    "keepalive": true,
+    "sampler_nominal_seconds": 0.25,
+    "minimum_available_memory_guard_kib": 16384,
+    "reads_only": true,
+    "automatic_queue_loading": false,
+    "automatic_updates": false,
+    "cpu_scale": "100% is one CPU core",
+    "idle_window": "last 10 seconds of idle label, excluding startup"
+  },
+  "idle": {
+    "baseline": {
+      "samples": 37,
+      "duration_seconds": 9.809999999997672,
+      "rss_median_kib": 3056,
+      "rss_min_kib": 3056,
+      "rss_max_kib": 3056,
+      "threads_max": 11,
+      "cpu_one_core_percent": 0.2038735983690596
+    },
+    "candidate": {
+      "samples": 37,
+      "duration_seconds": 9.769999999989523,
+      "rss_median_kib": 3100,
+      "rss_min_kib": 3100,
+      "rss_max_kib": 3100,
+      "threads_max": 11,
+      "cpu_one_core_percent": 0.3070624360289885
+    }
+  }
+}
