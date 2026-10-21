@@ -55,8 +55,23 @@ pub fn build(b: *std.Build) void {
     // Link-time optimization in release: lets the linker drop unreachable code
     // across the Zig + vendored-C boundary and inline across objects (smaller
     // binary, tighter code). Skipped in Debug (slow, and we want fast iteration).
-    if (release) exe.lto = .full;
+    if (release) exe.lto = releaseLtoMode(softfp);
     b.installArtifact(exe);
+
+    const float_probe_module = b.createModule(.{
+        .root_source_file = b.path("tests/fixtures/float_abi_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = release,
+    });
+    float_probe_module.addCSourceFile(.{
+        .file = b.path("tests/fixtures/float_abi_probe.c"),
+        .flags = if (softfp) &.{ "-std=c11", "-mfloat-abi=softfp" } else &.{"-std=c11"},
+    });
+    const float_probe = b.addExecutable(.{ .name = "float-abi-probe", .root_module = float_probe_module });
+    if (release) float_probe.lto = releaseLtoMode(softfp);
+    b.step("float-abi-probe", "Build the C/Zig floating-point ABI runtime check").dependOn(&b.addInstallArtifact(float_probe, .{}).step);
 
     // `zig build test --fuzz` runs the std.testing.fuzz harnesses in this
     // artifact with coverage-guided input.
@@ -105,6 +120,31 @@ fn validateSoftfp(target: std.Target) error{ UnsupportedTarget, UnsupportedFloat
     if (!target.cpu.hasAll(.arm, &.{ .vfp3, .d32 }) or target.cpu.has(.arm, .soft_float)) return error.UnsupportedFloatFeatures;
 }
 
+fn releaseLtoMode(softfp: bool) std.zig.LtoMode {
+    // Zig 0.17 full LTO changes C softfp calls to VFP registers while Zig keeps the base ABI.
+    return if (softfp) .none else .full;
+}
+
+test "release LTO preserves the mixed C softfp calling convention" {
+    try std.testing.expectEqual(std.zig.LtoMode.none, releaseLtoMode(true));
+    try std.testing.expectEqual(std.zig.LtoMode.full, releaseLtoMode(false));
+}
+
+test "fuzz release LTO policy keeps every mixed C softfp build out of LTO" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var bytes: [1]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const softfp = bytes[0] & 1 != 0;
+            switch (releaseLtoMode(softfp)) {
+                .none => try std.testing.expect(softfp),
+                .full => try std.testing.expect(!softfp),
+                .thin => return error.UnexpectedThinLto,
+            }
+        }
+    }.run, .{});
+}
+
 test "C softfp accepts VFPv3 soft ABI and rejects incompatible targets" {
     var target = @import("builtin").target;
     target.cpu = std.Target.arm.cpu.generic.toCpu(.arm);
@@ -139,6 +179,7 @@ test "fuzz C softfp validation accepts only the declared ARM ABI and FPU" {
             if (bytes[5] & 1 == 0) target.cpu.features.addFeature(@backingInt(std.Target.arm.Feature.soft_float));
             validateSoftfp(target) catch return;
             try std.testing.expectEqual(std.Target.Cpu.Arch.arm, target.cpu.arch);
+            try std.testing.expectEqual(std.Target.Os.Tag.linux, target.os.tag);
             try std.testing.expectEqual(std.Target.Abi.musleabi, target.abi);
             try std.testing.expect(target.cpu.hasAll(.arm, &.{ .vfp3, .d32 }));
             try std.testing.expect(!target.cpu.has(.arm, .soft_float));

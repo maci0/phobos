@@ -49,7 +49,9 @@ compiler, `musleabi` Zig arithmetic still calls software helpers such as
 `__aeabi_dadd`; the corresponding C arithmetic uses VFP instructions. The
 `armv7-softfp-c` name describes this mixed implementation. It does not promise
 that all floating-point operations use hardware or that it is faster than the
-other profiles.
+other profiles. This profile disables full LTO: with Zig 0.17, full LTO changes
+C floating-point calls to VFP registers while the Zig callers keep the base
+calling convention. The other release profiles retain full LTO.
 
 For example, compiling `double add(double a, double b) { return a + b; }` with
 these C flags emits `VMOV` from integer registers, `VADD.F64`, and `VMOV` back:
@@ -123,6 +125,25 @@ Build-option validation has standalone unit and bounded fuzz tests:
 zig test -target native-native-musl build.zig
 ```
 
+An opt-in runtime probe uses the same C flags and release LTO policy as the
+application. It compares four C `double` return values and one floating-point
+argument/result call with the values seen through Zig. Build it for the target,
+then run it on matching hardware. Exit status 0 and matching hex pairs mean
+all five checks passed:
+
+```sh
+zig build float-abi-probe -Dtarget=arm-linux-musleabi \
+  -Dcpu=generic+has_v7+aclass+vfp3 -Dsoftfp=true \
+  -Doptimize=ReleaseSmall --prefix .scratch/armv7-softfp-c
+```
+
+Copy `.scratch/armv7-softfp-c/bin/float-abi-probe` to matching ARM hardware and
+execute it there with no arguments. Do not run this ARM executable on the
+build host.
+
+The build step never runs the target executable. Normal application builds do
+not build or install this probe.
+
 ## Board examples
 
 These examples map processor families to candidate profiles. They are not a
@@ -138,7 +159,7 @@ per-printer compatibility list or an installation recommendation.
 | x86-64 Linux hosts | `x86_64` |
 
 Processor mappings come from the [Raspberry Pi processor documentation](https://www.raspberrypi.com/documentation/computers/processors.html)
-and [BIGTREETECH's CB1 specifications](https://eu.biqu.equipment/collections/for-voron-printers/products/manta-m4p-m8p).
+and [BIGTREETECH's CB1 specifications](https://github.com/bigtreetech/docs/blob/master/docs/CB1.md).
 The [Klipper FAQ](https://www.klipper3d.org/FAQ.html#can-i-run-klipper-on-something-other-than-a-raspberry-pi-3)
 recommends Zero 2 W and Pi 3/4/5, and advises against Pi 1, Pi 2 and original
 Zero hosts because their processing capacity can cause print stalls. Klipper
