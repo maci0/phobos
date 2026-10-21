@@ -897,23 +897,26 @@ const MemStore = struct {
         return &self.namespaces.items[self.namespaces.items.len - 1];
     }
 
-    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!?std.json.Value {
+    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key) ds.Error!?std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return null;
         return n.data.get(key);
     }
 
-    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getOrCreate(ns) catch return ds.Error.OutOfMemory;
         n.data.put(key, value) catch return ds.Error.OutOfMemory;
     }
 
-    fn vtUpdateItem(ctx: *anyopaque, alloc: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
-        return vtInsertItem(ctx, alloc, ns, key, value);
+    fn vtUpdateItem(ctx: *anyopaque, alloc: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        return vtInsertItem(ctx, alloc, ns, request_key, value);
     }
 
-    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
+    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key) ds.Error!std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return ds.Error.KeyNotFound;
         const v = n.data.get(key) orelse return ds.Error.KeyNotFound;
@@ -1355,12 +1358,12 @@ test "registerJobQueue: wires expected routes and JSON-RPC methods" {
 // Thread-safe no-op store: isolates the jobs/queue_state mutex under test from
 // the (separately-locked) store backend. All vtable ops are stateless no-ops.
 const NoopStore = struct {
-    fn g(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!?std.json.Value {
+    fn g(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key) ds.Error!?std.json.Value {
         return null;
     }
-    fn i(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {}
-    fn u(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {}
-    fn d(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!std.json.Value {
+    fn i(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key, _: std.json.Value) ds.Error!void {}
+    fn u(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key, _: std.json.Value) ds.Error!void {}
+    fn d(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key) ds.Error!std.json.Value {
         return .null;
     }
     fn ln(_: *anyopaque, _: std.mem.Allocator) ds.Error![][]const u8 {
@@ -1409,7 +1412,8 @@ test "queue saves cannot persist older snapshots after newer changes" {
         second_started: std.Io.Event = .unset,
         second_committed: std.Io.Event = .unset,
         attempts: std.atomic.Value(u32) = .init(0),
-        fn insert(raw: *anyopaque, a: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+        fn insert(raw: *anyopaque, a: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+            const key = request_key.dotted;
             const self: *@This() = @ptrCast(@alignCast(raw));
             const first = self.attempts.fetchAdd(1, .monotonic) == 0;
             if (first) {

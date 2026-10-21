@@ -676,7 +676,7 @@ test "usb ids metadata failure cannot attach stale conditional headers to a chan
         defer serving.cancel(aio);
         var failed_vtable = database.dataStore().vtable.*;
         failed_vtable.insertItem = struct {
-            fn fail(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) @import("../store/datastore.zig").Error!void {
+            fn fail(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: @import("../store/datastore.zig").Key, _: std.json.Value) @import("../store/datastore.zig").Error!void {
                 return error.BackendError;
             }
         }.fail;

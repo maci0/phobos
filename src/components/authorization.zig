@@ -1505,12 +1505,14 @@ const MemStore = struct {
         }
         self.map.deinit(self.alloc);
     }
-    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds.Error!?std.json.Value {
+    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8, request_key: ds.Key) ds.Error!?std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         if (self.read_error) |err| return err;
         return if (self.map.get(key)) |value| try jv.deepCopy(arena, value) else null;
     }
-    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         if (self.write_error) |err| return err;
         const owned_key = try self.alloc.dupe(u8, key);
@@ -1526,8 +1528,9 @@ const MemStore = struct {
         gop.value_ptr.* = owned_value;
         self.writes += 1;
     }
-    fn vtUpdateItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {}
-    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
+    fn vtUpdateItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key, _: std.json.Value) ds.Error!void {}
+    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, _: [:0]const u8, request_key: ds.Key) ds.Error!std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         if (self.delete_error) |err| return err;
         const removed = try jv.deepCopy(arena, self.map.get(key) orelse return error.KeyNotFound);

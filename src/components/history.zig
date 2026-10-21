@@ -1357,13 +1357,15 @@ const MemStore = struct {
         return &self.namespaces.items[self.namespaces.items.len - 1];
     }
 
-    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!?std.json.Value {
+    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key) ds.Error!?std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return null;
         return n.data.get(key);
     }
 
-    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getOrCreate(ns) catch return ds.Error.OutOfMemory;
         // Deep-copy the key so the HashMap owns stable memory even when the
@@ -1375,7 +1377,8 @@ const MemStore = struct {
         n.data.put(owned_key, owned_value) catch return ds.Error.OutOfMemory;
     }
 
-    fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+    fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return ds.Error.NamespaceNotFound;
         if (!n.data.contains(key)) return ds.Error.KeyNotFound;
@@ -1383,7 +1386,8 @@ const MemStore = struct {
         n.data.put(key, owned_value) catch return ds.Error.OutOfMemory;
     }
 
-    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
+    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key) ds.Error!std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return ds.Error.KeyNotFound;
         const v = n.data.get(key) orelse return ds.Error.KeyNotFound;
@@ -2170,13 +2174,13 @@ test "history handlers report store failures instead of empty results" {
     defer mem.deinit();
     try insertJob(&mem, a, "000001", "{\"filename\":\"a.gcode\"}");
     const failing = struct {
-        fn deleteItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds.Error!std.json.Value {
+        fn deleteItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key) ds.Error!std.json.Value {
             return ds.Error.BackendError;
         }
         fn getNamespace(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8) ds.Error!std.json.Value {
             return ds.Error.BackendError;
         }
-        fn insertItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds.Error!void {
+        fn insertItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key, _: std.json.Value) ds.Error!void {
             return ds.Error.BackendError;
         }
     };

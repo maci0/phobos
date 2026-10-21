@@ -1535,3 +1535,52 @@ active charts and documentation links. Representative figures were visually
 inspected. `git diff --check` passes. Source suites are not rerun for these
 measurement/documentation-only changes. `graphify` is unavailable, so graph
 output is excluded.
+
+## 2026-10-22: Fluidd startup subscriptions and database array keys
+
+The user reported Invalid params immediately on opening Fluidd and missing
+console output. Read-only replay of Fluidd 1.37.7-b2edab5's served startup code
+against production reproduces a 400 from `printer.objects.subscribe`: the
+Forge-X configuration exposes 262 objects after Fluidd's menu exclusion, while
+`Connections.replaceSubscriptions` allowed 256. Fluidd enables notifications
+and loads `server.gcode_store` only after that subscription succeeds. Existing
+console responses were already present in the production store.
+
+Raise the bounded subscription allowance to 1,024, retaining the name and frame
+limits and allocating only requested map entries. A boundary regression accepts
+262 and 1,024 objects, then rejects 1,025 without replacing the previous set.
+A full WebSocket test subscribes 262 objects, receives a simulated Klippy console
+response and reads the same response from the console store. The simulator returns
+the actual objects/subscribe result fields instead of null.
+
+Fluidd's settings code also uses array database keys. The shared item path now
+accepts dotted strings or literal string segments, preserving embedded dots
+and the original request key in responses. Both SQLite and file backends use
+the same parser, retain the 16-segment bound and reject empty or non-string
+segments. Public and debug handlers share validation and access checks. The
+storage format is unchanged. DEVELOPMENT.md documents these limits; the
+generated API table records the database path bound as partial behavior parity.
+
+Verification: failing regressions first reproduced the string-only database
+parser and the 256-object cap. Complete standalone Debug and ReleaseSafe suites
+each pass 1,735 tests with one real-Klippy skip, zero failures and 327 fuzz tests.
+Both include the new WebSocket console test. All 109 Python tool tests pass;
+format, lint, type and diff checks pass. Surface coverage remains 123/123
+endpoints, 130/130 methods and 27/27 notifications; the generated table check
+passes. Independent local daemons match Moonraker for six HTTP/WebSocket array
+key write/read/delete responses, including literal dotted segments. Malformed
+common keys return 400 on both daemons. Both private daemons were stopped.
+
+The 54-event older conformance capture reports the same seven failures against
+the published v0.2.2 binary and this build: server.info, file-root paths and USB
+details. Those pre-existing capture/configuration differences are retained,
+not reported as a passing replay. No API identity, Python stub, reboot no-op or
+optional component behavior changes. The native Debug binary remains installed
+in zig-out. The static ARM Cortex-A7 ReleaseSmall build has SHA256
+`a224e2699893895523acda2e95af90699abbae13e9ecd85a4a337281fcb97944`.
+
+The user requires deployment after the current print. No running printer
+service has been restarted during these checks; the completed print still has
+a nonzero nozzle target at this entry. Printer staging uses a unique executable
+and private probe directory. Browser automation is unavailable, so no visual
+Fluidd result is claimed. Graph output is excluded because graphify is absent.

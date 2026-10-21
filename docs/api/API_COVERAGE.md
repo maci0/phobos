@@ -32,7 +32,7 @@ Status: ✅ Full (no recorded delta) · ⚠️ Partial (known behavior differenc
 | `/api/version` | GET | HTTP | octoprint_compat | ✅ Full | No recorded behavior difference. |
 | `/connection/register_remote_method` | POST | WEBSOCKET | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |
 | `/connection/send_event` | POST | WEBSOCKET | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |
-| `/debug/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
+| `/debug/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
 | `/debug/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
 | `/debug/database/table` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
 | `/debug/notifiers/test` | POST | HTTP, WEBSOCKET, INTERNAL | notifier | ⚠️ Partial | Lists configured notifier records. Sending fails with AppriseNotAvailable; Apprise and full Jinja2 are outside scope. |
@@ -91,7 +91,7 @@ Status: ✅ Full (no recorded delta) · ⚠️ Partial (known behavior differenc
 | `/server/connection/identify` | POST | WEBSOCKET | websockets | ✅ Full | No recorded behavior difference. |
 | `/server/database/backup` | POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
 | `/server/database/compact` | POST | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
-| `/server/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
+| `/server/database/item` | GET, POST, DELETE | HTTP, WEBSOCKET, INTERNAL | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
 | `/server/database/list` | GET | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
 | `/server/database/restore` | POST | HTTP, WEBSOCKET, INTERNAL | database | ✅ Full | No recorded behavior difference. |
 | `/server/extensions/list` | GET | HTTP, WEBSOCKET, INTERNAL | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |
@@ -137,7 +137,7 @@ Status: ✅ Full (no recorded delta) · ⚠️ Partial (known behavior differenc
 | `<dynamic>` | <dynamic> | <dynamic> | application | ✅ Full | Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route. |
 | `<dynamic>` | GET, POST | HTTP, WEBSOCKET, INTERNAL | klippy_connection | ✅ Full | Dynamic endpoint registration: Klipper-registered endpoints are proxied via the is_remote path, not a fixed route. |
 
-_Endpoints: 91 full, 32 partial, 2 no-op, 0 missing._
+_Endpoints: 89 full, 34 partial, 2 no-op, 0 missing._
 
 ## JSON-RPC methods
 
@@ -157,10 +157,10 @@ _Endpoints: 91 full, 32 partial, 2 no-op, 0 missing._
 | `access.users.list` |  | authorization | ⚠️ Partial | JWT, oneshot tokens, API keys and trusted IP/CIDR clients are enforced. LDAP and reverse-DNS trusted_domains are not implemented. |
 | `connection.register_remote_method` |  | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |
 | `connection.send_event` |  | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |
-| `debug.database.delete_item` |  | database | ✅ Full | No recorded behavior difference. |
-| `debug.database.get_item` |  | database | ✅ Full | No recorded behavior difference. |
+| `debug.database.delete_item` |  | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
+| `debug.database.get_item` |  | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
 | `debug.database.list` |  | database | ✅ Full | No recorded behavior difference. |
-| `debug.database.post_item` |  | database | ✅ Full | No recorded behavior difference. |
+| `debug.database.post_item` |  | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
 | `debug.database.table` |  | database | ✅ Full | No recorded behavior difference. |
 | `debug.notifiers.test` |  | notifier | ⚠️ Partial | Lists configured notifier records. Sending fails with AppriseNotAvailable; Apprise and full Jinja2 are outside scope. |
 | `machine.device_power.devices` |  | power | ⚠️ Partial | HTTP, GPIO, Tasmota and Shelly perform device I/O with shutdown/queue hooks, service bindings, timers and HTTP templates. Other backends, including tplink_smartplug and homeseer, keep state in memory unless explicit HTTP URLs are configured. Templates use a bounded subset; see docs/POWER_BUTTONS.md. |
@@ -221,11 +221,11 @@ _Endpoints: 91 full, 32 partial, 2 no-op, 0 missing._
 | `server.connection.identify` |  | websockets | ✅ Full | No recorded behavior difference. |
 | `server.database.compact` |  | database | ✅ Full | No recorded behavior difference. |
 | `server.database.delete_backup` |  | database | ✅ Full | No recorded behavior difference. |
-| `server.database.delete_item` |  | database | ✅ Full | No recorded behavior difference. |
-| `server.database.get_item` |  | database | ✅ Full | No recorded behavior difference. |
+| `server.database.delete_item` |  | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
+| `server.database.get_item` |  | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
 | `server.database.list` |  | database | ✅ Full | No recorded behavior difference. |
 | `server.database.post_backup` |  | database | ✅ Full | No recorded behavior difference. |
-| `server.database.post_item` |  | database | ✅ Full | No recorded behavior difference. |
+| `server.database.post_item` |  | database | ⚠️ Partial | Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit. |
 | `server.database.restore` |  | database | ✅ Full | No recorded behavior difference. |
 | `server.extensions.list` |  | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |
 | `server.extensions.request` |  | extensions | ✅ Full | WebSocket agent registration, bounded bidirectional RPC, owned Klippy methods and agent events are implemented. Disconnect removes registrations and wakes pending callers. |

@@ -111,16 +111,12 @@ fn buildListResponse(
 fn buildItemResponse(
     alloc: std.mem.Allocator,
     namespace: []const u8,
-    key: ?[]const u8,
+    key: std.json.Value,
     value: std.json.Value,
 ) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     try obj.put(alloc, "namespace", .{ .string = namespace });
-    if (key) |k| {
-        try obj.put(alloc, "key", .{ .string = k });
-    } else {
-        try obj.put(alloc, "key", .null);
-    }
+    try obj.put(alloc, "key", key);
     try obj.put(alloc, "value", value);
     return .{ .object = obj };
 }
@@ -191,24 +187,19 @@ fn handleItemGet(
     const namespace = try webreq.required([]const u8, params, "namespace");
     if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
 
-    // database.py reads `key` with a raw `get("key", None)`: JSON null selects
-    // the whole namespace like an absent key. List keys are not supported.
-    const key_opt: ?[]const u8 = switch ((try webreq.optional(std.json.Value, params, "key")) orelse .null) {
-        .null => null,
-        .string => |s| s,
-        else => return error.InvalidParams,
-    };
+    const key = (try webreq.optional(std.json.Value, params, "key")) orelse .null;
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
-    const value: std.json.Value = if (key_opt) |key| blk: {
-        const v = c.store.getItem(alloc, ns_z, key) catch |err| return requestError(err);
+    var segments: [ds.max_key_segments][]const u8 = undefined;
+    const value: std.json.Value = if (key != .null) blk: {
+        const v = c.store.getItem(alloc, ns_z, try requestKey(key, &segments)) catch |err| return requestError(err);
         break :blk v orelse return error.MissingDbKey;
     } else blk: {
         if (!try namespaceKnown(c, alloc, namespace)) return error.UnknownDbNamespace;
         break :blk c.store.getNamespace(alloc, ns_z) catch |err| return requestError(err);
     };
 
-    return buildItemResponse(alloc, namespace, key_opt, value);
+    return buildItemResponse(alloc, namespace, key, value);
 }
 
 fn namespaceKnown(c: *DbCtx, alloc: std.mem.Allocator, namespace: []const u8) !bool {
@@ -248,7 +239,9 @@ fn handleItemPost(
     if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
     if (!is_debug and (isProtected(namespace) or try namespaceListed(c, alloc, "protected_namespaces", namespace))) return error.Forbidden;
 
-    const key = try webreq.required([]const u8, params, "key");
+    const key = try webreq.required(std.json.Value, params, "key");
+    var segments: [ds.max_key_segments][]const u8 = undefined;
+    const path = try requestKey(key, &segments);
     const value = try webreq.required(std.json.Value, params, "value");
     // Reject pathologically-nested values: storing one would let a later GET
     // serialize it through std.json.Stringify's fixed 256-level nesting stack,
@@ -256,7 +249,7 @@ fn handleItemPost(
     if (jv.exceedsDepth(value, jv.max_value_depth)) return error.InvalidParams;
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
-    c.store.insertItem(alloc, ns_z, key, value) catch |err| return requestError(err);
+    c.store.insertItem(alloc, ns_z, path, value) catch |err| return requestError(err);
     return buildItemResponse(alloc, namespace, key, value);
 }
 
@@ -285,10 +278,12 @@ fn handleItemDelete(
     if (!is_debug and (isForbidden(namespace) or try namespaceListed(c, alloc, "forbidden_namespaces", namespace))) return error.Forbidden;
     if (!is_debug and (isProtected(namespace) or try namespaceListed(c, alloc, "protected_namespaces", namespace))) return error.Forbidden;
 
-    const key = try webreq.required([]const u8, params, "key");
+    const key = try webreq.required(std.json.Value, params, "key");
+    var segments: [ds.max_key_segments][]const u8 = undefined;
+    const path = try requestKey(key, &segments);
     const ns_z = try alloc.dupeSentinel(u8, namespace, 0);
 
-    const removed = c.store.deleteItem(alloc, ns_z, key) catch |err| switch (err) {
+    const removed = c.store.deleteItem(alloc, ns_z, path) catch |err| switch (err) {
         ds.Error.KeyNotFound, ds.Error.NamespaceNotFound => return error.NotFound,
         else => return requestError(err),
     };
@@ -300,6 +295,24 @@ fn handleItemDelete(
 /// namespace that would name a path outside its directory.
 fn requestError(err: ds.Error) anyerror {
     return if (err == ds.Error.InvalidKey) error.InvalidParams else err;
+}
+
+/// Returned segments borrow the request and caller's buffer for the store call.
+fn requestKey(value: std.json.Value, segments: *[ds.max_key_segments][]const u8) !ds.Key {
+    const key: ds.Key = switch (value) {
+        .string => |text| .{ .dotted = text },
+        .array => |items| blk: {
+            if (items.items.len > segments.len) return error.InvalidParams;
+            for (items.items, 0..) |item, index| {
+                if (item != .string) return error.InvalidParams;
+                segments[index] = item.string;
+            }
+            break :blk .{ .segments = segments[0..items.items.len] };
+        },
+        else => return error.InvalidParams,
+    };
+    _ = ds.parseKey(key) catch return error.InvalidParams;
+    return key;
 }
 
 // ---------------------------------------------------------------------------
@@ -503,26 +516,30 @@ const MemStore = struct {
         return &self.namespaces.items[self.namespaces.items.len - 1];
     }
 
-    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!?std.json.Value {
+    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key) ds.Error!?std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return null;
         return n.data.get(key);
     }
 
-    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getOrCreateNs(ns) catch return ds.Error.OutOfMemory;
         n.data.put(key, value) catch return ds.Error.OutOfMemory;
     }
 
-    fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8, value: std.json.Value) ds.Error!void {
+    fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return ds.Error.NamespaceNotFound;
         if (!n.data.contains(key)) return ds.Error.KeyNotFound;
         n.data.put(key, value) catch return ds.Error.OutOfMemory;
     }
 
-    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, key: []const u8) ds.Error!std.json.Value {
+    fn vtDeleteItem(ctx: *anyopaque, _: std.mem.Allocator, ns: [:0]const u8, request_key: ds.Key) ds.Error!std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         const n = self.getNs(ns) orelse return ds.Error.KeyNotFound;
         const v = n.data.get(key) orelse return ds.Error.KeyNotFound;
@@ -1076,6 +1093,70 @@ test "fuzz handleDeleteItem: never panics" {
                 .{},
             ) catch return;
             _ = handleDeleteItem(@ptrCast(&ctx), p.value, a) catch {};
+        }
+    }.run, .{});
+}
+
+test "database item handlers preserve array key segments on both backends" {
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(aio, ".", a);
+    var sqlite = try @import("../store/sqlite_store.zig").SqliteStore.open(aio, ":memory:");
+    defer sqlite.deinit();
+    var files = try @import("../store/file_store.zig").FileStore.open(aio, path);
+    defer files.deinit();
+    for ([_]ds.DataStore{ sqlite.dataStore(), files.dataStore() }) |store| {
+        var ctx: DbCtx = .{ .store = store };
+        for ([_][]const u8{
+            "[\"uiSettings\",\"tableHeaders\",\"gcodes\"]",
+            "[\"uiSettings.v2\",\"theme.dark\",\"color\"]",
+        }) |key| {
+            const body = try mkParams(a, try std.fmt.allocPrint(a, "{{\"namespace\":\"fluidd\",\"key\":{s},\"value\":42}}", .{key}));
+            const posted = try handlePostItem(&ctx, body, a);
+            try testing.expectEqualStrings(key, try std.json.Stringify.valueAlloc(a, posted.object.get("key").?, .{}));
+            const got = try handleGetItem(&ctx, body, a);
+            try testing.expectEqual(@as(i64, 42), got.object.get("value").?.integer);
+            var segments: [ds.max_key_segments][]const u8 = undefined;
+            try store.updateItem(a, "fluidd", try requestKey(body.object.get("key").?, &segments), .{ .integer = 43 });
+            const removed = try handleDeleteItem(&ctx, body, a);
+            try testing.expectEqual(@as(i64, 43), removed.object.get("value").?.integer);
+            try testing.expectError(error.MissingDbKey, handleGetItem(&ctx, body, a));
+        }
+        _ = try handlePostItem(&ctx, try mkParams(a, "{\"namespace\":\"fluidd\",\"key\":\"settings.color\",\"value\":7}"), a);
+        const got = try handleGetItem(&ctx, try mkParams(a, "{\"namespace\":\"fluidd\",\"key\":[\"settings\",\"color\"]}"), a);
+        try testing.expectEqual(@as(i64, 7), got.object.get("value").?.integer);
+        var excessive: [ds.max_key_segments + 1][]const u8 = undefined;
+        @memset(&excessive, "a");
+        for ([_][]const u8{ "[]", "[\"\"]", "[\"settings\",1]", "{}", "true", try std.json.Stringify.valueAlloc(a, excessive, .{}) }) |key| {
+            const body = try mkParams(a, try std.fmt.allocPrint(a, "{{\"namespace\":\"fluidd\",\"key\":{s},\"value\":0}}", .{key}));
+            try testing.expectError(error.InvalidParams, handlePostItem(&ctx, body, a));
+            try testing.expectError(error.InvalidParams, handleGetItem(&ctx, body, a));
+            try testing.expectError(error.InvalidParams, handleDeleteItem(&ctx, body, a));
+        }
+    }
+}
+
+test "fuzz requestKey: typed segments preserve names or fail before storage" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var req_arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer req_arena.deinit();
+            const a = req_arena.allocator();
+            var bytes: [ds.max_key_segments + 2]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var items: std.json.Array = .init(a);
+            for (0..bytes[0] % bytes.len) |index| {
+                try items.append(if (bytes[index] % 4 == 0) .null else .{ .string = bytes[index .. index + 1] });
+            }
+            var segments: [ds.max_key_segments][]const u8 = undefined;
+            if (requestKey(.{ .array = items }, &segments)) |key| {
+                try testing.expect(key.segments.len > 0 and key.segments.len <= ds.max_key_segments);
+                for (key.segments, items.items) |segment, item| try testing.expectEqualStrings(item.string, segment);
+            } else |err| try testing.expectEqual(error.InvalidParams, err);
         }
     }.run, .{});
 }

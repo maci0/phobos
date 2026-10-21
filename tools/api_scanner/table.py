@@ -27,8 +27,20 @@ S_MISSING = "❌ Missing"
 # or component ("component:<name>") as a fallback for a whole component.
 # Value: (status, note). Anything not listed defaults to (S_FULL, MATCHES).
 MATCHES = "No recorded behavior difference."
+DATABASE_ITEM_KEYS = (
+    S_PARTIAL,
+    "Accepts dotted strings and string-array keys, preserving literal dots in array segments and the request key in responses. Paths are limited to 16 non-empty segments; Moonraker has no explicit segment-count limit.",
+)
 
 DELTAS: dict[str, tuple[str, str]] = {
+    "server.database.get_item": DATABASE_ITEM_KEYS,
+    "server.database.post_item": DATABASE_ITEM_KEYS,
+    "server.database.delete_item": DATABASE_ITEM_KEYS,
+    "debug.database.get_item": DATABASE_ITEM_KEYS,
+    "debug.database.post_item": DATABASE_ITEM_KEYS,
+    "debug.database.delete_item": DATABASE_ITEM_KEYS,
+    "path:/server/database/item": DATABASE_ITEM_KEYS,
+    "path:/debug/database/item": DATABASE_ITEM_KEYS,
     # Agent sessions and bidirectional requests.
     "component:extensions": (
         S_FULL,

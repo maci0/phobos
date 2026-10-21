@@ -984,12 +984,12 @@ const NullBus = struct {
 
 // Minimal NullStore for tests
 const NullDS = struct {
-    fn vtGetItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds_mod.Error!?std.json.Value {
+    fn vtGetItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key) ds_mod.Error!?std.json.Value {
         return null;
     }
-    fn vtInsert(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds_mod.Error!void {}
-    fn vtUpdate(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8, _: std.json.Value) ds_mod.Error!void {}
-    fn vtDelete(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds_mod.Error!std.json.Value {
+    fn vtInsert(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key, _: std.json.Value) ds_mod.Error!void {}
+    fn vtUpdate(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key, _: std.json.Value) ds_mod.Error!void {}
+    fn vtDelete(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key) ds_mod.Error!std.json.Value {
         return ds_mod.Error.KeyNotFound;
     }
     fn vtList(_: *anyopaque, arena: std.mem.Allocator) ds_mod.Error![][]const u8 {

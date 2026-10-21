@@ -940,25 +940,28 @@ const MemStore = struct {
         self.data.deinit();
     }
 
-    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8) ds_mod.Error!?std.json.Value {
+    fn vtGetItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, request_key: ds.Key) ds_mod.Error!?std.json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         if (self.fail_reads) return error.BackendError;
         return self.data.get(key);
     }
 
-    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds_mod.Error!void {
+    fn vtInsertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds_mod.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         if (self.fail_writes) return error.BackendError;
         self.data.put(key, value) catch return ds_mod.Error.OutOfMemory;
         self.writes += 1;
     }
 
-    fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: std.json.Value) ds_mod.Error!void {
+    fn vtUpdateItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, request_key: ds.Key, value: std.json.Value) ds_mod.Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         self.data.put(key, value) catch return ds_mod.Error.OutOfMemory;
     }
 
-    fn vtDeleteItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) ds_mod.Error!std.json.Value {
+    fn vtDeleteItem(_: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: ds.Key) ds_mod.Error!std.json.Value {
         return ds_mod.Error.KeyNotFound;
     }
 

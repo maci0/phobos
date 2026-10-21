@@ -56,6 +56,16 @@ pub const Error = error{
 /// previous 64 cost ~1 KiB of stack per parseKey on every get/insert/update.
 pub const max_key_segments = 16;
 
+/// Array segments preserve literal dots, unlike a dotted string path.
+pub const Key = union(enum) {
+    dotted: []const u8,
+    segments: []const []const u8,
+
+    pub fn init(value: anytype) Key {
+        return if (@TypeOf(value) == Key) value else .{ .dotted = value };
+    }
+};
+
 /// Parsed dotted key: a list of non-empty segments. Backed by a caller-owned
 /// fixed buffer to avoid allocation on the hot path.
 pub const ParsedKey = struct {
@@ -71,17 +81,28 @@ pub const ParsedKey = struct {
 /// `parse_namespace_key`. Returns `InvalidKey` for an empty key, an empty
 /// segment (e.g. `a..b`, leading/trailing dot), or more than
 /// `max_key_segments` segments.
-pub fn parseKey(key: []const u8) Error!ParsedKey {
-    if (key.len == 0) return Error.InvalidKey;
-    var pk: ParsedKey = .{};
-    var it = std.mem.splitScalar(u8, key, '.');
-    while (it.next()) |seg| {
-        if (seg.len == 0) return Error.InvalidKey;
-        if (pk.len == max_key_segments) return Error.InvalidKey;
-        pk.segments[pk.len] = seg;
-        pk.len += 1;
-    }
-    return pk;
+pub fn parseKey(value: anytype) Error!ParsedKey {
+    return switch (Key.init(value)) {
+        .segments => |segments| blk: {
+            if (segments.len == 0 or segments.len > max_key_segments) return Error.InvalidKey;
+            for (segments) |segment| if (segment.len == 0) return Error.InvalidKey;
+            var pk: ParsedKey = .{ .len = segments.len };
+            @memcpy(pk.segments[0..segments.len], segments);
+            break :blk pk;
+        },
+        .dotted => |key| blk: {
+            if (key.len == 0) return Error.InvalidKey;
+            var pk: ParsedKey = .{};
+            var it = std.mem.splitScalar(u8, key, '.');
+            while (it.next()) |seg| {
+                if (seg.len == 0) return Error.InvalidKey;
+                if (pk.len == max_key_segments) return Error.InvalidKey;
+                pk.segments[pk.len] = seg;
+                pk.len += 1;
+            }
+            break :blk pk;
+        },
+    };
 }
 
 /// Walk a dotted path (segments after the first) into a decoded JSON value.
@@ -277,10 +298,10 @@ pub const HistoryJob = struct { key: []const u8, val: json.Value };
 pub const HistoryPage = struct { limit: i64, start: i64, ascending: bool };
 
 pub const VTable = struct {
-    getItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value,
-    insertItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void,
-    updateItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void,
-    deleteItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value,
+    getItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: Key) Error!?json.Value,
+    insertItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: Key, value: json.Value) Error!void,
+    updateItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: Key, value: json.Value) Error!void,
+    deleteItem: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: Key) Error!json.Value,
     listNamespaces: *const fn (ctx: *anyopaque, arena: std.mem.Allocator) Error![][]const u8,
     getNamespace: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8) Error!json.Value,
     /// Optional unfiltered history page. Null selects the namespace fallback.
@@ -291,17 +312,17 @@ pub const DataStore = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
 
-    pub fn getItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
-        return self.vtable.getItem(self.ctx, arena, namespace, key);
+    pub fn getItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype) Error!?json.Value {
+        return self.vtable.getItem(self.ctx, arena, namespace, Key.init(key));
     }
-    pub fn insertItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
-        return self.vtable.insertItem(self.ctx, arena, namespace, key, value);
+    pub fn insertItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype, value: json.Value) Error!void {
+        return self.vtable.insertItem(self.ctx, arena, namespace, Key.init(key), value);
     }
-    pub fn updateItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
-        return self.vtable.updateItem(self.ctx, arena, namespace, key, value);
+    pub fn updateItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype, value: json.Value) Error!void {
+        return self.vtable.updateItem(self.ctx, arena, namespace, Key.init(key), value);
     }
-    pub fn deleteItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value {
-        return self.vtable.deleteItem(self.ctx, arena, namespace, key);
+    pub fn deleteItem(self: DataStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype) Error!json.Value {
+        return self.vtable.deleteItem(self.ctx, arena, namespace, Key.init(key));
     }
     pub fn listNamespaces(self: DataStore, arena: std.mem.Allocator) Error![][]const u8 {
         return self.vtable.listNamespaces(self.ctx, arena);
@@ -340,17 +361,19 @@ const MemStore = struct {
     fn dataStore(self: *MemStore) DataStore {
         return .{ .ctx = self, .vtable = vt() };
     }
-    fn getItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8) Error!?json.Value {
+    fn getItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, request_key: Key) Error!?json.Value {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         if (std.mem.eql(u8, key, self.last_key)) return self.last_value;
         return null;
     }
-    fn insertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    fn insertItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, request_key: Key, value: json.Value) Error!void {
+        const key = request_key.dotted;
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         self.last_key = key;
         self.last_value = value;
     }
-    fn deleteItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: []const u8) Error!json.Value {
+    fn deleteItem(ctx: *anyopaque, _: std.mem.Allocator, _: [:0]const u8, _: Key) Error!json.Value {
         const self: *MemStore = @ptrCast(@alignCast(ctx));
         self.last_key = "";
         return self.last_value;
@@ -403,6 +426,22 @@ test "parseKey: invalid forms" {
     try testing.expectError(Error.InvalidKey, parseKey("a..b"));
     try testing.expectError(Error.InvalidKey, parseKey(".a"));
     try testing.expectError(Error.InvalidKey, parseKey("a."));
+}
+
+test "parseKey: array segments retain literal dots and enforce the path bound" {
+    const segments = [_][]const u8{ "settings.v2", "theme.dark", "color" };
+    const parsed = try parseKey(Key{ .segments = &segments });
+    try testing.expectEqual(3, parsed.len);
+    try testing.expectEqualStrings("settings.v2", parsed.segments[0]);
+    try testing.expectEqualStrings("theme.dark", parsed.segments[1]);
+    try testing.expectError(Error.InvalidKey, parseKey(Key{ .segments = &.{} }));
+    try testing.expectError(Error.InvalidKey, parseKey(Key{ .segments = &.{ "a", "" } }));
+    var boundary: [max_key_segments][]const u8 = undefined;
+    @memset(&boundary, "a");
+    try testing.expectEqual(max_key_segments, (try parseKey(Key{ .segments = &boundary })).len);
+    var excessive: [max_key_segments + 1][]const u8 = undefined;
+    @memset(&excessive, "a");
+    try testing.expectError(Error.InvalidKey, parseKey(Key{ .segments = &excessive }));
 }
 
 test "getPath: nested lookup matches database.py reduce(getitem)" {
@@ -516,6 +555,9 @@ test "fuzz parseKey: never panics" {
             smith.bytesWithHash(&buf, 0);
             const n = @as(usize, buf[0]) % buf.len;
             _ = parseKey(buf[0..n]) catch {};
+            var segments: [max_key_segments + 1][]const u8 = undefined;
+            for (&segments, 0..) |*segment, index| segment.* = buf[index .. index + buf[index] % 4];
+            _ = parseKey(Key{ .segments = segments[0 .. buf[0] % segments.len] }) catch {};
         }
     }.run, .{});
 }

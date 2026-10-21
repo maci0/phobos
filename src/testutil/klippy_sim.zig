@@ -329,11 +329,15 @@ pub const KlippySim = struct {
                 std.mem.eql(u8, method, "register_remote_method"))
             {
                 const id_str: []const u8 = idStrVal(id);
+                const result = if (std.mem.eql(u8, method, "objects/subscribe"))
+                    "{\"eventtime\":1,\"status\":{}}"
+                else
+                    "null";
                 var buf: [128]u8 = undefined;
                 const resp = std.fmt.bufPrint(
                     &buf,
-                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":null}}",
-                    .{id_str},
+                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":{s}}}",
+                    .{ id_str, result },
                 ) catch continue;
                 self.writeFrame(io, stream, resp) catch return;
             }

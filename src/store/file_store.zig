@@ -77,7 +77,7 @@ pub const FileStore = struct {
 
     // --- DataStore API (shared dotted-key path helpers) -------------------
 
-    pub fn getItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
+    pub fn getItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype) Error!?json.Value {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.mutex.lockUncancelable(self.io);
@@ -90,7 +90,7 @@ pub const FileStore = struct {
         };
     }
 
-    pub fn insertItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    pub fn insertItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype, value: json.Value) Error!void {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.mutex.lockUncancelable(self.io);
@@ -103,7 +103,7 @@ pub const FileStore = struct {
         try self.save(arena, namespace, obj);
     }
 
-    pub fn updateItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    pub fn updateItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype, value: json.Value) Error!void {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.mutex.lockUncancelable(self.io);
@@ -115,7 +115,7 @@ pub const FileStore = struct {
         try self.save(arena, namespace, obj);
     }
 
-    pub fn deleteItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value {
+    pub fn deleteItem(self: *FileStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype) Error!json.Value {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.mutex.lockUncancelable(self.io);
@@ -170,16 +170,16 @@ pub const FileStore = struct {
         .getNamespace = vtGetNamespace,
     };
 
-    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
+    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key) Error!?json.Value {
         return getItem(@ptrCast(@alignCast(ctx)), arena, namespace, key);
     }
-    fn vtInsertItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    fn vtInsertItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key, value: json.Value) Error!void {
         return insertItem(@ptrCast(@alignCast(ctx)), arena, namespace, key, value);
     }
-    fn vtUpdateItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    fn vtUpdateItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key, value: json.Value) Error!void {
         return updateItem(@ptrCast(@alignCast(ctx)), arena, namespace, key, value);
     }
-    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value {
+    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key) Error!json.Value {
         return deleteItem(@ptrCast(@alignCast(ctx)), arena, namespace, key);
     }
     fn vtListNamespaces(ctx: *anyopaque, arena: std.mem.Allocator) Error![][]const u8 {

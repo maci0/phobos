@@ -15,7 +15,7 @@ const Io = std.Io;
 const Core = @import("core.zig").Core;
 const jv = @import("../json/value.zig");
 
-pub const max_subscription_objects = 256;
+pub const max_subscription_objects = 1024;
 pub const max_subscription_name_len = 256;
 
 pub const StatusMessage = struct { method: []const u8, params: std.json.Value };
@@ -930,4 +930,33 @@ test "fuzz_writeframe: random frames delivered in order, never crash" {
             }
         }
     }.run, .{});
+}
+
+test "Fluidd subscriptions accept 262 printer objects and preserve the limit" {
+    const aio = std.testing.io;
+    var core = Core.init();
+    var conns = Connections.init(std.testing.allocator, &core);
+    defer conns.deinit(aio);
+    const conn = try conns.add(aio, false);
+    var req_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    var objects: std.json.ObjectMap = .empty;
+    const fluidd_object_count = 262;
+    for (0..fluidd_object_count) |index| {
+        try objects.put(a, try std.fmt.allocPrint(a, "gcode_macro FLUIDD_{d}", .{index}), .null);
+    }
+    try conns.replaceSubscriptions(aio, conn, .{ .object = objects });
+    try std.testing.expectEqual(fluidd_object_count, conn.subs.count());
+    var aggregate: std.json.ObjectMap = .empty;
+    try conns.appendSubscriptionObjects(aio, a, &aggregate);
+    try std.testing.expectEqual(fluidd_object_count, aggregate.count());
+    var index: usize = fluidd_object_count;
+    while (index < max_subscription_objects) : (index += 1) {
+        try objects.put(a, try std.fmt.allocPrint(a, "gcode_macro FLUIDD_{d}", .{index}), .null);
+    }
+    try conns.replaceSubscriptions(aio, conn, .{ .object = objects });
+    try objects.put(a, "gcode_macro OVERFLOW", .null);
+    try std.testing.expectError(error.InvalidParams, conns.replaceSubscriptions(aio, conn, .{ .object = objects }));
+    try std.testing.expectEqual(max_subscription_objects, conn.subs.count());
 }

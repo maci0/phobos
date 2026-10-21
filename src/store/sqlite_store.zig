@@ -220,7 +220,7 @@ pub const SqliteStore = struct {
 
     // --- DataStore API (shared dotted-key path helpers) -------------------
 
-    pub fn getItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
+    pub fn getItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype) Error!?json.Value {
         self.lockRmw();
         defer self.unlockRmw();
         const pk = try ds.parseKey(key);
@@ -232,7 +232,7 @@ pub const SqliteStore = struct {
         };
     }
 
-    pub fn insertItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    pub fn insertItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype, value: json.Value) Error!void {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.lockRmw();
@@ -243,7 +243,7 @@ pub const SqliteStore = struct {
         try self.putRecordRaw(namespace, segs[0], try encodeRecord(arena, new_record));
     }
 
-    pub fn updateItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    pub fn updateItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype, value: json.Value) Error!void {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.lockRmw();
@@ -253,7 +253,7 @@ pub const SqliteStore = struct {
         try self.putRecordRaw(namespace, segs[0], try encodeRecord(arena, new_record));
     }
 
-    pub fn deleteItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value {
+    pub fn deleteItem(self: *SqliteStore, arena: std.mem.Allocator, namespace: [:0]const u8, key: anytype) Error!json.Value {
         const pk = try ds.parseKey(key);
         const segs = pk.slice();
         self.lockRmw();
@@ -497,16 +497,16 @@ pub const SqliteStore = struct {
         .getHistoryPage = vtGetHistoryPage,
     };
 
-    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!?json.Value {
+    fn vtGetItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key) Error!?json.Value {
         return getItem(@ptrCast(@alignCast(ctx)), arena, namespace, key);
     }
-    fn vtInsertItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    fn vtInsertItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key, value: json.Value) Error!void {
         return insertItem(@ptrCast(@alignCast(ctx)), arena, namespace, key, value);
     }
-    fn vtUpdateItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8, value: json.Value) Error!void {
+    fn vtUpdateItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key, value: json.Value) Error!void {
         return updateItem(@ptrCast(@alignCast(ctx)), arena, namespace, key, value);
     }
-    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: []const u8) Error!json.Value {
+    fn vtDeleteItem(ctx: *anyopaque, arena: std.mem.Allocator, namespace: [:0]const u8, key: ds.Key) Error!json.Value {
         return deleteItem(@ptrCast(@alignCast(ctx)), arena, namespace, key);
     }
     fn vtListNamespaces(ctx: *anyopaque, arena: std.mem.Allocator) Error![][]const u8 {

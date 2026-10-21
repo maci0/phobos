@@ -276,6 +276,18 @@ SQLite scalar records require their exact encoded length and UTF-8 strings;
 corrupt values produce a backend error instead of a substituted value.
 SQLite paths reject embedded NUL before creating parents or entering the C API.
 Reads and dotted mutations share the migrated history/totals record loader.
+Database item keys accept dotted strings or arrays of literal string segments.
+Array segments preserve dots in property names, including Fluidd settings keys.
+Both storage backends keep the 16-segment bound and reject empty segments.
+GET with an absent or null key returns the namespace; responses preserve the
+original key type. Internal callers pass a string or `datastore.Key` through
+the same item methods; parsed segments borrow their caller for that store call.
+WebSocket subscriptions allow 1,024 objects per client and 1,024 fields per
+object, with names up to 256 bytes and the existing transport frame limits.
+The maps allocate only requested entries. Fluidd subscribes to every object;
+the Forge-X configuration exposes 262, exceeding the previous 256-object cap.
+Fluidd enables notifications and loads console history after subscription
+succeeds, so rejecting that request also leaves its console empty.
 KV records shadow complete table records; deleting the final shadow field clears
 the backing row in the same transaction so it cannot reappear.
 Queue snapshots own their filename/id strings; snapshot and persistence share a

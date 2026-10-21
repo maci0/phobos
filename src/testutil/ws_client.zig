@@ -1201,3 +1201,51 @@ test "WS deadlines cover a stalled payload after a buffered header" {
     client.read_timeout_secs = 0;
     try std.testing.expectError(error.Timeout, nextDataFrame(client));
 }
+
+test "WS Fluidd startup subscribes 262 objects then loads and receives console output" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    try ts.startKlippyBridge();
+    const client = try connect(ts, alloc);
+    defer client.close();
+    var req_arena = std.heap.ArenaAllocator.init(alloc);
+    defer req_arena.deinit();
+    const a = req_arena.allocator();
+    var objects: std.json.ObjectMap = .empty;
+    try objects.put(a, "toolhead", .null);
+    try objects.put(a, "print_stats", .null);
+    for (0..260) |index| {
+        try objects.put(a, try std.fmt.allocPrint(a, "gcode_macro FLUIDD_{d}", .{index}), .null);
+    }
+    const request = try std.json.Stringify.valueAlloc(a, .{ .objects = std.json.Value{ .object = objects } }, .{});
+    const reply = try client.call(a, "printer.objects.subscribe", request);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, reply, .{});
+    try std.testing.expect(parsed.object.get("error") == null);
+    try std.testing.expect(parsed.object.get("result").?.object.contains("status"));
+
+    const message = "// Fluidd console check";
+    const frame = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"params\":{\"response\":\"" ++ message ++ "\"}}", .{});
+    {
+        ts.app.core.lock(ts.io);
+        defer ts.app.core.unlock(ts.io);
+        try ts.app.klippy_ctx.dispatchRemoteMethod(ts.io, "process_gcode_response", frame);
+    }
+    var received = false;
+    for (0..8) |_| {
+        const notification = try nextDataFrame(client);
+        defer alloc.free(notification.data);
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, a, notification.data, .{});
+        const method = value.object.get("method") orelse continue;
+        if (!std.mem.eql(u8, method.string, notify.names.gcode_response)) continue;
+        try std.testing.expectEqualStrings(message, value.object.get("params").?.array.items[0].string);
+        received = true;
+        break;
+    }
+    try std.testing.expect(received);
+    const history = try client.call(a, "server.gcode_store", null);
+    const store = try std.json.parseFromSliceLeaky(std.json.Value, a, history, .{});
+    const entries = store.object.get("result").?.object.get("gcode_store").?.array.items;
+    try std.testing.expect(entries.len > 0);
+    try std.testing.expectEqualStrings(message, entries[entries.len - 1].object.get("message").?.string);
+}
