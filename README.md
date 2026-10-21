@@ -33,8 +33,8 @@ remain no-ops; package execution requires an injected runner. Full Jinja2, LDAP
 and Apprise are out of scope.
 
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
-record the v0.2.1 release candidate on an x86-64 host and the Forge-X printer,
-including their measurement conditions and limits. The latest release is
+record versioned host and Forge-X comparisons, including the newer history
+memory changes, actual Moonraker measurements and capture limits. The latest release is
 [v0.2.1](docs/releases/v0.2.1.md).
 
 ## Architecture

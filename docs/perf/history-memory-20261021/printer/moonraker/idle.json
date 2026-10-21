@@ -1,0 +1,5 @@
+{
+  "rss_kib_median": 36980,
+  "cpu_percent_one_core": 1.8487394957992236,
+  "aggregation": "median of three fresh-process idle trial medians; trial details in idle-trials.json"
+}

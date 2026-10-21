@@ -77,6 +77,19 @@ is available.
    running. Do not run a load comparison during printing.
 3. Sample `VmRSS`/`Threads` from `/proc/<pid>/status` during the run.
 
+Use identical copied inputs, rates, durations and collectors for each backend.
+Read process user/system CPU ticks before and after each trial, normalize by
+completed requests, and retain actual throughput when a paced run falls behind.
+Record board available memory and swap alongside probe RSS. A production
+readiness/idle check and a stop guard protect the shared board; terminate only
+the owned probe PID.
+
+For a private Moonraker probe, omit update components when no network refresh
+is intended. `enable_auto_refresh: false` disables periodic refresh but does not
+prevent Moonraker's initial refresh. Keep probe config, logs, sockets and database
+separate from production. The [versioned report](../../docs/PERFORMANCE.md)
+records the actual Forge-X comparison and this kernel's disabled perf events.
+
 ## Helper checks
 
 `timeout 90 bash tools/perf_harness/tests/smoke.sh` checks setup, capture paths,

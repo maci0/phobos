@@ -1,0 +1,43 @@
+{
+  "scope": "Seven read-endpoint preflights on actual Forge-X, plus history pages, filters and all 266 jobs. This is not an exhaustive parity audit.",
+  "code_bugs_fixed": [
+    {
+      "field": "history.jobs[].end_time",
+      "observed": "SQL NULL became numeric zero in the earlier and first optimized builds. Two affected records appeared in the first 20; seven exist in the complete copied history.",
+      "fix": "f34d601 preserves SQLite NULL before reading a double. Seven final ARM response comparisons match actual Moonraker, including before-filter exclusion of the seven unfinished rows.",
+      "evidence": "nullable-history-parity.json"
+    }
+  ],
+  "identity_and_capabilities_kept": [
+    {
+      "fields": ["server.info.api_version", "server.info.api_version_string", "server.info.moonraker_version"],
+      "reason": "Phobos identifies as API 1.5.0 and phobos. Forge-X reports API 1.4.0 and an unknown software version. The newer compatibility target is retained."
+    },
+    {
+      "fields": ["machine.system_info.python.version", "machine.system_info.python.version_string"],
+      "reason": "Phobos retains its documented Python stub and does not impersonate the installed CPython 3.11.10 runtime. Other system-info values matched inside the chroot."
+    },
+    {
+      "fields": ["server.info.components"],
+      "reason": "The minimal probe config leaves update_manager and octoprint_compat registered in phobos; Forge-X omits them. No update remotes are configured. Implementations remain available. Production's full Forge-X component set is a different fixture."
+    },
+    {
+      "fields": ["server.config.config.file_manager.enable_inotify_warnings", "server.config.config.file_manager.excludes", "server.config.config.klippy_apis.hidden_objects", "server.config.config.machine.script_path", "server.config.config.machine.script_timeout"],
+      "reason": "Phobos reports these supported defaults even when the older Forge-X minimal configuration does not read or report them. They are retained capability/default-reporting differences; no parser option was removed to match omission."
+    }
+  ],
+  "intentional_policy_kept": [
+    {
+      "fields": ["server.database.list.namespaces"],
+      "reason": "Phobos deliberately hides the forbidden authorized_users namespace from the public list. The older Forge-X lists that name. Credential reads remain forbidden, and the existing security policy/tests were preserved. Namespace ordering is not compared as an ordered sequence."
+    }
+  ],
+  "environment": [
+    {
+      "fields": ["server.info.warnings"],
+      "reason": "Moonraker warns that the private probe config and empty gcodes directories differ from Klippy's live /opt/config and /data paths. These separate probe directories protect production. Phobos with validation disabled returns no such warnings. No live paths were changed to suppress them."
+    }
+  ],
+  "matching_reads": ["access.info", "64 KiB database record", "final history responses"],
+  "other_deliberate_limits": "See docs/releases/v0.2.1.md: CAN empty-list fallback, Python stub, optional component registration, no-op host reboot/shutdown, and excluded full Jinja2/LDAP/Apprise remain unchanged."
+}

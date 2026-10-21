@@ -1,0 +1,84 @@
+[
+  {
+    "backend": "before",
+    "samples": 30595,
+    "sample_period_sum": 69000423841,
+    "unknown_leaf_samples": 647,
+    "unknown_leaf_period_percent": 2.0813171427892883,
+    "load": {
+      "latencies": {
+        "total": 30979772066,
+        "mean": 759308,
+        "50th": 100322,
+        "90th": 2388300,
+        "95th": 2555735,
+        "99th": 3006426,
+        "max": 9130551,
+        "min": 25608
+      },
+      "bytes_in": {
+        "total": 176827200,
+        "mean": 4334
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T15:22:33.436168704+08:00",
+      "latest": "2026-10-21T15:23:07.435657338+08:00",
+      "end": "2026-10-21T15:23:07.437173966+08:00",
+      "duration": 33999488634,
+      "wait": 1516628,
+      "requests": 40800,
+      "rate": 1200.018048483217,
+      "throughput": 1199.9645212136904,
+      "success": 1,
+      "status_codes": {
+        "200": 40800
+      },
+      "errors": []
+    },
+    "binary_sha256": "0229a82fab1b9a1f3ec7921f1dfea5fdf1cdc5cc2662e26ca5dd55b21b05da82"
+  },
+  {
+    "backend": "after",
+    "samples": 9630,
+    "sample_period_sum": 19846058699,
+    "unknown_leaf_samples": 189,
+    "unknown_leaf_period_percent": 1.9770491811543947,
+    "load": {
+      "latencies": {
+        "total": 9427556794,
+        "mean": 231067,
+        "50th": 82014,
+        "90th": 653397,
+        "95th": 827077,
+        "99th": 1462532,
+        "max": 4397785,
+        "min": 22122
+      },
+      "bytes_in": {
+        "total": 177765600,
+        "mean": 4357
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-21T16:13:17.559309526+08:00",
+      "latest": "2026-10-21T16:13:51.558284074+08:00",
+      "end": "2026-10-21T16:13:51.558316525+08:00",
+      "duration": 33998974548,
+      "wait": 32451,
+      "requests": 40800,
+      "rate": 1200.0361935151386,
+      "throughput": 1200.0350481177297,
+      "success": 1,
+      "status_codes": {
+        "200": 40800
+      },
+      "errors": []
+    },
+    "binary_sha256": "93203147722a9dd2b234571a75b0f5385b90060d19ee444e85fcac385136b180"
+  }
+]

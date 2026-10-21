@@ -1,0 +1,6 @@
+{
+  "minimum_available_kib": 34268,
+  "maximum_probe_swap_kib": 0,
+  "minimum_board_swap_free_kib": 0,
+  "maximum_board_swap_free_kib": 232
+}

@@ -1,0 +1,65 @@
+{
+  "source_commit": "a6a3aeff7e47ed454988400e0c9e843a7a9f22c6",
+  "mode": "fixed",
+  "maximum_load_workers": 8,
+  "baseline_commit": "39386ca926d3eb441e797d1f4cc8a829ec3bfa7c",
+  "binaries": {
+    "baseline": {
+      "sha256": "70c59aaad5ff46b52be89e9358d238c98443cddfa096036121c6fbba876c7fa3",
+      "bytes": 2744856
+    },
+    "candidate": {
+      "sha256": "8294a0b8341a47865948493f4060da555e20312bc5af9ff98729284041c160ab",
+      "bytes": 2751768
+    }
+  },
+  "seed_sha256": "d57490f92eb64b7ee12011e8610c5acbf6f2f8a9184eb5d1e26cb06cef861b6c",
+  "moonraker_commit": "9008485843740c93e0154ccbdac1fc2b02b03aaa",
+  "moonraker_python": "Python 3.12.12",
+  "uname": [
+    "Linux",
+    "speedy3.lan",
+    "7.2.10-1-cachyos",
+    "#1 SMP PREEMPT_DYNAMIC Wed, 14 Oct 2026 07:02:02 +0000",
+    "x86_64"
+  ],
+  "ticks": 100,
+  "server_cpus": [
+    2,
+    4
+  ],
+  "load_cpus": [
+    8,
+    10
+  ],
+  "stub_cpu": [
+    6
+  ],
+  "controller_cpus": [
+    12,
+    14
+  ],
+  "duration_seconds": 8,
+  "repetitions": 3,
+  "warmup_seconds": 2,
+  "idle_seconds": 5,
+  "server_order": [
+    [
+      "baseline",
+      "moonraker",
+      "candidate"
+    ],
+    [
+      "candidate",
+      "moonraker",
+      "baseline"
+    ],
+    [
+      "moonraker",
+      "baseline",
+      "candidate"
+    ]
+  ],
+  "vegeta": "Version: 12.13.0\nCommit: 507c4f0\nRuntime: go1.25.5 X:nodwarf5 linux/amd64\nDate: NOTSET",
+  "timestamp_utc": "2026-10-21T08:14:20Z"
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "backend": "baseline",
+    "repetition": 1,
+    "samples": 46,
+    "observed_seconds": 12.160000000003492,
+    "rss_kib_median": 3280.0,
+    "cpu_percent_one_core": 0.2467105263157186,
+    "swap_kib_max": 0,
+    "available_min_kib": 55668
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "samples": 46,
+    "observed_seconds": 12.179999999993015,
+    "rss_kib_median": 37080.0,
+    "cpu_percent_one_core": 1.8883415435150401,
+    "swap_kib_max": 0,
+    "available_min_kib": 34668
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "samples": 46,
+    "observed_seconds": 12.160000000003492,
+    "rss_kib_median": 3028.0,
+    "cpu_percent_one_core": 0.1644736842104791,
+    "swap_kib_max": 0,
+    "available_min_kib": 60196
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "samples": 46,
+    "observed_seconds": 12.170000000012806,
+    "rss_kib_median": 3040.0,
+    "cpu_percent_one_core": 0.3286770747736887,
+    "swap_kib_max": 0,
+    "available_min_kib": 60232
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "samples": 46,
+    "observed_seconds": 12.170000000012806,
+    "rss_kib_median": 36456.0,
+    "cpu_percent_one_core": 1.8077239112552876,
+    "swap_kib_max": 0,
+    "available_min_kib": 38620
+  },
+  {
+    "backend": "baseline",
+    "repetition": 2,
+    "samples": 46,
+    "observed_seconds": 12.170000000012806,
+    "rss_kib_median": 3268.0,
+    "cpu_percent_one_core": 0.2465078060802665,
+    "swap_kib_max": 0,
+    "available_min_kib": 56068
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "samples": 45,
+    "observed_seconds": 11.89999999999418,
+    "rss_kib_median": 36980,
+    "cpu_percent_one_core": 1.8487394957992236,
+    "swap_kib_max": 0,
+    "available_min_kib": 38404
+  },
+  {
+    "backend": "baseline",
+    "repetition": 3,
+    "samples": 45,
+    "observed_seconds": 11.89000000001397,
+    "rss_kib_median": 3244,
+    "cpu_percent_one_core": 0.2523128679559693,
+    "swap_kib_max": 0,
+    "available_min_kib": 60004
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "samples": 46,
+    "observed_seconds": 12.159999999974389,
+    "rss_kib_median": 3012.0,
+    "cpu_percent_one_core": 0.2467105263163091,
+    "swap_kib_max": 0,
+    "available_min_kib": 59932
+  }
+]

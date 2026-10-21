@@ -1,0 +1,572 @@
+[
+  {
+    "fixture": "printer",
+    "backend": "baseline",
+    "workload": "database64k10",
+    "trials": 3,
+    "requests": 240,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 10.097893571032452,
+      "min": 10.095707735879792,
+      "max": 10.102885326639642
+    },
+    "p50_ms": {
+      "median": 19.553491,
+      "min": 19.285817,
+      "max": 19.696603
+    },
+    "p99_ms": {
+      "median": 36.488791,
+      "min": 35.920077,
+      "max": 40.05914
+    },
+    "cpu_percent": {
+      "median": 5.959475566160928,
+      "min": 5.945303210461264,
+      "max": 6.107784431133467
+    },
+    "cpu_us_per_request": {
+      "median": 6250.0,
+      "min": 6250.0,
+      "max": 6375.0
+    },
+    "rss_peak_kib": {
+      "median": 3452,
+      "min": 3336,
+      "max": 3472
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "baseline",
+    "workload": "history10",
+    "trials": 3,
+    "requests": 240,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 10.031378486703666,
+      "min": 10.030554492067756,
+      "max": 10.038634039472418
+    },
+    "p50_ms": {
+      "median": 65.611067,
+      "min": 65.07248,
+      "max": 65.83239
+    },
+    "p99_ms": {
+      "median": 89.062928,
+      "min": 87.144797,
+      "max": 101.862785
+    },
+    "cpu_percent": {
+      "median": 55.01193317419377,
+      "min": 54.93460166466208,
+      "max": 55.9808612439178
+    },
+    "cpu_us_per_request": {
+      "median": 57750.0,
+      "min": 57625.0,
+      "max": 58500.0
+    },
+    "rss_peak_kib": {
+      "median": 4720,
+      "min": 4588,
+      "max": 4768
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "baseline",
+    "workload": "independent25",
+    "trials": 3,
+    "requests": 600,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 25.109481816485008,
+      "min": 25.106615613525417,
+      "max": 25.110122435054905
+    },
+    "p50_ms": {
+      "median": 6.911938,
+      "min": 6.507455,
+      "max": 7.001655
+    },
+    "p99_ms": {
+      "median": 80.767718,
+      "min": 79.751929,
+      "max": 84.067302
+    },
+    "cpu_percent": {
+      "median": 25.598086124355575,
+      "min": 25.450180071979016,
+      "max": 25.6009615385296
+    },
+    "cpu_us_per_request": {
+      "median": 10650.0,
+      "min": 10600.0,
+      "max": 10700.0
+    },
+    "rss_peak_kib": {
+      "median": 4628,
+      "min": 4316,
+      "max": 4792
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "baseline",
+    "workload": "independent75",
+    "trials": 3,
+    "requests": 1800,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 74.45897562896,
+      "min": 74.45300365646557,
+      "max": 74.60984503162884
+    },
+    "p50_ms": {
+      "median": 10.949299,
+      "min": 10.624367,
+      "max": 10.973704
+    },
+    "p99_ms": {
+      "median": 91.254743,
+      "min": 89.978848,
+      "max": 94.909098
+    },
+    "cpu_percent": {
+      "median": 76.56804733743634,
+      "min": 76.00950118779558,
+      "max": 77.31591448946082
+    },
+    "cpu_us_per_request": {
+      "median": 10783.333333333334,
+      "min": 10666.666666666666,
+      "max": 10850.0
+    },
+    "rss_peak_kib": {
+      "median": 4720,
+      "min": 4680,
+      "max": 4768
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "baseline",
+    "workload": "info50",
+    "trials": 3,
+    "requests": 1200,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 50.100265580092504,
+      "min": 50.08789529050157,
+      "max": 50.10411246890469
+    },
+    "p50_ms": {
+      "median": 3.743988,
+      "min": 3.517651,
+      "max": 3.883774
+    },
+    "p99_ms": {
+      "median": 9.41638,
+      "min": 9.32549,
+      "max": 12.354075
+    },
+    "cpu_percent": {
+      "median": 2.5059665871107795,
+      "min": 2.409638554211798,
+      "max": 2.5149700598872524
+    },
+    "cpu_us_per_request": {
+      "median": 525.0,
+      "min": 500.0,
+      "max": 525.0
+    },
+    "rss_peak_kib": {
+      "median": 3280,
+      "min": 3244,
+      "max": 3476
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "candidate",
+    "workload": "database64k10",
+    "trials": 3,
+    "requests": 240,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 10.096264703625689,
+      "min": 10.091934815220672,
+      "max": 10.096521928027471
+    },
+    "p50_ms": {
+      "median": 18.444379,
+      "min": 17.895956,
+      "max": 18.829764
+    },
+    "p99_ms": {
+      "median": 35.286831,
+      "min": 34.05191,
+      "max": 44.804427
+    },
+    "cpu_percent": {
+      "median": 5.4892601431950405,
+      "min": 5.382775119607481,
+      "max": 5.508982035943505
+    },
+    "cpu_us_per_request": {
+      "median": 5750.0,
+      "min": 5625.0,
+      "max": 5750.0
+    },
+    "rss_peak_kib": {
+      "median": 3464,
+      "min": 3108,
+      "max": 3532
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "candidate",
+    "workload": "history10",
+    "trials": 3,
+    "requests": 240,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 10.0788739033434,
+      "min": 10.064898301954518,
+      "max": 10.088155692779669
+    },
+    "p50_ms": {
+      "median": 30.140511,
+      "min": 29.800058,
+      "max": 32.027641
+    },
+    "p99_ms": {
+      "median": 48.847129,
+      "min": 44.750877,
+      "max": 49.443739
+    },
+    "cpu_percent": {
+      "median": 22.102747909211818,
+      "min": 22.035928143697213,
+      "max": 23.021582733742253
+    },
+    "cpu_us_per_request": {
+      "median": 23125.0,
+      "min": 23000.0,
+      "max": 24000.0
+    },
+    "rss_peak_kib": {
+      "median": 3396,
+      "min": 3244,
+      "max": 3464
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "candidate",
+    "workload": "independent25",
+    "trials": 3,
+    "requests": 600,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 25.106328470747584,
+      "min": 25.103939538525267,
+      "max": 25.11286857927274
+    },
+    "p50_ms": {
+      "median": 5.185119,
+      "min": 4.765572,
+      "max": 5.421175
+    },
+    "p99_ms": {
+      "median": 38.530026,
+      "min": 37.983416,
+      "max": 42.663337
+    },
+    "cpu_percent": {
+      "median": 11.58900836320836,
+      "min": 11.058263971457952,
+      "max": 11.602870813376125
+    },
+    "cpu_us_per_request": {
+      "median": 4850.0,
+      "min": 4650.0,
+      "max": 4850.0
+    },
+    "rss_peak_kib": {
+      "median": 3272,
+      "min": 3252,
+      "max": 3336
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "candidate",
+    "workload": "independent75",
+    "trials": 3,
+    "requests": 1800,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 74.82021124102471,
+      "min": 74.81110374914851,
+      "max": 74.82371981489227
+    },
+    "p50_ms": {
+      "median": 6.822104,
+      "min": 6.731764,
+      "max": 6.842577
+    },
+    "p99_ms": {
+      "median": 45.78701,
+      "min": 44.158568,
+      "max": 57.113989
+    },
+    "cpu_percent": {
+      "median": 34.79809976253767,
+      "min": 34.52380952371383,
+      "max": 35.04171632902626
+    },
+    "cpu_us_per_request": {
+      "median": 4883.333333333333,
+      "min": 4833.333333333333,
+      "max": 4900.0
+    },
+    "rss_peak_kib": {
+      "median": 3396,
+      "min": 3336,
+      "max": 3464
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "candidate",
+    "workload": "info50",
+    "trials": 3,
+    "requests": 1200,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 50.092082885913875,
+      "min": 50.08891116074515,
+      "max": 50.092326770425025
+    },
+    "p50_ms": {
+      "median": 3.819217,
+      "min": 3.739886,
+      "max": 3.854665
+    },
+    "p99_ms": {
+      "median": 9.61884,
+      "min": 9.019398,
+      "max": 10.630646
+    },
+    "cpu_percent": {
+      "median": 2.5149700598784865,
+      "min": 2.5089605734780984,
+      "max": 2.6378896882413
+    },
+    "cpu_us_per_request": {
+      "median": 525.0,
+      "min": 525.0,
+      "max": 550.0
+    },
+    "rss_peak_kib": {
+      "median": 3028,
+      "min": 3012,
+      "max": 3336
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "moonraker",
+    "workload": "database64k10",
+    "trials": 3,
+    "requests": 240,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 10.089322029088777,
+      "min": 10.086638347941983,
+      "max": 10.098561935456692
+    },
+    "p50_ms": {
+      "median": 25.004538,
+      "min": 24.871219,
+      "max": 25.450379
+    },
+    "p99_ms": {
+      "median": 43.85538,
+      "min": 36.174335,
+      "max": 47.977619
+    },
+    "cpu_percent": {
+      "median": 13.89548693589388,
+      "min": 13.77672209024033,
+      "max": 14.166666666676484
+    },
+    "cpu_us_per_request": {
+      "median": 14625.0,
+      "min": 14500.0,
+      "max": 14875.0
+    },
+    "rss_peak_kib": {
+      "median": 36992,
+      "min": 36548,
+      "max": 37080
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "moonraker",
+    "workload": "history10",
+    "trials": 3,
+    "requests": 240,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 10.072595520165248,
+      "min": 10.071689539578735,
+      "max": 10.073578785679727
+    },
+    "p50_ms": {
+      "median": 32.542226,
+      "min": 32.363473,
+      "max": 32.602551
+    },
+    "p99_ms": {
+      "median": 50.983134,
+      "min": 50.321538,
+      "max": 79.216856
+    },
+    "cpu_percent": {
+      "median": 26.133651551298126,
+      "min": 26.014319809054758,
+      "max": 26.491646778028237
+    },
+    "cpu_us_per_request": {
+      "median": 27375.0,
+      "min": 27250.0,
+      "max": 27750.0
+    },
+    "rss_peak_kib": {
+      "median": 36992,
+      "min": 36548,
+      "max": 37080
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "moonraker",
+    "workload": "independent25",
+    "trials": 3,
+    "requests": 600,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 25.06550526717473,
+      "min": 25.064051462349607,
+      "max": 25.07765115688996
+    },
+    "p50_ms": {
+      "median": 12.316041,
+      "min": 11.862563,
+      "max": 12.480016
+    },
+    "p99_ms": {
+      "median": 43.595556,
+      "min": 42.85899,
+      "max": 49.074915
+    },
+    "cpu_percent": {
+      "median": 28.69047619049607,
+      "min": 28.537455410214072,
+      "max": 28.724672228895674
+    },
+    "cpu_us_per_request": {
+      "median": 12050.0,
+      "min": 12000.0,
+      "max": 12050.0
+    },
+    "rss_peak_kib": {
+      "median": 36992,
+      "min": 36548,
+      "max": 37080
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "moonraker",
+    "workload": "independent75",
+    "trials": 3,
+    "requests": 1800,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 74.68284733022129,
+      "min": 74.48098243006771,
+      "max": 74.78988448518732
+    },
+    "p50_ms": {
+      "median": 21.156967,
+      "min": 19.891801,
+      "max": 22.466372
+    },
+    "p99_ms": {
+      "median": 111.367847,
+      "min": 84.175034,
+      "max": 258.607837
+    },
+    "cpu_percent": {
+      "median": 85.86698337279103,
+      "min": 83.92434988158881,
+      "max": 87.4258600234954
+    },
+    "cpu_us_per_request": {
+      "median": 12050.0,
+      "min": 11833.333333333334,
+      "max": 12283.333333333334
+    },
+    "rss_peak_kib": {
+      "median": 36992,
+      "min": 36548,
+      "max": 37080
+    }
+  },
+  {
+    "fixture": "printer",
+    "backend": "moonraker",
+    "workload": "info50",
+    "trials": 3,
+    "requests": 1200,
+    "minimum_success": 1,
+    "throughput": {
+      "median": 50.06387143084962,
+      "min": 50.02494385020838,
+      "max": 50.069366281547914
+    },
+    "p50_ms": {
+      "median": 9.685958,
+      "min": 9.637795,
+      "max": 10.18706
+    },
+    "p99_ms": {
+      "median": 26.943971,
+      "min": 21.136236,
+      "max": 40.562912
+    },
+    "cpu_percent": {
+      "median": 37.82816229114843,
+      "min": 37.35083532217495,
+      "max": 37.918660287144704
+    },
+    "cpu_us_per_request": {
+      "median": 7925.0,
+      "min": 7825.0,
+      "max": 7925.0
+    },
+    "rss_peak_kib": {
+      "median": 36992,
+      "min": 36548,
+      "max": 37080
+    }
+  }
+]

@@ -1,0 +1,32 @@
+{
+  "source_commit": "a6a3aeff7e47ed454988400e0c9e843a7a9f22c6",
+  "baseline_commit": "39386ca926d3eb441e797d1f4cc8a829ec3bfa7c",
+  "timestamp_utc": "2026-10-21T08:28:05Z",
+  "binary_sha256": {
+    "baseline": "999bcbe75d4bd73f01009f3d76af537e47fb59918267dbe35160b4af2eb51503",
+    "candidate": "e92209fa6c8b83d35d195a1670d3f4f855c2a690c32d19bb79054598bc845b33"
+  },
+  "seed_sha256": "efb48c2e2a3606d18a55ba8d96e546e283926a3432ae5449d053135dff175079",
+  "clock_ticks_per_second": 100,
+  "process_sample_period_seconds": 0.25,
+  "duration_seconds": 8,
+  "repetitions": 3,
+  "idle_seconds": 8,
+  "memory_floor_kib": 16384,
+  "workers": 2,
+  "maximum_workers": 8,
+  "connections": 8,
+  "request_timeout_seconds": 3,
+  "transport": "host Vegeta through SSH forwarding and WiFi to printer loopback; latency includes transport and host scheduling",
+  "config": "[server]\nhost : 127.0.0.1\nport : 7126\nklippy_uds_address : /tmp/uds\n\n[machine]\nprovider : simple\nvalidate_service : false\nvalidate_config : false\n\n[file_manager]\nfile_system_observer : none\n\n[authorization]\nenable_api_key : false\ntrusted_clients : 127.0.0.1\n\n[history]\n\n[announcements]\ndev_mode : true\n\n[job_queue]\nload_on_startup : false\nautomatic_transition : false\n\n",
+  "moonraker_entry_sha256": "c0111c255c60b3465798e4abf70de4492e1b16e016cebffe51c252a9cec94116",
+  "moonraker_history_sha256": "09c78f73a5714a67a26b9bc9fc47b0e8f62f6588b7dbe1c8d9e78623aa355c20",
+  "moonraker_database_sha256": "a76d7bf63d2574ba2b358acb405168d74cfafd56adab17ed429c911b625bd0bf",
+  "firmware": "Forge-X 1.4.2, VERSION_ID 1.4.2-6966333",
+  "kernel": "Linux 5.4.61",
+  "cpu": "two Cortex-A7 cores",
+  "ram_kib": 110404,
+  "production_pid": 2243,
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "perf_events": "CONFIG_PERF_EVENTS disabled in printer kernel"
+}

@@ -1186,3 +1186,62 @@ record stores counts and response hashes, not private job payloads. Both
 probes stopped, production remained ready with zero heater targets, and the
 board boot ID stayed unchanged. A final load comparison follows this fix;
 the earlier optimized host CPU profile remains tied to commit a6a3aef.
+
+## 2026-10-21: final memory, load and profiling report
+
+The user's memory/performance goal now has a final-build Cortex-A7 comparison
+with actual Forge-X Moonraker, and separate versioned host/profile captures.
+The final f34d601 printer study contains 45 eight-second trials, 12,240
+successful requests and three fresh-process repetitions per backend. The
+75/s independent mix uses 4.883 ms CPU/request versus 10.783 in 39386ca and
+12.050 in Moonraker, reductions of 54.7% and 59.5%. Maximum sampled load RSS
+is 3,532 KiB versus 4,792 and 37,080. Each process starts from the same private
+266-job seed and 64 KiB record, common core config and disabled queue actions.
+Minimal-config component/default differences, the stronger credential-list
+policy, Python/API identity and private-path warnings are explicitly classified.
+The final candidate matches Moonraker's history responses in every repetition;
+the baseline retains its documented nullable-time bug.
+
+The a6a3aef host study retains all 57 trials and 803,711 successful requests,
+including three under-rate trials and unfavorable empty-store CPU results.
+External desktop contention prevents an isolated-host performance verdict.
+The earlier adaptive same-binary control is recorded as a different protocol,
+not used as an uncertainty bound. Both matched ReleaseSmall/LTO CPU profiles
+use the same populated fixture at 1,200/s, frame pointers, 1,999 Hz user-cycle
+sampling and a 30-second window. There are zero lost samples; unknown leaf
+cycle weights remain 2.08% and 1.98%. Flat reports, SVGs, hashes and load
+reports accompany the summaries. The real maintained profile helper also
+completed its five-second capture with 10,800 successful requests and cleanup.
+The embedded FlameGraph plotting code retains its CDDL notice/license.
+
+Memory/performance docs now identify source commits, units, better-direction
+labels, repetition ranges, actual rates, CPU/request, sampler resolution,
+smaller probe configuration and retained limitations. README links to those
+versioned results; TODO names the exact test-artifact runner. The harness
+documents owned private Moonraker setup and its initial-refresh behavior.
+Portable JSON, figures and mismatch classifications are published without
+database files, private job bodies, raw load binaries or perf.data. JSON,
+success/count/parity checks, plot-input hashes, PNG signatures, Markdown links,
+formatting and diff checks pass. Plots and flamegraphs were visually inspected.
+The final local MISRA checker scan covers 80 files with 2,342 syntax findings;
+it is a memory-review input, not a compliance or defect-count claim.
+
+The code CI run https://github.com/maci0/phobos/actions/runs/39571925685 passed
+all suites, seven build profiles, native x86-64/AArch64 smoke and packaging.
+Debug and ReleaseSafe each pass 1,726 tests, one real-Klippy skip and zero
+failures, with 326 bounded fuzz harnesses; API coverage remains complete.
+No further source edits followed those gates. The host Debug binary is restored.
+
+All private probes, samplers and tunnels stopped. The owned printer work
+directory was removed after verifying its marker, absent PIDs, closed 7126
+listener and unchanged boot ID. Eight production reads passed at final verification.
+The final counter snapshot records 62,040 KiB available board memory and
+production VmRSS/VmSwap of 2,712/1,192 KiB; board free swap reached zero during
+the final study. Probe-only RSS is not a claim that the board or production
+stayed fully resident. No swap settings changed. Production remains the
+published v0.2.1 executable as PID 2243, with matching SHA256, Klippy ready,
+print complete and zero heater targets. No printer-control action, live
+database mutation, configuration change or experimental deployment occurred.
+
+`graphify-out/graph.json` exists, but `graphify` is not on PATH, so its update
+step was skipped. The graph output is not part of the deliverable.

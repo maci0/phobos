@@ -1,101 +1,95 @@
 # Memory footprint
 
-Measured 2026-10-21 alongside the v0.2.1 [load comparisons](PERFORMANCE.md).
-Values are process RSS from `/proc`, in KiB (1,024 bytes) and MiB. The
-binary includes SQLite and musl; the file backend remains a runtime choice
-and does not remove linked SQLite code.
+Measured 2026-10-21 alongside [the load comparisons](PERFORMANCE.md).
+Host capture: `a6a3aef`. Final Cortex-A7 capture: `f34d601`. Earlier phobos is
+`39386ca`, already including lazy temperature rings. All use static musl
+ReleaseSmall builds with SQLite 3.54.1. The file backend remains available
+but is not measured in this study and does not remove linked SQLite code.
 
-**Lower RSS is better:** it leaves more RAM for Klippy and the rest of the
-system. Lower CPU is better at matched throughput. Thread counts are diagnostic;
-fewer threads do not automatically mean better performance.
-
-## Host idle and load
-
-AMD Ryzen 9 9950X, CachyOS x86-64, Linux 7.2.10-1-cachyos.
-The exact portable ReleaseSmall x86-64 asset is 2,745,112 bytes (2.62 MiB).
-Full pinned Moonraker runs on Python 3.12.12 with its dependencies loaded;
-the comparison is not a bare interpreter or an estimated production range.
-
-Both servers are Klippy-ready against the same protocol stub. Their fresh
-databases contain the same seeded `mainsail.settings` value. After successful
-fixture reads and three seconds of settling, 101 samples span ten seconds.
-The file-backend measurement uses the same phobos executable, common config,
-stub and seeded value, with an independent file store.
-
-| Process / store | Median idle KiB ↓ | MiB ↓ | Threads | CPU, one core ↓ |
-| --- | ---: | ---: | ---: | ---: |
-| phobos / SQLite | 6,112 | 5.97 | 12 | 0.00% |
-| phobos / file | 5,448 | 5.32 | 12 | 0.00% |
-| Moonraker / SQLite | 59,468 | 58.07 | 5 | 0.10% |
-
-↓ Lower is better. In this fixture phobos/SQLite uses 9.7× less idle RSS
-than full Moonraker; phobos/file has the lowest measured idle RSS.
-
-The SQLite/file difference is 664 KiB in this fixture. It is not a fixed
-SQLite cache cost or a universal saving. Zero measured CPU means no process
-ticks advanced within this short sampling window.
-
-The SQLite phobos and Moonraker processes each run 15 load trials; the file
-backend has an idle measurement only. The table reports
-the maximum sampled RSS across three trials of each workload, the median
-whole-trial CPU percentage and peak thread count. Earlier workloads can leave
-resident allocations and worker threads behind. CPU excludes the stub and
-load generator; 100% is one core.
-The RSS figure shows the median of the three trial peaks and their range;
-the table keeps the maximum across all three.
-
-| Process | Workload | Peak RSS MiB ↓ | Median CPU ↓ at matched rate | Peak threads |
-| --- | --- | ---: | ---: | ---: |
-| phobos | Info, unlimited / 8 workers | 9.59 | 93.35% | 21 |
-| Moonraker | Info, unlimited / 8 workers | 58.19 | 93.75% | 5 |
-| phobos | Info, 5,000/s | 9.60 | 4.79% | 21 |
-| Moonraker | Info, 5,000/s | 58.19 | 46.78% | 5 |
-| phobos | Independent mix, 200/s | 9.61 | 0.60% | 21 |
-| Moonraker | Independent mix, 200/s | 58.19 | 5.19% | 5 |
-| phobos | Independent mix, 1,000/s | 9.66 | 1.80% | 21 |
-| Moonraker | Independent mix, 1,000/s | 58.19 | 17.15% | 5 |
-| phobos | Stub query, 200/s | 10.04 | 0.80% | 21 |
-| Moonraker | Stub query, 200/s | 58.19 | 5.09% | 5 |
-
-phobos uses less RSS in every measured workload and less CPU at every matched
-offered rate. The unlimited rows perform different amounts of work, so their
-CPU percentages alone do not decide which implementation is more efficient.
-
-![Host resident memory](perf/host-v0.2.1/memory.png)
-![Host process CPU](perf/host-v0.2.1/cpu.png)
-
-Idle JSON, trial measurements and source/tool metadata are in
-[the host capture summary](perf/host-v0.2.1/summary.json) and its neighboring
-files. These are short read workloads, not a leak or long-soak test.
+**Lower RSS is better:** it leaves RAM for Klippy and other services.
+KiB means 1,024 bytes. RSS is resident pages, not total allocated bytes or
+private memory. The tables report the maximum sampled load RSS across all
+trials, not an instantaneous allocation peak. Worker pools and prior workloads
+can leave resident pages behind; a lower arena allocation need not lower RSS
+by the same amount.
 
 ## Cortex-A7 printer
 
-Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores, 110,404 KiB RAM.
-The candidate Cortex-A7 asset is 2,623,944 bytes (2.50 MiB), SHA-256
-`5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf`.
-Each private probe uses a database copy, the real configured components and
-Klippy connection; production v0.2.0 remains running separately. RSS below
-counts the probe only, not the complete board's resident memory.
+Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores and 110,404 KiB RAM.
+The final executable is 2,630,600 bytes, SHA256
+`c3afd1bcdb905ccb2661689d2e1762550c4dc67fa3670ecfd61bf0c5388cb755`.
+Probes run sequentially on loopback 7126 using identical copied inputs and
+common core configuration. Production v0.2.1 stays running on 7125. This is
+the actual Forge-X Moonraker daemon, not an estimated Python baseline.
 
-| Probe version | Idle RSS KiB ↓ | Idle MiB ↓ | Idle threads | Peak load RSS KiB ↓ | Peak load MiB ↓ | Peak threads |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| v0.2.0 | 3,056 | 2.98 | 11 | 5,052 | 4.93 | 16 |
-| v0.2.1 | 3,100 | 3.03 | 11 | 5,056 | 4.94 | 16 |
+| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
+| --- | ---: | ---: | ---: |
+| Earlier phobos | 3,268 (3,244 to 3,280) | 4,792 | 15 |
+| Optimized phobos | 3,028 (3,012 to 3,040) | 3,532 | 16 |
+| Moonraker | 36,980 (36,456 to 37,080) | 37,080 | 5 |
 
-↓ Lower is better. v0.2.0 measured 44 KiB less idle RSS and 4 KiB less peak
-load RSS. These small differences do not establish a general memory regression.
+↓ Lower is better. Optimized phobos uses less idle and sampled load RSS than
+Moonraker in this fixture. Earlier and optimized phobos are much closer;
+their [trial ranges](perf/history-memory-20261021/printer/idle-trials.json)
+and per-workload peaks accompany the report. The common config omits optional
+update remotes and differs from production, so this is not an all-components
+memory guarantee.
 
-Idle uses the last ten seconds before load, excluding startup, with 37
-samples per version over about 9.8 seconds. Load comprises 42 eight-second
-read trials, including the real Klippy query and config directory paths.
-The shell sampler reads process and board memory about every 250 ms.
-Board MemAvailable stayed at or above 49,540 KiB; an automatic guard would stop
-load below 16 MiB. No new full Moonraker process was started on the board.
-No file-backend measurement was made on the printer in this release.
+There are three fresh-process repetitions per backend, 45 eight-second read
+trials, and about 250 ms process/board samples. Each idle phase has eight
+one-second sleeps plus guard/read overhead; its actual observed duration is
+stored with the samples. No probe reported swapped pages. Board swap existed
+before testing and its free space varied from
+0 to 232 KiB;
+zero probe VmSwap does not mean the board did no swapping. Available board
+memory stayed at or above 34,268 KiB, above the
+16 MiB stop guard.
 
-See [the printer summary](perf/printer-v0.2.1.json) for exact samples,
-trial ranges, rates and transport limits. RSS is neither total allocated
-memory nor proof that all optional components fit on another printer.
+![Printer resident memory](perf/history-memory-20261021/printer/memory.png)
+
+[Environment and binary hashes](perf/history-memory-20261021/printer/environment.json),
+[all measured trials](perf/history-memory-20261021/printer/all-trials.json)
+and [board memory limits](perf/history-memory-20261021/printer/board-memory.json)
+record the inputs and counters. All probes stopped; production PID, binary,
+boot ID, Klippy readiness and zero heater targets were preserved.
+
+After probe shutdown, eight production read checks passed with 62,040 KiB
+available board memory. Production phobos had 2,712 KiB RSS and 1,192 KiB
+VmSwap. The comparison therefore does not claim that production stayed fully
+resident. Swap controls were unchanged. The
+[final state record](perf/history-memory-20261021/printer/final-state.json)
+contains those counters and checks without response payloads.
+
+## Host optimization capture
+
+Ryzen 9 9950X, CachyOS x86-64, Linux 7.2.10. The portable optimized binary is
+2,751,768 bytes, SHA256
+`8294a0b8341a47865948493f4060da555e20312bc5af9ff98729284041c160ab`.
+Pinned Moonraker runs on Python 3.12.12 against the same Klippy stub, copied
+266-job database and synthetic 64 KiB record. The later nullable-time fix is
+not in this host capture.
+
+| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
+| --- | ---: | ---: | ---: |
+| Earlier phobos | 6,172 (4,180 to 6,208) | 11,020 | 18 |
+| Optimized phobos | 6,252 (6,252 to 8,308) | 9,536 | 19 |
+| Moonraker | 54,024 (53,940 to 54,168) | 55,624 | 5 |
+
+The host had external CPU contention. RSS also varies with worker allocation
+and workload order: the earlier same-binary adaptive-worker control ranged
+from 9,692 to 32,024 KiB under load. That control used a different rate and
+worker bound; it is not an uncertainty estimate for this table. The fixed
+eight-worker final host run retains all favorable and unfavorable measurements.
+[PERFORMANCE.md](PERFORMANCE.md) records the empty-history CPU regression and
+why an isolated-host verdict remains unavailable.
+
+![Host resident memory](perf/history-memory-20261021/host/memory.png)
+
+The [idle trials](perf/history-memory-20261021/host/idle-trials.json) and
+[complete trial records](perf/history-memory-20261021/host/all-trials.json)
+retain ranges. No file-backend or long-soak comparison was made here.
+The older release's file-backend idle result remains in the
+[historical v0.2.1 capture](perf/host-v0.2.1/phobos-file/idle.json).
 
 ## Reservations and ownership
 
@@ -154,7 +148,7 @@ The local MISRA-Zig handbook's allocator and resource rules (Dir 4.12,
 Dir 4.14, 21.3, 22.1 and 22.2) support explicit owners, bounded inputs,
 matching frees and allocation-failure checks. They do not forbid dynamic
 allocation in this daemon. A later checkout of the local checker compiled with
-Zig 0.17 and scanned all 80 source files: 2,339 syntax findings, including test
+Zig 0.17 and scanned all 80 source files: 2,342 syntax findings, including test
 code. These are review inputs, not confirmed defects or a compliance result.
 The memory review distinguishes request-arena cleanup, ownership transfer and
 streaming file copies from actual leaks or unlimited allocation. Bounded JSON

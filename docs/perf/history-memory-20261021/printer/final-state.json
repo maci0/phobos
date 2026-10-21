@@ -1,0 +1,64 @@
+{
+  "timestamp_utc": "2026-10-21T09:02:00Z",
+  "production_pid": 2243,
+  "production_version": "v0.2.1",
+  "binary_sha256": "5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf",
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "probe_7126_listening": false,
+  "klippy_state": "ready",
+  "print_state": "complete",
+  "extruder_target": 0,
+  "bed_target": 0,
+  "process": {
+    "VmRSS": 2712,
+    "VmSwap": 1192,
+    "Threads": 15
+  },
+  "board": {
+    "MemAvailable": 62040,
+    "SwapFree": 68
+  },
+  "read_checks": [
+    {
+      "path": "/server/info",
+      "status": 200,
+      "response_bytes": 683
+    },
+    {
+      "path": "/printer/objects/query?extruder=target&heater_bed=target&print_stats=state",
+      "status": 200,
+      "response_bytes": 137
+    },
+    {
+      "path": "/server/temperature_store",
+      "status": 200,
+      "response_bytes": 31962
+    },
+    {
+      "path": "/server/gcode_store?count=1",
+      "status": 200,
+      "response_bytes": 29
+    },
+    {
+      "path": "/server/config",
+      "status": 200,
+      "response_bytes": 5049
+    },
+    {
+      "path": "/machine/system_info",
+      "status": 200,
+      "response_bytes": 1237
+    },
+    {
+      "path": "/server/database/list",
+      "status": 200,
+      "response_bytes": 190
+    },
+    {
+      "path": "/server/files/directory?path=config",
+      "status": 200,
+      "response_bytes": 2253
+    }
+  ],
+  "control_or_update_actions": false
+}

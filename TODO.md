@@ -21,8 +21,9 @@ for v0.2.0 passed 47/54 events: three component-list differences, two file-root
 normalization differences and two USB-device differences remained. These were
 also reproduced against v0.1.5; see the ledger for the capture conditions.
 
-Build the full suite with `zig build test-artifact -Doptimize=Debug` and run the
-newest standalone artifact under a timeout. The real-Klippy test skips when its
+Run the full suites with `scripts/test.sh Debug` and
+`scripts/test.sh ReleaseSafe`; each builds and runs its exact artifact under
+timeouts. The real-Klippy test skips when its
 socket is absent. Test totals belong with the verified commit in
 [docs/PROVENANCE.md](docs/PROVENANCE.md), rather than an unversioned overview.
 
