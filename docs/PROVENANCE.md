@@ -970,3 +970,8 @@ ShellCheck/actionlint, Ruff, Black and the changed Python tools' type checks
 passed. The CI installer downloaded and verified the official x86-64 compiler
 archive successfully. Hosted workflow results are verified after pushing these
 workflow files; these local checks do not claim hosted execution in advance.
+
+The first hosted check passed all 109 Python tests and lint/type gates, then
+failed the shell smoke step because the Ubuntu image lacked `rg`. The checks
+job now installs ripgrep and ShellCheck explicitly and lints the shell helpers;
+the smoke requirement was preserved.
