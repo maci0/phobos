@@ -204,3 +204,8 @@ sorting. Only selected keys are formatted into the response arena. A 20-row
 page from 1,028 empty KV jobs retains 95,326 bytes instead of 186,830 on
 x86-64, measured with `std.testing.FailingAllocator`. Zero and the complete
 unsigned 64-bit ID range keep their existing ordering and formatting.
+
+Legacy SQLite rows reserve their 11 JSON fields before copying column data.
+The 200-row fixture retains 517,988 bytes instead of 858,758 on x86-64. Reserving
+the field map once avoids retaining its earlier backing arrays between string
+and metadata allocations. Returned strings still belong to the request arena.

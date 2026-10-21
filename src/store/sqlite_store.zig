@@ -522,6 +522,7 @@ pub const SqliteStore = struct {
 
 /// Column order is fixed: `mapJobRow` reads by index.
 const job_history_select = "SELECT job_id, user, filename, status, start_time, end_time, print_duration, total_duration, filament_used, metadata, auxiliary_data FROM job_history";
+const job_history_field_count = 11;
 
 /// `job_history.job_id` for a hex job key. A sign or a value above the
 /// INTEGER range names no row.
@@ -563,6 +564,7 @@ fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!?MappedJob {
     // Unsigned 6-hex like phobos's own keys; signed formatting would emit a sign.
     const jid = std.math.cast(u64, c.sqlite3_column_int64(stmt, 0)) orelse return null;
     var job: json.ObjectMap = .empty;
+    try job.ensureTotalCapacity(arena, job_history_field_count);
     try job.put(arena, "filename", .{ .string = try colText(arena, stmt, 2) });
     try job.put(arena, "status", .{ .string = try colText(arena, stmt, 3) });
     try job.put(arena, "user", .{ .string = try colText(arena, stmt, 1) });
@@ -797,6 +799,34 @@ test "SqliteStore history pages preserve namespace ordering overrides and filter
     try testing.expectEqualStrings(try json.Stringify.valueAlloc(a, try history.handleList(&fallback, .null, a), .{}), try json.Stringify.valueAlloc(a, try history.handleList(&ctx, .null, a), .{}));
     try s.execSql("INSERT INTO namespace_store VALUES ('history','000005',x'7b00');");
     try testing.expectError(Error.BackendError, history.handleList(&ctx, .null, a));
+}
+
+test "SqliteStore legacy history rows reserve their known fields" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try createJobHistory(&s);
+    try s.execSql(
+        \\DELETE FROM job_history;
+        \\WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<200)
+        \\INSERT INTO job_history SELECT id,'me','fixture.gcode','completed',100.0,NULL,
+        \\ 90.0,100.0,42.5,'{"payload":"kept"}','[]','default' FROM ids;
+    );
+    var tracked = testing.FailingAllocator.init(testing.allocator, .{});
+    var response = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer response.deinit();
+    const page = (try s.getHistoryPage(response.allocator(), .{ .limit = 0, .start = 0, .ascending = false })).?;
+    try testing.expectEqual(@as(usize, 200), page.len);
+    for (page, 0..) |job, index| {
+        var key: [16]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&key, "{X:0>6}", .{200 - index}), job.key);
+        try testing.expectEqual(@as(usize, 11), job.val.object.count());
+        try testing.expectEqualStrings("fixture.gcode", job.val.object.get("filename").?.string);
+        try testing.expectEqualStrings("kept", job.val.object.get("metadata").?.object.get("payload").?.string);
+        try testing.expect(job.val.object.get("end_time").? == .null);
+    }
+    const retained = tracked.allocated_bytes - tracked.freed_bytes;
+    std.debug.print("legacy history rows retained request storage: {d} bytes\n", .{retained});
+    try testing.expect(retained < 768 * 1024);
 }
 
 test "SqliteStore history page key indexes retain scalar IDs" {

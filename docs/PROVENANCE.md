@@ -1283,3 +1283,18 @@ changing authentication or deadlines. Debug and ReleaseSafe each pass 1,728
 tests, one existing real-Klippy skip, zero failures and 326 fuzz harnesses.
 The interrupted timeout's cause remains unconfirmed. Matched portable and
 Cortex-A7 ReleaseSmall binaries are frozen for the subsequent measurements.
+
+## 2026-10-21: tuning round 3, reserve legacy row fields
+
+Second resumed round requested by the user. `mapJobRow` now reserves its 11
+known fields through `ObjectMap.ensureTotalCapacity` before allocating column
+strings and metadata. No field, ownership rule or SQLite operation changes.
+The 200-row regression checks all IDs, field counts, payloads and SQL nulls.
+Its 768 KiB budget fails before the change at 858,758 bytes and passes afterward
+at 517,988 bytes. Existing page allocation-failure injection and the differential
+fuzzer cover the new reservation failure.
+
+Debug and ReleaseSafe each pass 1,729 tests, one real-Klippy skip, zero failures
+and 326 fuzz harnesses. Portable and Cortex-A7 ReleaseSmall builds complete.
+Formatting and diff checks pass. Matched timing measurements follow this
+verified source commit; production remains unchanged.
