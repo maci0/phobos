@@ -45,6 +45,11 @@ case "$COMMAND" in
     sleep)
         exec /usr/bin/sleep 0.01
         ;;
+    sudo)
+        [[ $1 == -n ]] || exit 1
+        shift
+        exec "$@"
+        ;;
     vegeta)
         [[ ${PERF_FAKE_LOAD_FAIL:-0} == 0 ]] || exit 43
         if [[ $1 == attack ]]; then
@@ -105,7 +110,7 @@ PERF_REAL_UV=$(command -v uv)
 PERF_FAKE_PIDS="$ROOT/$TEST_DIR/pids"
 export PERF_FAKE_SCRIPT PERF_REAL_UV PERF_FAKE_PIDS
 mkdir "$TEST_DIR/bin"
-for name in zig phobos uv curl sleep vegeta perf bpftrace stackcollapse-bpftrace.pl stackcollapse-perf.pl flamegraph.pl; do
+for name in zig phobos uv curl sleep sudo vegeta perf bpftrace stackcollapse-bpftrace.pl stackcollapse-perf.pl flamegraph.pl; do
     ln -s "$PERF_FAKE_SCRIPT" "$TEST_DIR/bin/$name"
 done
 export PATH="$ROOT/$TEST_DIR/bin:$PATH"
@@ -135,6 +140,8 @@ PROFILE_DIR=$(awk '$1 == "captures:" {print $2}' "$TEST_DIR/profile.log")
 [[ -s "$PROFILE_DIR/flamegraph.svg" && -f "$PROFILE_DIR/phobos.perf" ]]
 [[ -s "$PROFILE_DIR/report.txt" && -s "$PROFILE_DIR/folded.txt" && -s "$PROFILE_DIR/stacks.txt" ]]
 jq -e '.success == 1 and .requests == 12' "$PROFILE_DIR/vegeta.json" >/dev/null
+check_cleanup
+PERF_SUDO=1 PERF_FAKE_SUCCESS=1 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/perf-sudo.log"
 check_cleanup
 USE_BPFTRACE=1 PERF_FAKE_SUCCESS=1 bash tools/perf_harness/profile.sh /server/info 1 1 > "$TEST_DIR/bpf.log"
 check_cleanup

@@ -1131,3 +1131,10 @@ cleanup and the probe stopped. Production phobos stayed ready on 7125 and the
 boot ID was unchanged. `/proc/config.gz` reports `CONFIG_PERF_EVENTS` disabled,
 so hardware comparisons use process CPU/RSS counters; resolved CPU sampling is
 performed on the host. Final matched load measurements follow these fixes.
+
+The host permits self-launched user-cycle counters but restricts attachment to
+another process. `PERF_SUDO=1` therefore elevates only perf collection/decoding;
+the owned server and generator keep the caller's identity. No host profiling
+sysctl or capability was changed. The helper documents this mode and its smoke
+fixture uses a sudo command double to check argument forwarding and cleanup.
+ShellCheck and the complete helper smoke suite pass with the new mode.

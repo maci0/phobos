@@ -9,6 +9,8 @@ RATE=${2:-4000}
 SECONDS_TO_SAMPLE=${3:-10}
 PORT=${PHOBOS_PERF_PORT:-7141}
 FLAMEGRAPH=${FLAMEGRAPH_DIR:-$HOME/FlameGraph}
+PERF_COMMAND=(perf)
+if [[ ${PERF_SUDO:-0} == 1 ]]; then PERF_COMMAND=(sudo -n perf); fi
 [[ "$ENDPOINT" == /* && "$ENDPOINT" != *$'\n'* && "$ENDPOINT" != *$'\r'* ]] || { echo 'endpoint must be a single absolute URL path' >&2; exit 1; }
 [[ "$SECONDS_TO_SAMPLE" =~ ^[1-9][0-9]*$ ]] || { echo 'seconds must be a positive integer' >&2; exit 1; }
 [[ -x "$FLAMEGRAPH/flamegraph.pl" ]] || { echo "FlameGraph not found at $FLAMEGRAPH" >&2; exit 1; }
@@ -39,7 +41,7 @@ if [[ ${USE_BPFTRACE:-0} == 1 ]]; then
         [[ $result == 124 ]] || exit "$result"
     fi
 else
-    perf record -e cycles:u -g --call-graph=fp -F 1999 -o "$PERF_RUN/phobos.perf" -p "$SERVER_PID" -- sleep "$SECONDS_TO_SAMPLE"
+    "${PERF_COMMAND[@]}" record -e cycles:u -g --call-graph=fp -F 1999 -o "$PERF_RUN/phobos.perf" -p "$SERVER_PID" -- sleep "$SECONDS_TO_SAMPLE"
 fi
 load_status=0
 wait "$LOAD_PID" || load_status=$?
@@ -53,8 +55,8 @@ if [[ ${USE_BPFTRACE:-0} == 1 ]]; then
         tee "$PERF_RUN/folded.txt" |
         "$FLAMEGRAPH/flamegraph.pl" --title "phobos $ENDPOINT" --colors java > "$OUTPUT"
 else
-    perf report -i "$PERF_RUN/phobos.perf" --stdio --no-children --call-graph=none > "$PERF_RUN/report.txt"
-    perf script -i "$PERF_RUN/phobos.perf" |
+    "${PERF_COMMAND[@]}" report -i "$PERF_RUN/phobos.perf" --stdio --no-children --call-graph=none > "$PERF_RUN/report.txt"
+    "${PERF_COMMAND[@]}" script -i "$PERF_RUN/phobos.perf" |
         tee "$PERF_RUN/stacks.txt" |
         "$FLAMEGRAPH/stackcollapse-perf.pl" |
         tee "$PERF_RUN/folded.txt" |

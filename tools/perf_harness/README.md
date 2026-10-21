@@ -51,6 +51,9 @@ process to finish and rejects failed or empty request sets. The capture includes
 the Vegeta JSON report, folded stacks and, with perf, raw stacks and a flat CPU
 report. Perf samples user-space cycles; frame-pointer profiling changes code
 generation and is separate from uninstrumented latency/CPU comparisons.
+`PERF_SUDO=1` runs only counter collection/decoding through `sudo -n`, keeping
+the server and load generator under the caller's identity when attachment is
+restricted. The default invokes perf directly.
 `loadtest.sh` keeps its binary capture below `.scratch/load-*/`; its
 label is display text, not a filename.
 
