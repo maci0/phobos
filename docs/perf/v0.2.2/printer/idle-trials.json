@@ -1,0 +1,62 @@
+[
+  {
+    "backend": "phobos",
+    "repetition": 1,
+    "rss_kib_median": 3096,
+    "rss_kib_min": 3096,
+    "rss_kib_max": 3096,
+    "cpu_percent_one_core": 0.24549918166878634,
+    "observed_seconds": 12.220000000030268,
+    "sample_count": 45
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "rss_kib_median": 33048,
+    "rss_kib_min": 33048,
+    "rss_kib_max": 33056,
+    "cpu_percent_one_core": 1.963993453359646,
+    "observed_seconds": 12.21999999997206,
+    "sample_count": 45
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "rss_kib_median": 36696.0,
+    "rss_kib_min": 36696,
+    "rss_kib_max": 36704,
+    "cpu_percent_one_core": 1.7573221757305055,
+    "observed_seconds": 11.950000000011642,
+    "sample_count": 44
+  },
+  {
+    "backend": "phobos",
+    "repetition": 2,
+    "rss_kib_median": 3016.0,
+    "rss_kib_min": 3016,
+    "rss_kib_max": 3016,
+    "cpu_percent_one_core": 0.2508361204008983,
+    "observed_seconds": 11.960000000020955,
+    "sample_count": 44
+  },
+  {
+    "backend": "phobos",
+    "repetition": 3,
+    "rss_kib_median": 3044,
+    "rss_kib_min": 3044,
+    "rss_kib_max": 3044,
+    "cpu_percent_one_core": 0.3273322422266077,
+    "observed_seconds": 12.21999999997206,
+    "sample_count": 45
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "rss_kib_median": 36788,
+    "rss_kib_min": 36788,
+    "rss_kib_max": 36788,
+    "cpu_percent_one_core": 1.883701883707631,
+    "observed_seconds": 12.209999999962747,
+    "sample_count": 45
+  }
+]

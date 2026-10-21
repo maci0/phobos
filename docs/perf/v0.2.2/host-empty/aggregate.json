@@ -1,0 +1,118 @@
+[
+  {
+    "backend": "phobos",
+    "workload": "info-5000",
+    "cpu_us_per_request_lower_better": {
+      "median": 10.0,
+      "min": 9.999999999999998,
+      "max": 10.5
+    },
+    "cpu_percent_one_core_lower_at_matched_rate_better": {
+      "median": 4.981527076616973,
+      "min": 4.981097986504544,
+      "max": 5.230039189318006
+    },
+    "rss_kib_lower_better": {
+      "median": 10352,
+      "min": 6232,
+      "max": 12276
+    },
+    "p99_ms_lower_better": {
+      "median": 0.35753,
+      "min": 0.301605,
+      "max": 0.548304
+    },
+    "throughput_rps_higher_better": {
+      "median": 5000.1335435666815,
+      "min": 5000.103377762348,
+      "max": 5000.663754352272
+    }
+  },
+  {
+    "backend": "moonraker",
+    "workload": "info-5000",
+    "cpu_us_per_request_lower_better": {
+      "median": 95.75957595759577,
+      "min": 93.5,
+      "max": 102.0
+    },
+    "cpu_percent_one_core_lower_at_matched_rate_better": {
+      "median": 47.702390872350136,
+      "min": 46.583906003071455,
+      "max": 50.68124766068875
+    },
+    "rss_kib_lower_better": {
+      "median": 53964,
+      "min": 53704,
+      "max": 54080
+    },
+    "p99_ms_lower_better": {
+      "median": 1.343965,
+      "min": 1.022493,
+      "max": 1.776892
+    },
+    "throughput_rps_higher_better": {
+      "median": 4999.988253852977,
+      "min": 4999.909118526918,
+      "max": 5000.055225609967
+    }
+  },
+  {
+    "backend": "phobos",
+    "workload": "independent-1200",
+    "cpu_us_per_request_lower_better": {
+      "median": 30.208333333333332,
+      "min": 25.000000000000007,
+      "max": 32.291666666666664
+    },
+    "cpu_percent_one_core_lower_at_matched_rate_better": {
+      "median": 3.61172425648381,
+      "min": 2.9892930394975035,
+      "max": 3.859361422242905
+    },
+    "rss_kib_lower_better": {
+      "median": 10312,
+      "min": 6364,
+      "max": 12368
+    },
+    "p99_ms_lower_better": {
+      "median": 0.926878,
+      "min": 0.321774,
+      "max": 1.790969
+    },
+    "throughput_rps_higher_better": {
+      "median": 1200.0795295704445,
+      "min": 1199.4578371112175,
+      "max": 1200.1261371574253
+    }
+  },
+  {
+    "backend": "moonraker",
+    "workload": "independent-1200",
+    "cpu_us_per_request_lower_better": {
+      "median": 191.66666666666666,
+      "min": 173.95833333333334,
+      "max": 206.24999999999994
+    },
+    "cpu_percent_one_core_lower_at_matched_rate_better": {
+      "median": 22.872576649618644,
+      "min": 20.80332673009172,
+      "max": 24.590057710377824
+    },
+    "rss_kib_lower_better": {
+      "median": 54016,
+      "min": 53784,
+      "max": 54044
+    },
+    "p99_ms_lower_better": {
+      "median": 1.569324,
+      "min": 0.567874,
+      "max": 2.127744
+    },
+    "throughput_rps_higher_better": {
+      "median": 1200.064084622183,
+      "min": 1200.0526329584225,
+      "max": 1200.082993989605
+    }
+  }
+]

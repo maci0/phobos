@@ -1,0 +1,54 @@
+{
+  "source_commit": "b079b773823c0d655823f91c1d08f0f96a67ad39",
+  "package_version": "0.2.2",
+  "release_tag": "v0.2.2",
+  "build_mode": "ReleaseSmall",
+  "timestamp_utc": "2026-10-21T14:42:18Z",
+  "binary_sha256": {
+    "phobos": "94737315462468de6ec1fa54cb86c46c4127f5918b452c532c0311606ed56290"
+  },
+  "seed_sha256": "efb48c2e2a3606d18a55ba8d96e546e283926a3432ae5449d053135dff175079",
+  "clock_ticks_per_second": 100,
+  "process_sample_period_seconds": 0.25,
+  "duration_seconds": 8,
+  "repetitions": 3,
+  "idle_seconds": 8,
+  "memory_floor_kib": 16384,
+  "workers": 2,
+  "maximum_workers": 8,
+  "connections": 8,
+  "request_timeout_seconds": 3,
+  "transport": "host Vegeta through SSH forwarding and WiFi to printer loopback; latency includes transport and host scheduling",
+  "config": "[server]\nhost : 127.0.0.1\nport : 7126\nklippy_uds_address : /tmp/uds\n\n[machine]\nprovider : simple\nvalidate_service : false\nvalidate_config : false\n\n[file_manager]\nfile_system_observer : none\n\n[authorization]\nenable_api_key : false\ntrusted_clients : 127.0.0.1\n\n[history]\n\n[announcements]\ndev_mode : true\n\n[job_queue]\nload_on_startup : false\nautomatic_transition : false\n\n",
+  "moonraker_entry_sha256": "c0111c255c60b3465798e4abf70de4492e1b16e016cebffe51c252a9cec94116",
+  "moonraker_history_sha256": "09c78f73a5714a67a26b9bc9fc47b0e8f62f6588b7dbe1c8d9e78623aa355c20",
+  "moonraker_database_sha256": "a76d7bf63d2574ba2b358acb405168d74cfafd56adab17ed429c911b625bd0bf",
+  "firmware": "Forge-X 1.4.2, VERSION_ID 1.4.2-6966333",
+  "kernel": "Linux 5.4.61",
+  "cpu": "two Cortex-A7 cores",
+  "ram_kib": 110404,
+  "production_pid": 29180,
+  "production_version": "0.2.2",
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "perf_events": "CONFIG_PERF_EVENTS disabled in printer kernel",
+  "server_order": [
+    [
+      "phobos",
+      "moonraker"
+    ],
+    [
+      "moonraker",
+      "phobos"
+    ],
+    [
+      "phobos",
+      "moonraker"
+    ]
+  ],
+  "fixture_history_jobs": 266,
+  "phobos_binary_bytes": 2629960,
+  "preflight": "Seven endpoint reads and four history cases run before idle sampling for each process.",
+  "moonraker_python": "Python 3.11.10",
+  "zig_version": "0.17.0",
+  "phobos_sqlite_version": "3.54.1"
+}

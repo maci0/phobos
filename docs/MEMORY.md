@@ -1,219 +1,110 @@
 # Memory footprint
 
-Measured 2026-10-21 alongside [the load comparisons](PERFORMANCE.md).
-Host capture: `a6a3aef`. Final Cortex-A7 capture: `f34d601`. Earlier phobos is
-`39386ca`, already including lazy temperature rings. All use static musl
-ReleaseSmall builds with SQLite 3.54.1. The file backend remains available
-but is not measured in this study and does not remove linked SQLite code.
+Current comparison: **phobos v0.2.2 versus Moonraker**, measured 2026-10-21
+with the published static musl ReleaseSmall assets. The
+[performance report](PERFORMANCE.md) gives matched workloads, rates, repetition
+order, exact versions and capture limits. These tables and graphics contain
+only v0.2.2 and Moonraker.
 
-**Lower RSS is better:** it leaves RAM for Klippy and other services.
-KiB means 1,024 bytes. RSS is resident pages, not total allocated bytes or
-private memory. The tables report the maximum sampled load RSS across all
-trials, not an instantaneous allocation peak. Worker pools and prior workloads
-can leave resident pages behind; a lower arena allocation need not lower RSS
-by the same amount.
+**Lower RSS is better.** KiB means 1,024 bytes. RSS measures resident pages,
+not total allocations or private memory. Idle values are medians of three
+fresh-process trial medians, with their min/max range. Load tables give the
+largest sampled RSS across every workload and repetition; plots give each
+workload's median trial maximum with min/max whiskers. Samples can miss brief
+peaks. Worker pools and earlier workloads can leave pages resident.
 
 ## Cortex-A7 printer
 
-Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores and 110,404 KiB RAM.
-The final executable is 2,630,600 bytes, SHA256
-`c3afd1bcdb905ccb2661689d2e1762550c4dc67fa3670ecfd61bf0c5388cb755`.
-Probes run sequentially on loopback 7126 using identical copied inputs and
-common core configuration. Production v0.2.1 stays running on 7125. This is
-the actual Forge-X Moonraker daemon, not an estimated Python baseline.
-
-| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
-| --- | ---: | ---: | ---: |
-| Earlier phobos | 3,268 (3,244 to 3,280) | 4,792 | 15 |
-| Optimized phobos | 3,028 (3,012 to 3,040) | 3,532 | 16 |
-| Moonraker | 36,980 (36,456 to 37,080) | 37,080 | 5 |
-
-↓ Lower is better. Optimized phobos uses less idle and sampled load RSS than
-Moonraker in this fixture. Earlier and optimized phobos are much closer;
-their [trial ranges](perf/history-memory-20261021/printer/idle-trials.json)
-and per-workload peaks accompany the report. The common config omits optional
-update remotes and differs from production, so this is not an all-components
+Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores, 110,404 KiB RAM.
+The official Cortex-A7 asset is 2,629,960 bytes,
+SHA256 `94737315462468de6ec1fa54cb86c46c4127f5918b452c532c0311606ed56290`.
+The reference is the actual Forge-X Moonraker on Python 3.11.10. Each private
+probe uses loopback 7126, the same minimal core config and its own copy of the
+266-job seed plus a 64 KiB record. Production v0.2.2 stays on 7125. The probe
+config has fewer components than production; this is not an all-components
 memory guarantee.
 
-There are three fresh-process repetitions per backend, 45 eight-second read
-trials, and about 250 ms process/board samples. Each idle phase has eight
-one-second sleeps plus guard/read overhead; its actual observed duration is
-stored with the samples. No probe reported swapped pages. Board swap existed
-before testing and its free space varied from
-0 to 232 KiB;
-zero probe VmSwap does not mean the board did no swapping. Available board
-memory stayed at or above 34,268 KiB, above the
-16 MiB stop guard.
+| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
+| --- | ---: | ---: | ---: |
+| phobos v0.2.2 | 3,044 (3,016 to 3,096) | 3,500 | 14 |
+| Moonraker | 36,696 (33,048 to 36,788) | 36,816 | 4 |
 
-![Printer resident memory](perf/history-memory-20261021/printer/memory.png)
+![Forge-X RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/printer/memory.png)
 
-[Environment and binary hashes](perf/history-memory-20261021/printer/environment.json),
-[all measured trials](perf/history-memory-20261021/printer/all-trials.json)
-and [board memory limits](perf/history-memory-20261021/printer/board-memory.json)
-record the inputs and counters. All probes stopped; production PID, binary,
-boot ID, Klippy readiness and zero heater targets were preserved.
+Thirty eight-second load trials and six idle windows use roughly 250 ms RSS
+and board samples. MemAvailable stayed at or above
+23,960 KiB, with a 16 MiB stop guard. Maximum probe
+VmSwap was 0 KiB. Existing board SwapFree ranged
+from 3,072 to 11,552
+KiB; production VmSwap ranged from 0 to
+428 KiB. A zero probe VmSwap does not establish
+that the board avoided swapping. Swap settings were unchanged.
 
-After probe shutdown, eight production read checks passed with 62,040 KiB
-available board memory. Production phobos had 2,712 KiB RSS and 1,192 KiB
-VmSwap. The comparison therefore does not claim that production stayed fully
-resident. Swap controls were unchanged. The
-[final state record](perf/history-memory-20261021/printer/final-state.json)
-contains those counters and checks without response payloads.
+[Idle trials](perf/v0.2.2/printer/idle-trials.json),
+[all load trials](perf/v0.2.2/printer/summary.json),
+[environment](perf/v0.2.2/printer/environment.json) and
+[board limits](perf/v0.2.2/printer/board-memory.json) retain the observations.
+After cleanup production remains PID 29180, ready, standby,
+both heater targets zero, with its release hash and boot ID unchanged.
+[Final state](perf/v0.2.2/printer/final-state.json) records production RSS and
+swap separately from the probes. No long-soak or reboot-persistence test is
+claimed.
 
-## Host optimization capture
+## x86-64 host, populated history
 
-Ryzen 9 9950X, CachyOS x86-64, Linux 7.2.10. The portable optimized binary is
-2,751,768 bytes, SHA256
-`8294a0b8341a47865948493f4060da555e20312bc5af9ff98729284041c160ab`.
-Pinned Moonraker runs on Python 3.12.12 against the same Klippy stub, copied
-266-job database and synthetic 64 KiB record. The later nullable-time fix is
-not in this host capture.
+Ryzen 9 9950X, CachyOS Linux 7.2.10, pinned server/generator/stub affinity on
+a shared desktop. The official x86-64 asset is 2,751,384 bytes, SHA256
+`f81657748202cec356e841b7409371de4d74104cdac95e39c99c2a739079022d`.
+Moonraker pin `900848584374` runs on Python 3.12.12. Both backends use the same
+stub and copied 266-job seed plus 64 KiB record.
 
 | Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
 | --- | ---: | ---: | ---: |
-| Earlier phobos | 6,172 (4,180 to 6,208) | 11,020 | 18 |
-| Optimized phobos | 6,252 (6,252 to 8,308) | 9,536 | 19 |
-| Moonraker | 54,024 (53,940 to 54,168) | 55,624 | 5 |
+| phobos v0.2.2 | 6,400 (4,372 to 8,396) | 13,296 | 18 |
+| Moonraker | 55,076 (55,060 to 55,152) | 56,176 | 5 |
 
-The host had external CPU contention. RSS also varies with worker allocation
-and workload order: the earlier same-binary adaptive-worker control ranged
-from 9,692 to 32,024 KiB under load. That control used a different rate and
-worker bound; it is not an uncertainty estimate for this table. The fixed
-eight-worker final host run retains all favorable and unfavorable measurements.
-[PERFORMANCE.md](PERFORMANCE.md) records the empty-history CPU regression and
-why an isolated-host verdict remains unavailable.
+![Populated host RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/host-rich/memory.png)
 
-![Host resident memory](perf/history-memory-20261021/host/memory.png)
+## x86-64 host, empty history
 
-The [idle trials](perf/history-memory-20261021/host/idle-trials.json) and
-[complete trial records](perf/history-memory-20261021/host/all-trials.json)
-retain ranges. No file-backend or long-soak comparison was made here.
-The older release's file-backend idle result remains in the
-[historical v0.2.1 capture](perf/host-v0.2.1/phobos-file/idle.json).
+Same setup, independent fresh databases with the same 64 KiB record.
 
-## Reservations and ownership
+| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
+| --- | ---: | ---: | ---: |
+| phobos v0.2.2 | 7,932 (5,924 to 12,000) | 12,368 | 18 |
+| Moonraker | 53,776 (53,528 to 53,808) | 54,080 | 5 |
 
-`VmSize` and `VmData` include reserved address space; RSS counts resident
-pages. Background workers use bounded stack reservations, and the 32-bit
-daemon owns a threaded I/O backend with 1 MiB handler stacks. Those are
-implementation settings, not fresh measurements of every mapping.
-Request arenas are freed on return, but long-lived component state, SQLite
-pages and the connection worker pool can remain resident after load.
+![Empty-history host RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/host-empty/memory.png)
 
-`scripts/measure-memory.sh [port]` provides a separate, minimal idle
-ReleaseSmall fixture with no Klippy connection and a bare Python baseline.
-It uses an isolated scratch prefix and stops only its own process. Its
-configuration differs from the connected measurements above; do not compare
-those values as a storage-only change. Never point measurement helpers at a
-live printer database.
+Host sampling is about 100 ms. Each fixture has three fresh-process starts
+per backend and five-second idle windows. Full idle ranges and per-workload
+load maxima are retained with the
+[populated](perf/v0.2.2/host-rich/idle-trials.json) and
+[empty](perf/v0.2.2/host-empty/idle-trials.json) captures. Shared-host scheduling,
+connection worker allocation and workload order contribute to RSS variation;
+one low sample is not a memory guarantee.
 
-## Temperature-store allocation review
+## Allocation and ownership limits
 
-The post-v0.2.1 temperature store allocates optional target, power and speed
-rings only when Klippy reports those fields. Each ring retains the configured
-1,200-sample capacity. A late field still starts its own history, and omitted
-fields retain their last reading. Responses allocate JSON arrays at their final
-length and read the deque directly, avoiding a scratch copy and array growth
-inside the request arena.
+`VmSize` includes reserved address space and is not RSS. Thread stacks reserve
+bounded space; request arenas free their contents on return. Long-lived
+component state, SQLite pages and connection workers can remain resident.
+Temperature rings allocate only reported fields, retaining the configured
+1,200-sample bound. Ordinary unfiltered history pages select scalar IDs before
+decoding records, reuse one scoped legacy statement, and own returned strings.
+Filtered and unlimited history can still decode the full namespace, and the
+scalar ID index grows with job count. These mechanisms do not imply a fixed
+RSS reduction for every workload.
 
-The allocation regressions use the same inputs and `std.testing.FailingAllocator`
-before and after the change on x86-64. These are requested/retained allocation
-bytes, not process RSS or printer-wide RAM:
+The file backend remains available but is not measured here and still links
+SQLite. `scripts/measure-memory.sh [port]` is a separate minimal idle fixture
+without Klippy and uses a bare Python baseline. Its outputs are not comparable
+to these connected-daemon measurements. Never point a measurement helper at
+the live printer database. The [harness](../tools/perf_harness/README.md) and
+[performance report](PERFORMANCE.md#reproduce-and-limits) describe reproduction.
 
-| Measurement | Before bytes ↓ | After bytes ↓ |
-| --- | ---: | ---: |
-| New plain sensor, including its map entry | 39,909 | 11,109 |
-| Arena retained by one full 1,200-value response | 135,816 | 100,872 |
-
-↓ Lower is better. The configured Forge-X reports two heaters with temperature,
-target and power, and two plain temperature sensors. Allocating only those eight
-fields removes eight unused rings: `8 × 1,200 × 8 = 76,800` bytes (75 KiB).
-That is a ring-payload calculation, not an asserted RSS reduction. The tests
-check a wrapped full window, late fields and unused buffers; the bounded sampler
-fuzzer also checks that an unreported speed field has no allocation.
-
-A private Cortex-A7 ReleaseSmall baseline/candidate pair used the same settings
-and separate copies of the existing probe database on loopback port 7126.
-Twenty-one `/proc` samples covered 20 seconds after Klippy became ready. Median
-RSS over the last ten samples was 2,984 KiB for the published v0.2.1 baseline
-and 2,712 KiB for the candidate (lower is better). Both returned the four expected
-sensor field sets and added about 20 samples per field. Directory capacity also
-passed. This single short pair is not a soak or a general RSS guarantee; a full
-1,200-sample response was checked in the unit suite. Exact hashes, samples,
-field counts and final printer state are in the
-[capture summary](perf/temperature-memory-20261021.json). Both probes stopped;
-production v0.2.1 on 7125 and the board boot ID were unchanged.
-
-The local MISRA-Zig handbook's allocator and resource rules (Dir 4.12,
-Dir 4.14, 21.3, 22.1 and 22.2) support explicit owners, bounded inputs,
-matching frees and allocation-failure checks. They do not forbid dynamic
-allocation in this daemon. A later checkout of the local checker compiled with
-Zig 0.17 and scanned all 80 source files: 2,342 syntax findings, including test
-code. These are review inputs, not confirmed defects or a compliance result.
-The memory review distinguishes request-arena cleanup, ownership transfer and
-streaming file copies from actual leaks or unlimited allocation. Bounded JSON
-recursion remains a deliberate difference from the handbook's no-recursion
-rule. No blanket suppressions or mechanical rewrites were applied.
-
-## History pages and SQLite reads
-
-Unfiltered SQLite history pages now select and order scalar job IDs before
-decoding the requested records. KV records still override migrated table rows.
-Noncanonical keys, non-object records and time-filtered queries use the existing
-namespace implementation, as does the file backend. Their ordering, offset,
-limit and error behavior remains covered against that implementation.
-
-SQLite JSON reads also decode the current column directly, before the statement
-is finalized. The JSON value owns its strings, so retaining a second encoded
-record is unnecessary. A regression overwrites the database record after the
-read and verifies that the returned payload remains intact.
-
-| Native allocation fixture | Before retained bytes ↓ | After retained bytes ↓ |
-| --- | ---: | ---: |
-| 20-job page from 200 KV jobs, 4 KiB metadata each | 1,396,192 | 235,146 to 235,578 |
-| Read one 64 KiB JSON payload | 393,638 | 149,834 |
-
-These are x86-64 request-arena allocations measured with
-`std.testing.FailingAllocator`, not process RSS. Both fixtures failed their
-allocation budgets before the change. Pagination tests compare the real history
-handler with the namespace path, including overrides, filters, unusual keys,
-negative/large offsets and unlimited requests. Allocation-failure injection and
-a bounded differential fuzzer cover the optimized store operation.
-
-KV syntax checks use `std.json.validate` on actual rows. Empty or migrated-only
-history does not prepare a SQL JSON-validation expression. Scalar ID storage
-still grows with total job count; filtered and unlimited responses can still
-decode the full history. These changes reduce ordinary page cost without
-changing the API's unlimited-query behavior.
-
-The copied printer history also exposed nullable SQL end times being read as
-zero. The row mapper now preserves `NULL`, which also lets the existing `before`
-filter exclude unfinished rows correctly. The final ARM probe matches Forge-X
-Moonraker for all 266 copied jobs, seven null end times, both page orders,
-offsets, time filters and a single unfinished job. The
-[parity record](perf/history-memory-20261021/nullable-history-parity.json)
-contains counts and response hashes without publishing job data.
-
-The subsequent page reader reuses one legacy-row statement within a request.
-Each row is decoded into the request arena before the statement is reset, and
-the statement is finalized on return. KV overrides and namespace fallbacks are
-preserved. No statement cache or additional long-lived state is introduced.
-
-Canonical KV history keys are retained as scalar IDs and a source flag while
-sorting. Only selected keys are formatted into the response arena. A 20-row
-page from 1,028 empty KV jobs retains 95,326 bytes instead of 186,830 on
-x86-64, measured with `std.testing.FailingAllocator`. Zero and the complete
-unsigned 64-bit ID range keep their existing ordering and formatting.
-
-Legacy SQLite rows reserve their 11 JSON fields before copying column data.
-The 200-row fixture retains 517,988 bytes instead of 858,758 on x86-64. Reserving
-the field map once avoids retaining its earlier backing arrays between string
-and metadata allocations. Returned strings still belong to the request arena.
-
-The page reader also uses SQLite's namespace/key index to exclude overridden
-legacy IDs when KV jobs exist. It no longer builds a second in-memory hash map
-of the same IDs. Legacy-only pages retain their simpler ID query. The key-index
-fixture above falls further to 43,992 retained bytes. `%06llX` preserves the
-full signed legacy ID range; KV-only IDs still support unsigned 64-bit values.
-The [matched tuning report](PERFORMANCE.md#further-history-tuning-2026-10-21)
-records host and physical measurements, including timing and RSS regressions.
+Historical [temperature allocations](perf/temperature-memory-20261021.json),
+[history arena/tuning results](perf/history-tuning-20261021/summary.json) and
+[earlier process captures](perf/history-memory-20261021/printer/aggregate.json)
+remain archived, with favorable and unfavorable results intact. They are not
+current v0.2.2-versus-Moonraker measurements and are excluded from these graphics.

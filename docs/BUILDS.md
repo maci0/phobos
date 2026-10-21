@@ -34,13 +34,21 @@ ELF format and build target, without running foreign binaries or proving that
 every optional kernel interface exists on a board. Hardware measurements and
 their exact kernels are recorded separately in [PERFORMANCE.md](PERFORMANCE.md).
 
-For v0.2.1, all five ARM32 assets passed startup, real Klippy object queries,
-copied SQLite history/float-value comparisons and directory-stat checks inside
+For v0.2.2, all seven downloaded release assets pass ELF/ABI/static-link and
+checksum validation. Native x86-64 and AArch64 CI run the complete suites and
+release-asset smoke checks. The published Cortex-A7 asset passed real Klippy
+queries, copied-history/float comparisons, directory capacity and WebSocket
+reads, and is installed on the Forge-X printer. Current
+[benchmarks](PERFORMANCE.md) compare that asset and the published x86-64 asset
+against Moonraker. Other physical printer models are not certified.
+
+For the archived v0.2.1 release, all five ARM32 assets passed startup, real
+Klippy object queries, copied SQLite history/float comparisons and directory-stat checks inside
 the Forge-X 1.4.2 chroot on Cortex-A7/Linux 5.4.61. The
 [smoke record](perf/arm32-smoke-v0.2.1.json) identifies the exact asset hashes.
 Running the ARMv6 asset on ARMv7 does not certify native ARMv6 hardware.
-The x86-64 asset was executed in the host benchmark. AArch64 was built and
-ELF-checked without execution on 64-bit ARM hardware.
+The v0.2.1 AArch64 asset was built and ELF-checked without execution; current
+native AArch64 CI is a separate validation, not a physical-printer test.
 
 ## Soft, softfp and hardfp
 

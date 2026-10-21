@@ -1,0 +1,91 @@
+{
+  "source_commit": "b079b773823c0d655823f91c1d08f0f96a67ad39",
+  "mode": "fixed",
+  "maximum_load_workers": 8,
+  "package_version": "0.2.2",
+  "release_tag": "v0.2.2",
+  "build_mode": "ReleaseSmall",
+  "binaries": {
+    "phobos": {
+      "sha256": "f81657748202cec356e841b7409371de4d74104cdac95e39c99c2a739079022d",
+      "bytes": 2751384
+    }
+  },
+  "seed_sha256": "efb48c2e2a3606d18a55ba8d96e546e283926a3432ae5449d053135dff175079",
+  "moonraker_commit": "9008485843740c93e0154ccbdac1fc2b02b03aaa",
+  "moonraker_python": "Python 3.12.12",
+  "uname": [
+    "Linux",
+    "speedy3.lan",
+    "7.2.10-1-cachyos",
+    "#1 SMP PREEMPT_DYNAMIC Wed, 14 Oct 2026 07:02:02 +0000",
+    "x86_64"
+  ],
+  "ticks": 100,
+  "server_cpus": [
+    2,
+    4
+  ],
+  "load_cpus": [
+    8,
+    10
+  ],
+  "stub_cpu": [
+    6
+  ],
+  "controller_cpus": [
+    12,
+    14
+  ],
+  "duration_seconds": 8,
+  "repetitions": 3,
+  "warmup_seconds": 2,
+  "idle_seconds": 5,
+  "server_order": [
+    [
+      "phobos",
+      "moonraker"
+    ],
+    [
+      "moonraker",
+      "phobos"
+    ],
+    [
+      "phobos",
+      "moonraker"
+    ]
+  ],
+  "vegeta": "Version: 12.13.0\nCommit: 507c4f0\nRuntime: go1.25.5 X:nodwarf5 linux/amd64\nDate: NOTSET",
+  "timestamp_utc": "2026-10-21T14:34:33Z",
+  "fixture": "rich",
+  "fixture_history_jobs": 266,
+  "config": "[server]\nhost: 127.0.0.1\nport: 17413\nklippy_uds_address: <owned-stub-socket>\n[machine]\nprovider: none\n[authorization]\ntrusted_clients: 127.0.0.1\n[announcements]\ndev_mode: true\n[history]\n[job_queue]\nload_on_startup: false\nautomatic_transition: false\n",
+  "cpu_model": "AMD Ryzen 9 9950X, 32 logical CPUs",
+  "process_sample_period_seconds": 0.1,
+  "generator_workers": 8,
+  "request_timeout_seconds": 2,
+  "host_isolation": "Affinity is fixed but CPUs are not exclusive; per-trial external contention was not continuously collected.",
+  "preflight": "Seven endpoint reads and six history cases, including unlimited history, run before idle sampling for each process.",
+  "zig_version": "0.17.0",
+  "phobos_sqlite_version": "3.54.1",
+  "response_bytes_preflight": {
+    "phobos": [
+      640,
+      1992,
+      3420,
+      158,
+      21286,
+      113,
+      65604
+    ],
+    "moonraker": [
+      1137,
+      1994,
+      3466,
+      177,
+      21464,
+      113,
+      65604
+    ]
+  }
+}

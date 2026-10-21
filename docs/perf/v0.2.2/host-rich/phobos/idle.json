@@ -1,0 +1,5 @@
+{
+  "rss_kib_median": 6400,
+  "cpu_percent_one_core": 0.0,
+  "method": "median of three fresh-process idle trial medians/counter rates"
+}

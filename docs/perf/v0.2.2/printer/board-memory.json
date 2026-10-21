@@ -1,0 +1,14 @@
+{
+  "minimum_available_kib": 23960,
+  "probe_swap_kib_max": 0,
+  "board_swap_free_kib": {
+    "min": 3072,
+    "max": 11552
+  },
+  "production_swap_kib": {
+    "min": 0,
+    "max": 428
+  },
+  "sample_count": 1388,
+  "memory_stop_floor_kib": 16384
+}

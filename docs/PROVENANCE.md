@@ -1395,3 +1395,94 @@ The version-matched host Debug binary reports 0.2.2. Fresh API coverage remains
 Relative release-note links resolve through the packaging helper. Formatting
 and diff checks pass. Full native suites and all release profiles are required
 again by main/tag CI before publication.
+
+## 2026-10-21: publish and install v0.2.2
+
+At the user's request, release commit
+`b079b773823c0d655823f91c1d08f0f96a67ad39` and annotated tag `v0.2.2` were
+pushed without rewriting history. Main CI 39612767322 passed; tag workflow
+39614476733 completed its required checks, builds, native suites, native
+asset smoke tests, packaging and publication. The public release contains
+seven static Linux assets plus profiles and checksums. All downloaded assets
+pass `scripts/build-release.sh --verify-only`; the official Cortex-A7 asset
+matches the tag-produced executable already exercised inside the chroot.
+Release source validation is 1,730 passed, one gated real-Klippy skip, zero
+failures and 326 fuzz harnesses in Debug/ReleaseSafe; API/table gates remain
+123/123 paths, 130/130 methods and 27/27 notifications. No API regeneration or
+runtime code change is part of the later documentation update.
+
+The user authorized installation on 7125 and use of the normal database.
+Before switching, readiness/standby/zero-target and queue guards passed.
+The exact old running binary and launcher were saved; after terminating only
+the verified old daemon, its stopped database and any WAL/SHM files were
+copied under `/data/phobos-backups/v0.2.2-20261021T142806Z/`. The new launcher
+executes `/data/phobos-v0.2.2`, the official Cortex-A7 SHA256
+`94737315462468de6ec1fa54cb86c46c4127f5918b452c532c0311606ed56290`.
+PID 29180 owns the production listener on 7125. It passes 29 HTTP and six
+WebSocket reads, including directory capacity, history filters/order, persisted
+floats, temperature and console stores. All 26 components are healthy with
+no warnings, 270 jobs and seven nullable end times. The board boot ID remains
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117`. No board or Klipper restart was used.
+The private installation probe on 7126 was stopped and its owned directory
+removed. Release/build docs now distinguish current validation from older
+ARM32 smoke evidence. Public release notes link to current documentation on
+main; the release tag and binary assets are unchanged.
+
+## 2026-10-21: current benchmarks compare v0.2.2 with Moonraker
+
+The user requested that current benchmark tables and graphics contain only
+the latest release and Moonraker. `docs/PERFORMANCE.md`, `docs/MEMORY.md`, the
+README, build/release notes and harness guide now point to a fresh versioned
+capture under `docs/perf/v0.2.2/`. Earlier captures remain unchanged archives,
+including negative results, and are excluded from current figures. All twelve
+figures use the maintained plotter and record their input hashes. Higher
+throughput and lower latency/RSS/CPU per request are explicitly labeled.
+
+Both phobos executables are unmodified published ReleaseSmall assets. The
+x86-64 SHA256 is `f81657748202cec356e841b7409371de4d74104cdac95e39c99c2a739079022d`;
+the physical Cortex-A7 hash is the installed hash above. Host Moonraker stays
+at pin `9008485843740c93e0154ccbdac1fc2b02b03aaa` on Python 3.12.12. The printer
+reference is the actual Forge-X 1.4.2 Moonraker on Python 3.11.10, whose entry,
+history and database module hashes were reread. Config and seed hashes, process
+sampling periods, worker limits and repetition order accompany each capture.
+Every backend restores independent inputs. The populated seed has 266 legacy
+jobs plus the same 64 KiB item; empty host stores contain the item only.
+
+Forty-two eight-second host trials produce 643,189 successful requests; thirty
+eight-second printer trials produce 8,159 successful requests. Three fresh
+process repetitions alternate backend order and reverse workload order in the
+middle repetition. No compilation or simultaneous benchmark ran during timed
+host capture. Servers/generator/stub/controller have fixed host affinity, but
+the shared desktop CPUs are not exclusive. Host preflights include unlimited
+history before idle measurement. Seventy-two host history checks and all 24
+physical history comparisons pass. Fresh seven-endpoint physical preflights
+retain only the documented identity, capability/default, namespace-policy and
+private-path warning differences; no new code bug is observed in that scope.
+
+Printer median idle RSS is 3,044 KiB for v0.2.2 and 36,696 KiB for Moonraker;
+maximum sampled load RSS is 3,500 and 36,816 KiB. At 75/s, median CPU time per
+request is 3.017 versus 11.850 ms (74.5% lower). One phobos 64 KiB trial delivers
+8.96/s against 10/s despite all requests succeeding. Host populated 1,200/s
+mix median p99 is worse for phobos (1.58 versus 0.96 ms); all trial ranges
+remain visible. Available board memory stays above 23,960 KiB with the 16 MiB
+stop guard. Probe swap stays zero, board SwapFree ranges 3,072 to 11,552 KiB,
+and production VmSwap ranges 0 to 428 KiB. No swap control or cache adjustment
+was used. The printer kernel has no perf events; no sampled device CPU profile
+or isolated-host/long-soak guarantee is claimed.
+
+After removing the owned benchmark probes/directory and SSH tunnel, the final
+29 HTTP/six WebSocket production checks pass again. PID, release hash and boot
+ID are unchanged; ready, standby, targets zero, no 7126 listener. The final
+record reports 3,352 KiB production RSS, 140 KiB production swap, 57,612 KiB
+board MemAvailable and 3,328 KiB SwapFree. No benchmark opened the live database
+or sent printer-control commands. The rollback snapshot remains available.
+
+Verification: all 31 performance/release Python tests and measurement-helper
+smoke tests pass. Independent checks validate all 72 trials and 651,348
+successful requests, aggregate calculations, exact executable and plot-input
+hashes, parity records, twelve current graphic links, document targets and final
+printer state. Representative plots were visually inspected. `git diff --check`
+passes. Graph output is excluded because `graphify` is unavailable. No source
+change or additional release tag is needed for these measured documentation
+updates; the post-release documentation update is prepared for a fast-forward
+push on main.
