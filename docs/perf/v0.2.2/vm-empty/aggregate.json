@@ -1,0 +1,98 @@
+[
+  {
+    "backend": "phobos",
+    "workload": "info-5000",
+    "cpu_us_per_request_lower_better": {
+      "median": 12.5005000200008,
+      "min": 12.5002500050001,
+      "max": 12.700127001270012
+    },
+    "p99_ms_lower_better": {
+      "median": 0.121515,
+      "min": 0.120708,
+      "max": 0.122055
+    },
+    "throughput_rps_higher_better": {
+      "median": 5000.038302075479,
+      "min": 5000.006147880517,
+      "max": 5000.0440763293
+    },
+    "rss_kib_lower_better": {
+      "median": 9344,
+      "min": 9296,
+      "max": 9352
+    }
+  },
+  {
+    "backend": "moonraker",
+    "workload": "info-5000",
+    "cpu_us_per_request_lower_better": {
+      "median": 166.8,
+      "min": 165.79999999999998,
+      "max": 168.1
+    },
+    "p99_ms_lower_better": {
+      "median": 1.141153,
+      "min": 1.059311,
+      "max": 1.176658
+    },
+    "throughput_rps_higher_better": {
+      "median": 5000.1552450700565,
+      "min": 5000.009970519882,
+      "max": 5000.1732112502195
+    },
+    "rss_kib_lower_better": {
+      "median": 57880,
+      "min": 57756,
+      "max": 58016
+    }
+  },
+  {
+    "backend": "phobos",
+    "workload": "independent-1200",
+    "cpu_us_per_request_lower_better": {
+      "median": 25.41666666666666,
+      "min": 25.000000000000004,
+      "max": 25.416666666666668
+    },
+    "p99_ms_lower_better": {
+      "median": 0.105258,
+      "min": 0.104974,
+      "max": 0.106974
+    },
+    "throughput_rps_higher_better": {
+      "median": 1200.028315928144,
+      "min": 1200.0235295813586,
+      "max": 1200.0451114958087
+    },
+    "rss_kib_lower_better": {
+      "median": 9304,
+      "min": 7168,
+      "max": 9368
+    }
+  },
+  {
+    "backend": "moonraker",
+    "workload": "independent-1200",
+    "cpu_us_per_request_lower_better": {
+      "median": 244.58333333333334,
+      "min": 242.92678861619225,
+      "max": 247.92699695820656
+    },
+    "p99_ms_lower_better": {
+      "median": 0.581994,
+      "min": 0.577138,
+      "max": 0.589333
+    },
+    "throughput_rps_higher_better": {
+      "median": 1199.996198113633,
+      "min": 1199.9931824146654,
+      "max": 1200.027076930953
+    },
+    "rss_kib_lower_better": {
+      "median": 57944,
+      "min": 57820,
+      "max": 58016
+    }
+  }
+]

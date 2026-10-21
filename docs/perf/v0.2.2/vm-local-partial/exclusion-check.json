@@ -1,0 +1,87 @@
+{
+  "ordinary_host_process_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23
+  ],
+  "attempts": [
+    {
+      "cpu": 8,
+      "returncode": 1
+    },
+    {
+      "cpu": 9,
+      "returncode": 1
+    },
+    {
+      "cpu": 10,
+      "returncode": 1
+    },
+    {
+      "cpu": 11,
+      "returncode": 1
+    },
+    {
+      "cpu": 12,
+      "returncode": 1
+    },
+    {
+      "cpu": 13,
+      "returncode": 1
+    },
+    {
+      "cpu": 14,
+      "returncode": 1
+    },
+    {
+      "cpu": 15,
+      "returncode": 1
+    },
+    {
+      "cpu": 24,
+      "returncode": 1
+    },
+    {
+      "cpu": 25,
+      "returncode": 1
+    },
+    {
+      "cpu": 26,
+      "returncode": 1
+    },
+    {
+      "cpu": 27,
+      "returncode": 1
+    },
+    {
+      "cpu": 28,
+      "returncode": 1
+    },
+    {
+      "cpu": 29,
+      "returncode": 1
+    },
+    {
+      "cpu": 30,
+      "returncode": 1
+    },
+    {
+      "cpu": 31,
+      "returncode": 1
+    }
+  ],
+  "all_reserved_cpus_refused": true
+}

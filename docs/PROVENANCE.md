@@ -1486,3 +1486,52 @@ passes. Graph output is excluded because `graphify` is unavailable. No source
 change or additional release tag is needed for these measured documentation
 updates; the post-release documentation update is prepared for a fast-forward
 push on main.
+
+## 2026-10-22: independent KVM benchmarks on the second PC
+
+The user requested VM benchmarks with guaranteed performance and no CPU steal,
+offered the Ryzen 9 5950X PC at 192.168.0.99, authorized QEMU installation and
+temporary sudo access, and prohibited printer access. No printer was contacted.
+`docs/PERFORMANCE.md`, `docs/MEMORY.md`, release/build notes, README and the
+harness guide now use the complete second-PC capture for active x86-64 figures.
+The versioned `VM_METHOD.md` records inputs, configuration and counter definitions.
+Published v0.2.2 assets, source, tag and API coverage are unchanged.
+
+QEMU 11.1.2 uses KVM, four FIFO vCPUs on exclusive physical cores, unused SMT
+siblings, an isolated complete L3 group, 4 GiB preallocated locked RAM, no NIC
+and no VM swap. Both daemons use the same guest CPU, local Klippy stub and
+independent copies of populated/empty history. Forty-two matched twenty-second
+trials, three fresh-process repetitions per case, produce 1,607,980 successful
+requests. All 72 parsed-history checks match. The stopped guest's extracted
+phobos binary matches the published x86-64 SHA256; its kernel hash also matches.
+
+The strict zero-steal/guaranteed-performance request is not established. The
+aggregate guest counter records two steal ticks; individual CPU counters round
+to zero. All raw deltas remain. Maximum server-vCPU host run-queue delay is
+0.0011543543221001374% of its observed boundary interval, maximum any-vCPU delay
+0.001168089124419008%. Frequencies vary. No trial is discarded for interference.
+Phobos uses less CPU per request in four of five populated workloads, but the
+history page uses 3.0% more CPU than Moonraker. Moonraker has lower median p99
+for history and the 600/s mix. Phobos has lower sampled RSS throughout.
+
+The first PC's 30 complete rich-history trials remain in `vm-local-partial/`,
+including nonzero interference and the later private-disk capacity failure.
+Its incomplete empty-history case has no result row. Second-PC CPU-incompatible
+setup utilities were replaced before measurement; generator smoke preflights
+then passed. The complete run uses a 16 GiB private disk and a free-space guard.
+Earlier shared-host and printer captures remain unchanged. Printer states in
+the active reports are explicitly historical.
+
+Cleanup stops the owned VM, removes its partition, restores user/system slices
+to CPUs 0-31, verifies unchanged frequency policies, releases both PCs' owned
+sleep inhibitors and removes the temporary sudo rule. QEMU, BusyBox and Vegeta
+packages remain installed. No existing VM or golden image was changed.
+
+Verification: all 31 performance/release Python tests and measurement-helper
+shell smoke checks pass. Independent assertions validate all 42 rows, request
+totals, matched repetitions, guest/host counter arithmetic, affinity, no quota
+throttling, locked-memory/swap samples, parity, asset and plot hashes, twelve
+active charts and documentation links. Representative figures were visually
+inspected. `git diff --check` passes. Source suites are not rerun for these
+measurement/documentation-only changes. `graphify` is unavailable, so graph
+output is excluded.

@@ -6,9 +6,12 @@ limits are in [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) and
 [`docs/MEMORY.md`](../../docs/MEMORY.md).
 Current tables and graphics compare only published phobos v0.2.2 with
 Moonraker. The [capture directory](../../docs/perf/v0.2.2/) contains populated
-and empty-history host trials plus real Forge-X trials, with exact asset,
-source and seed hashes. Older captures retain their original versions and
-are excluded from the current figures. Higher throughput is better; lower
+and empty-history VM trials plus earlier real Forge-X trials, with exact asset,
+source and seed hashes. The [VM method](../../docs/perf/v0.2.2/VM_METHOD.md)
+records exclusive physical cores, locked RAM, guest steal and host run-queue
+delay; these controls do not guarantee zero steal or fixed physical performance.
+No printer is contacted for the VM study. Older captures retain their original
+versions and are excluded from the current figures. Higher throughput is better; lower
 latency, RSS and CPU time per completed request are better.
 
 ## Layout

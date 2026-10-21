@@ -15,6 +15,8 @@ peaks. Worker pools and earlier workloads can leave pages resident.
 
 ## Cortex-A7 printer
 
+Earlier capture, 2026-10-21. The VM followup did not contact the printer.
+
 Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores, 110,404 KiB RAM.
 The official Cortex-A7 asset is 2,629,960 bytes,
 SHA256 `94737315462468de6ec1fa54cb86c46c4127f5918b452c532c0311606ed56290`.
@@ -44,45 +46,53 @@ that the board avoided swapping. Swap settings were unchanged.
 [all load trials](perf/v0.2.2/printer/summary.json),
 [environment](perf/v0.2.2/printer/environment.json) and
 [board limits](perf/v0.2.2/printer/board-memory.json) retain the observations.
-After cleanup production remains PID 29180, ready, standby,
+At cleanup of that capture, production was PID 29180, ready, standby,
 both heater targets zero, with its release hash and boot ID unchanged.
 [Final state](perf/v0.2.2/printer/final-state.json) records production RSS and
 swap separately from the probes. No long-soak or reboot-persistence test is
 claimed.
 
-## x86-64 host, populated history
+## KVM guest, populated history
 
-Ryzen 9 9950X, CachyOS Linux 7.2.10, pinned server/generator/stub affinity on
-a shared desktop. The official x86-64 asset is 2,751,384 bytes, SHA256
-`f81657748202cec356e841b7409371de4d74104cdac95e39c99c2a739079022d`.
-Moonraker pin `900848584374` runs on Python 3.12.12. Both backends use the same
-stub and copied 266-job seed plus 64 KiB record.
-
-| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
-| --- | ---: | ---: | ---: |
-| phobos v0.2.2 | 6,400 (4,372 to 8,396) | 13,296 | 18 |
-| Moonraker | 55,076 (55,060 to 55,152) | 56,176 | 5 |
-
-![Populated host RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/host-rich/memory.png)
-
-## x86-64 host, empty history
-
-Same setup, independent fresh databases with the same 64 KiB record.
+The isolated KVM study uses four vCPUs and 4 GiB locked RAM. Each backend is
+pinned to the same single guest CPU; the generator and stub/controller use
+separate guest CPUs. All vCPUs have exclusive physical cores with unused SMT
+siblings. The identical published v0.2.2 asset, Moonraker pin, database inputs
+and method are in [the VM report](PERFORMANCE.md#kvm-guest-isolated-physical-cores).
 
 | Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
 | --- | ---: | ---: | ---: |
-| phobos v0.2.2 | 7,932 (5,924 to 12,000) | 12,368 | 18 |
-| Moonraker | 53,776 (53,528 to 53,808) | 54,080 | 5 |
+| phobos v0.2.2 | 5,608 (5,604 to 7,612) | 9,884 | 17 |
+| Moonraker | 57,604 (57,552 to 57,616) | 59,656 | 5 |
 
-![Empty-history host RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/host-empty/memory.png)
+![KVM populated-history RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/vm-rich/memory.png)
 
-Host sampling is about 100 ms. Each fixture has three fresh-process starts
-per backend and five-second idle windows. Full idle ranges and per-workload
-load maxima are retained with the
-[populated](perf/v0.2.2/host-rich/idle-trials.json) and
-[empty](perf/v0.2.2/host-empty/idle-trials.json) captures. Shared-host scheduling,
-connection worker allocation and workload order contribute to RSS variation;
-one low sample is not a memory guarantee.
+## KVM guest, empty history
+
+Same VM and affinity, with fresh independent databases and the 64 KiB record.
+
+| Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ | Peak threads |
+| --- | ---: | ---: | ---: |
+| phobos v0.2.2 | 7,132 (7,112 to 7,132) | 9,368 | 17 |
+| Moonraker | 57,608 (57,520 to 57,692) | 58,016 | 4 |
+
+![KVM empty-history RSS, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/vm-empty/memory.png)
+
+Host QEMU memory, idle polling and the 4 GiB reservation are excluded from
+daemon RSS. Host VM swap remains zero and its locked memory stays above
+4,838,436 KiB; these guarantees do not imply
+that process RSS is fixed. The guest has no configured swap. About 100 ms
+process samples cover 42 twenty-second trials and six idle windows per fixture.
+Each fresh process handles history preflights before the five-second idle
+capture. The full [populated](perf/v0.2.2/vm-rich/idle-trials.json) and
+[empty](perf/v0.2.2/vm-empty/idle-trials.json) idle ranges and load records remain
+checked in. The VM does not establish literal zero steal or fixed physical
+frequency; see the measured scheduling and frequency limits in the report.
+
+The printer was not contacted for this study. Its figures above are from the
+earlier capture, not a new printer check. Earlier native shared-host
+[populated](perf/v0.2.2/host-rich/summary.json) and
+[empty](perf/v0.2.2/host-empty/summary.json) measurements stay archived separately.
 
 ## Allocation and ownership limits
 

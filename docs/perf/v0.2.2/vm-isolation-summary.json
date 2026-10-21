@@ -1,0 +1,40 @@
+{
+  "trials": 42,
+  "duration_seconds": 20,
+  "requests": 1607980,
+  "guest_steal_ticks_sum_by_counter": {
+    "cpu": 2,
+    "cpu0": 0,
+    "cpu1": 0,
+    "cpu2": 0,
+    "cpu3": 0
+  },
+  "trials_with_any_nonzero_steal_counter": [
+    "rich-moonraker-r3-info-5000",
+    "empty-moonraker-r3-independent-1200"
+  ],
+  "maximum_server_vcpu_host_wait_percent": 0.0011543543221001374,
+  "maximum_any_vcpu_host_wait_percent": 0.001168089124419008,
+  "minimum_qemu_locked_kib": 4838436,
+  "qemu_swap_kib_max": 0,
+  "host_frequency_khz_range_by_vcpu": {
+    "0": {
+      "min": 4375225,
+      "max": 4575229
+    },
+    "1": {
+      "min": 3626856,
+      "max": 4525253
+    },
+    "2": {
+      "min": 3662640,
+      "max": 4525226
+    },
+    "3": {
+      "min": 3649589,
+      "max": 4525286
+    }
+  },
+  "interpretation": "Exclusive physical CPUs and no quota throttling or VM swap are verified. Guest ticks and host nanosecond scheduling delay remain recorded, including nonzero values; absolute zero steal or constant physical performance is not guaranteed.",
+  "printer_contacted": false
+}

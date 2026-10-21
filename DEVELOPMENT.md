@@ -77,8 +77,10 @@ Notes:
   kernel requirements, and the C-only `-Dsoftfp` option. Building or validating
   an artifact does not install it or establish compatibility with every printer.
 - [Performance](docs/PERFORMANCE.md) and [memory](docs/MEMORY.md) record the
-  versioned host and printer measurements. Plots consume checked-in measured
-  JSON summaries; raw captures and private configurations stay in `.scratch/`.
+  versioned VM and earlier printer measurements. The VM method records CPU
+  reservation and measured scheduling interference. Plots consume checked-in
+  measured JSON summaries; raw captures and private configurations stay in
+  `.scratch/`.
 - [CI and releases](docs/CI.md) documents the hosted test/build matrix,
   `uv.lock`, tag requirements, verified draft publication and local commands.
 

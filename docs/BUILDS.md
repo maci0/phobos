@@ -40,7 +40,9 @@ release-asset smoke checks. The published Cortex-A7 asset passed real Klippy
 queries, copied-history/float comparisons, directory capacity and WebSocket
 reads, and is installed on the Forge-X printer. Current
 [benchmarks](PERFORMANCE.md) compare that asset and the published x86-64 asset
-against Moonraker. Other physical printer models are not certified.
+against Moonraker in a KVM guest and the earlier printer capture. The VM study
+does not contact the printer or establish literal zero steal. Other physical
+printer models are not certified.
 
 For the archived v0.2.1 release, all five ARM32 assets passed startup, real
 Klippy object queries, copied SQLite history/float comparisons and directory-stat checks inside

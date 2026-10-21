@@ -1,0 +1,3174 @@
+[
+  {
+    "event": "BEGIN rich-phobos-r1-info-5000",
+    "monotonic_ns": 165089031533554,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          10051402334,
+          5060244,
+          1040
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          9916179211,
+          3090651,
+          652
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          9918086247,
+          17273,
+          23
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          9914657858,
+          3627610,
+          751
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 40164673\nuser_usec 39791477\nsystem_usec 373195\nnice_usec 39763211\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r1-info-5000",
+    "monotonic_ns": 165109846628296,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          30419367283,
+          17080765,
+          3373
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          30670758551,
+          12209943,
+          2398
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          30676326616,
+          28875,
+          25
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          30664507427,
+          14805271,
+          2765
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 123171546\nuser_usec 122496535\nsystem_usec 675010\nnice_usec 122390789\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r1-independent-600",
+    "monotonic_ns": 165109850950434,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          30427343176,
+          17080765,
+          3373
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          30678743793,
+          12209943,
+          2398
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          30684310745,
+          28875,
+          25
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          30672491858,
+          14805271,
+          2765
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 123187528\nuser_usec 122512517\nsystem_usec 675010\nnice_usec 122406755\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r1-independent-600",
+    "monotonic_ns": 165132110143724,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          50653918443,
+          25440569,
+          4981
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          52875141702,
+          18479441,
+          3567
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          52876362600,
+          32923,
+          26
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          52854564330,
+          22556351,
+          4192
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 210055753\nuser_usec 209348579\nsystem_usec 707174\nnice_usec 209190418\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r1-independent-1200",
+    "monotonic_ns": 165132116691888,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          50659899305,
+          25440569,
+          4981
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          52881128604,
+          18479441,
+          3567
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          52882341457,
+          32923,
+          26
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          52860525163,
+          22556351,
+          4192
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 210079692\nuser_usec 209372517\nsystem_usec 707174\nnice_usec 209214326\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r1-independent-1200",
+    "monotonic_ns": 165152894104693,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          71357838510,
+          35926281,
+          7491
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          73596762746,
+          27452261,
+          5504
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          73586600728,
+          49284,
+          30
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          73556698186,
+          29621274,
+          5748
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 292960971\nuser_usec 292194328\nsystem_usec 766642\nnice_usec 291984857\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r1-history-200",
+    "monotonic_ns": 165152935078176,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          71398723736,
+          35926281,
+          7491
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          73637666754,
+          27461749,
+          5506
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          73627507392,
+          49284,
+          30
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          73597603080,
+          29621274,
+          5748
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 293124681\nuser_usec 292357039\nsystem_usec 767641\nnice_usec 292147466\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r1-history-200",
+    "monotonic_ns": 165172803394724,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          91204161324,
+          36781218,
+          7703
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          93456796885,
+          28484122,
+          5734
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          93440531039,
+          67318,
+          35
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          93411677455,
+          30647663,
+          5995
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 372444987\nuser_usec 371654161\nsystem_usec 790826\nnice_usec 371386053\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r1-database64k-200",
+    "monotonic_ns": 165172845326539,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          91246009379,
+          36781218,
+          7703
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          93498698020,
+          28484122,
+          5734
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          93482433039,
+          67318,
+          35
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          93453595642,
+          30647663,
+          5995
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 372612737\nuser_usec 371821910\nsystem_usec 790826\nnice_usec 371553623\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r1-database64k-200",
+    "monotonic_ns": 165193179487696,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          111510969418,
+          37341365,
+          7836
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          113779905072,
+          29003302,
+          5843
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          113756817321,
+          81293,
+          38
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          113730169721,
+          31159420,
+          6112
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 453941065\nuser_usec 452932240\nsystem_usec 1008824\nnice_usec 452606540\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r1-info-5000",
+    "monotonic_ns": 165216568092782,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          134828492230,
+          37416895,
+          7849
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          137111708739,
+          29285639,
+          5899
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          137087660682,
+          98875,
+          43
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          137059127996,
+          31216536,
+          6125
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 548082673\nuser_usec 546339940\nsystem_usec 1742732\nnice_usec 545914359\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r1-info-5000",
+    "monotonic_ns": 165237049082260,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          155228237679,
+          37637236,
+          7896
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          157532375645,
+          29568125,
+          5939
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          157455199160,
+          136305,
+          48
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          157431787606,
+          31524721,
+          6183
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 629711669\nuser_usec 627727171\nsystem_usec 1984498\nnice_usec 627247576\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r1-independent-600",
+    "monotonic_ns": 165239049081284,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          157220588859,
+          37637236,
+          7896
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          159526819347,
+          29577813,
+          5940
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          159448727477,
+          140423,
+          49
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          159425517394,
+          31536503,
+          6185
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 637691605\nuser_usec 635694154\nsystem_usec 1997451\nnice_usec 635208781\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r1-independent-600",
+    "monotonic_ns": 165257407309616,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          175505701518,
+          37831581,
+          7940
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          177838020940,
+          29804338,
+          5983
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          177745606319,
+          162955,
+          52
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          177721533523,
+          31806776,
+          6246
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 710954919\nuser_usec 708874644\nsystem_usec 2080274\nnice_usec 708340305\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r1-independent-1200",
+    "monotonic_ns": 165258668743540,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          176762147296,
+          37850236,
+          7944
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          179096057449,
+          29823844,
+          5986
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          179002115416,
+          162955,
+          52
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          178978175140,
+          31820883,
+          6249
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 715997778\nuser_usec 713907548\nsystem_usec 2090229\nnice_usec 713369991\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r1-independent-1200",
+    "monotonic_ns": 165278157442737,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          196181059300,
+          37909254,
+          7958
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          198537269018,
+          29902761,
+          5997
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          198416361405,
+          172894,
+          54
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          198390793660,
+          31843094,
+          6254
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 793737870\nuser_usec 791528468\nsystem_usec 2209401\nnice_usec 790942482\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r1-history-200",
+    "monotonic_ns": 165278575835794,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          196597770285,
+          37909254,
+          7958
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          198955281901,
+          29902761,
+          5997
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          198834177123,
+          172894,
+          54
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          198808806316,
+          31843094,
+          6254
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 795410469\nuser_usec 793200070\nsystem_usec 2210399\nnice_usec 792613051\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r1-history-200",
+    "monotonic_ns": 165298106179208,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          216064909136,
+          37951441,
+          7969
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          218442279438,
+          29962104,
+          6007
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          218316234462,
+          182161,
+          56
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          218289752197,
+          31843094,
+          6254
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 873396538\nuser_usec 871124877\nsystem_usec 2271661\nnice_usec 870486629\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r1-database64k-200",
+    "monotonic_ns": 165298671997703,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          216629318736,
+          37951441,
+          7969
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          219007141628,
+          29966953,
+          6008
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          218880932102,
+          182161,
+          56
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          218854526766,
+          31843094,
+          6254
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 875656874\nuser_usec 873384214\nsystem_usec 2272659\nnice_usec 872744438\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r1-database64k-200",
+    "monotonic_ns": 165318508137404,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          236396593085,
+          38025722,
+          7984
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          238799953754,
+          30062630,
+          6023
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          238666088857,
+          191318,
+          58
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          238640553351,
+          31858124,
+          6257
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 954857316\nuser_usec 952543371\nsystem_usec 2313944\nnice_usec 951847707\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r2-database64k-200",
+    "monotonic_ns": 165328809159854,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          246665121823,
+          38266303,
+          8045
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          249080663654,
+          30266729,
+          6075
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          248945297993,
+          191318,
+          58
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          248920158312,
+          32003967,
+          6298
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 995996233\nuser_usec 993676318\nsystem_usec 2319915\nnice_usec 992953425\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r2-database64k-200",
+    "monotonic_ns": 165349165412795,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          266951879862,
+          38439015,
+          8079
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          269394654715,
+          30607357,
+          6139
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          269251097951,
+          195827,
+          59
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          269226845845,
+          32105911,
+          6322
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1077299341\nuser_usec 1074901583\nsystem_usec 2397757\nnice_usec 1074120298\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r2-history-200",
+    "monotonic_ns": 165349166471016,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          266952877770,
+          38439015,
+          8079
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          269395653392,
+          30607357,
+          6139
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          269252096689,
+          195827,
+          59
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          269227844584,
+          32105911,
+          6322
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1077303338\nuser_usec 1074905580\nsystem_usec 2397757\nnice_usec 1074124290\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r2-history-200",
+    "monotonic_ns": 165369603536905,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          287324644600,
+          38715512,
+          8144
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          289789672520,
+          30792037,
+          6171
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          289639271543,
+          200065,
+          60
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          289615726670,
+          32310733,
+          6366
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1158946739\nuser_usec 1156479396\nsystem_usec 2467342\nnice_usec 1155642715\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r2-independent-1200",
+    "monotonic_ns": 165369609416161,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          287330629398,
+          38715512,
+          8144
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          289795661058,
+          30792037,
+          6171
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          289645260229,
+          200065,
+          60
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          289621714524,
+          32310733,
+          6366
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1158970706\nuser_usec 1156503363\nsystem_usec 2467342\nnice_usec 1155666664\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r2-independent-1200",
+    "monotonic_ns": 165389834239038,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          307478820210,
+          38899068,
+          8181
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          309973728750,
+          31059751,
+          6220
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          309792896494,
+          203952,
+          61
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          309769122750,
+          32477336,
+          6401
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1239662030\nuser_usec 1237098473\nsystem_usec 2563556\nnice_usec 1236210417\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r2-independent-600",
+    "monotonic_ns": 165389835346290,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          307479818577,
+          38899068,
+          8181
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          309974726659,
+          31059751,
+          6220
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          309793895212,
+          203952,
+          61
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          309770121498,
+          32477336,
+          6401
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1239666026\nuser_usec 1237102470\nsystem_usec 2563556\nnice_usec 1236214410\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r2-independent-600",
+    "monotonic_ns": 165410172241280,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          327738874881,
+          39093364,
+          8227
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          330267877270,
+          31200951,
+          6246
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          330069539612,
+          207939,
+          62
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          330046125628,
+          32601978,
+          6430
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1320839789\nuser_usec 1318196933\nsystem_usec 2642855\nnice_usec 1317254569\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r2-info-5000",
+    "monotonic_ns": 165410173382486,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          327739873159,
+          39093364,
+          8227
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          330268875287,
+          31200951,
+          6246
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          330070538179,
+          207939,
+          62
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          330047123474,
+          32601978,
+          6430
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1320843784\nuser_usec 1318200928\nsystem_usec 2642855\nnice_usec 1317258562\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r2-info-5000",
+    "monotonic_ns": 165430641864981,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          348133019011,
+          39316744,
+          8277
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          350691119973,
+          31452670,
+          6287
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          350445474313,
+          212027,
+          63
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          350422908729,
+          32789063,
+          6471
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1402477403\nuser_usec 1399595669\nsystem_usec 2881734\nnice_usec 1398599729\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r2-database64k-200",
+    "monotonic_ns": 165439979637160,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          357441913859,
+          39480699,
+          8317
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          360011248417,
+          31587884,
+          6314
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          359764768317,
+          216084,
+          64
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          359741943933,
+          32941680,
+          6508
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1439767720\nuser_usec 1436882006\nsystem_usec 2885713\nnice_usec 1435860691\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r2-database64k-200",
+    "monotonic_ns": 165460318642858,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          377707523351,
+          39917676,
+          8424
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          380305799125,
+          31940514,
+          6391
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          380051714916,
+          220132,
+          65
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          380030651333,
+          33309369,
+          6595
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1520981611\nuser_usec 1518038586\nsystem_usec 2943024\nnice_usec 1516965977\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r2-history-200",
+    "monotonic_ns": 165460319892077,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          377708521708,
+          39917676,
+          8424
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          380306797133,
+          31940514,
+          6391
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          380052712944,
+          220132,
+          65
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          380031649351,
+          33309369,
+          6595
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1520985606\nuser_usec 1518042581\nsystem_usec 2943024\nnice_usec 1516969969\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r2-history-200",
+    "monotonic_ns": 165480637823126,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          397955457166,
+          40165712,
+          8478
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          400582369665,
+          32515870,
+          6521
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          400322161389,
+          227205,
+          67
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          400297824950,
+          33509394,
+          6642
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1602131206\nuser_usec 1599148728\nsystem_usec 2982477\nnice_usec 1598022364\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r2-independent-1200",
+    "monotonic_ns": 165480639100729,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          397957452501,
+          40165712,
+          8478
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          400584366259,
+          32515870,
+          6521
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          400324157162,
+          227205,
+          67
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          400299820663,
+          33509394,
+          6642
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1602135200\nuser_usec 1599152722\nsystem_usec 2982477\nnice_usec 1598026357\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r2-independent-1200",
+    "monotonic_ns": 165500984709190,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          418221704855,
+          40407713,
+          8536
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          420885187101,
+          32753600,
+          6568
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          420603674103,
+          227205,
+          67
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          420583507694,
+          33769689,
+          6697
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1683330543\nuser_usec 1680286985\nsystem_usec 3043558\nnice_usec 1679109289\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r2-independent-600",
+    "monotonic_ns": 165500985676389,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          418222702441,
+          40407713,
+          8536
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          420886185218,
+          32753600,
+          6568
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          420604672130,
+          227205,
+          67
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          420584505751,
+          33769689,
+          6697
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1683334538\nuser_usec 1680290979\nsystem_usec 3043558\nnice_usec 1679113281\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r2-independent-600",
+    "monotonic_ns": 165521300278266,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          438460244727,
+          40841549,
+          8642
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          441158420517,
+          33024821,
+          6627
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          440866161207,
+          230791,
+          68
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          440846698651,
+          34069800,
+          6771
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1764436005\nuser_usec 1761335350\nsystem_usec 3100655\nnice_usec 1760108070\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r2-info-5000",
+    "monotonic_ns": 165521301566188,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          438461239647,
+          40841549,
+          8642
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          441159418554,
+          33024821,
+          6627
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          440867150226,
+          230791,
+          68
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          440847697329,
+          34069800,
+          6771
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1764439991\nuser_usec 1761339336\nsystem_usec 3100655\nnice_usec 1760112050\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r2-info-5000",
+    "monotonic_ns": 165541735477415,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          458818040247,
+          41148202,
+          8716
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          461551999440,
+          33346249,
+          6699
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          461250611268,
+          241732,
+          71
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          461233349154,
+          34453234,
+          6863
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1846022456\nuser_usec 1842884238\nsystem_usec 3138217\nnice_usec 1841604913\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r3-info-5000",
+    "monotonic_ns": 165550884183526,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          467936105454,
+          41420951,
+          8791
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          470681827921,
+          33802413,
+          6813
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          470378989590,
+          241732,
+          71
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          470361995009,
+          34714832,
+          6931
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1882552454\nuser_usec 1879410262\nsystem_usec 3142191\nnice_usec 1878107643\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r3-info-5000",
+    "monotonic_ns": 165571295640995,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          488273632909,
+          42636181,
+          9101
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          491048947109,
+          35022754,
+          7113
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          490740159766,
+          241732,
+          71
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          490722632698,
+          36050288,
+          7233
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1964044125\nuser_usec 1960827457\nsystem_usec 3216667\nnice_usec 1959472692\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r3-independent-600",
+    "monotonic_ns": 165571296885595,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          488274631426,
+          42636181,
+          9101
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          491049945086,
+          35022754,
+          7113
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          490741158515,
+          241732,
+          71
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          490723631457,
+          36050288,
+          7233
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 1964048121\nuser_usec 1960831454\nsystem_usec 3216667\nnice_usec 1959476684\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r3-independent-600",
+    "monotonic_ns": 165591617602522,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          508518315640,
+          43804240,
+          9386
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          511329461856,
+          36025137,
+          7356
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          511010783722,
+          241732,
+          71
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          510991082407,
+          37172226,
+          7501
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2045173386\nuser_usec 2041902157\nsystem_usec 3271228\nnice_usec 2040495275\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r3-independent-1200",
+    "monotonic_ns": 165591618972258,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          508519314160,
+          43804240,
+          9386
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          511330459664,
+          36025137,
+          7356
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          511012779647,
+          241732,
+          71
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          510993078112,
+          37172226,
+          7501
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2045181372\nuser_usec 2041910143\nsystem_usec 3271228\nnice_usec 2040503259\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r3-independent-1200",
+    "monotonic_ns": 165611977806074,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          528803798821,
+          44745296,
+          9618
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          531647320666,
+          37132334,
+          7617
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          531314443639,
+          249636,
+          73
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          531291784615,
+          38158879,
+          7725
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2126443325\nuser_usec 2123136302\nsystem_usec 3307022\nnice_usec 2121677234\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r3-history-200",
+    "monotonic_ns": 165611979355307,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          528805794434,
+          44745296,
+          9618
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          531649316382,
+          37132334,
+          7617
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          531316439574,
+          249636,
+          73
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          531293780589,
+          38158879,
+          7725
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2126451311\nuser_usec 2123144288\nsystem_usec 3307022\nnice_usec 2121685217\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r3-history-200",
+    "monotonic_ns": 165632295674242,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          549051952148,
+          45254348,
+          9749
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          551924270144,
+          37455271,
+          7687
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          551582310249,
+          253292,
+          74
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          551561020901,
+          38567226,
+          7822
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2207573936\nuser_usec 2204166424\nsystem_usec 3407511\nnice_usec 2202653160\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-phobos-r3-database64k-200",
+    "monotonic_ns": 165632297213947,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          549053947672,
+          45254348,
+          9749
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          551926266578,
+          37455271,
+          7687
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          551584306073,
+          253292,
+          74
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          551563017405,
+          38567226,
+          7822
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2207581923\nuser_usec 2204174411\nsystem_usec 3407511\nnice_usec 2202661144\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-phobos-r3-database64k-200",
+    "monotonic_ns": 165652628109545,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          569314586817,
+          45754509,
+          9869
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          572216822175,
+          37805835,
+          7761
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          571865898799,
+          270064,
+          78
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          571844809936,
+          38854822,
+          7891
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2288765673\nuser_usec 2285326349\nsystem_usec 3439323\nnice_usec 2283760316\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r3-info-5000",
+    "monotonic_ns": 165662786438028,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          579439612135,
+          45891345,
+          9905
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          582355201294,
+          37936910,
+          7791
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          582003347805,
+          273199,
+          79
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          581982203666,
+          38965107,
+          7920
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2329333749\nuser_usec 2325888452\nsystem_usec 3445297\nnice_usec 2324295329\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r3-info-5000",
+    "monotonic_ns": 165683298041252,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          599873666990,
+          48844270,
+          10618
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          602826404139,
+          41165825,
+          8480
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          602429994792,
+          285272,
+          82
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          602409003416,
+          41395520,
+          8467
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2411212843\nuser_usec 2407452592\nsystem_usec 3760251\nnice_usec 2405806015\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r3-independent-600",
+    "monotonic_ns": 165683432619218,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          600007220255,
+          48852936,
+          10620
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          602950075804,
+          41205129,
+          8484
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          602553715371,
+          285272,
+          82
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          602531606926,
+          41402774,
+          8469
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2411703799\nuser_usec 2407943547\nsystem_usec 3760251\nnice_usec 2406296648\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r3-independent-600",
+    "monotonic_ns": 165703628801339,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          620126968325,
+          49146391,
+          10691
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          623100858035,
+          41503314,
+          8547
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          622687056517,
+          292966,
+          84
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          622664886086,
+          41694024,
+          8540
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2492316753\nuser_usec 2488464531\nsystem_usec 3852222\nnice_usec 2486766021\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r3-independent-1200",
+    "monotonic_ns": 165703630028747,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          620128962736,
+          49146391,
+          10691
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          623102854650,
+          41503314,
+          8547
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          622689053132,
+          292966,
+          84
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          622666882632,
+          41694024,
+          8540
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2492324740\nuser_usec 2488472518\nsystem_usec 3852222\nnice_usec 2486774004\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r3-independent-1200",
+    "monotonic_ns": 165723984613039,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          640407158554,
+          49695333,
+          10824
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          643410054887,
+          42257201,
+          8713
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          642966459023,
+          292966,
+          84
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          642943636106,
+          42168273,
+          8651
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2573528401\nuser_usec 2569568786\nsystem_usec 3959614\nnice_usec 2567818380\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r3-history-200",
+    "monotonic_ns": 165723985865274,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          640408156542,
+          49695333,
+          10824
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          643411053635,
+          42257201,
+          8713
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          642967457812,
+          292966,
+          84
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          642944634262,
+          42168273,
+          8651
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2573532397\nuser_usec 2569572782\nsystem_usec 3959614\nnice_usec 2567822372\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r3-history-200",
+    "monotonic_ns": 165744303271004,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          660657526759,
+          49993017,
+          10892
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          663687839449,
+          42523420,
+          8767
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          663237749687,
+          300670,
+          86
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          663212872664,
+          42384346,
+          8701
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2654667531\nuser_usec 2650664169\nsystem_usec 4003361\nnice_usec 2648860394\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN rich-moonraker-r3-database64k-200",
+    "monotonic_ns": 165744304537897,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          660658524998,
+          49993017,
+          10892
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          663688836394,
+          42523420,
+          8767
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          663238748447,
+          300670,
+          86
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          663213869619,
+          42384346,
+          8701
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2654671527\nuser_usec 2650668165\nsystem_usec 4003361\nnice_usec 2648864386\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "END rich-moonraker-r3-database64k-200",
+    "monotonic_ns": 165764672168490,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          680957150279,
+          50818050,
+          11093
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          684010829583,
+          43372714,
+          8949
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          683554732963,
+          300670,
+          86
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          683531745622,
+          43157360,
+          8893
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2736021321\nuser_usec 2731950141\nsystem_usec 4071179\nnice_usec 2730093921\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  },
+  {
+    "event": "BEGIN empty-phobos-r1-info-5000",
+    "monotonic_ns": 165773969013196,
+    "vcpu_threads": {
+      "0": {
+        "tid": 2185472,
+        "schedstat": [
+          690224781767,
+          51164300,
+          11183
+        ],
+        "affinity": [
+          10
+        ]
+      },
+      "1": {
+        "tid": 2185474,
+        "schedstat": [
+          693288310850,
+          43706889,
+          9029
+        ],
+        "affinity": [
+          11
+        ]
+      },
+      "2": {
+        "tid": 2185475,
+        "schedstat": [
+          692833345770,
+          303756,
+          87
+        ],
+        "affinity": [
+          12
+        ]
+      },
+      "3": {
+        "tid": 2185476,
+        "schedstat": [
+          692806919877,
+          43643400,
+          9023
+        ],
+        "affinity": [
+          13
+        ]
+      }
+    },
+    "cpu_stat": "usage_usec 2773148684\nuser_usec 2769074527\nsystem_usec 4074157\nnice_usec 2767195673\ncore_sched.force_idle_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\n",
+    "partition": "isolated"
+  }
+]

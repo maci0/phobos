@@ -1,0 +1,8 @@
+{
+  "valid_populated_history_trials": 30,
+  "all_requests_successful": true,
+  "empty_fixture_complete": false,
+  "failure": "Load generator exited after filling the 4 GiB private guest filesystem; offline journal replay exposed the committed allocation state. The incomplete empty-history trial is excluded.",
+  "strict_zero_steal_met": false,
+  "host_restored": true
+}

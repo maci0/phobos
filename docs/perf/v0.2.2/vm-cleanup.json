@@ -1,0 +1,13 @@
+{
+  "vm_stopped": true,
+  "frequency_policies_restored": true,
+  "owned_cgroup_removed": true,
+  "host_user_cpus_after": "0-31",
+  "sleep_idle_inhibitors_released": true,
+  "temporary_sudo_rule_removed": true,
+  "system_slice_cpus_after": "0-31",
+  "qemu_package_remains_installed": true,
+  "busybox_and_vegeta_packages_remain_installed": true,
+  "measured_asset_sha256": "f81657748202cec356e841b7409371de4d74104cdac95e39c99c2a739079022d",
+  "guest_kernel_hash_verified": true
+}
