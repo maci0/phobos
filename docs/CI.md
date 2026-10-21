@@ -14,7 +14,8 @@ printer credentials and does not deploy to a printer.
   maintained performance and release helpers; scanner behavior is tested.
 - The complete standalone daemon suite runs in Debug and ReleaseSafe on
   x86-64, and ReleaseSafe on native AArch64. The physical-Klippy fixture may
-  skip. Logs are retained as artifacts. No test uses a live printer database.
+  skip. OpenSSL and socat are installed so the MQTT/WebSocket TLS fixtures run.
+  Logs are retained as artifacts. No test uses a live printer database.
 - All seven [Linux profiles](BUILDS.md) build independently. The build helper
   checks ELF class/machine, static linkage, ARM ABI/FPU attributes and checksums.
 - The exact x86-64 and AArch64 release assets execute natively, check their

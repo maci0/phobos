@@ -1057,3 +1057,17 @@ endpoints, 130/130 methods and 27/27 notifications. Generated coverage docs
 needed no edits. `graphify-out/graph.json` exists but `graphify` is unavailable,
 so no graph update was run or treated as a deliverable. Hosted CI is rerun on
 the pushed fixes; publication remains restricted to a future annotated tag.
+
+The next hosted run (39546487029) passed checks and both x86-64 suites, but its
+ReleaseSafe log showed 1,718 passed and three skipped: the real-Klippy fixture
+plus the two TLS fixtures because socat was absent. The daemon jobs now install
+OpenSSL and socat explicitly, preserving execution of certificate/hostname and
+MQTT TLS checks. Local suites already had these peers and passed those tests.
+This dependency correction changes no daemon code or skip conditions.
+
+The AArch64 daemon suite also passed 1,718 tests with the same three skips;
+the job failed afterward because setup-uv tried to save a dependency cache
+that a Zig-only job had never created. Dependency caching is disabled in the
+shared setup action so Zig-only jobs have no Python cache post-step dependency.
+Actionlint passes after both workflow corrections. Native AArch64 execution
+found no daemon failures in that run.
