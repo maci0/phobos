@@ -3,16 +3,21 @@
 Source root: `vendor/moonraker/moonraker/`
 Test root: `vendor/moonraker/tests/`
 
-Line counts are `wc -l` at vendored commit `9008485`.
+Line counts are `wc -l` at vendored commit `900848584374`.
+
+This maps Moonraker's upstream tests, not phobos's own suite. The
+[API name gate](api/COVERAGE_HEATMAP.md) and [build matrix](BUILDS.md) describe
+separate registration and target checks. They do not assign a percentage to
+behavioral parity.
 
 ## Status
 
-- The upstream suite collects 473 tests across 4 files (`test_config.py`,
-  `test_database.py`, `test_klippy_connection.py`, `test_server.py`).
+- The recorded 2026-06-01 upstream run collected 473 tests across 4 files
+  (`test_config.py`, `test_database.py`, `test_klippy_connection.py`, `test_server.py`).
 - CI does not run it: `.github/workflows/test_code.yaml` runs only flake8 and mypy.
-- 1 test passes and ~466 error at fixture setup, because `conftest.py`'s
-  `event_loop` fixture and `EventLoop` usage no longer match the asyncio API the
-  source calls. See [`TEST_RUN_FINDINGS.md`](TEST_RUN_FINDINGS.md).
+- That run had 1 pass, 6 failures and 466 fixture setup errors. The `event_loop`
+  fixture in `conftest.py` and `EventLoop` usage no longer match the asyncio API
+  the source calls. See [`TEST_RUN_FINDINGS.md`](TEST_RUN_FINDINGS.md).
 - The failed run does not measure behavioral coverage. The tables record what
   the suite nominally targets, not what runs green.
 

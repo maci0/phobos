@@ -9,6 +9,11 @@ coverage. A passing gate proves registration, including names whose implementati
 is partial. It does not prove response fidelity, notification timing, hardware
 control or safety under load.
 
+The gate rebuilds the default native target. Cross-compilation alone does not
+execute a target binary, and a matching name set does not validate its ABI.
+The [build matrix](../BUILDS.md) records compilation, execution and measurement
+evidence separately for each target.
+
 The previous heatmap used hand-assigned depth scores. Those scores and their
 weighted total were not measured implementation coverage and are no longer used.
 The historical image and renderer remain available for reproducing old reports

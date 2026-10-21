@@ -1,10 +1,10 @@
 # Moonraker API-surface scanner
 
 Extracts Moonraker's externally observable API surface from its source tree into
-a deterministic, diffable JSON artifact. phobos reimplements Moonraker in Zig with
-identical behaviour; this tool shows exactly what changed in the API whenever the
-vendored Moonraker is bumped, replacing the hand-written `docs/api/API_SURFACE.md`
-as the source of truth.
+a deterministic, diffable JSON artifact. phobos targets Moonraker's API; the
+scanner records declared surface changes when the vendored source changes.
+`api/api_surface.json` is the authoritative call list, alongside the hand-written
+[`API_SURFACE.md`](../../docs/api/API_SURFACE.md) inventory.
 
 Parsing uses tree-sitter (`tree-sitter-python`): no regexes, no importing
 Moonraker. [`tools/client_api_scanner`](../client_api_scanner/README.md) uses the
@@ -113,6 +113,11 @@ Coverage: endpoints 123/123 (100.0%), methods 130/130, notifications 27/27, OVER
 `coverage` exit codes: 0 when fully covered, 1 when partial, 2 when the baseline
 or phobos dump file is not found.
 
+The script rebuilds the default native target. Name coverage does not establish
+target ABI correctness, runtime behavior or benchmark results. See the
+[build matrix](../../docs/BUILDS.md) for target-specific evidence and the
+[coverage limits](../../docs/api/COVERAGE_HEATMAP.md) for what this gate proves.
+
 There is no CI workflow in the repo; `diff`, `coverage`, and `table --check` all
 exit non-zero on failure and can serve as gates.
 
@@ -120,7 +125,7 @@ exit non-zero on failure and can serve as gates.
 
 ```sh
 PYTHONPATH=tools uv run --with pytest --with tree-sitter --with tree-sitter-python \
-  pytest tools/api_scanner/tests -q
+  pytest tools/api_scanner/tests -q --basetemp=.scratch/api-scanner-tests
 ```
 
 They cover every extractor function (endpoint, method, remote, static, and
@@ -128,41 +133,37 @@ notification derivation), the diff logic and exit codes, an end-to-end CLI run
 over a synthetic tree, and fuzz tests that feed malformed or unusual Python and
 assert the scanner never crashes and degrades to `<dynamic>` or skips the input.
 
-## Reconciliation against the manual inventory
+## Counts at the pinned baseline
 
-Scanned `vendor/moonraker` (`0.10.1.dev20`, commit `9008485`):
+Scanned `vendor/moonraker` (`0.10.1.dev20+g9008485`, commit `900848584374`):
 
-| Surface             | Scanner | Manual `API_SURFACE.md` |
-|---------------------|---------|-------------------------|
-| Endpoints           | 125     | 125 (section-2 table)   |
-| HTTP endpoints      | 117     | ~110                    |
-| JSON-RPC methods    | 120     | ~130                    |
-| Remote methods      | 14      | (listed separately)     |
-| Notifications       | 27      | 27                      |
-| Static/upload       | 6       | folded into endpoints   |
+| Surface | Count |
+| --- | --- |
+| Endpoint registration records | 125 |
+| Distinct literal endpoint paths, across transports | 123 |
+| HTTP-enabled registration records | 117, including 116 literal paths |
+| Endpoint-derived JSON-RPC names | 130 |
+| Remote-method registration records | 14 |
+| Notifications | 27 |
+| Static/upload handlers | 6 |
 
-The endpoint count (125) and the notification set (27) match the manual doc. The
-other differences are accounting, not missed surface:
+Two endpoint records have `<dynamic>` paths: the debug-registration wrapper in
+`application.py` and runtime Klippy-proxied registration in `klippy_connection.py`.
+The name gate excludes them and checks the 123 literal paths. Runtime Klippy
+registration needs a separate connection test.
 
-- **JSON-RPC methods**: the scanner reports 120 endpoint-derived methods; adding
-  the 14 remote methods (also callable over JSON-RPC) gives 134, against the
-  manual's "~130". The scanner keeps them in separate sections because they
-  register through different code paths.
-- **HTTP endpoints**: the two paths the manual lists that the scanner does not
-  record as endpoints, `/server/files/upload` and `/api/files/local`, are upload
-  handlers (`register_upload_handler`), captured under `static_handlers`.
-- The single `<dynamic>` endpoint is the runtime Klipper-proxied registration in
-  `klippy_connection.py` (`is_remote=True` with a variable path); the manual
-  documents these dynamic `printer.*` endpoints in its own subsection.
-
-Where the two differ, the scanner follows the registration calls in the source
-rather than an editorial grouping.
+JSON-RPC names are flattened and deduplicated from endpoints. Remote-method
+records stay separate; adding their count does not measure distinct JSON-RPC
+names. Upload paths `/server/files/upload` and `/api/files/local` are captured
+under `static_handlers`, rather than as endpoint registrations. The
+[manual inventory](../../docs/api/API_SURFACE.md) groups these APIs for readers;
+the scanner follows their registration calls.
 
 ## Known limitations
 
 - Only `register_*` call sites and `notify_*` string literals are analysed; a
   registration built entirely from runtime data resolves to `"<dynamic>"`. The
-  one such case today is the Klipper-proxied endpoint.
+  pinned baseline contains the debug wrapper and Klipper-proxied registrations.
 - Module-level `NAME = "string"` constants are resolved (e.g.
   `SENSOR_EVENT_NAME`), but constants imported from another module are not; none
   affect the current result.

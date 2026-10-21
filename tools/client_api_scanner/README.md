@@ -8,6 +8,9 @@ The clients show which method names matter alongside vendored Moonraker (scanned
 by [`tools/api_scanner`](../api_scanner/README.md)). The matrix lists client calls
 that phobos does not register. It does not test method behavior or whether a
 client handles a missing plugin. Version-pinned inputs make changes reviewable.
+The server method set comes from a native API dump; the matrix does not run
+clients or validate each CPU/ABI variant. See the [build matrix](../../docs/BUILDS.md)
+for target-specific checks.
 
 ## Clients and call idioms (parsed with tree-sitter, no regex)
 
@@ -61,7 +64,8 @@ Tests:
 
 ```sh
 uv run --with pytest --with tree-sitter --with tree-sitter-typescript --with tree-sitter-python \
-  --with tree-sitter-cpp pytest tools/client_api_scanner/tests -q
+  --with tree-sitter-cpp pytest tools/client_api_scanner/tests -q \
+  --basetemp=.scratch/client-api-scanner-tests
 ```
 
 ## Known non-gaps
