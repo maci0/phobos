@@ -63,6 +63,8 @@ Notes:
   outside module path".
 - Run socket and WebSocket tests under a `timeout`; a deadlock otherwise hangs
   the suite.
+- `TestServer.startKlippyBridge` waits for the simulator and the bridge's proxy
+  gate before returning, so immediate printer requests use the finished handshake.
 - DataStore backend: `[database] backend`, vendored SQLite (default) or the
   pure-Zig file backend.
 

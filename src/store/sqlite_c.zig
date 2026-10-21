@@ -1,7 +1,7 @@
 //! Minimal hand-declared bindings for the vendored SQLite amalgamation
-//! (vendor/sqlite/sqlite3.c, 3.47.0). Only the symbols the DataStore backend
-//! needs — hand-declared rather than `@cImport`, matching the codebase's C-binding
-//! style and keep cross-compilation simple. Built with SQLITE_OMIT_AUTOINIT, so
+//! (vendor/sqlite/sqlite3.c, 3.54.1). Only the symbols the DataStore backend
+//! needs are declared here, keeping cross-compilation simple without `@cImport`.
+//! Built with SQLITE_OMIT_AUTOINIT, so
 //! `sqlite3_initialize` must be called once before use.
 
 pub const sqlite3 = opaque {};

@@ -1,18 +1,26 @@
 # SQLite amalgamation
 
-The build compiles these upstream SQLite 3.47.0 sources into the static binary.
+The build compiles these upstream SQLite 3.54.1 sources into the static binary.
 They are required in a fresh checkout. Moonraker's reference checkout is separate
 and is not a build dependency.
 
 Upstream source ID:
-`2024-10-21 16:30:22 03a9703e27c44437c39363d0baf82db4ebc94538a0f28411c85dda156f82636e`.
+`2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76`.
 Local patches: none. Build defines are listed in `build.zig:addVendoredSqlite`.
+
+Source: [official amalgamation archive](https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip),
+the latest stable version listed on the [download page](https://www.sqlite.org/download.html)
+when checked on 2026-10-21. Its SHA3-256 is
+`92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30`.
+The amalgamation's SHA3-256 also matches the
+[release history](https://www.sqlite.org/changes.html):
+`e2b869d3003b33c942b7dd7063604fbc53553e1b66609570df39b9b7b558ee81`.
 
 SHA-256:
 
 ```text
-0a830d5ab8a0a24be25b795869b8986231be90102bcb9b164da4f02d6958a2f7  vendor/sqlite/sqlite3.c
-9bcec02d51f4328941ba24b8fac7afcf78e4f0ff2148cfc1a63329fca9d0b766  vendor/sqlite/sqlite3.h
+0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52  vendor/sqlite/sqlite3.c
+d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c  vendor/sqlite/sqlite3.h
 ```
 
 Both files retain the upstream copyright disclaimer and blessing. The header's

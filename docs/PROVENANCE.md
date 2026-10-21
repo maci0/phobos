@@ -756,3 +756,36 @@ No components failed; the last print remained complete and both heater targets
 remained zero. The board boot ID is unchanged. Only the Phobos daemon was
 restarted. The private probe and its copied data were removed. Reboot
 persistence was not tested; no board reboot or printer control command was sent.
+## 2026-10-21: SQLite 3.54.1 and version-matched test setup
+
+Requested by the user: update SQLite to the latest stable version while adding
+ARM variants and refreshing performance evidence. The official download and
+release-history pages list 3.54.1, released 2026-10-16. The unpatched amalgamation
+replaces 3.47.0. Its source ID, archive URL, archive/source SHA3-256 and file
+SHA-256 values are recorded in `vendor/sqlite/README.md`. Both official SHA3
+values were checked before copying the source and header into the vendor tree.
+The upstream C file retains its original trailing whitespace at line 23 so its
+published hash remains verifiable; first-party diff checks exclude that file.
+
+The package version advances to 0.2.1 for these new runtime assets rather than
+replacing the published 0.2.0 binaries. A regression queries the linked library's
+`sqlite_version()` and `sqlite_source_id()` through the existing C bindings.
+All store, migration, rollback, malformed-record and persistence tests pass.
+
+The first complete run exposed an existing simulator setup race: the peer's
+handshake signal could precede the bridge's proxy gate, causing the immediate
+internal PanelDue/power test to fail with `KlippyDisconnected`. The shared test
+constructor now waits for that existing gate after the simulator signal, using
+its bounded connection helper. No production handshake behavior was changed.
+The repeated complete standalone Debug suite passed 1718 tests, with one gated
+real-Klippy skip, zero failures and 325 bounded fuzz harnesses. Commands were
+`zig build test-artifact -Doptimize=Debug` and the selected standalone artifact
+with `--cache-dir=./.zig-cache`, under a timeout and without a runtime filter.
+
+Static ReleaseSmall builds passed for Cortex-A7 ARM hard-float and baseline
+AArch64. The Cortex-A7 candidate SHA-256 is
+`5f878845076f575756b0ba2239a82ba5e00b30ff22d6ec7634790836673957cf`.
+Native Debug was rebuilt after the cross-builds. Architecture-matrix checks,
+fresh host/printer performance measurements and final release evidence follow
+in later entries. No deployment, live database write, printer control action,
+board reboot, image mutation or QEMU execution was used for this change.

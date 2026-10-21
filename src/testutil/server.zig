@@ -174,8 +174,9 @@ pub const TestServer = struct {
         // The bridge reads `sim.socket_path`; stop it before the sim is freed.
         errdefer self.app.klippy_ctx.stop(self.io);
 
-        // Wait for the simulator handshake to complete.
+        // The peer can finish sending before the bridge opens its proxy gate.
         try sim.waitReady();
+        if (!waitKlippyConnected(self)) return error.KlippyBridgeNotReady;
 
         self.klippy_sim = sim;
     }

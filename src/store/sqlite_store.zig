@@ -512,6 +512,17 @@ fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!?MappedJob {
 
 const testing = std.testing;
 
+test "SqliteStore links the pinned SQLite version and source revision" {
+    var store = try SqliteStore.open(testing.io, ":memory:");
+    defer store.deinit();
+    var stmt: ?*c.sqlite3_stmt = null;
+    try testing.expectEqual(c.SQLITE_OK, c.sqlite3_prepare_v2(store.db, "SELECT sqlite_version(), sqlite_source_id()", -1, &stmt, null));
+    defer _ = c.sqlite3_finalize(stmt.?);
+    try testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(stmt.?));
+    try testing.expectEqualStrings("3.54.1", std.mem.span(c.sqlite3_column_text(stmt.?, 0).?));
+    try testing.expectEqualStrings("2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76", std.mem.span(c.sqlite3_column_text(stmt.?, 1).?));
+}
+
 test "SqliteStore.open rejects embedded NUL before creating database parents" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
