@@ -1584,3 +1584,53 @@ service has been restarted during these checks; the completed print still has
 a nonzero nozzle target at this entry. Printer staging uses a unique executable
 and private probe directory. Browser automation is unavailable, so no visual
 Fluidd result is claimed. Graph output is excluded because graphify is absent.
+
+## 2026-10-22: deploy the Fluidd compatibility fixes after calibration
+
+The user authorized a phobos restart after printing, then clarified that bed-mesh
+calibration must finish first. The initial probe launch was rejected by its
+preflight when a new 60-degree bed target appeared; no probe or restart occurred
+then. Read-only checks subsequently observed Mesh Bed Leveling Complete, profile
+`auto`, inactive motion, completed print state and zero heater targets.
+
+The static ARM build recorded above ran inside the Forge-X chroot on loopback
+7126 with a private data directory and fresh database. Its minimal configuration
+exposes 268 objects because it omits production's six hidden-object exclusions.
+The full subscription returns all 268 statuses, both literal array-key
+write/read/delete paths pass, and the config directory's filesystem usage is
+valid. Those writes touched only the private probe database. The probe was
+stopped before deployment.
+
+Only the owned production phobos PID was stopped. While it was stopped, the
+database, WAL and SHM were copied with the old executable and launcher into
+`/data/phobos-backups/fluidd-20261021T180219Z`. The snapshot database SHA256 is
+`d6bca7b80e685f0048eee93f4767f73ab9e8073ce3f06c2c9bf3b092f2b26b15`.
+The launcher now executes `/data/phobos-fluidd-20261022`, a patched v0.2.2 build
+from commit e0b9bf7. Published v0.2.2 assets and its tag are unchanged. The running
+executable matches ARM SHA256
+`a224e2699893895523acda2e95af90699abbae13e9ecd85a4a337281fcb97944`.
+
+Before/after checks replay the same production Fluidd subscription: 262 objects
+returned 400 before and all 262 statuses after deployment. All 26 production
+components remain loaded, without failed components or warnings. Existing
+Fluidd uiSettings read identically through dotted and array keys, with the array
+key echoed intact. Directory stat succeeds. The console store starts empty after
+the daemon restart; live console fan-out is covered by the host WebSocket test,
+but no printer gcode was sent to manufacture a console event or a visual result.
+
+Klippy remains ready, mesh profile auto is intact and both heater targets remain
+zero at verification. The board boot ID is unchanged. No Klippy restart, board
+restart, movement or heater command was sent. Probe port 7126 is closed and its
+owned scratch directory is removed; production serves 7125. The normal host
+Debug binary was rebuilt successfully. The fixes were fast-forward pushed to
+main; CI checks, all seven build profiles, native x86-64/AArch64 smoke tests and
+the x86-64 Debug suite pass at this entry. Remaining CI suites are still running.
+
+Subsequent [CI run 39648295675](https://github.com/maci0/phobos/actions/runs/39648295675)
+passes for source commit e0b9bf7: all seven static build profiles, both native
+smoke jobs, packaging, x86-64 Debug/ReleaseSafe and native AArch64 ReleaseSafe.
+Each test job reports 1,735 passed, one skipped, zero failed and 327 fuzz tests.
+Publication is skipped because this is a main-branch fix, not a release tag.
+A read-only 60-second production WebSocket observation also accepts the exact
+262-object subscription; no natural console event occurs during that idle
+window, so it adds no claim of real-printer console event or visual verification.
