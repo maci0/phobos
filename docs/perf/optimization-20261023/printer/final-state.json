@@ -1,0 +1,64 @@
+{
+  "production_pid": 13321,
+  "production_executable_sha256": "a31858612a226140fdc435f61b17c773360f4a0d2d61b322cc7fda7bb1890ad8",
+  "production_executable": "/data/phobos-speed-20261022",
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "board_boot_unchanged": true,
+  "probe_listener_absent": true,
+  "production_restored": true,
+  "candidate_installed_during_load": false,
+  "components": [
+    "announcements",
+    "application",
+    "authorization",
+    "data_store",
+    "database",
+    "dbus_manager",
+    "extensions",
+    "feather_updates",
+    "file_manager",
+    "history",
+    "http_client",
+    "internal_transport",
+    "job_queue",
+    "job_state",
+    "jsonrpc",
+    "klippy_apis",
+    "klippy_connection",
+    "machine",
+    "octoprint_compat",
+    "proc_stats",
+    "secrets",
+    "shell_command",
+    "template",
+    "update_manager",
+    "webcam",
+    "websockets"
+  ],
+  "console_entries": 0,
+  "disk_usage": {
+    "free": 401993728,
+    "total": 1300103168,
+    "used": 881332224
+  },
+  "klippy_state": "ready",
+  "private_array_roundtrips": 0,
+  "status": {
+    "extruder": {
+      "target": 0
+    },
+    "heater_bed": {
+      "target": 0
+    },
+    "idle_timeout": {
+      "printing_time": 0,
+      "state": "Idle"
+    },
+    "print_stats": {
+      "state": "complete"
+    }
+  },
+  "subscription_error": null,
+  "subscription_objects": 262,
+  "subscription_status_objects": 262
+}

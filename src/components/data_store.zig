@@ -327,10 +327,7 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     const c: *DataStoreCtx = @ptrCast(@alignCast(ctx));
     const ring = &c.gcode_ring;
 
-    var tmp_buf = try alloc.alloc(GcodeEntry, ring.entries.len);
-    defer alloc.free(tmp_buf);
-
-    const n = ring.copyAll(tmp_buf);
+    const n = ring.entries.len;
     // data_store.py returns `list(queue)[-count:]`: 0 keeps every entry and a
     // negative count drops the oldest |count|. lossyCast clamps i64 counts a
     // 32-bit usize cannot hold.
@@ -339,16 +336,17 @@ pub fn handleGcodeStore(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
     else
         0;
 
-    var arr: std.json.Array = .init(alloc);
-    for (tmp_buf[first..n]) |entry| {
+    var arr = try std.json.Array.initCapacity(alloc, n - first);
+    for (first..n) |index| {
+        const entry = ring.entries.at(index);
         var obj: std.json.ObjectMap = .empty;
-        try obj.put(alloc, "message", .{ .string = entry.message });
-        try obj.put(alloc, "time", .{ .float = entry.time });
-        try obj.put(alloc, "type", .{ .string = switch (entry.type) {
-            .response => "response",
-            .command => "command",
-        } });
-        try arr.append(.{ .object = obj });
+        // The fixed schema needs no growth slack.
+        try obj.entries.setCapacity(alloc, @typeInfo(GcodeEntry).@"struct".field_names.len);
+        try obj.reIndex(alloc);
+        obj.putAssumeCapacity("message", .{ .string = entry.message });
+        obj.putAssumeCapacity("time", .{ .float = entry.time });
+        obj.putAssumeCapacity("type", .{ .string = @tagName(entry.type) });
+        arr.appendAssumeCapacity(.{ .object = obj });
     }
 
     var result: std.json.ObjectMap = .empty;
@@ -677,6 +675,50 @@ test "handleGcodeStore: count follows Python list[-count:] slicing" {
         try testing.expectEqual(case.len, arr.items.len);
         if (case.len > 0) try testing.expectEqualStrings(case.first, arr.items[0].object.get("message").?.string);
     }
+}
+
+test "gcode snapshots allocate for the requested count and preserve wrapped order" {
+    const a = testing.allocator;
+    var ctx = try DataStoreCtx.init(a);
+    defer ctx.deinit();
+    for (0..1024) |index| try ctx.pushGcodeResponse("kept", @floatFromInt(index));
+    var params: std.json.ObjectMap = .empty;
+    defer params.deinit(a);
+    try params.put(a, "count", .{ .integer = 1 });
+    var tracked = testing.FailingAllocator.init(a, .{});
+    var arena = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer arena.deinit();
+    const result = try handleGcodeStore(&ctx, .{ .object = params }, arena.allocator());
+    const entries = result.object.get("gcode_store").?.array.items;
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqual(@as(f64, 1023), entries[0].object.get("time").?.float);
+    try testing.expectEqualStrings("kept", entries[0].object.get("message").?.string);
+    try testing.expect(tracked.allocated_bytes < 8192);
+    const full = try handleGcodeStore(&ctx, .null, arena.allocator());
+    const all = full.object.get("gcode_store").?.array.items;
+    try testing.expectEqual(@as(usize, 1000), all.len);
+    for (all, 24..) |entry, index| {
+        try testing.expectEqual(@as(f64, @floatFromInt(index)), entry.object.get("time").?.float);
+        try testing.expectEqualStrings("response", entry.object.get("type").?.string);
+    }
+    try testing.expect(tracked.allocated_bytes < 512 * 1024);
+}
+
+test "gcode snapshots release partial output after every allocation failure" {
+    var ctx = try DataStoreCtx.init(testing.allocator);
+    defer ctx.deinit();
+    for (0..3) |index| try ctx.pushGcodeCommand("kept", @floatFromInt(index));
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
+        fn run(alloc: std.mem.Allocator, store: *DataStoreCtx) !void {
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            defer arena.deinit();
+            const result = try handleGcodeStore(store, .null, arena.allocator());
+            const entries = result.object.get("gcode_store").?.array.items;
+            try testing.expectEqual(@as(usize, 3), entries.len);
+            for (entries, 0..) |entry, index| try testing.expectEqual(@as(f64, @floatFromInt(index)), entry.object.get("time").?.float);
+        }
+    }.run, .{&ctx});
 }
 
 test "handleTempStore: returns empty object (no Klippy)" {

@@ -327,9 +327,8 @@ pub const FileCtx = struct {
         const a = arena.allocator();
         const req = std.fmt.allocPrint(a, "{s}/{s}", .{ root_name, rel }) catch return false;
         const resolved = resolveRequestPath(self, a, req) catch return false;
-        const file = resolved.openFile(io, a) catch return false;
-        file.close(io);
-        return true;
+        const info = resolved.stat(io, a) catch return false;
+        return info.kind == .file;
     }
 
     /// Type-erased adapter: does "gcodes/<filename>" exist as a file?
@@ -1723,6 +1722,55 @@ test "resolveRequestPath: escape attempt → Forbidden" {
     var c = tr.ctx();
     try testing.expectError(error.Forbidden, resolveRequestPath(&c, a, "gcodes/../../etc/passwd"));
     try testing.expectError(error.Forbidden, resolveRequestPath(&c, a, "gcodes/../config/secret"));
+}
+
+test "fileExists checks regular file metadata without opening its data" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tr = try TestRoots.init(arena.allocator());
+    defer tr.deinit();
+    var ctx = tr.ctx();
+    defer ctx.deinit();
+    try tr.writeFile("gcodes/present.gcode", "data");
+    try tr.writeFile("config/secret.gcode", "private");
+    try tr.tmp.dir.symLink(tr.io, "present.gcode", "gcodes/alias.gcode", .{});
+    try tr.tmp.dir.symLink(tr.io, "../config/secret.gcode", "gcodes/escape.gcode", .{});
+    var vtable = testing.io.vtable.*;
+    vtable.dirOpenFile = struct {
+        fn open(userdata: ?*anyopaque, dir: Dir, name: []const u8, options: Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            if (std.mem.eql(u8, name, "present.gcode")) return error.AccessDenied;
+            return testing.io.vtable.dirOpenFile(userdata, dir, name, options);
+        }
+    }.open;
+    ctx.io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    try testing.expect(ctx.fileExists("gcodes", "present.gcode"));
+    try testing.expect(ctx.fileExists("gcodes", "alias.gcode"));
+    try testing.expect(!ctx.fileExists("gcodes", "escape.gcode"));
+    try testing.expect(!ctx.fileExists("gcodes", "../config/secret.gcode"));
+    try testing.expect(!ctx.fileExists("gcodes", "."));
+    try testing.expect(!ctx.fileExists("gcodes", "missing.gcode"));
+}
+
+test "fuzz fileExists observes file creation and deletion" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var name: [16]u8 = undefined;
+            smith.bytesWithHash(&name, 0);
+            for (&name) |*byte| byte.* = 'a' + byte.* % 26;
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var tr = try TestRoots.init(arena.allocator());
+            defer tr.deinit();
+            var ctx = tr.ctx();
+            defer ctx.deinit();
+            const path = try std.fmt.allocPrint(arena.allocator(), "gcodes/{s}", .{name});
+            try testing.expect(!ctx.fileExists("gcodes", &name));
+            try tr.writeFile(path, "data");
+            try testing.expect(ctx.fileExists("gcodes", &name));
+            try tr.tmp.dir.deleteFile(tr.io, path);
+            try testing.expect(!ctx.fileExists("gcodes", &name));
+        }
+    }.run, .{});
 }
 
 test "file operations reject symlink escapes from their registered root" {

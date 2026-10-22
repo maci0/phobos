@@ -7,6 +7,10 @@ const std = @import("std");
 const Io = std.Io;
 const net = std.Io.net;
 
+pub fn initThreaded(alloc: std.mem.Allocator, environ: std.process.Environ) std.Io.Threaded {
+    return .init(alloc, .{ .stack_size = Listener.handler_stack_size, .environ = environ });
+}
+
 /// A connection handler carrying an opaque context pointer. Used to wire the
 /// HTTP transport (`serveConn`) — which needs the shared server state — into the
 /// accept loop without globals.
@@ -49,11 +53,10 @@ pub const Listener = struct {
     /// connections wait in the listen backlog instead of spawning a worker.
     pub const max_concurrent_conns = 128;
 
-    /// Per-handler thread stack size used on 32-bit targets (see main.zig — the
-    /// 16 MB default would reserve ~2 GB of VSZ at the handler-pool peak). The
+    /// Per-handler stack size used by the daemon's owned Threaded backend. The
     /// deepest handler path (streaming upload: 64 KB read + 32 KB write buffers
     /// nested under the connection's 24 KB) peaks ~120 KB; 1 MB is ~8× headroom.
-    /// Referenced by the production gate AND the stack-stress tests so they can't
+    /// Referenced by runtime initialization and stack-stress tests so they can't
     /// validate a size production no longer uses.
     pub const handler_stack_size: usize = 1 << 20;
 
@@ -293,6 +296,42 @@ test "fuzz_listener: random payload round-trips through serveWith" {
             const echoed = try sendLine(c.io, c.address, payload[0..n], &out);
             try std.testing.expectEqualStrings("F:", echoed[0..2]);
             try std.testing.expectEqualStrings(payload[0..n], echoed[2..]);
+        }
+    }.run, .{});
+}
+
+fn expectChildEnvironment(marker: []const u8) !void {
+    const alloc = std.heap.smp_allocator;
+    var entry_buffer: [128]u8 = undefined;
+    const entry = try std.fmt.bufPrintSentinel(&entry_buffer, "PHOBOS_IO_TEST={s}", .{marker}, 0);
+    const block = [_:null]?[*:0]const u8{ entry.ptr, "PATH=/usr/bin:/bin" };
+    var threaded = initThreaded(alloc, .{ .block = .{ .slice = &block } });
+    defer threaded.deinit();
+    const aio = threaded.io();
+    const output = try @import("util/process.zig").run(alloc, aio, .{
+        .argv = &.{ "printenv", "PHOBOS_IO_TEST" },
+        .stdout_limit = .limited(1024),
+        .stderr_limit = .limited(1024),
+        .timeout = .{ .deadline = .fromNow(aio, .{ .raw = .fromSeconds(3), .clock = .awake }) },
+    });
+    defer alloc.free(output.stdout);
+    defer alloc.free(output.stderr);
+    var expected_buffer: [128]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{s}\n", .{marker});
+    try std.testing.expectEqualStrings(expected, output.stdout);
+    try std.testing.expect(output.term == .exited and output.term.exited == 0);
+}
+
+test "runtime I/O preserves the environment passed to child processes" {
+    try expectChildEnvironment("retained");
+}
+
+test "fuzz runtime I/O child environment retains variable values" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var marker_buffer: [32]u8 = undefined;
+            const marker = try std.fmt.bufPrint(&marker_buffer, "{d}", .{smith.value(u32)});
+            try expectChildEnvironment(marker);
         }
     }.run, .{});
 }

@@ -1,0 +1,1166 @@
+[
+  {
+    "fixture": "empty",
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "empty-candidate-r1-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          8081,
+          0,
+          2550,
+          212074,
+          29,
+          449,
+          325,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          956,
+          0,
+          211,
+          54545,
+          21,
+          139,
+          11,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5739,
+          0,
+          1062,
+          48879,
+          3,
+          34,
+          160,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          695,
+          0,
+          652,
+          54315,
+          2,
+          138,
+          76,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          689,
+          0,
+          624,
+          54334,
+          1,
+          136,
+          76,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.14 avg300=0.24 total=3203806\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 558895921750
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          8144,
+          0,
+          2596,
+          215961,
+          29,
+          460,
+          336,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          958,
+          0,
+          211,
+          55544,
+          21,
+          142,
+          11,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5755,
+          0,
+          1073,
+          49851,
+          3,
+          36,
+          165,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          717,
+          0,
+          669,
+          55273,
+          2,
+          141,
+          79,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          712,
+          0,
+          641,
+          55293,
+          1,
+          139,
+          79,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.12 avg300=0.23 total=3276814\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 568943131979
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.02516264499991,
+      "cpu_seconds": 0.27,
+      "cpu_percent_one_core": 2.6932231382267258,
+      "rss_kib_min": 4708,
+      "rss_kib_median": 4712,
+      "rss_kib_max": 4712,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 5240,
+      "cpu_us_per_request": 22.5
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 921114143,
+        "mean": 76759,
+        "50th": 72313,
+        "90th": 103707,
+        "95th": 111099,
+        "99th": 129658,
+        "max": 346130,
+        "min": 40550
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:34:11.093845205Z",
+      "latest": "2026-10-22T16:34:21.09345248Z",
+      "end": "2026-10-22T16:34:21.09351016Z",
+      "duration": 9999607275,
+      "wait": 57680,
+      "requests": 12000,
+      "rate": 1200.0471288508677,
+      "throughput": 1200.040206747107,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "empty",
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "empty-moonraker-r1-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          8234,
+          0,
+          2605,
+          220131,
+          40,
+          462,
+          337,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          961,
+          0,
+          212,
+          56599,
+          32,
+          144,
+          11,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5840,
+          0,
+          1077,
+          50831,
+          3,
+          36,
+          165,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          719,
+          0,
+          671,
+          56339,
+          2,
+          142,
+          80,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          713,
+          0,
+          644,
+          56360,
+          1,
+          139,
+          79,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.10 avg300=0.22 total=3292750\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 579653076588
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          8556,
+          0,
+          2689,
+          223713,
+          41,
+          484,
+          348,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          964,
+          0,
+          212,
+          57596,
+          32,
+          148,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6111,
+          0,
+          1102,
+          51533,
+          3,
+          37,
+          171,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          743,
+          0,
+          701,
+          57281,
+          2,
+          150,
+          82,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          736,
+          0,
+          673,
+          57301,
+          1,
+          147,
+          82,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.55 avg60=0.21 avg300=0.24 total=3461780\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 589709953795
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.02555104499993,
+      "cpu_seconds": 2.9499999999999997,
+      "cpu_percent_one_core": 29.42481651890109,
+      "rss_kib_min": 58076,
+      "rss_kib_median": 58236,
+      "rss_kib_max": 58236,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 58236,
+      "cpu_us_per_request": 245.85382115176262
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3726607156,
+        "mean": 310576,
+        "50th": 287305,
+        "90th": 471111,
+        "95th": 571968,
+        "99th": 602469,
+        "max": 3443516,
+        "min": 170820
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:34:31.851269682Z",
+      "latest": "2026-10-22T16:34:41.850130208Z",
+      "end": "2026-10-22T16:34:41.850522217Z",
+      "duration": 9998860526,
+      "wait": 392009,
+      "requests": 11999,
+      "rate": 1200.036741066549,
+      "throughput": 1199.9896950297396,
+      "success": 1,
+      "status_codes": {
+        "200": 11999
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "empty",
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "empty-moonraker-r2-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          8649,
+          0,
+          2698,
+          227949,
+          48,
+          487,
+          349,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          966,
+          0,
+          213,
+          58678,
+          33,
+          150,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6200,
+          0,
+          1106,
+          52526,
+          4,
+          37,
+          171,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          745,
+          0,
+          702,
+          58358,
+          8,
+          150,
+          82,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          737,
+          0,
+          675,
+          58385,
+          1,
+          148,
+          82,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.23 avg60=0.20 avg300=0.24 total=3481999\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 600583655001
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          8971,
+          0,
+          2782,
+          231532,
+          49,
+          508,
+          359,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          969,
+          0,
+          213,
+          59675,
+          33,
+          155,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6470,
+          0,
+          1131,
+          53229,
+          4,
+          38,
+          177,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          768,
+          0,
+          733,
+          59299,
+          9,
+          158,
+          85,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          762,
+          0,
+          702,
+          59327,
+          1,
+          156,
+          84,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.71 avg60=0.32 avg300=0.26 total=3654938\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 610641027378
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025330233999966,
+      "cpu_seconds": 2.9499999999999997,
+      "cpu_percent_one_core": 29.42546460958814,
+      "rss_kib_min": 58220,
+      "rss_kib_median": 58800,
+      "rss_kib_max": 58800,
+      "threads_min": 5,
+      "threads_max": 5,
+      "vmhwm_kib": 58800,
+      "cpu_us_per_request": 245.8333333333333
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3797238167,
+        "mean": 316436,
+        "50th": 293835,
+        "90th": 505575,
+        "95th": 574949,
+        "99th": 598841,
+        "max": 1675638,
+        "min": 166540
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:34:52.781472576Z",
+      "latest": "2026-10-22T16:35:02.780487371Z",
+      "end": "2026-10-22T16:35:02.780683401Z",
+      "duration": 9999014795,
+      "wait": 196030,
+      "requests": 12000,
+      "rate": 1200.1182362486943,
+      "throughput": 1200.094708474156,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "empty",
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "empty-candidate-r2-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          8978,
+          0,
+          2787,
+          235341,
+          50,
+          511,
+          360,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          970,
+          0,
+          215,
+          60628,
+          34,
+          156,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6474,
+          0,
+          1132,
+          54181,
+          4,
+          38,
+          178,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          770,
+          0,
+          735,
+          60252,
+          9,
+          159,
+          85,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          763,
+          0,
+          704,
+          60278,
+          3,
+          156,
+          84,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.32 avg60=0.28 avg300=0.26 total=3666404\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 620207486302
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          9041,
+          0,
+          2832,
+          239229,
+          51,
+          521,
+          371,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          973,
+          0,
+          215,
+          61626,
+          34,
+          159,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6490,
+          0,
+          1143,
+          55152,
+          4,
+          40,
+          182,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          793,
+          0,
+          750,
+          61211,
+          9,
+          161,
+          88,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          784,
+          0,
+          722,
+          61237,
+          3,
+          159,
+          88,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.11 avg60=0.23 avg300=0.25 total=3736234\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 630255169850
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025301373999923,
+      "cpu_seconds": 0.27,
+      "cpu_percent_one_core": 2.693185869705926,
+      "rss_kib_min": 4708,
+      "rss_kib_median": 4712,
+      "rss_kib_max": 4712,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 5240,
+      "cpu_us_per_request": 22.5
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 923479563,
+        "mean": 76956,
+        "50th": 72097,
+        "90th": 104293,
+        "95th": 113898,
+        "99th": 129731,
+        "max": 656099,
+        "min": 39850
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:35:12.405301197Z",
+      "latest": "2026-10-22T16:35:22.405180991Z",
+      "end": "2026-10-22T16:35:22.405243471Z",
+      "duration": 9999879794,
+      "wait": 62480,
+      "requests": 12000,
+      "rate": 1200.014424893396,
+      "throughput": 1200.0069271599878,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "empty",
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "empty-candidate-r3-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          9047,
+          0,
+          2838,
+          242974,
+          52,
+          523,
+          372,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          975,
+          0,
+          216,
+          62562,
+          34,
+          161,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6491,
+          0,
+          1144,
+          56090,
+          4,
+          40,
+          183,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          794,
+          0,
+          752,
+          62148,
+          9,
+          162,
+          88,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          785,
+          0,
+          724,
+          62173,
+          4,
+          159,
+          88,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.04 avg60=0.20 avg300=0.24 total=3746362\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 639655683879
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          9111,
+          0,
+          2883,
+          246861,
+          52,
+          534,
+          383,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          978,
+          0,
+          216,
+          63560,
+          34,
+          164,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6507,
+          0,
+          1155,
+          57062,
+          4,
+          42,
+          187,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          818,
+          0,
+          769,
+          63106,
+          9,
+          164,
+          91,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          807,
+          0,
+          742,
+          63132,
+          4,
+          162,
+          91,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.01 avg60=0.16 avg300=0.23 total=3817212\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 649702985778
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025267825000014,
+      "cpu_seconds": 0.27,
+      "cpu_percent_one_core": 2.693194882302305,
+      "rss_kib_min": 4704,
+      "rss_kib_median": 4708,
+      "rss_kib_max": 4708,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 5236,
+      "cpu_us_per_request": 22.5
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 928088764,
+        "mean": 77340,
+        "50th": 72614,
+        "90th": 104301,
+        "95th": 112870,
+        "99th": 133034,
+        "max": 363899,
+        "min": 40760
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:35:31.853503404Z",
+      "latest": "2026-10-22T16:35:41.852883279Z",
+      "end": "2026-10-22T16:35:41.852934199Z",
+      "duration": 9999379875,
+      "wait": 50920,
+      "requests": 12000,
+      "rate": 1200.0744196149462,
+      "throughput": 1200.0683084881532,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "empty",
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "empty-moonraker-r3-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          9200,
+          0,
+          2893,
+          251035,
+          58,
+          536,
+          384,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          979,
+          0,
+          218,
+          64626,
+          35,
+          165,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6592,
+          0,
+          1159,
+          58042,
+          4,
+          42,
+          187,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          819,
+          0,
+          771,
+          64168,
+          14,
+          165,
+          92,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          808,
+          0,
+          743,
+          64199,
+          4,
+          162,
+          91,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.13 avg300=0.22 total=3828888\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 660412566917
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          9524,
+          0,
+          2979,
+          254614,
+          59,
+          558,
+          395,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          982,
+          0,
+          219,
+          65622,
+          35,
+          170,
+          12,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          6865,
+          0,
+          1185,
+          58741,
+          4,
+          43,
+          193,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          842,
+          0,
+          799,
+          65109,
+          14,
+          173,
+          94,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          833,
+          0,
+          774,
+          65140,
+          4,
+          170,
+          94,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.63 avg60=0.27 avg300=0.24 total=4019650\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 670469475544
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025380754000025,
+      "cpu_seconds": 2.9899999999999998,
+      "cpu_percent_one_core": 29.824303668536682,
+      "rss_kib_min": 58608,
+      "rss_kib_median": 58672,
+      "rss_kib_max": 58704,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 58704,
+      "cpu_us_per_request": 249.16666666666666
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3803498385,
+        "mean": 316958,
+        "50th": 288616,
+        "90th": 437688,
+        "95th": 617559,
+        "99th": 674410,
+        "max": 3613505,
+        "min": 165300
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:35:52.610469912Z",
+      "latest": "2026-10-22T16:36:02.609992867Z",
+      "end": "2026-10-22T16:36:02.610199946Z",
+      "duration": 9999522955,
+      "wait": 207079,
+      "requests": 12000,
+      "rate": 1200.0572481309935,
+      "throughput": 1200.0323967946033,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  }
+]

@@ -1,8 +1,8 @@
 # Memory footprint
 
-Current measurements compare **phobos 0.2.2 development with Moonraker**,
-measured 2026-10-22. The ReleaseFast build is not the published v0.2.2 asset.
-The [performance report](PERFORMANCE.md) and [method](perf/optimization-20261022-2/METHOD.md) identify
+Current measurements compare **phobos v0.2.3 with Moonraker**,
+measured 2026-10-23. The ReleaseFast binaries come from the release matrix.
+The [performance report](PERFORMANCE.md) and [method](perf/optimization-20261023/METHOD.md) identify
 sources, executable hashes, fixtures, rates and measured scheduling limits.
 Every active graphic shows only the current build and Moonraker.
 
@@ -22,20 +22,20 @@ run on CPU 1. The installed reference uses Python 3.11.10.
 
 | Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ |
 | --- | ---: | ---: |
-| phobos development | 4,720 (4,548.0 to 4,772) | 6,452 |
-| Moonraker | 37,880 (37,640.0 to 37,884) | 37,888 |
+| phobos v0.2.3 | 4,512 (4,388.0 to 4,652) | 5,968 |
+| Moonraker | 37,536 (37,276 to 37,820) | 37,532 |
 
-![printer memory, current phobos versus Moonraker](perf/optimization-20261022-2/printer/memory.png)
+![printer memory, current phobos versus Moonraker](perf/optimization-20261023/printer/memory.png)
 
 The table includes HTTP and full-subscription samples; the graphic covers HTTP
 and idle. Load sampling is about 100 ms; lifetime/idle sampling about 250 ms.
 VmHWM can retain a previous unlimited-history preflight peak and is not a
-per-workload peak. Board MemAvailable stays above 20,508 KiB,
+per-workload peak. Board MemAvailable stays above 19,668 KiB,
 with a 16 MiB guard. Probe VmSwap stays 0 KiB.
 Board SwapFree ranges from 0 to
-472 KiB; zero probe swap does not prove the entire
+204 KiB; zero probe swap does not prove the entire
 board avoided swapping. Swap settings remain unchanged.
-[Board observations](perf/optimization-20261022-2/printer/board-memory.json) retain these limits.
+[Board observations](perf/optimization-20261023/printer/board-memory.json) retain these limits.
 
 ## KVM on the benchmark PC, populated history
 
@@ -45,10 +45,10 @@ Runtime, SQLite and scheduling controls are in the [performance report](PERFORMA
 
 | Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ |
 | --- | ---: | ---: |
-| phobos development | 7,408 (7,400 to 9,444) | 11,672 |
-| Moonraker | 57,800 (57,668 to 58,408) | 60,940 |
+| phobos v0.2.3 | 5,200 (5,196 to 5,200) | 6,164 |
+| Moonraker | 58,868 (58,020 to 58,912) | 60,324 |
 
-![vm-rich memory, current phobos versus Moonraker](perf/optimization-20261022-2/vm-rich/memory.png)
+![vm-rich memory, current phobos versus Moonraker](perf/optimization-20261023/vm-rich/memory.png)
 
 ## KVM on the benchmark PC, empty history
 
@@ -56,15 +56,15 @@ Same controls with fresh databases containing only the 64 KiB item.
 
 | Process | Median idle KiB ↓ (trial range) | Maximum sampled load KiB ↓ |
 | --- | ---: | ---: |
-| phobos development | 6,872 (4,860 to 8,908) | 10,892 |
-| Moonraker | 58,252 (58,168 to 58,424) | 58,588 |
+| phobos v0.2.3 | 4,700 (4,696 to 4,700) | 4,712 |
+| Moonraker | 58,220 (58,076 to 58,608) | 58,800 |
 
-![vm-empty memory, current phobos versus Moonraker](perf/optimization-20261022-2/vm-empty/memory.png)
+![vm-empty memory, current phobos versus Moonraker](perf/optimization-20261023/vm-empty/memory.png)
 
 QEMU's locked host RAM is excluded from daemon RSS. RSS can vary by several
 MiB between fresh phobos processes because of allocator/worker/address-layout
 behavior. Three trials do not isolate those effects. The separate local-host
-[corroboration](perf/optimization-20261022-2/local-vm/) is not pooled with remote-host measurements.
+[corroboration](perf/optimization-20261023/local-vm/) is not pooled with remote-host measurements.
 
 ## Allocation and ownership
 
@@ -77,10 +77,32 @@ are archived; no universal resident-memory reduction is attributed to that choic
 Klippy's reader owns a persistent 64 KiB standard I/O buffer. A reply is parsed
 once into its own arena, retained by its waiter, copied into the caller's
 allocator and released. There is a deliberate peak-memory tradeoff: the 256 KiB
-reply allocation test observes about 580 KiB (594,223 bytes) of parsed storage, bounded below
-2.5 times the wire size plus 4 KiB. Standard dynamic JSON string growth and arena
-growth account for the spare capacity. The prior wire-copy allocation bound no
-longer describes this implementation; the budget is not an RSS promise.
+baseline reply allocation test observes about 580 KiB (594,223 bytes) of parsed
+storage, below 2.5 times wire size plus 4 KiB. Standard dynamic JSON string growth
+and arena growth account for that spare capacity. The subsequent long-ASCII
+token adapter reserves once and shrinks the token; its 256 KiB ownership test
+and Klippy dispatch test tighten the budget to twice wire size plus 4 KiB.
+The same budget covers a 256 KiB SQLite JSON record decoded into a caller arena,
+including owned bytes after overwriting the encoded input.
+Unicode and other tokens keep the standard path. Neither allocation budget
+is an RSS promise; fresh-process RSS rose in the first profiling trials despite
+lower parser allocation, so no resident-memory gain is attributed to that change.
+
+The subsequent native worker-stack experiment uses 1 MiB instead of the default
+16 MiB. Three alternating remote trials lower median trial-maximum RSS from
+10,016 to 5,952 KiB, while CPU rises from 1.020 to 1.063 ms/request and p99 from
+1.862 to 1.917 ms. Post-load `smaps_rollup` shows 4,096 and 6,144 KiB of anonymous
+huge pages in two baseline trials and none in their candidates; the third pair
+has none and similar RSS. Host transparent-huge-page policy stays unchanged.
+These diagnostic trials use pinned cores without VM isolation. The combined
+release comparisons above include this change. ARM32 already used the 1 MiB bound.
+
+Console snapshots no longer copy the full ring before selecting entries. The
+request arena reserves only the requested array and exactly three fields per
+entry using public standard-map capacity/index operations. The wrapped-ring
+regression bounds a one-entry request to 8 KiB and the full 1,000-entry request
+to 512 KiB, including arena growth. Every allocation-failure path releases the
+request arena. These are allocation budgets, separate from RSS measurements.
 
 Long valid UTF-8 strings use a 1 KiB stack output buffer and a 896-byte compile-time
 escape table derived from the standard encoder. SIMD comparisons find unescaped

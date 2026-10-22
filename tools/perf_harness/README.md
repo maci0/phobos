@@ -4,10 +4,10 @@ Tools to compare phobos against stock Moonraker on identical hardware and to
 profile phobos's on-CPU hot path under load. Current measurements and their
 limits are in [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) and
 [`docs/MEMORY.md`](../../docs/MEMORY.md).
-Current tables and graphics compare the 0.2.2 development build with
-Moonraker. The [capture directory](../../docs/perf/optimization-20261022/) contains populated
+Current tables and graphics compare v0.2.3 with
+Moonraker. The [capture directory](../../docs/perf/optimization-20261023/) contains populated
 and empty-history VM trials plus real Forge-X trials, with exact binary,
-source and seed hashes. The [capture method](../../docs/perf/optimization-20261022/METHOD.md)
+source and seed hashes. The [capture method](../../docs/perf/optimization-20261023/METHOD.md)
 records exclusive physical cores, locked RAM, guest steal and host run-queue
 delay; these controls do not guarantee zero steal or fixed physical performance.
 No printer is contacted for the VM study. Older captures retain their original

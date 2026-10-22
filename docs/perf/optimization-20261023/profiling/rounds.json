@@ -1,0 +1,164 @@
+{
+  "baseline_commit": "b381577f869a76ed112bd004cdb64f44ad49a532",
+  "objective": "Ten bpftrace-guided profiling and optimization rounds, including memory; retain justified changes and rejected experiments, then matched uninstrumented VM and printer verification.",
+  "rounds": [
+    {
+      "round": 1,
+      "scope": "Klippy config JSON decoding",
+      "status": "complete",
+      "finding": "About 52% inclusive CPU in standard JSON decoding on both hosts; long ASCII string token adapter prototype halves decoder CPU and reduces arena growth. Uninstrumented remote 400/s config trials: CPU 1.2833 to 1.0283 ms/request, p99 2.2047 to 1.8695 ms. RSS maximum median 8004 to 10032 KiB, retained for investigation in round 3; no RSS reduction claimed.",
+      "evidence": [
+        "round01-initial/bpftrace.jsonl",
+        "round01-remote-bpftrace.jsonl",
+        "round01-candidate-bpftrace.jsonl",
+        "parser-cpu.json",
+        "parser-remote-cpu.log",
+        "parser-budget-before.log",
+        "round01-ab/trials.json"
+      ],
+      "tests": "Six focused tests including differential fuzz, every-byte and malformed JSON, Unicode/key fallback, decoded length limits, ownership and every allocation failure; final full Debug/Fast each 1756 passed, 1 skip, 332 fuzz."
+    },
+    {
+      "round": 2,
+      "scope": "Response encoding and copies",
+      "status": "complete",
+      "finding": "Retained direct writes into std.Io.Writer spare capacity with small/unbuffered fallback. Exact-output-buffer regression fixed before integration. Three uninstrumented alternating remote trials: median CPU 1.025 to 1.016667 ms/request; p99 1.865935 to 1.856304 ms. Microencoder improvement is larger than API improvement. Batched writer variant remains scratch only.",
+      "evidence": [
+        "round02-ab/trials.json",
+        "round02-candidate-bpftrace.jsonl",
+        "encoder-unbatched-cpu.json"
+      ],
+      "tests": "Debug/Fast each 1758 passed, 1 skipped, 332 fuzz; 13 focused encoder tests, 3 fuzz."
+    },
+    {
+      "round": 3,
+      "scope": "Request allocation, mmap/munmap and retained pages",
+      "status": "complete",
+      "finding": "Rejected direct SMP startup allocator: CPU regressed 3.6%. Retained owned std.Io.Threaded backend with 1 MiB worker stacks and actual startup environment on all targets. Before test reproduces missing child environment. Native stack change lowers median trial max RSS 10016 to 5952 KiB, with CPU 1.020 to 1.063333 ms/request and p99 1.861516 to 1.916518 ms. smaps confirms baseline 2 MiB RSS steps are transparent huge pages, not allocator slabs; host THP policy unchanged. Memory goal justifies measured CPU trade pending final combined verification.",
+      "evidence": [
+        "round03-alloc-before.jsonl",
+        "round03-ab/trials.json",
+        "round03-stack-ab/trials.json",
+        "round03-stack-ab/round03-stack-ab-baseline-r1-memory.json",
+        "round03-stack-ab/round03-stack-ab-candidate-r1-memory.json",
+        "round03-environment-before.log"
+      ],
+      "tests": "Debug/Fast each 1760 passed, 1 skipped, 333 fuzz."
+    },
+    {
+      "round": 4,
+      "scope": "HTTP and RPC dispatch at high independent arrival rates",
+      "status": "complete",
+      "finding": "Independent mixed workload: 45600 successful requests per profile; local 1341 CPU samples. SQLite preparation 13.4% inclusive; history 52.6%, database namespace list 14.6%, file existence 14.2%. No owned child exec observed; system info already cached. Retained reuse of two statements under existing store lock, without caching results. Three alternating remote trials, each 18000 successes: median CPU 0.105 to 0.102778 ms/request, p99 0.623953 to 0.611397 ms; sampled max RSS median 5772 to 5768 KiB.",
+      "evidence": [
+        "round04-local-mix/bpftrace.jsonl",
+        "round04-remote-mix-bpftrace.jsonl",
+        "round04-candidate-mix-bpftrace.jsonl",
+        "round04-ab/trials.json",
+        "round04-tests-before.log"
+      ],
+      "tests": "Before regression fails expected 0 preparations, found 1. Debug/Fast each 1763 passed, 1 skipped, 334 fuzz; covers namespace freshness, schema invalidation and all request allocation failures."
+    },
+    {
+      "round": 5,
+      "scope": "SQLite history, filters and database reads/writes",
+      "status": "complete",
+      "finding": "Large-record profile: 4220 samples; JSON decode 37% inclusive and pread 16.5% leaf. Added caller-arena parser entry point for records/columns. Rejected first extension (database CPU +2.7%, history +5.9%) and plain-copy variant (config CPU +11.6%). Config BPF identifies generic substring search at 23.45% leaf; moving plain return alone does not fix it. Retained standard parser for short documents, bulk copy for validated plain strings, and standard scalar search plus preceding-byte check for Unicode escape fallback. Final three-pair comparisons: config CPU 1.010 to 0.888333 ms/request, p99 1.850391 to 1.723567 ms; database CPU 0.165556 to 0.136674 ms and p99 0.450576 to 0.352772 ms; history CPU 0.460 to 0.461667 ms and p99 0.520052 to 0.521906 ms. RSS medians similar, no memory gain claimed from RSS.",
+      "evidence": [
+        "round05-database-before-bpftrace.jsonl",
+        "round05-database-after-bpftrace.jsonl",
+        "round05-record-budget-before.log",
+        "round05-database-ab/trials.json",
+        "round05-history-ab/trials.json",
+        "round05-final-config-ab/trials.json",
+        "round05-final-config-bpftrace.jsonl",
+        "round05-early-config-trial.json",
+        "round05-scalar-config-bpftrace.jsonl",
+        "round05-scalar-config-ab/trials.json",
+        "round05-scalar-database-ab/trials.json",
+        "round05-scalar-history-ab/trials.json"
+      ],
+      "tests": "Final Debug/Fast each 1764 passed, 1 skipped, 334 fuzz. Six focused parser tests pass in Fast, including both APIs in differential/malformed/byte/fuzz and all-allocation-failure checks. 256 KiB record owns input and meets twice-wire-plus-4-KiB allocation budget; fails budget before change."
+    },
+    {
+      "round": 6,
+      "scope": "Filesystem directory and metadata paths",
+      "status": "complete",
+      "finding": "Populated private history files; mixed history/directory profile has statx 21.4% leaf and fileExists 11.4% inclusive. File existence now uses the existing checked Resolved.stat and a regular-file kind check, preserving symlink/root restrictions and avoiding data open/fstat/close. Vendor check_file_exists uses pathlib.is_file, supporting metadata-only semantics. Three alternating remote trials per binary: CPU 0.485 to 0.450 ms/request, p99 0.604563 to 0.540922 ms, sampled maximum RSS median 5612 to 5604 KiB. Directory stat calls remain necessary; no result cache added.",
+      "evidence": [
+        "round06-tests-before.log",
+        "round06-final-files-before/bpftrace.jsonl",
+        "round06-files-after.log",
+        "round06-files-ab/trials.json"
+      ],
+      "tests": "Before test fails when data open is denied. Debug/Fast each 1766 passed, 1 skipped, 335 fuzz; tests in-root aliases, escaping links/traversal, non-files, missing paths and file creation/deletion."
+    },
+    {
+      "round": 7,
+      "scope": "Temperature and console ring snapshots",
+      "status": "complete",
+      "finding": "Removed the full-ring copy, reserve only requested entries and exactly three JSON fields using public ObjectMap entries/reIndex. Exact-map variant passes partial 8 KiB and full 512 KiB request allocation budgets. Three alternating remote pairs: CPU 0.226667 to 0.180000 ms/request, p99 0.467676 to 0.406977 ms, median maximum RSS 5764 to 5564 KiB. Rejected growth-slack variant fails full budget.",
+      "evidence": [
+        "round07-exact-rings-ab/trials.json",
+        "round07-full-budget-before.log",
+        "round07-exact-tests-debug.log",
+        "round07-exact-tests-fast.log"
+      ]
+    },
+    {
+      "round": 8,
+      "scope": "Subscription/status fanout, field masking and backpressure",
+      "status": "complete",
+      "finding": "No additional source change justified. CPU profile at 100 fresh subscriptions/s: 3800 successes, 22664 masked/full status updates. Default-limit 200/s trials correctly return HTTP 503 and are rejected as timings. With private limit 100: 7600 successes and 45535 validated notifications. Connection-owned deep copies remain necessary. C allocation requested bytes are not RSS.",
+      "evidence": [
+        "round08-subscriptions-before/bpftrace.jsonl",
+        "round08-subscriptions-alloc100/bpftrace.jsonl"
+      ]
+    },
+    {
+      "round": 9,
+      "scope": "WebSocket/TLS sessions and contention",
+      "status": "complete",
+      "finding": "No additional source change justified. 3800 fresh WebSocket config queries all match the 328 KiB fixture; 1379 CPU samples identify decoding, encoding, copies and sendmsg. Speculative ownership rewrites rejected. Outbound TLS tests pass; TLS was not separately profiled and inbound TLS is not implemented.",
+      "evidence": [
+        "round09-websocket-config/bpftrace.jsonl"
+      ]
+    },
+    {
+      "round": 10,
+      "scope": "Combined workloads, CPU/retention audit and final verification",
+      "status": "complete",
+      "finding": "Combined nine-path profile: 34200 successes, populated history, 1000 console entries and two 32-sample temperature stores. Remaining CPU distributed among copies, sendmsg, parsing, encoding, history and database paths. Diagnostic profile ran alongside compilation and is not final timing evidence. Release validation and isolated studies follow.",
+      "evidence": [
+        "round10-combined/bpftrace.jsonl",
+        "round10-combined/vegeta.json"
+      ]
+    }
+  ],
+  "rules": [
+    "Profile only owned processes and private fixture databases",
+    "No performance verdict from instrumented timings",
+    "No mandatory code change when measurements reject it",
+    "Full tests pass before the next source change",
+    "Keep the remote sudo rule and sleep inhibitor",
+    "Do not deploy until final verified build"
+  ],
+  "final_verification": {
+    "version": "0.2.3",
+    "local_vm": {
+      "trials": 36,
+      "requests": 479975,
+      "all_guest_steal_ticks_zero": false
+    },
+    "remote_vm": {
+      "trials": 36,
+      "requests": 479993,
+      "all_guest_steal_ticks_zero": true
+    },
+    "printer_http_trials": 24,
+    "printer_http_requests": 10440,
+    "printer_full_subscriptions": 126,
+    "ARM32_daemon_variants": 5,
+    "host_suites_each_passed": 1768
+  }
+}

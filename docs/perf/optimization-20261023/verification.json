@@ -1,0 +1,476 @@
+{
+  "package_version": "0.2.3",
+  "source_parent_commit": "b381577f869a76ed112bd004cdb64f44ad49a532",
+  "source_blobs_match_checkout": true,
+  "build_files_sha256": {
+    "build.zig": "1401f231923ae8b1fea5739ed2ece9177efccfe61faf8d11f537bb0e8595fc35",
+    "build.zig.zon": "c74e9f99dc2c9e5cfdbce9b433a5f0d3a9d9c83b35292dfc20560d3cb35f16fa"
+  },
+  "native_benchmark_matches_release_asset": true,
+  "host_suites": {
+    "Debug": {
+      "passed": 1768,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 335
+    },
+    "ReleaseSafe": {
+      "passed": 1768,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 335
+    },
+    "ReleaseFast": {
+      "passed": 1768,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 335
+    }
+  },
+  "skip": "Local real-Klippy fixture absent; real Klippy verified separately on the printer.",
+  "python_tests_passed": 110,
+  "build_policy_tests_passed": 4,
+  "api_registration": {
+    "endpoints": [
+      123,
+      123
+    ],
+    "methods": [
+      130,
+      130
+    ],
+    "notifications": [
+      27,
+      27
+    ],
+    "generated_table": "current without regeneration"
+  },
+  "static_ReleaseFast_profiles": {
+    "phobos-v0.2.3-armv6-linux-musleabihf": {
+      "sha256": "2b166a929e8c86baa74a8b6458a1c811c6817bd72b33d8d39f84a18b825d81a3",
+      "bytes": 4845364
+    },
+    "phobos-v0.2.3-armv7-linux-musleabi-soft": {
+      "sha256": "5dea9fc9670c596a9efa2c8e087027db259c07c4cbdfef3d141c497b00567885",
+      "bytes": 4754976
+    },
+    "phobos-v0.2.3-armv7-linux-musleabi-softfp-c": {
+      "sha256": "e8816afd4bdc87462220a1b3c8fabf5c92c246246c771e9c887210b92df559a6",
+      "bytes": 4756772
+    },
+    "phobos-v0.2.3-armv7-linux-musleabihf": {
+      "sha256": "7eef46e7528c27ee3870813704683043b352acd7262122420dd38120fcca5bc9",
+      "bytes": 4786084
+    },
+    "phobos-v0.2.3-arm-linux-musleabihf": {
+      "sha256": "ea85ea002a5c138821951f646f56deddf2aa6e001a84eef22c0f549a7fc2372d",
+      "bytes": 5304888
+    },
+    "phobos-v0.2.3-aarch64-linux-musl": {
+      "sha256": "43837e8ce2c950869e817444fa37f4676387968a0408b1cfa7379333a225fc77",
+      "bytes": 4332144
+    },
+    "phobos-v0.2.3-x86_64-linux-musl": {
+      "sha256": "f155232e783e3a91585617b485d6c078a0c809e1e90b15e7bdc56ea2dc83c229",
+      "bytes": 4931224
+    }
+  },
+  "native_float_abi_probe": "passed",
+  "physical_ARM_float_abi_probe": {
+    "profiles": [
+      {
+        "profile": "cortex-a7-hardfp",
+        "sha256": "e58a716afea5ed6b64f4d4cb38ca48c97b5557321831076a7b5c2e339cac2e2b",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv6-hardfp",
+        "sha256": "f4bbad38839e77cf7086fdba48858dfb85a5a3dedf20163a0e81d2a6f72f1f7f",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv7-hardfp",
+        "sha256": "523b9069b07528db87af8b61a98813e60aeba26eab4e27a25e5f79429f33f45a",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv7-soft",
+        "sha256": "0b07014ee7bc4ad3e5df24c5c7c99a3879e03f506b781a82c51132be6bd9c0bb",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv7-softfp-c",
+        "sha256": "7309e97b20fd0d9cdb5752076aa1c493256a5eb2880987deb72102316df30acd",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      }
+    ],
+    "after": {
+      "extruder": {
+        "target": 0
+      },
+      "heater_bed": {
+        "target": 0
+      },
+      "print_stats": {
+        "state": "complete"
+      },
+      "idle_timeout": {
+        "state": "Idle"
+      }
+    }
+  },
+  "physical_ARM_daemon_probes": [
+    {
+      "components": [
+        "announcements",
+        "application",
+        "authorization",
+        "data_store",
+        "database",
+        "dbus_manager",
+        "extensions",
+        "feather_updates",
+        "file_manager",
+        "history",
+        "http_client",
+        "internal_transport",
+        "job_queue",
+        "job_state",
+        "jsonrpc",
+        "klippy_apis",
+        "klippy_connection",
+        "machine",
+        "octoprint_compat",
+        "proc_stats",
+        "secrets",
+        "shell_command",
+        "template",
+        "update_manager",
+        "webcam",
+        "websockets"
+      ],
+      "console_entries": 0,
+      "disk_usage": {
+        "free": 401993728,
+        "total": 1300103168,
+        "used": 881332224
+      },
+      "history_page_count": 20,
+      "klippy_state": "ready",
+      "private_array_roundtrips": 2,
+      "private_database": true,
+      "real_config_entries": 307,
+      "status": {
+        "extruder": {
+          "target": 0
+        },
+        "heater_bed": {
+          "target": 0
+        },
+        "idle_timeout": {
+          "printing_time": 0,
+          "state": "Idle"
+        },
+        "print_stats": {
+          "state": "complete"
+        }
+      },
+      "subscription_error": null,
+      "subscription_objects": 262,
+      "subscription_status_objects": 262,
+      "temperature_samples": {
+        "extruder": 8,
+        "heater_bed": 8,
+        "temperature_sensor tvocValue": 8,
+        "temperature_sensor weightValue": 8
+      },
+      "version": "0.2.3",
+      "profile": "cortex-a7-hardfp",
+      "sha256": "ea85ea002a5c138821951f646f56deddf2aa6e001a84eef22c0f549a7fc2372d"
+    },
+    {
+      "components": [
+        "announcements",
+        "application",
+        "authorization",
+        "data_store",
+        "database",
+        "dbus_manager",
+        "extensions",
+        "feather_updates",
+        "file_manager",
+        "history",
+        "http_client",
+        "internal_transport",
+        "job_queue",
+        "job_state",
+        "jsonrpc",
+        "klippy_apis",
+        "klippy_connection",
+        "machine",
+        "octoprint_compat",
+        "proc_stats",
+        "secrets",
+        "shell_command",
+        "template",
+        "update_manager",
+        "webcam",
+        "websockets"
+      ],
+      "console_entries": 0,
+      "disk_usage": {
+        "free": 401993728,
+        "total": 1300103168,
+        "used": 881332224
+      },
+      "history_page_count": 20,
+      "klippy_state": "ready",
+      "private_array_roundtrips": 2,
+      "private_database": true,
+      "real_config_entries": 307,
+      "status": {
+        "extruder": {
+          "target": 0
+        },
+        "heater_bed": {
+          "target": 0
+        },
+        "idle_timeout": {
+          "printing_time": 0,
+          "state": "Idle"
+        },
+        "print_stats": {
+          "state": "complete"
+        }
+      },
+      "subscription_error": null,
+      "subscription_objects": 262,
+      "subscription_status_objects": 262,
+      "temperature_samples": {
+        "extruder": 9,
+        "heater_bed": 9,
+        "temperature_sensor tvocValue": 9,
+        "temperature_sensor weightValue": 9
+      },
+      "version": "0.2.3",
+      "profile": "armv6-hardfp",
+      "sha256": "2b166a929e8c86baa74a8b6458a1c811c6817bd72b33d8d39f84a18b825d81a3"
+    },
+    {
+      "components": [
+        "announcements",
+        "application",
+        "authorization",
+        "data_store",
+        "database",
+        "dbus_manager",
+        "extensions",
+        "feather_updates",
+        "file_manager",
+        "history",
+        "http_client",
+        "internal_transport",
+        "job_queue",
+        "job_state",
+        "jsonrpc",
+        "klippy_apis",
+        "klippy_connection",
+        "machine",
+        "octoprint_compat",
+        "proc_stats",
+        "secrets",
+        "shell_command",
+        "template",
+        "update_manager",
+        "webcam",
+        "websockets"
+      ],
+      "console_entries": 0,
+      "disk_usage": {
+        "free": 401993728,
+        "total": 1300103168,
+        "used": 881332224
+      },
+      "history_page_count": 20,
+      "klippy_state": "ready",
+      "private_array_roundtrips": 2,
+      "private_database": true,
+      "real_config_entries": 307,
+      "status": {
+        "extruder": {
+          "target": 0
+        },
+        "heater_bed": {
+          "target": 0
+        },
+        "idle_timeout": {
+          "printing_time": 0,
+          "state": "Idle"
+        },
+        "print_stats": {
+          "state": "complete"
+        }
+      },
+      "subscription_error": null,
+      "subscription_objects": 262,
+      "subscription_status_objects": 262,
+      "temperature_samples": {
+        "extruder": 9,
+        "heater_bed": 9,
+        "temperature_sensor tvocValue": 9,
+        "temperature_sensor weightValue": 9
+      },
+      "version": "0.2.3",
+      "profile": "armv7-hardfp",
+      "sha256": "7eef46e7528c27ee3870813704683043b352acd7262122420dd38120fcca5bc9"
+    },
+    {
+      "components": [
+        "announcements",
+        "application",
+        "authorization",
+        "data_store",
+        "database",
+        "dbus_manager",
+        "extensions",
+        "feather_updates",
+        "file_manager",
+        "history",
+        "http_client",
+        "internal_transport",
+        "job_queue",
+        "job_state",
+        "jsonrpc",
+        "klippy_apis",
+        "klippy_connection",
+        "machine",
+        "octoprint_compat",
+        "proc_stats",
+        "secrets",
+        "shell_command",
+        "template",
+        "update_manager",
+        "webcam",
+        "websockets"
+      ],
+      "console_entries": 0,
+      "disk_usage": {
+        "free": 401993728,
+        "total": 1300103168,
+        "used": 881332224
+      },
+      "history_page_count": 20,
+      "klippy_state": "ready",
+      "private_array_roundtrips": 2,
+      "private_database": true,
+      "real_config_entries": 307,
+      "status": {
+        "extruder": {
+          "target": 0
+        },
+        "heater_bed": {
+          "target": 0
+        },
+        "idle_timeout": {
+          "printing_time": 0,
+          "state": "Idle"
+        },
+        "print_stats": {
+          "state": "complete"
+        }
+      },
+      "subscription_error": null,
+      "subscription_objects": 262,
+      "subscription_status_objects": 262,
+      "temperature_samples": {
+        "extruder": 9,
+        "heater_bed": 9,
+        "temperature_sensor tvocValue": 9,
+        "temperature_sensor weightValue": 9
+      },
+      "version": "0.2.3",
+      "profile": "armv7-soft",
+      "sha256": "5dea9fc9670c596a9efa2c8e087027db259c07c4cbdfef3d141c497b00567885"
+    },
+    {
+      "components": [
+        "announcements",
+        "application",
+        "authorization",
+        "data_store",
+        "database",
+        "dbus_manager",
+        "extensions",
+        "feather_updates",
+        "file_manager",
+        "history",
+        "http_client",
+        "internal_transport",
+        "job_queue",
+        "job_state",
+        "jsonrpc",
+        "klippy_apis",
+        "klippy_connection",
+        "machine",
+        "octoprint_compat",
+        "proc_stats",
+        "secrets",
+        "shell_command",
+        "template",
+        "update_manager",
+        "webcam",
+        "websockets"
+      ],
+      "console_entries": 0,
+      "disk_usage": {
+        "free": 401993728,
+        "total": 1300103168,
+        "used": 881332224
+      },
+      "history_page_count": 20,
+      "klippy_state": "ready",
+      "private_array_roundtrips": 2,
+      "private_database": true,
+      "real_config_entries": 307,
+      "status": {
+        "extruder": {
+          "target": 0
+        },
+        "heater_bed": {
+          "target": 0
+        },
+        "idle_timeout": {
+          "printing_time": 0,
+          "state": "Idle"
+        },
+        "print_stats": {
+          "state": "complete"
+        }
+      },
+      "subscription_error": null,
+      "subscription_objects": 262,
+      "subscription_status_objects": 262,
+      "temperature_samples": {
+        "extruder": 9,
+        "heater_bed": 9,
+        "temperature_sensor tvocValue": 9,
+        "temperature_sensor weightValue": 9
+      },
+      "version": "0.2.3",
+      "profile": "armv7-softfp-c",
+      "sha256": "e8816afd4bdc87462220a1b3c8fabf5c92c246246c771e9c887210b92df559a6"
+    }
+  ],
+  "graphify": "Skipped: graphify-out/graph.json exists but graphify is not installed. Not a deliverable.",
+  "limits": [
+    "Not all optional components individually profiled",
+    "No maximum-capacity, printing, upload, file-backend or long-soak benchmark",
+    "Other physical printer models and native ARMv6 hardware not certified",
+    "Native AArch64 execution belongs to hosted CI"
+  ]
+}

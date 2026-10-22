@@ -13,7 +13,7 @@ pub const StringifyValue = struct {
                 if (!stream.options.escape_unicode and !stream.options.emit_strings_as_arrays and plainAscii(text)) {
                     try stream.print("\"{s}\"", .{text});
                 } else if (!stream.options.escape_unicode and !stream.options.emit_strings_as_arrays and text.len >= string_buffer_size and std.unicode.utf8ValidateSlice(text)) {
-                    try writeBufferedString(stream, text);
+                    try writeLongString(stream, text);
                 } else try stream.write(text);
             },
             .array => |items| {
@@ -49,6 +49,44 @@ const string_escapes: [128]StringEscape = blk: {
     }
     break :blk table;
 };
+
+fn writeLongString(stream: *std.json.Stringify, text: []const u8) std.Io.Writer.Error!void {
+    const width = std.simd.suggestVectorLength(u8) orelse return writeBufferedString(stream, text);
+    if (stream.writer.buffer.len < width + 6) return writeBufferedString(stream, text);
+    try stream.beginWriteRaw();
+    try stream.writer.writeByte('"');
+    const Vector = @Vector(width, u8);
+    var offset: usize = 0;
+    while (text.len - offset >= width) {
+        const bytes: Vector = text[offset..][0..width].*;
+        const special = (bytes < @as(Vector, @splat(0x20))) |
+            (bytes == @as(Vector, @splat('"'))) |
+            (bytes == @as(Vector, @splat('\\')));
+        const mask: @Int(.unsigned, width) = @bitCast(special);
+        const plain: usize = @ctz(mask);
+        const escape = if (plain < width) string_escapes[text[offset + plain]] else StringEscape{};
+        const written = plain + escape.len;
+        const output = try stream.writer.writableSliceGreedy(@max(width, written));
+        @memcpy(output[0..width], text[offset..][0..width]);
+        offset += plain;
+        if (plain < width) {
+            if (escape.len == 2)
+                @memcpy(output[plain..][0..2], escape.bytes[0..2])
+            else
+                @memcpy(output[plain..][0..6], &escape.bytes);
+            offset += 1;
+        }
+        stream.writer.advance(written);
+    }
+    for (text[offset..]) |byte| {
+        if (byte < 0x20 or byte == '"' or byte == '\\') {
+            const escape = string_escapes[byte];
+            try stream.writer.writeAll(escape.bytes[0..escape.len]);
+        } else try stream.writer.writeByte(byte);
+    }
+    try stream.writer.writeByte('"');
+    stream.endWriteRaw();
+}
 
 fn writeBufferedString(stream: *std.json.Stringify, text: []const u8) std.Io.Writer.Error!void {
     try stream.beginWriteRaw();
@@ -162,6 +200,55 @@ test "StringifyValue buffers escaped UTF-8 across blocks and propagates short wr
     }
 }
 
+test "StringifyValue fits every exact output buffer at vector boundaries" {
+    const a = std.testing.allocator;
+    var text: [2049]u8 = @splat('x');
+    for ([_]usize{ 1024, 1025, 1039, 1040, 1041, text.len }) |len| {
+        for ([_]u8{ '\n', 0, '"', '\\' }) |special| {
+            for (0..len) |i| text[i] = if (i % 17 == 0) special else 'x';
+            const value: std.json.Value = .{ .string = text[0..len] };
+            const expected = try std.json.Stringify.valueAlloc(a, value, .{});
+            defer a.free(expected);
+            for (0..23) |extra| {
+                const output = try a.alloc(u8, expected.len + extra);
+                defer a.free(output);
+                var writer = std.Io.Writer.fixed(output);
+                try std.json.Stringify.value(StringifyValue{ .value = value }, .{}, &writer);
+                try std.testing.expectEqualStrings(expected, output[0..writer.end]);
+            }
+        }
+    }
+}
+
+test "StringifyValue drains small and unbuffered writers without changing UTF-8" {
+    const Forwarder = struct {
+        writer: std.Io.Writer,
+        target: *std.Io.Writer,
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", w);
+            try self.target.writeAll(w.buffer[0..w.end]);
+            w.end = 0;
+            return self.target.writeSplat(data, splat);
+        }
+    };
+    const a = std.testing.allocator;
+    const line = "é水😀 \"quote\"\\\n\r\t\x00";
+    var text: [line.len * 100]u8 = undefined;
+    for (0..100) |i| @memcpy(text[i * line.len ..][0..line.len], line);
+    const value: std.json.Value = .{ .string = &text };
+    const expected = try std.json.Stringify.valueAlloc(a, value, .{});
+    defer a.free(expected);
+    for ([_]usize{ 0, 1, 15, 21, 22, 23, 31, 32, 64 }) |capacity| {
+        var target: std.Io.Writer.Allocating = .init(a);
+        defer target.deinit();
+        var buffer: [64]u8 = undefined;
+        var forwarder: Forwarder = .{ .writer = .{ .buffer = buffer[0..capacity], .vtable = &.{ .drain = Forwarder.drain } }, .target = &target.writer };
+        try std.json.Stringify.value(StringifyValue{ .value = value }, .{}, &forwarder.writer);
+        try forwarder.writer.flush();
+        try std.testing.expectEqualStrings(expected, target.writer.buffer[0..target.writer.end]);
+    }
+}
+
 test "StringifyValue preserves nested values, Unicode, escaping and writer failures" {
     const alloc = std.testing.allocator;
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
@@ -201,6 +288,16 @@ test "fuzz StringifyValue matches std.json for bounded byte strings" {
             const actual = try std.json.Stringify.valueAlloc(std.testing.allocator, StringifyValue{ .value = value }, .{});
             defer std.testing.allocator.free(actual);
             try std.testing.expectEqualStrings(expected, actual);
+            const nested_expected = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .payload = value }, .{});
+            defer std.testing.allocator.free(nested_expected);
+            const nested_actual = try std.json.Stringify.valueAlloc(std.testing.allocator, .{ .payload = StringifyValue{ .value = value } }, .{});
+            defer std.testing.allocator.free(nested_actual);
+            try std.testing.expectEqualStrings(nested_expected, nested_actual);
+            const output = try std.testing.allocator.alloc(u8, nested_expected.len);
+            defer std.testing.allocator.free(output);
+            var writer = std.Io.Writer.fixed(output);
+            try std.json.Stringify.value(.{ .payload = StringifyValue{ .value = value } }, .{}, &writer);
+            try std.testing.expectEqualStrings(nested_expected, output[0..writer.end]);
         }
     }.run, .{});
 }

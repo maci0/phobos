@@ -104,8 +104,11 @@ restores direct API notifications. Restart to observe subsequent external change
 
 File operations retain an open root handle and check every path component.
 Native canonicalization handles nested links and `..`; an in-root target is
-reopened relative to the retained root without following unchecked links. The
-`resolve_beneath` option alone is insufficient because the installed Linux
+reopened relative to the retained root without following unchecked links.
+Regular-file existence uses `Resolved.stat`, including for unreadable file data;
+component/link checks and the returned file kind still govern the result.
+Directory, missing and escaping paths report false. The `resolve_beneath` option
+alone is insufficient because the installed Linux
 backend ignores it. The private root walker uses `Dir.Iterator`: `Dir.Walker`
 reopens directories with symlink following enabled and cannot accept a checked
 child handle. The private walker follows checked in-root directory links.
@@ -267,7 +270,11 @@ Plain ASCII uses vector comparisons and `@reduce`. Long valid UTF-8 strings use
 a 1 KiB output buffer; their 34 mandatory escapes are generated at compile time
 by `std.json.Stringify.encodeJsonStringChars`. Vector masks, `@ctz` and fixed-width
 copies process ordinary byte runs; targets without byte vectors use a scalar
-loop. Other options and invalid UTF-8 use the standard encoder. Punctuation and
+loop. Buffered writers receive escaped vectors directly through
+`std.Io.Writer.writableSliceGreedy` and `advance`; small/unbuffered writers keep
+the 1 KiB staging path. Exact-size and draining-writer tests cover reserve/flush
+boundaries, and nested-value fuzzing exercises allocating and fixed writers.
+Other options and invalid UTF-8 use the standard encoder. Punctuation and
 scalar formatting remain in `std.json.Stringify`. Differential tests cover every
 byte, vector/buffer boundaries, Unicode, options and writer/allocation failures.
 
@@ -278,6 +285,19 @@ Method frames dispatch under Core; present null methods are rejected. Handshake
 ID matching uses a typed envelope. Tests cover owned replies, allocation failure,
 large pipelined frames and continuous pushes during requests.
 
+`json/parse.zig` adapts the standard token source for long ASCII string values.
+It reserves their encoded-length bound once, decodes ordinary runs with portable
+vectors and shrinks the owned token. Object keys, Unicode escapes, UTF-8,
+structure, numbers and other tokens retain the standard scanner/parser. Simple
+ASCII escapes are validated by the adapter. Its complete-input value transition
+uses the checked Zig 0.17 scanner fields; differential byte/malformed/fuzz tests,
+decoded-length limits, ownership and allocation-failure tests guard that coupling.
+SQLite JSON records and history columns use its caller-arena entry point.
+Documents shorter than the long-token threshold use the standard parser directly.
+Validated plain strings bulk-copy once; escaped strings retain the vector decoder.
+Unicode-escape screening uses standard scalar searches with a preceding-byte
+check, avoiding a generic substring search in the sampled config path.
+
 Each Klippy status update produces one notification per interested client,
 filtered by its object and field subscriptions. Status frames are serialized
 after filtering; generic notifications share a prebuilt frame. Connection pins,
@@ -287,6 +307,18 @@ The entry point uses `std.process.Init.gpa`. Zig 0.17 selects its checked
 allocator in Debug and ReleaseSafe, and `std.heap.c_allocator` for this
 libc-linked program in ReleaseFast and ReleaseSmall. Component and request
 allocators remain explicit; the entry point does not override that choice.
+
+The daemon owns its `std.Io.Threaded` backend on all targets. Its worker stacks
+use the listener's 1 MiB bound; the backend receives the startup environment so
+child processes retain PATH and other configured variables. A real child-process
+test checks environment propagation, including generated values.
+
+The SQLite store reuses two prepared statements for namespace enumeration and
+table-existence checks under its existing operation mutex. Results are never
+cached. Statements reset after reads and allocation failures; table-name bindings
+are cleared promptly. SQLite's `prepare_v2` schema invalidation remains active,
+and teardown finalizes both statements before closing the database. Tests check
+new namespaces, table creation/deletion, preparation counts and allocation failures.
 
 TCP listeners set `TCP_NODELAY` through `std.c.setsockopt`; the installed
 `std.Io.net` exposes no socket-option setter. Linux inherits the flag on accepted
@@ -356,3 +388,9 @@ across a write. Response correlation checks the owning connection and copies the
 frame before waking its waiter. Owned WebSocket task groups cancel and join before
 the session's writer and registry entry are removed. Dynamic Klippy registrations
 use a separately locked map and are replayed by the normal handshake.
+
+Console snapshots iterate the standard deque directly and reserve the requested
+array length. Their three-field JSON maps use public `ObjectMap.entries`
+capacity and `reIndex` before `putAssumeCapacity`, avoiding geometric growth
+slack while preserving the standard map's index invariants. Wrapped ordering,
+count slicing and allocation failures retain request-arena ownership.

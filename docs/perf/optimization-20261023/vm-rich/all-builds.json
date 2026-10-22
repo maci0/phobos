@@ -1,0 +1,5822 @@
+[
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r1-info-5000",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          41,
+          0,
+          38,
+          4110,
+          3,
+          6,
+          0,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          18,
+          0,
+          19,
+          1005,
+          1,
+          5,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          4,
+          0,
+          6,
+          1037,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          11,
+          0,
+          4,
+          1033,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          7,
+          0,
+          7,
+          1033,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=13438\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 10535601184
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          187,
+          0,
+          123,
+          7880,
+          3,
+          17,
+          27,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          26,
+          0,
+          20,
+          2003,
+          2,
+          8,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          29,
+          0,
+          36,
+          1978,
+          0,
+          3,
+          10,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          66,
+          0,
+          32,
+          1949,
+          0,
+          3,
+          8,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          65,
+          0,
+          33,
+          1949,
+          0,
+          3,
+          8,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.26 avg60=0.30 avg300=0.06 total=293604\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 20637421429
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025496794,
+      "cpu_seconds": 0.5700000000000001,
+      "cpu_percent_one_core": 5.685503788112827,
+      "rss_kib_min": 5204,
+      "rss_kib_median": 5348,
+      "rss_kib_max": 5356,
+      "threads_min": 12,
+      "threads_max": 17,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 11.400000000000002
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3670526823,
+        "mean": 73410,
+        "50th": 67924,
+        "90th": 95088,
+        "95th": 107978,
+        "99th": 148216,
+        "max": 3826665,
+        "min": 24310
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:25:02.733445729Z",
+      "latest": "2026-10-22T16:25:12.733297984Z",
+      "end": "2026-10-22T16:25:12.733350194Z",
+      "duration": 9999852255,
+      "wait": 52210,
+      "requests": 50000,
+      "rate": 5000.073873591446,
+      "throughput": 5000.047767956351,
+      "success": 1,
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r1-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          187,
+          0,
+          123,
+          7981,
+          3,
+          18,
+          27,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          26,
+          0,
+          20,
+          2028,
+          2,
+          8,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          29,
+          0,
+          36,
+          2003,
+          0,
+          3,
+          10,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          66,
+          0,
+          32,
+          1974,
+          0,
+          3,
+          8,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          65,
+          0,
+          33,
+          1974,
+          0,
+          3,
+          8,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.26 avg60=0.30 avg300=0.06 total=294553\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 20889405052
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          317,
+          0,
+          225,
+          11735,
+          3,
+          37,
+          38,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          28,
+          0,
+          21,
+          3024,
+          2,
+          13,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          110,
+          0,
+          86,
+          2870,
+          0,
+          5,
+          14,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          88,
+          0,
+          59,
+          2919,
+          0,
+          9,
+          11,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          90,
+          0,
+          58,
+          2920,
+          0,
+          9,
+          11,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.64 avg60=0.53 avg300=0.12 total=528222\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 30936791550
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025429564,
+      "cpu_seconds": 1.3199999999999998,
+      "cpu_percent_one_core": 13.16651811848488,
+      "rss_kib_min": 5356,
+      "rss_kib_median": 5380,
+      "rss_kib_max": 5548,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 109.99999999999999
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 2114053820,
+        "mean": 176171,
+        "50th": 70604,
+        "90th": 549468,
+        "95th": 571455,
+        "99th": 663145,
+        "max": 734229,
+        "min": 32880
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:25:13.087311287Z",
+      "latest": "2026-10-22T16:25:23.086177143Z",
+      "end": "2026-10-22T16:25:23.086236933Z",
+      "duration": 9998865856,
+      "wait": 59790,
+      "requests": 12000,
+      "rate": 1200.1361127171422,
+      "throughput": 1200.1289363323265,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r1-history-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          317,
+          0,
+          226,
+          11835,
+          3,
+          37,
+          38,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          28,
+          0,
+          21,
+          3049,
+          2,
+          13,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          110,
+          0,
+          86,
+          2895,
+          0,
+          5,
+          14,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          88,
+          0,
+          59,
+          2945,
+          0,
+          9,
+          11,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          90,
+          0,
+          58,
+          2945,
+          0,
+          9,
+          11,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.64 avg60=0.53 avg300=0.12 total=529034\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 31188835894
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          391,
+          0,
+          284,
+          15704,
+          5,
+          45,
+          41,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          30,
+          0,
+          22,
+          4046,
+          2,
+          16,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          170,
+          0,
+          127,
+          3796,
+          0,
+          5,
+          16,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          93,
+          0,
+          68,
+          3930,
+          0,
+          11,
+          12,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          96,
+          0,
+          66,
+          3930,
+          1,
+          11,
+          12,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.68 avg60=0.48 avg300=0.13 total=547446\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 41221129780
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025377143999997,
+      "cpu_seconds": 1.0000000000000002,
+      "cpu_percent_one_core": 9.974687092928786,
+      "rss_kib_min": 5380,
+      "rss_kib_median": 5396,
+      "rss_kib_max": 5564,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 500.0000000000001
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1111040636,
+        "mean": 555520,
+        "50th": 554908,
+        "90th": 572745,
+        "95th": 580220,
+        "99th": 624324,
+        "max": 855589,
+        "min": 515139
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:25:23.390632034Z",
+      "latest": "2026-10-22T16:25:33.386195124Z",
+      "end": "2026-10-22T16:25:33.386741443Z",
+      "duration": 9995563090,
+      "wait": 546319,
+      "requests": 2000,
+      "rate": 200.08877758981762,
+      "throughput": 200.07784210517937,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "database64k-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r1-database64k-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          391,
+          0,
+          284,
+          15805,
+          5,
+          45,
+          41,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          30,
+          0,
+          22,
+          4071,
+          2,
+          16,
+          0,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          170,
+          0,
+          127,
+          3821,
+          0,
+          5,
+          16,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          93,
+          0,
+          68,
+          3955,
+          0,
+          11,
+          12,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          96,
+          0,
+          66,
+          3956,
+          1,
+          11,
+          12,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.68 avg60=0.48 avg300=0.13 total=548354\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 41473245543
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          422,
+          0,
+          326,
+          19731,
+          5,
+          53,
+          45,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          31,
+          0,
+          23,
+          5069,
+          3,
+          19,
+          1,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          187,
+          0,
+          150,
+          4783,
+          0,
+          6,
+          17,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          100,
+          0,
+          76,
+          4938,
+          1,
+          14,
+          13,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          103,
+          0,
+          76,
+          4940,
+          1,
+          13,
+          13,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.25 avg60=0.40 avg300=0.12 total=574643\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 51505321110
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025453094,
+      "cpu_seconds": 0.3999999999999999,
+      "cpu_percent_one_core": 3.989844611007064,
+      "rss_kib_min": 5396,
+      "rss_kib_median": 5400,
+      "rss_kib_max": 5504,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 199.99999999999994
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 525205171,
+        "mean": 262602,
+        "50th": 270286,
+        "90th": 281612,
+        "95th": 286093,
+        "99th": 295573,
+        "max": 671959,
+        "min": 210940
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:25:33.675090644Z",
+      "latest": "2026-10-22T16:25:43.670315964Z",
+      "end": "2026-10-22T16:25:43.670585203Z",
+      "duration": 9995225320,
+      "wait": 269239,
+      "requests": 2000,
+      "rate": 200.09553921691884,
+      "throughput": 200.09014943629663,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "klippy-config-50",
+    "requested_rate": 50,
+    "duration_seconds": 40,
+    "trial_id": "rich-candidate-r1-klippy328k-50",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          422,
+          0,
+          326,
+          19831,
+          5,
+          53,
+          45,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          31,
+          0,
+          23,
+          5094,
+          3,
+          19,
+          1,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          187,
+          0,
+          150,
+          4808,
+          0,
+          6,
+          17,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          100,
+          0,
+          76,
+          4963,
+          1,
+          14,
+          13,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          103,
+          0,
+          76,
+          4965,
+          1,
+          13,
+          13,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.25 avg60=0.40 avg300=0.12 total=575615\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 51757492423
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          662,
+          0,
+          472,
+          35431,
+          7,
+          69,
+          51,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          137,
+          0,
+          46,
+          8956,
+          5,
+          26,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          300,
+          0,
+          243,
+          8600,
+          0,
+          7,
+          20,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          111,
+          0,
+          92,
+          8935,
+          1,
+          17,
+          14,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          113,
+          0,
+          89,
+          8939,
+          1,
+          16,
+          14,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.20 avg300=0.10 total=630072\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 91782597600
+    },
+    "process": {
+      "sample_count": 402,
+      "observed_seconds": 40.01729921599999,
+      "cpu_seconds": 2.0500000000000003,
+      "cpu_percent_one_core": 5.1227844961120095,
+      "rss_kib_min": 5400,
+      "rss_kib_median": 5408.0,
+      "rss_kib_max": 6140,
+      "threads_min": 17,
+      "threads_max": 17,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 1025.0000000000002
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3828603944,
+        "mean": 1914301,
+        "50th": 1879328,
+        "90th": 2073005,
+        "95th": 2145585,
+        "99th": 2420044,
+        "max": 2839907,
+        "min": 1602469
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:25:43.974352226Z",
+      "latest": "2026-10-22T16:26:23.955007435Z",
+      "end": "2026-10-22T16:26:23.956927813Z",
+      "duration": 39980655209,
+      "wait": 1920378,
+      "requests": 2000,
+      "rate": 50.024192688812725,
+      "throughput": 50.02179000820256,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r1-info-5000",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          755,
+          0,
+          482,
+          39613,
+          8,
+          72,
+          52,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          139,
+          0,
+          47,
+          10024,
+          5,
+          28,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          388,
+          0,
+          249,
+          9578,
+          0,
+          8,
+          20,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          112,
+          0,
+          94,
+          10002,
+          1,
+          18,
+          14,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          114,
+          0,
+          91,
+          10007,
+          1,
+          17,
+          14,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.16 avg300=0.10 total=645803\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 102506103583
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          1709,
+          0,
+          648,
+          42483,
+          9,
+          102,
+          85,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          151,
+          0,
+          48,
+          11021,
+          5,
+          32,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1177,
+          0,
+          285,
+          9745,
+          0,
+          8,
+          42,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          188,
+          0,
+          159,
+          10855,
+          1,
+          31,
+          20,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          192,
+          0,
+          156,
+          10860,
+          1,
+          30,
+          20,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.63 avg60=0.29 avg300=0.13 total=763383\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 112647399581
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025664464000002,
+      "cpu_seconds": 8.23,
+      "cpu_percent_one_core": 82.08932215467767,
+      "rss_kib_min": 58912,
+      "rss_kib_median": 58912,
+      "rss_kib_max": 58912,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 58912,
+      "cpu_us_per_request": 164.6
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 25005931308,
+        "mean": 500118,
+        "50th": 453522,
+        "90th": 853315,
+        "95th": 946945,
+        "99th": 1281789,
+        "max": 2325457,
+        "min": 150340
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:26:34.703854198Z",
+      "latest": "2026-10-22T16:26:44.702826103Z",
+      "end": "2026-10-22T16:26:44.703179173Z",
+      "duration": 9998971905,
+      "wait": 353070,
+      "requests": 50000,
+      "rate": 5000.5141003544,
+      "throughput": 5000.337535284475,
+      "success": 1,
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r1-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          1709,
+          0,
+          648,
+          42583,
+          9,
+          102,
+          85,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          151,
+          0,
+          48,
+          11046,
+          5,
+          32,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1177,
+          0,
+          285,
+          9770,
+          0,
+          8,
+          42,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          188,
+          0,
+          159,
+          10880,
+          1,
+          31,
+          20,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          192,
+          0,
+          156,
+          10885,
+          1,
+          30,
+          20,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.63 avg60=0.29 avg300=0.13 total=763410\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 112899768474
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          2093,
+          0,
+          732,
+          46105,
+          9,
+          123,
+          95,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          155,
+          0,
+          48,
+          12043,
+          5,
+          36,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1509,
+          0,
+          310,
+          10411,
+          0,
+          9,
+          48,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          213,
+          0,
+          188,
+          11822,
+          1,
+          39,
+          22,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          214,
+          0,
+          184,
+          11828,
+          1,
+          38,
+          22,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.86 avg60=0.40 avg300=0.16 total=889888\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 122956780771
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025564153999994,
+      "cpu_seconds": 3.58,
+      "cpu_percent_one_core": 35.708713694397474,
+      "rss_kib_min": 58912,
+      "rss_kib_median": 59916,
+      "rss_kib_max": 59916,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 60792,
+      "cpu_us_per_request": 298.3333333333333
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 4288203187,
+        "mean": 357350,
+        "50th": 283401,
+        "90th": 669366,
+        "95th": 779735,
+        "99th": 879290,
+        "max": 1733228,
+        "min": 175540
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:26:45.097785759Z",
+      "latest": "2026-10-22T16:26:55.096715154Z",
+      "end": "2026-10-22T16:26:55.096955044Z",
+      "duration": 9998929395,
+      "wait": 239890,
+      "requests": 12000,
+      "rate": 1200.1284863558135,
+      "throughput": 1200.0996940817367,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r1-history-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          2093,
+          0,
+          732,
+          46206,
+          9,
+          123,
+          95,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          155,
+          0,
+          48,
+          12067,
+          5,
+          36,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1509,
+          0,
+          310,
+          10436,
+          0,
+          9,
+          48,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          213,
+          0,
+          188,
+          11847,
+          1,
+          39,
+          22,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          214,
+          0,
+          184,
+          11853,
+          1,
+          38,
+          22,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.86 avg60=0.40 avg300=0.16 total=890732\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 123209233824
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          2250,
+          0,
+          764,
+          50019,
+          10,
+          130,
+          98,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          157,
+          0,
+          49,
+          13066,
+          6,
+          39,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1653,
+          0,
+          326,
+          11277,
+          0,
+          10,
+          49,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          219,
+          0,
+          195,
+          12834,
+          1,
+          40,
+          23,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          220,
+          0,
+          192,
+          12840,
+          1,
+          40,
+          23,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.49 avg60=0.37 avg300=0.16 total=986898\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 133243349288
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.02549659399999,
+      "cpu_seconds": 1.5999999999999996,
+      "cpu_percent_one_core": 15.959309197287643,
+      "rss_kib_min": 59916,
+      "rss_kib_median": 59916,
+      "rss_kib_max": 59916,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61708,
+      "cpu_us_per_request": 799.9999999999998
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1631354218,
+        "mean": 815677,
+        "50th": 808573,
+        "90th": 843050,
+        "95th": 852702,
+        "99th": 899584,
+        "max": 1734478,
+        "min": 667410
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:26:55.411302884Z",
+      "latest": "2026-10-22T16:27:05.406234884Z",
+      "end": "2026-10-22T16:27:05.407076413Z",
+      "duration": 9994932000,
+      "wait": 841529,
+      "requests": 2000,
+      "rate": 200.10141139529512,
+      "throughput": 200.08456516122013,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "database64k-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r1-database64k-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          2250,
+          0,
+          764,
+          50119,
+          10,
+          130,
+          98,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          157,
+          0,
+          49,
+          13091,
+          6,
+          39,
+          2,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1653,
+          0,
+          327,
+          11302,
+          0,
+          10,
+          49,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          219,
+          0,
+          195,
+          12859,
+          1,
+          40,
+          23,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          220,
+          0,
+          192,
+          12866,
+          1,
+          40,
+          23,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.49 avg60=0.37 avg300=0.16 total=987849\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 133495785111
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          2341,
+          0,
+          793,
+          54000,
+          10,
+          138,
+          102,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          158,
+          0,
+          49,
+          14089,
+          6,
+          42,
+          3,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1729,
+          0,
+          338,
+          12215,
+          0,
+          11,
+          51,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          227,
+          0,
+          203,
+          13844,
+          1,
+          43,
+          24,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          226,
+          0,
+          201,
+          13850,
+          1,
+          42,
+          24,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.18 avg60=0.31 avg300=0.15 total=1030685\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 143530085715
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025475613999987,
+      "cpu_seconds": 0.8800000000000008,
+      "cpu_percent_one_core": 8.77763842715983,
+      "rss_kib_min": 59916,
+      "rss_kib_median": 59916,
+      "rss_kib_max": 59916,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61708,
+      "cpu_us_per_request": 440.0000000000004
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 907948774,
+        "mean": 453974,
+        "50th": 449584,
+        "90th": 467028,
+        "95th": 473408,
+        "99th": 498007,
+        "max": 1643698,
+        "min": 369669
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:27:05.697719291Z",
+      "latest": "2026-10-22T16:27:15.69333513Z",
+      "end": "2026-10-22T16:27:15.69380156Z",
+      "duration": 9995615839,
+      "wait": 466430,
+      "requests": 2000,
+      "rate": 200.08772167859624,
+      "throughput": 200.07838532926343,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "klippy-config-50",
+    "requested_rate": 50,
+    "duration_seconds": 40,
+    "trial_id": "rich-moonraker-r1-klippy328k-50",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          2341,
+          0,
+          793,
+          54101,
+          10,
+          139,
+          102,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          158,
+          0,
+          49,
+          14114,
+          6,
+          42,
+          3,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1729,
+          0,
+          339,
+          12240,
+          0,
+          11,
+          51,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          227,
+          0,
+          203,
+          13869,
+          1,
+          43,
+          24,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          226,
+          0,
+          201,
+          13876,
+          1,
+          42,
+          24,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.18 avg60=0.31 avg300=0.15 total=1030711\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 143782578828
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          2701,
+          0,
+          875,
+          69650,
+          11,
+          152,
+          108,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          313,
+          0,
+          87,
+          17916,
+          7,
+          49,
+          3,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          1913,
+          0,
+          356,
+          16039,
+          0,
+          11,
+          53,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          238,
+          0,
+          217,
+          17843,
+          1,
+          46,
+          25,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          236,
+          0,
+          214,
+          17850,
+          1,
+          45,
+          25,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.15 avg300=0.13 total=1058053\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 183811242580
+    },
+    "process": {
+      "sample_count": 402,
+      "observed_seconds": 40.01876573499999,
+      "cpu_seconds": 1.9999999999999982,
+      "cpu_percent_one_core": 4.997655383086489,
+      "rss_kib_min": 59916,
+      "rss_kib_median": 59916.0,
+      "rss_kib_max": 59916,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61708,
+      "cpu_us_per_request": 999.9999999999991
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 4224005600,
+        "mean": 2112002,
+        "50th": 2050117,
+        "90th": 2451060,
+        "95th": 2604365,
+        "99th": 2785692,
+        "max": 3738915,
+        "min": 1689658
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:27:15.99954552Z",
+      "latest": "2026-10-22T16:27:55.980248619Z",
+      "end": "2026-10-22T16:27:55.982110677Z",
+      "duration": 39980703099,
+      "wait": 1862058,
+      "requests": 2000,
+      "rate": 50.024132768441085,
+      "throughput": 50.02180305707192,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "klippy-config-50",
+    "requested_rate": 50,
+    "duration_seconds": 40,
+    "trial_id": "rich-moonraker-r2-klippy328k-50",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          2796,
+          0,
+          883,
+          73853,
+          13,
+          154,
+          109,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          315,
+          0,
+          88,
+          18987,
+          9,
+          50,
+          3,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2003,
+          0,
+          360,
+          17022,
+          0,
+          11,
+          53,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          240,
+          0,
+          219,
+          18917,
+          1,
+          46,
+          25,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          238,
+          0,
+          215,
+          18925,
+          1,
+          45,
+          25,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.12 avg300=0.12 total=1075029\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 194590208728
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          3150,
+          0,
+          969,
+          89405,
+          15,
+          167,
+          114,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          464,
+          0,
+          128,
+          22792,
+          10,
+          57,
+          4,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2186,
+          0,
+          379,
+          20820,
+          0,
+          12,
+          56,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          251,
+          0,
+          233,
+          22892,
+          1,
+          49,
+          27,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          248,
+          0,
+          227,
+          22899,
+          1,
+          48,
+          26,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.06 avg300=0.10 total=1103998\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 234618662291
+    },
+    "process": {
+      "sample_count": 402,
+      "observed_seconds": 40.018584893999986,
+      "cpu_seconds": 2.01,
+      "cpu_percent_one_core": 5.022666356953967,
+      "rss_kib_min": 58868,
+      "rss_kib_median": 58868.0,
+      "rss_kib_max": 58868,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 58868,
+      "cpu_us_per_request": 1004.9999999999999
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 4136709496,
+        "mean": 2068354,
+        "50th": 2043523,
+        "90th": 2282689,
+        "95th": 2369101,
+        "99th": 2757648,
+        "max": 3522886,
+        "min": 1707278
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:28:06.80751485Z",
+      "latest": "2026-10-22T16:28:46.78778507Z",
+      "end": "2026-10-22T16:28:46.789617178Z",
+      "duration": 39980270220,
+      "wait": 1832108,
+      "requests": 2000,
+      "rate": 50.02467439550988,
+      "throughput": 50.02238210468921,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "database64k-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r2-database64k-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          3150,
+          0,
+          969,
+          89505,
+          15,
+          168,
+          114,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          464,
+          0,
+          128,
+          22817,
+          10,
+          57,
+          4,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2186,
+          0,
+          379,
+          20845,
+          0,
+          12,
+          56,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          251,
+          0,
+          233,
+          22917,
+          1,
+          49,
+          27,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          248,
+          0,
+          227,
+          22924,
+          1,
+          48,
+          26,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.06 avg300=0.10 total=1104855\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 234871311324
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          3239,
+          0,
+          997,
+          93389,
+          15,
+          175,
+          118,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          465,
+          0,
+          128,
+          23816,
+          11,
+          60,
+          4,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2260,
+          0,
+          391,
+          21760,
+          0,
+          13,
+          57,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          258,
+          0,
+          241,
+          23902,
+          1,
+          51,
+          27,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          254,
+          0,
+          235,
+          23910,
+          1,
+          50,
+          27,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.05 avg300=0.10 total=1146117\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 244905712777
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025649694000009,
+      "cpu_seconds": 0.8700000000000001,
+      "cpu_percent_one_core": 8.677741857673961,
+      "rss_kib_min": 58868,
+      "rss_kib_median": 58932,
+      "rss_kib_max": 58932,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 58932,
+      "cpu_us_per_request": 435.00000000000006
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 887513996,
+        "mean": 443756,
+        "50th": 444154,
+        "90th": 464835,
+        "95th": 470357,
+        "99th": 481652,
+        "max": 853719,
+        "min": 371150
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:28:47.073503754Z",
+      "latest": "2026-10-22T16:28:57.068339134Z",
+      "end": "2026-10-22T16:28:57.068819233Z",
+      "duration": 9994835380,
+      "wait": 480099,
+      "requests": 2000,
+      "rate": 200.10334577416523,
+      "throughput": 200.09373433004376,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r2-history-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          3239,
+          0,
+          997,
+          93490,
+          15,
+          176,
+          118,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          465,
+          0,
+          129,
+          23841,
+          11,
+          60,
+          4,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2260,
+          0,
+          391,
+          21785,
+          0,
+          13,
+          57,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          258,
+          0,
+          241,
+          23928,
+          1,
+          51,
+          27,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          254,
+          0,
+          235,
+          23935,
+          1,
+          50,
+          27,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.05 avg300=0.10 total=1147065\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 245158418480
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          3396,
+          0,
+          1029,
+          97304,
+          15,
+          183,
+          121,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          466,
+          0,
+          129,
+          24839,
+          11,
+          63,
+          5,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2404,
+          0,
+          407,
+          22626,
+          0,
+          13,
+          59,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          264,
+          0,
+          248,
+          24915,
+          1,
+          53,
+          28,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          260,
+          0,
+          243,
+          24922,
+          1,
+          52,
+          28,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.04 avg300=0.09 total=1231245\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 255192798454
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025553563999978,
+      "cpu_seconds": 1.5899999999999999,
+      "cpu_percent_one_core": 15.859473393164183,
+      "rss_kib_min": 58932,
+      "rss_kib_median": 59872,
+      "rss_kib_max": 59872,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 60668,
+      "cpu_us_per_request": 794.9999999999999
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1617799139,
+        "mean": 808899,
+        "50th": 802112,
+        "90th": 836272,
+        "95th": 843014,
+        "99th": 870787,
+        "max": 1835828,
+        "min": 688009
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:28:57.36064085Z",
+      "latest": "2026-10-22T16:29:07.35536852Z",
+      "end": "2026-10-22T16:29:07.356195249Z",
+      "duration": 9994727670,
+      "wait": 826729,
+      "requests": 2000,
+      "rate": 200.1055022242542,
+      "throughput": 200.08895156431635,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r2-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          3396,
+          0,
+          1029,
+          97405,
+          15,
+          183,
+          121,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          466,
+          0,
+          129,
+          24864,
+          11,
+          63,
+          5,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2404,
+          0,
+          407,
+          22652,
+          0,
+          13,
+          59,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          264,
+          0,
+          248,
+          24940,
+          1,
+          53,
+          28,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          260,
+          0,
+          243,
+          24947,
+          1,
+          52,
+          28,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.04 avg300=0.09 total=1231976\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 255445577516
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          3774,
+          0,
+          1112,
+          100932,
+          16,
+          204,
+          132,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          470,
+          0,
+          130,
+          25861,
+          12,
+          67,
+          5,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2732,
+          0,
+          433,
+          23297,
+          0,
+          15,
+          65,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          288,
+          0,
+          278,
+          25882,
+          1,
+          61,
+          31,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          283,
+          0,
+          270,
+          25890,
+          1,
+          60,
+          30,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.55 avg60=0.16 avg300=0.12 total=1389016\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 265502421103
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025290004000027,
+      "cpu_seconds": 3.5300000000000002,
+      "cpu_percent_one_core": 35.21095148959833,
+      "rss_kib_min": 59872,
+      "rss_kib_median": 59872,
+      "rss_kib_max": 59872,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61600,
+      "cpu_us_per_request": 294.1911825985499
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3984338996,
+        "mean": 332055,
+        "50th": 248604,
+        "90th": 654011,
+        "95th": 677782,
+        "99th": 920855,
+        "max": 1597948,
+        "min": 174850
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:29:07.643563161Z",
+      "latest": "2026-10-22T16:29:17.642546326Z",
+      "end": "2026-10-22T16:29:17.643210676Z",
+      "duration": 9998983165,
+      "wait": 664350,
+      "requests": 11999,
+      "rate": 1200.0220224393186,
+      "throughput": 1199.9422961660264,
+      "success": 1,
+      "status_codes": {
+        "200": 11999
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r2-info-5000",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          3774,
+          0,
+          1112,
+          101033,
+          16,
+          204,
+          132,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          470,
+          0,
+          130,
+          25886,
+          12,
+          67,
+          5,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          2732,
+          0,
+          433,
+          23322,
+          0,
+          15,
+          65,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          288,
+          0,
+          278,
+          25908,
+          1,
+          61,
+          31,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          283,
+          0,
+          270,
+          25916,
+          1,
+          60,
+          30,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.55 avg60=0.16 avg300=0.12 total=1389924\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 265755300766
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          4726,
+          0,
+          1279,
+          103905,
+          16,
+          235,
+          165,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          482,
+          0,
+          131,
+          26884,
+          12,
+          71,
+          5,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3521,
+          0,
+          468,
+          23489,
+          0,
+          15,
+          86,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          363,
+          0,
+          343,
+          26761,
+          1,
+          74,
+          36,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          359,
+          0,
+          335,
+          26769,
+          1,
+          73,
+          36,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.83 avg60=0.29 avg300=0.15 total=1506366\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 275897944062
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025675804000002,
+      "cpu_seconds": 8.25,
+      "cpu_percent_one_core": 82.28871710282561,
+      "rss_kib_min": 59872,
+      "rss_kib_median": 59872,
+      "rss_kib_max": 59872,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61600,
+      "cpu_us_per_request": 165.0
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 25164474225,
+        "mean": 503289,
+        "50th": 460789,
+        "90th": 857108,
+        "95th": 949201,
+        "99th": 1297581,
+        "max": 2286308,
+        "min": 148290
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:29:17.953232071Z",
+      "latest": "2026-10-22T16:29:27.952169206Z",
+      "end": "2026-10-22T16:29:27.952452806Z",
+      "duration": 9998937135,
+      "wait": 283600,
+      "requests": 50000,
+      "rate": 5000.531488990105,
+      "throughput": 5000.389662865064,
+      "success": 1,
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "klippy-config-50",
+    "requested_rate": 50,
+    "duration_seconds": 40,
+    "trial_id": "rich-candidate-r2-klippy328k-50",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          4737,
+          0,
+          1287,
+          107712,
+          17,
+          237,
+          166,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          484,
+          0,
+          132,
+          27836,
+          13,
+          72,
+          5,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3528,
+          0,
+          471,
+          24436,
+          0,
+          15,
+          87,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          364,
+          0,
+          345,
+          27715,
+          1,
+          75,
+          36,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          360,
+          0,
+          337,
+          27723,
+          1,
+          74,
+          36,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.30 avg60=0.24 avg300=0.14 total=1515744\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 285474258285
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          4974,
+          0,
+          1426,
+          123323,
+          18,
+          252,
+          172,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          587,
+          0,
+          146,
+          31713,
+          13,
+          79,
+          6,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3642,
+          0,
+          566,
+          28225,
+          1,
+          16,
+          89,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          374,
+          0,
+          359,
+          31688,
+          1,
+          78,
+          38,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          370,
+          0,
+          353,
+          31696,
+          1,
+          77,
+          38,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.12 avg300=0.12 total=1571131\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 325498632553
+    },
+    "process": {
+      "sample_count": 402,
+      "observed_seconds": 40.016736865999974,
+      "cpu_seconds": 2.1,
+      "cpu_percent_one_core": 5.247804205105626,
+      "rss_kib_min": 5200,
+      "rss_kib_median": 5220.0,
+      "rss_kib_max": 5952,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8000,
+      "cpu_us_per_request": 1050.0
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3836886047,
+        "mean": 1918443,
+        "50th": 1878167,
+        "90th": 2068436,
+        "95th": 2137497,
+        "99th": 2349465,
+        "max": 2767357,
+        "min": 1536389
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:29:37.691091408Z",
+      "latest": "2026-10-22T16:30:17.671298347Z",
+      "end": "2026-10-22T16:30:17.673095735Z",
+      "duration": 39980206939,
+      "wait": 1797388,
+      "requests": 2000,
+      "rate": 50.02475357497549,
+      "throughput": 50.02250471593773,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "database64k-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r2-database64k-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          4975,
+          0,
+          1426,
+          123424,
+          18,
+          252,
+          172,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          587,
+          0,
+          146,
+          31738,
+          13,
+          79,
+          6,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3642,
+          0,
+          566,
+          28251,
+          1,
+          16,
+          89,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          374,
+          0,
+          359,
+          31713,
+          1,
+          78,
+          38,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          370,
+          0,
+          353,
+          31721,
+          1,
+          77,
+          38,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.12 avg300=0.12 total=1571914\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 325751603385
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5006,
+          0,
+          1468,
+          127351,
+          18,
+          260,
+          176,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          588,
+          0,
+          147,
+          32736,
+          13,
+          82,
+          6,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3659,
+          0,
+          589,
+          29211,
+          1,
+          17,
+          91,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          381,
+          0,
+          369,
+          32697,
+          1,
+          80,
+          39,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          377,
+          0,
+          361,
+          32706,
+          1,
+          79,
+          38,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.10 avg300=0.11 total=1596472\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 335784047501
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025670734000016,
+      "cpu_seconds": 0.3899999999999997,
+      "cpu_percent_one_core": 3.8900140484106895,
+      "rss_kib_min": 5220,
+      "rss_kib_median": 5220,
+      "rss_kib_max": 5356,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8000,
+      "cpu_us_per_request": 194.99999999999986
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 527966173,
+        "mean": 263983,
+        "50th": 271089,
+        "90th": 279896,
+        "95th": 283698,
+        "99th": 294036,
+        "max": 573599,
+        "min": 203650
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:30:17.953509755Z",
+      "latest": "2026-10-22T16:30:27.949084285Z",
+      "end": "2026-10-22T16:30:27.949322514Z",
+      "duration": 9995574530,
+      "wait": 238229,
+      "requests": 2000,
+      "rate": 200.0885485869115,
+      "throughput": 200.0837799006635,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r2-history-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5006,
+          0,
+          1468,
+          127452,
+          18,
+          260,
+          176,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          588,
+          0,
+          147,
+          32761,
+          13,
+          82,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3659,
+          0,
+          589,
+          29237,
+          1,
+          17,
+          91,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          381,
+          0,
+          369,
+          32722,
+          1,
+          80,
+          39,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          377,
+          0,
+          361,
+          32731,
+          1,
+          79,
+          38,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.10 avg300=0.11 total=1597406\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 336037093023
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5080,
+          0,
+          1526,
+          131321,
+          18,
+          267,
+          179,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          590,
+          0,
+          147,
+          33759,
+          13,
+          85,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3720,
+          0,
+          630,
+          30137,
+          2,
+          17,
+          92,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          386,
+          0,
+          378,
+          33707,
+          1,
+          83,
+          39,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          383,
+          0,
+          369,
+          33717,
+          1,
+          81,
+          39,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.08 avg300=0.11 total=1615612\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 346069485039
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025594674000047,
+      "cpu_seconds": 1.0100000000000002,
+      "cpu_percent_one_core": 10.07421537416919,
+      "rss_kib_min": 5220,
+      "rss_kib_median": 5220,
+      "rss_kib_max": 5392,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8000,
+      "cpu_us_per_request": 505.0000000000001
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1120609969,
+        "mean": 560304,
+        "50th": 560005,
+        "90th": 574072,
+        "95th": 577939,
+        "99th": 622432,
+        "max": 843979,
+        "min": 525369
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:30:28.239090663Z",
+      "latest": "2026-10-22T16:30:38.234637403Z",
+      "end": "2026-10-22T16:30:38.235193722Z",
+      "duration": 9995546740,
+      "wait": 556319,
+      "requests": 2000,
+      "rate": 200.0891048807201,
+      "throughput": 200.07796920413884,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r2-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5081,
+          0,
+          1526,
+          131422,
+          18,
+          267,
+          179,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          590,
+          0,
+          147,
+          33784,
+          13,
+          85,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3720,
+          0,
+          630,
+          30162,
+          2,
+          17,
+          92,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          386,
+          0,
+          378,
+          33732,
+          1,
+          83,
+          39,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          383,
+          0,
+          369,
+          33742,
+          1,
+          81,
+          39,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.08 avg300=0.11 total=1616336\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 346322589511
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5211,
+          0,
+          1627,
+          135178,
+          19,
+          286,
+          190,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          593,
+          0,
+          148,
+          34780,
+          13,
+          90,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3801,
+          0,
+          680,
+          31028,
+          2,
+          19,
+          97,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          409,
+          0,
+          403,
+          34679,
+          1,
+          89,
+          42,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          407,
+          0,
+          395,
+          34690,
+          1,
+          87,
+          42,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.26 avg60=0.37 avg300=0.17 total=1854912\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 356370705179
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025554543999988,
+      "cpu_seconds": 1.3299999999999996,
+      "cpu_percent_one_core": 13.266099088712926,
+      "rss_kib_min": 5220,
+      "rss_kib_median": 5228,
+      "rss_kib_max": 5396,
+      "threads_min": 12,
+      "threads_max": 12,
+      "vmhwm_kib": 8000,
+      "cpu_us_per_request": 110.8333333333333
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 2128311045,
+        "mean": 177359,
+        "50th": 69851,
+        "90th": 550776,
+        "95th": 572241,
+        "99th": 663091,
+        "max": 793719,
+        "min": 32550
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:30:38.520562006Z",
+      "latest": "2026-10-22T16:30:48.520320041Z",
+      "end": "2026-10-22T16:30:48.520380901Z",
+      "duration": 9999758035,
+      "wait": 60860,
+      "requests": 12000,
+      "rate": 1200.029036502582,
+      "throughput": 1200.0217329935954,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r2-info-5000",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5211,
+          0,
+          1628,
+          135279,
+          19,
+          286,
+          190,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          593,
+          0,
+          148,
+          34805,
+          13,
+          90,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3801,
+          0,
+          680,
+          31054,
+          2,
+          19,
+          97,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          409,
+          0,
+          403,
+          34704,
+          1,
+          89,
+          42,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          407,
+          0,
+          395,
+          34715,
+          1,
+          87,
+          42,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.26 avg60=0.37 avg300=0.17 total=1855737\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 356623899441
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5355,
+          0,
+          1712,
+          139051,
+          19,
+          298,
+          216,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          601,
+          0,
+          149,
+          35804,
+          13,
+          93,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3826,
+          0,
+          711,
+          31994,
+          2,
+          22,
+          107,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          465,
+          0,
+          433,
+          35620,
+          1,
+          92,
+          51,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          462,
+          0,
+          418,
+          35632,
+          1,
+          90,
+          50,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.72 avg60=0.62 avg300=0.24 total=2144425\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 366725432076
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025407054000027,
+      "cpu_seconds": 0.5600000000000005,
+      "cpu_percent_one_core": 5.585808107178717,
+      "rss_kib_min": 5228,
+      "rss_kib_median": 5348,
+      "rss_kib_max": 5348,
+      "threads_min": 12,
+      "threads_max": 16,
+      "vmhwm_kib": 8000,
+      "cpu_us_per_request": 11.200896071685744
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3639189310,
+        "mean": 72789,
+        "50th": 68128,
+        "90th": 93714,
+        "95th": 105684,
+        "99th": 141795,
+        "max": 616999,
+        "min": 27720
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:30:48.821808226Z",
+      "latest": "2026-10-22T16:30:58.820784431Z",
+      "end": "2026-10-22T16:30:58.820856011Z",
+      "duration": 9998976205,
+      "wait": 71580,
+      "requests": 49996,
+      "rate": 5000.111908957183,
+      "throughput": 5000.076114747761,
+      "success": 1,
+      "status_codes": {
+        "200": 49996
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r3-info-5000",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5363,
+          0,
+          1720,
+          142798,
+          19,
+          300,
+          217,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          602,
+          0,
+          150,
+          36741,
+          13,
+          94,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3830,
+          0,
+          714,
+          32928,
+          2,
+          22,
+          107,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          466,
+          0,
+          435,
+          36558,
+          1,
+          92,
+          51,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          463,
+          0,
+          420,
+          36570,
+          1,
+          90,
+          51,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.77 avg60=0.54 avg300=0.23 total=2153472\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 376139904199
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5507,
+          0,
+          1805,
+          146570,
+          20,
+          312,
+          244,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          610,
+          0,
+          151,
+          37739,
+          13,
+          97,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3855,
+          0,
+          745,
+          33868,
+          2,
+          26,
+          117,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          522,
+          0,
+          462,
+          37475,
+          1,
+          95,
+          59,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          519,
+          0,
+          446,
+          37487,
+          1,
+          93,
+          59,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.58 avg60=0.78 avg300=0.29 total=2442622\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 386241862503
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025179234000007,
+      "cpu_seconds": 0.5700000000000001,
+      "cpu_percent_one_core": 5.685683883504717,
+      "rss_kib_min": 5204,
+      "rss_kib_median": 5384,
+      "rss_kib_max": 5384,
+      "threads_min": 12,
+      "threads_max": 18,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 11.400000000000002
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3733069110,
+        "mean": 74661,
+        "50th": 67839,
+        "90th": 95045,
+        "95th": 107705,
+        "99th": 150165,
+        "max": 3793905,
+        "min": 25240
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:31:08.337618764Z",
+      "latest": "2026-10-22T16:31:18.337490228Z",
+      "end": "2026-10-22T16:31:18.337545958Z",
+      "duration": 9999871464,
+      "wait": 55730,
+      "requests": 50000,
+      "rate": 5000.064268826086,
+      "throughput": 5000.036403265038,
+      "success": 1,
+      "status_codes": {
+        "200": 50000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r3-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5508,
+          0,
+          1805,
+          146671,
+          20,
+          312,
+          244,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          610,
+          0,
+          151,
+          37764,
+          13,
+          97,
+          7,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3855,
+          0,
+          745,
+          33893,
+          2,
+          26,
+          117,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          522,
+          0,
+          462,
+          37500,
+          1,
+          95,
+          59,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          519,
+          0,
+          446,
+          37512,
+          1,
+          93,
+          59,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.58 avg60=0.78 avg300=0.29 total=2443351\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 386495260125
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5636,
+          0,
+          1909,
+          150425,
+          20,
+          333,
+          254,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          613,
+          0,
+          151,
+          38760,
+          14,
+          102,
+          8,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3934,
+          0,
+          794,
+          34763,
+          2,
+          28,
+          121,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          543,
+          0,
+          489,
+          38444,
+          1,
+          102,
+          62,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          545,
+          0,
+          473,
+          38456,
+          1,
+          100,
+          62,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.84 avg60=0.97 avg300=0.35 total=2680199\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 396544091291
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025491734000013,
+      "cpu_seconds": 1.29,
+      "cpu_percent_one_core": 12.867199277868341,
+      "rss_kib_min": 5384,
+      "rss_kib_median": 5424,
+      "rss_kib_max": 5576,
+      "threads_min": 18,
+      "threads_max": 18,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 107.5
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 2075775352,
+        "mean": 172981,
+        "50th": 69866,
+        "90th": 544021,
+        "95th": 564357,
+        "99th": 659804,
+        "max": 744050,
+        "min": 34820
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:31:18.69326529Z",
+      "latest": "2026-10-22T16:31:28.693139154Z",
+      "end": "2026-10-22T16:31:28.693206684Z",
+      "duration": 9999873864,
+      "wait": 67530,
+      "requests": 12000,
+      "rate": 1200.015136510926,
+      "throughput": 1200.0070327612161,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r3-history-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5637,
+          0,
+          1909,
+          150526,
+          20,
+          333,
+          254,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          613,
+          0,
+          151,
+          38785,
+          14,
+          102,
+          8,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3934,
+          0,
+          794,
+          34788,
+          2,
+          28,
+          121,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          543,
+          0,
+          489,
+          38469,
+          1,
+          102,
+          62,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          545,
+          0,
+          473,
+          38482,
+          1,
+          100,
+          62,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=1.84 avg60=0.97 avg300=0.35 total=2680227\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 396797544763
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5710,
+          0,
+          1967,
+          154395,
+          21,
+          340,
+          257,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          614,
+          0,
+          152,
+          39783,
+          14,
+          105,
+          8,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3995,
+          0,
+          835,
+          35689,
+          2,
+          28,
+          123,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          550,
+          0,
+          499,
+          39454,
+          1,
+          104,
+          63,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          549,
+          0,
+          480,
+          39468,
+          1,
+          102,
+          62,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.67 avg60=0.82 avg300=0.34 total=2698371\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 406829625560
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025600364000013,
+      "cpu_seconds": 1.0100000000000002,
+      "cpu_percent_one_core": 10.074209656577919,
+      "rss_kib_min": 5424,
+      "rss_kib_median": 5424,
+      "rss_kib_max": 5588,
+      "threads_min": 18,
+      "threads_max": 18,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 505.0000000000001
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1119368100,
+        "mean": 559684,
+        "50th": 560307,
+        "90th": 571276,
+        "95th": 575094,
+        "99th": 585205,
+        "max": 1174128,
+        "min": 517559
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:31:28.999862753Z",
+      "latest": "2026-10-22T16:31:38.995107553Z",
+      "end": "2026-10-22T16:31:38.995672262Z",
+      "duration": 9995244800,
+      "wait": 564709,
+      "requests": 2000,
+      "rate": 200.09514924536916,
+      "throughput": 200.08384495515298,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "database64k-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-candidate-r3-database64k-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5711,
+          0,
+          1968,
+          154496,
+          21,
+          340,
+          257,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          614,
+          0,
+          152,
+          39808,
+          14,
+          105,
+          8,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          3995,
+          0,
+          835,
+          35714,
+          2,
+          28,
+          123,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          550,
+          0,
+          499,
+          39479,
+          1,
+          104,
+          63,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          549,
+          0,
+          480,
+          39493,
+          1,
+          102,
+          62,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.67 avg60=0.82 avg300=0.34 total=2699115\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 407083041761
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          5739,
+          0,
+          2007,
+          158428,
+          21,
+          348,
+          261,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          615,
+          0,
+          153,
+          40806,
+          15,
+          108,
+          8,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          4010,
+          0,
+          857,
+          36679,
+          2,
+          29,
+          124,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          556,
+          0,
+          509,
+          40464,
+          1,
+          106,
+          63,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          555,
+          0,
+          487,
+          40479,
+          1,
+          104,
+          63,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.24 avg60=0.69 avg300=0.33 total=2724873\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 417115358688
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025465854000004,
+      "cpu_seconds": 0.3599999999999999,
+      "cpu_percent_one_core": 3.59085557960746,
+      "rss_kib_min": 5424,
+      "rss_kib_median": 5424,
+      "rss_kib_max": 5560,
+      "threads_min": 18,
+      "threads_max": 18,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 179.99999999999994
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 462766482,
+        "mean": 231383,
+        "50th": 230995,
+        "90th": 247766,
+        "95th": 268767,
+        "99th": 279728,
+        "max": 470949,
+        "min": 181000
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:31:39.285940601Z",
+      "latest": "2026-10-22T16:31:49.280775311Z",
+      "end": "2026-10-22T16:31:49.28102636Z",
+      "duration": 9994834710,
+      "wait": 251049,
+      "requests": 2000,
+      "rate": 200.10335918801803,
+      "throughput": 200.09833314327642,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "klippy-config-50",
+    "requested_rate": 50,
+    "duration_seconds": 40,
+    "trial_id": "rich-candidate-r3-klippy328k-50",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          5739,
+          0,
+          2007,
+          158529,
+          21,
+          349,
+          261,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          615,
+          0,
+          153,
+          40831,
+          15,
+          108,
+          8,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          4010,
+          0,
+          857,
+          36704,
+          2,
+          29,
+          124,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          556,
+          0,
+          509,
+          40489,
+          1,
+          106,
+          63,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          555,
+          0,
+          487,
+          40504,
+          1,
+          104,
+          63,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.24 avg60=0.69 avg300=0.33 total=2725816\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 417368864299
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          6041,
+          0,
+          2141,
+          174081,
+          23,
+          363,
+          267,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          784,
+          0,
+          165,
+          44644,
+          16,
+          115,
+          9,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          4123,
+          0,
+          950,
+          40496,
+          2,
+          30,
+          127,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          568,
+          0,
+          524,
+          44461,
+          1,
+          109,
+          65,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          566,
+          0,
+          500,
+          44479,
+          1,
+          107,
+          65,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.35 avg300=0.28 total=2780282\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 457396451833
+    },
+    "process": {
+      "sample_count": 402,
+      "observed_seconds": 40.019731233000016,
+      "cpu_seconds": 2.05,
+      "cpu_percent_one_core": 5.12247318220264,
+      "rss_kib_min": 5424,
+      "rss_kib_median": 5432.0,
+      "rss_kib_max": 6164,
+      "threads_min": 18,
+      "threads_max": 18,
+      "vmhwm_kib": 8004,
+      "cpu_us_per_request": 1024.9999999999998
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3827390979,
+        "mean": 1913695,
+        "50th": 1872786,
+        "90th": 2114971,
+        "95th": 2225260,
+        "99th": 2466335,
+        "max": 2566147,
+        "min": 1563778
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:31:49.585986102Z",
+      "latest": "2026-10-22T16:32:29.566188541Z",
+      "end": "2026-10-22T16:32:29.568312979Z",
+      "duration": 39980202439,
+      "wait": 2124438,
+      "requests": 2000,
+      "rate": 50.02475920554705,
+      "throughput": 50.02210116866681,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "info-5000",
+    "requested_rate": 5000,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r3-info-5000",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          6134,
+          0,
+          2150,
+          178224,
+          24,
+          366,
+          268,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          786,
+          0,
+          166,
+          45701,
+          16,
+          117,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          4211,
+          0,
+          954,
+          41466,
+          2,
+          30,
+          127,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          569,
+          0,
+          526,
+          45519,
+          2,
+          110,
+          65,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          567,
+          0,
+          501,
+          45537,
+          1,
+          107,
+          65,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.29 avg300=0.27 total=2796816\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 468020086364
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          7090,
+          0,
+          2316,
+          181092,
+          24,
+          396,
+          301,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          798,
+          0,
+          167,
+          46698,
+          17,
+          120,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5003,
+          0,
+          991,
+          41630,
+          2,
+          31,
+          149,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          645,
+          0,
+          592,
+          46372,
+          2,
+          123,
+          71,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          642,
+          0,
+          565,
+          46391,
+          1,
+          121,
+          70,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.55 avg60=0.37 avg300=0.29 total=2912219\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 478161712201
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025587143999985,
+      "cpu_seconds": 8.28,
+      "cpu_percent_one_core": 82.58867915736319,
+      "rss_kib_min": 58020,
+      "rss_kib_median": 58516,
+      "rss_kib_max": 58516,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 58516,
+      "cpu_us_per_request": 165.6033120662413
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 25370263558,
+        "mean": 507415,
+        "50th": 465220,
+        "90th": 861856,
+        "95th": 964453,
+        "99th": 1301699,
+        "max": 2568067,
+        "min": 147730
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:32:40.217940019Z",
+      "latest": "2026-10-22T16:32:50.216810674Z",
+      "end": "2026-10-22T16:32:50.217359224Z",
+      "duration": 9998870655,
+      "wait": 548550,
+      "requests": 49999,
+      "rate": 5000.464724983484,
+      "throughput": 5000.190408558834,
+      "success": 1,
+      "status_codes": {
+        "200": 49999
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "independent-1200",
+    "requested_rate": 1200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r3-independent-1200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          7090,
+          0,
+          2316,
+          181193,
+          24,
+          396,
+          301,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          798,
+          0,
+          167,
+          46723,
+          17,
+          121,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5003,
+          0,
+          991,
+          41655,
+          2,
+          31,
+          149,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          645,
+          0,
+          592,
+          46398,
+          2,
+          123,
+          71,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          642,
+          0,
+          565,
+          46416,
+          1,
+          121,
+          70,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.63 avg60=0.39 avg300=0.29 total=2913130\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 478415516583
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          7469,
+          0,
+          2398,
+          184721,
+          24,
+          418,
+          312,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          802,
+          0,
+          168,
+          47719,
+          17,
+          125,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5331,
+          0,
+          1016,
+          42300,
+          2,
+          32,
+          155,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          670,
+          0,
+          619,
+          47341,
+          2,
+          131,
+          73,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          664,
+          0,
+          594,
+          47360,
+          1,
+          128,
+          73,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.86 avg60=0.49 avg300=0.32 total=3031448\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 488472054490
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025249785000028,
+      "cpu_seconds": 3.540000000000001,
+      "cpu_percent_one_core": 35.31084088594598,
+      "rss_kib_min": 58516,
+      "rss_kib_median": 59520,
+      "rss_kib_max": 59520,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 60340,
+      "cpu_us_per_request": 295.00000000000006
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 3883554580,
+        "mean": 323629,
+        "50th": 234543,
+        "90th": 651218,
+        "95th": 658383,
+        "99th": 945288,
+        "max": 1630888,
+        "min": 172809
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:32:50.613585067Z",
+      "latest": "2026-10-22T16:33:00.612723862Z",
+      "end": "2026-10-22T16:33:00.612920492Z",
+      "duration": 9999138795,
+      "wait": 196630,
+      "requests": 12000,
+      "rate": 1200.103353500855,
+      "throughput": 1200.0797543002714,
+      "success": 1,
+      "status_codes": {
+        "200": 12000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "history-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r3-history-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          7469,
+          0,
+          2398,
+          184822,
+          24,
+          418,
+          312,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          802,
+          0,
+          168,
+          47744,
+          17,
+          125,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5331,
+          0,
+          1016,
+          42325,
+          2,
+          32,
+          155,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          670,
+          0,
+          619,
+          47366,
+          2,
+          131,
+          73,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          664,
+          0,
+          594,
+          47385,
+          1,
+          128,
+          73,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.86 avg60=0.49 avg300=0.32 total=3031476\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 488725874031
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          7627,
+          0,
+          2431,
+          188633,
+          25,
+          425,
+          315,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          804,
+          0,
+          168,
+          48743,
+          18,
+          128,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5476,
+          0,
+          1032,
+          43165,
+          2,
+          33,
+          156,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          677,
+          0,
+          627,
+          48353,
+          2,
+          133,
+          74,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          669,
+          0,
+          602,
+          48372,
+          1,
+          130,
+          73,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.31 avg60=0.41 avg300=0.31 total=3119097\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 498760263725
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025486983999997,
+      "cpu_seconds": 1.5999999999999996,
+      "cpu_percent_one_core": 15.95932449519402,
+      "rss_kib_min": 59520,
+      "rss_kib_median": 59520,
+      "rss_kib_max": 60324,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61232,
+      "cpu_us_per_request": 799.9999999999998
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 1632302761,
+        "mean": 816151,
+        "50th": 818724,
+        "90th": 840193,
+        "95th": 845433,
+        "99th": 873767,
+        "max": 1764138,
+        "min": 666739
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:33:00.927778492Z",
+      "latest": "2026-10-22T16:33:10.922869582Z",
+      "end": "2026-10-22T16:33:10.923674631Z",
+      "duration": 9995091090,
+      "wait": 805049,
+      "requests": 2000,
+      "rate": 200.09822641846478,
+      "throughput": 200.08211091717908,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "database64k-200",
+    "requested_rate": 200,
+    "duration_seconds": 10,
+    "trial_id": "rich-moonraker-r3-database64k-200",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          7628,
+          0,
+          2431,
+          188734,
+          25,
+          425,
+          315,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          804,
+          0,
+          168,
+          48767,
+          18,
+          128,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5476,
+          0,
+          1032,
+          43190,
+          2,
+          33,
+          156,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          677,
+          0,
+          627,
+          48378,
+          2,
+          133,
+          74,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          669,
+          0,
+          602,
+          48397,
+          1,
+          130,
+          73,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.31 avg60=0.41 avg300=0.31 total=3120037\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 499014023067
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          7718,
+          0,
+          2461,
+          192614,
+          26,
+          434,
+          318,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          805,
+          0,
+          169,
+          49765,
+          19,
+          131,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5552,
+          0,
+          1044,
+          44104,
+          2,
+          33,
+          158,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          683,
+          0,
+          637,
+          49362,
+          2,
+          135,
+          75,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          676,
+          0,
+          610,
+          49381,
+          1,
+          133,
+          74,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.11 avg60=0.35 avg300=0.29 total=3163539\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 509048514790
+    },
+    "process": {
+      "sample_count": 103,
+      "observed_seconds": 10.025603423999996,
+      "cpu_seconds": 0.8800000000000008,
+      "cpu_percent_one_core": 8.777526526666662,
+      "rss_kib_min": 59520,
+      "rss_kib_median": 59520,
+      "rss_kib_max": 59520,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61232,
+      "cpu_us_per_request": 440.0000000000004
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 903129362,
+        "mean": 451564,
+        "50th": 449903,
+        "90th": 462777,
+        "95th": 468416,
+        "99th": 487494,
+        "max": 908019,
+        "min": 390039
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:33:11.216228917Z",
+      "latest": "2026-10-22T16:33:21.211130737Z",
+      "end": "2026-10-22T16:33:21.211575746Z",
+      "duration": 9994901820,
+      "wait": 445009,
+      "requests": 2000,
+      "rate": 200.10201560939393,
+      "throughput": 200.09310674416017,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  },
+  {
+    "fixture": "rich",
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "klippy-config-50",
+    "requested_rate": 50,
+    "duration_seconds": 40,
+    "trial_id": "rich-moonraker-r3-klippy328k-50",
+    "guest_steal_ticks": {
+      "cpu": 0,
+      "cpu0": 0,
+      "cpu1": 0,
+      "cpu2": 0,
+      "cpu3": 0
+    },
+    "guest_counters_before": {
+      "cpus": {
+        "cpu": [
+          7719,
+          0,
+          2461,
+          192715,
+          26,
+          434,
+          318,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          806,
+          0,
+          169,
+          49790,
+          19,
+          131,
+          10,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5552,
+          0,
+          1044,
+          44129,
+          2,
+          33,
+          158,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          683,
+          0,
+          637,
+          49387,
+          2,
+          135,
+          75,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          676,
+          0,
+          610,
+          49407,
+          1,
+          133,
+          74,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.11 avg60=0.35 avg300=0.29 total=3164329\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 509302389551
+    },
+    "guest_counters_after": {
+      "cpus": {
+        "cpu": [
+          8074,
+          0,
+          2545,
+          208266,
+          27,
+          447,
+          324,
+          15,
+          0,
+          0
+        ],
+        "cpu0": [
+          955,
+          0,
+          210,
+          53593,
+          20,
+          138,
+          11,
+          13,
+          0,
+          0
+        ],
+        "cpu1": [
+          5736,
+          0,
+          1061,
+          47928,
+          2,
+          34,
+          160,
+          1,
+          0,
+          0
+        ],
+        "cpu2": [
+          694,
+          0,
+          650,
+          53362,
+          2,
+          138,
+          76,
+          0,
+          0,
+          0
+        ],
+        "cpu3": [
+          688,
+          0,
+          623,
+          53381,
+          1,
+          136,
+          76,
+          0,
+          0,
+          0
+        ]
+      },
+      "pressure": "some avg10=0.00 avg60=0.17 avg300=0.25 total=3192338\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "monotonic_ns": 549331618663
+    },
+    "process": {
+      "sample_count": 402,
+      "observed_seconds": 40.01920049399996,
+      "cpu_seconds": 2.009999999999998,
+      "cpu_percent_one_core": 5.022589095205326,
+      "rss_kib_min": 59520,
+      "rss_kib_median": 59520.0,
+      "rss_kib_max": 59520,
+      "threads_min": 4,
+      "threads_max": 4,
+      "vmhwm_kib": 61232,
+      "cpu_us_per_request": 1004.999999999999
+    },
+    "vegeta": {
+      "latencies": {
+        "total": 4191263214,
+        "mean": 2095631,
+        "50th": 2067466,
+        "90th": 2286449,
+        "95th": 2374190,
+        "99th": 2702967,
+        "max": 3645276,
+        "min": 1755098
+      },
+      "bytes_in": {
+        "total": 0,
+        "mean": 0
+      },
+      "bytes_out": {
+        "total": 0,
+        "mean": 0
+      },
+      "earliest": "2026-10-22T16:33:21.519354854Z",
+      "latest": "2026-10-22T16:34:01.499724184Z",
+      "end": "2026-10-22T16:34:01.501753221Z",
+      "duration": 39980369330,
+      "wait": 2029037,
+      "requests": 2000,
+      "rate": 50.02455038601315,
+      "throughput": 50.022011727308644,
+      "success": 1,
+      "status_codes": {
+        "200": 2000
+      },
+      "errors": []
+    }
+  }
+]

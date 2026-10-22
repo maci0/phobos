@@ -180,19 +180,9 @@ pub fn main(init: std.process.Init) !void {
 
 fn run(init: std.process.Init) !void {
     const alloc = init.gpa;
-    // On 32-bit targets (armv7) the runtime-default IO backend's 16 MB handler
-    // stacks reserve ~2 GB of VSZ at the ~128-thread peak — enough to exhaust the
-    // 3 GB user address space. Own the backend there with a 1 MB stack (handlers
-    // need ~120 KB: the 64 KB file buffer + bounded JSON depth). On 64-bit the
-    // address space is effectively unlimited, so the default backend is fine and
-    // we skip the override entirely — the whole thing compiles out.
-    const bounded_stack = @import("builtin").target.ptrBitWidth() <= 32;
-    var threaded: std.Io.Threaded = if (bounded_stack)
-        std.Io.Threaded.init(alloc, .{ .stack_size = io.Listener.handler_stack_size })
-    else
-        undefined;
-    defer if (bounded_stack) threaded.deinit();
-    const aio = if (bounded_stack) threaded.io() else init.io;
+    var threaded = io.initThreaded(alloc, init.minimal.environ);
+    defer threaded.deinit();
+    const aio = threaded.io();
 
     // Parse CLI args.
     const args = try init.minimal.args.toSlice(init.arena.allocator());

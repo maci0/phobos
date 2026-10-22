@@ -1,0 +1,15 @@
+{
+  "stopped_backup": "/data/phobos-backups/v0.2.3-20261022T164357Z/moonraker-sql.db",
+  "legacy_jobs": 266,
+  "KV_jobs": 7,
+  "unique_backup_jobs": 273,
+  "production_jobs": 273,
+  "job_ids_match": true,
+  "legacy_null_end_times": 7,
+  "production_null_end_times": 7,
+  "copied_backup_sidecars": [
+    "-wal",
+    "-shm"
+  ],
+  "live_database_opened_by_check": false
+}

@@ -29,6 +29,7 @@ const SocketDeadline = @import("../util/socket_deadline.zig").SocketDeadline;
 const DeadlineWriter = @import("../util/deadline_writer.zig").DeadlineWriter;
 const MessageBuffer = @import("../util/ws_message.zig").MessageBuffer;
 const connections = @import("../server/connections.zig");
+const json_parse = @import("../json/parse.zig");
 const read_buffer_size = 64 * 1024;
 
 /// One in-flight request awaiting its response. The persistent reader routes
@@ -659,7 +660,7 @@ pub const KlippyCtx = struct {
     /// `call_remote_method`) run under Core; Moonraker sends no reply to them.
     /// Responses go to the waiter registered under their string id.
     pub fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{ .allocate = .alloc_always });
+        const parsed = try json_parse.parse(self.gpa, payload);
         var retained = false;
         defer if (!retained) parsed.deinit();
         const frame = parsed.value;
@@ -1698,8 +1699,8 @@ test "dispatchFrame retains one decoded reply independently of its input" {
     const before = tracked.allocated_bytes;
     try ctx.dispatchFrame(std.testing.io, wire);
     try std.testing.expectEqualStrings(text, waiter.response.?.value.object.get("result").?.object.get("payload").?.string);
-    // std.json grows both its string ArrayList and arena by 1.5; no wire copy remains.
-    try std.testing.expect(tracked.allocated_bytes - before < wire.len * 5 / 2 + 4096);
+    // Long ASCII values reserve once; only arena growth adds spare capacity.
+    try std.testing.expect(tracked.allocated_bytes - before < wire.len * 2 + 4096);
     @memset(wire, ' ');
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();

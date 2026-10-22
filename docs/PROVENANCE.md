@@ -1893,3 +1893,227 @@ including memory improvements. This capture is their starting baseline; deployme
 of the new build is deferred until those rounds finish. Current performance and
 memory reports, twelve current-versus-Moonraker graphics, all trial statistics,
 negative experiments and verification evidence are updated from measured JSON.
+
+### 2026-10-22: profiling rounds 1 through 4
+
+At the user's request for ten profiling rounds and lower memory use, optimized
+symbol builds are sampled with bpftrace on owned local and remote fixture
+processes. Timing comparisons run separately without instrumentation, with
+matched private databases and alternating binary order. The remote sudo rule
+and sleep/idle inhibitor are retained; both hosts' blockers are rechecked.
+Final isolated VM and physical-printer verification remains pending.
+
+Round 1 replaces repeated growth of long ASCII value tokens with one bounded
+allocation in `json/parse.zig`, keeping the standard JSON token parser and
+Unicode/key fallback. Klippy uses that adapter. Differential malformed/byte/fuzz,
+decoded-length, ownership and every-allocation-failure tests pass; the 256 KiB
+reply budget tightens to twice wire size plus 4 KiB. Three remote trials reduce
+median config CPU from 1.2833 to 1.0283 ms/request and p99 from 2.2047 to
+1.8695 ms. RSS does not improve in those trials and is not claimed as a gain.
+
+Round 2 writes encoded string vectors directly into `std.Io.Writer` capacity,
+retaining the small/unbuffered fallback. Exact-size writer tests first expose an
+over-reservation error, then pass with the corrected bound. Full writer options,
+UTF-8, failures and nested-value fuzz checks remain. Remote median API CPU moves
+from 1.025 to 1.0167 ms/request; standalone encoder improvements are larger and
+are not substituted for request timings. A further batching prototype stays out.
+
+Round 3 rejects a direct SMP startup allocator after a 3.6% CPU regression.
+The daemon instead owns a native I/O backend with the existing 1 MiB handler
+stack bound and actual startup environment on all architectures. A real child
+process reproduces the omitted-environment defect before the fix. Native median
+trial-maximum RSS falls from 10,016 to 5,952 KiB, with CPU rising from 1.020 to
+1.0633 ms/request and p99 from 1.8615 to 1.9165 ms. Post-load smaps identify
+anonymous huge pages as the discrete baseline RSS steps; allocator slab sizes
+are not their cause. Host huge-page policy is unchanged. The memory goal
+justifies this measured tradeoff pending final combined verification.
+
+Round 4 samples an independent six-route mix, 45,600 successful requests per
+profile. Local SQLite preparation accounts for 13.4% inclusive samples.
+`SqliteStore` now retains two prepared statements under its existing mutex,
+resets execution on success/failure, clears copied table-name bindings and
+finalizes before closing. Query results remain fresh. The preparation-count
+test fails before the change; namespace writes, schema create/drop, bounded
+schema fuzz and allocation-failure recovery pass afterward. Three alternating
+remote trials complete 108,000 requests: median CPU 0.105 to 0.102778 ms/request,
+p99 0.623953 to 0.611397 ms and sampled maximum RSS 5,772 to 5,768 KiB. Final
+Debug and ReleaseFast suites each pass 1,763 tests, skip one local real-Klippy
+fixture and find 334 fuzz tests. Earlier stages' full suites also pass before
+the next source change. Diagnostic logs, raw profiles, binary/source snapshots
+and per-trial statistics are retained in `.scratch/speed28/`; the current
+published benchmark tables still identify their unchanged `b381577` baseline.
+
+### 2026-10-22: profiling round 5
+
+The large-record profile samples 4,220 stacks: JSON decoding accounts for 37%
+inclusive samples and `pread` for 16.5% leaf samples. SQLite JSON records and
+history columns now use the long-token adapter's caller-arena entry point.
+Its 256 KiB record test fails the allocation budget before the change and
+passes after, also checking ownership after the input is overwritten. Both
+entry points participate in differential byte/malformed/fuzz and every-allocation
+failure checks. Short documents delegate directly to the standard parser;
+validated plain strings bulk-copy once without running the escape loop.
+
+The first extension regresses history CPU by 5.9% and large-record CPU by 2.7%.
+A later variant improves large records but regresses config CPU by 11.6%.
+That config profile samples a generic `mem.findPos` search at 23.45% leaf CPU;
+disassembly confirms its call in `Source.nextAllocMax`. Moving the plain return
+alone does not correct it. Replacing the Unicode-escape substring search with
+standard scalar searches and a preceding-byte check removes that sampled call.
+All rejected variants and their measurements remain private scratch evidence.
+
+Final alternating remote comparisons use three trials per binary and workload,
+without instrumentation. Config median CPU falls from 1.010 to 0.888333 ms/request
+and p99 from 1.850391 to 1.723567 ms; sampled maximum RSS medians are both
+5,948 KiB. Large-record CPU falls from 0.165556 to 0.136674 ms and p99 from
+0.450576 to 0.352772 ms; RSS is 5,152 versus 5,156 KiB. History CPU is 0.460
+versus 0.461667 ms and p99 0.520052 versus 0.521906 ms, with identical 5,360 KiB
+RSS medians. The small history regression is retained rather than omitted.
+These pinned-host diagnostics make no isolated-VM or universal-win claim.
+
+Debug and ReleaseFast each pass 1,764 tests, skip one gated local real-Klippy
+fixture and find 334 fuzz tests on the final scalar-search source. The six
+standalone parser tests also pass in ReleaseFast. Source is preserved under
+`.scratch/speed28/source-round05/`, with raw profiles, rejected binaries and
+the three accepted `round05-scalar-*-ab/trials.json` captures beside it.
+The published benchmark tables remain the earlier baseline pending all ten
+rounds and final isolated/printer verification.
+
+### 2026-10-23: profiling round 6
+
+The owned fixture populates files named by its 266 history rows, then checks
+history `exists` fields before load. A mixed history/directory profile places
+`statx` at 21.4% leaf samples and file existence at 11.4% inclusive samples.
+Existence now uses `Resolved.stat` and its regular-file kind, preserving the
+checked root/component/symlink traversal while avoiding file-data open, fstat
+and close. Vendor `file_manager.py:386` uses `Path.is_file`, supporting this
+metadata-only behavior. No filesystem result cache is introduced.
+
+The data-open-denied regression fails before the change. In-root aliases,
+escaping links/traversal, directories, missing files and generated file
+creation/deletion pass afterward. Debug and ReleaseFast each pass 1,766 tests,
+skip one gated local real-Klippy fixture and find 335 fuzz tests.
+Three alternating remote trials per binary complete 36,000 requests: median
+CPU 0.485 to 0.450 ms/request, p99 0.604563 to 0.540922 ms and sampled maximum
+RSS 5,612 to 5,604 KiB. Raw profiles, per-trial data and exact source remain in
+`.scratch/speed28/round06-*` and `source-round06/`. Isolated and physical
+verification of the combined candidate remains pending.
+
+### 2026-10-23: profiling rounds 7 through 10
+
+The user requested ten profiling rounds with CPU and memory improvements.
+Round 7 profiles a private fake-Klippy fixture containing 1,000 console entries
+and two 32-sample temperature stores. Console snapshots now read the deque
+directly, reserve only the requested array length and use exact three-field
+standard map storage. The old handler fails the one-entry 8 KiB allocation
+budget; the first growth-slack variant fails the full 512 KiB budget. The
+retained exact-capacity variant passes both, wrapped FIFO, count edge cases
+and every request allocation failure. Three alternating remote pairs complete
+27,000 requests: median CPU 0.226667 to 0.180000 ms/request, p99 0.467676 to
+0.406977 ms and sampled maximum RSS 5,764 to 5,564 KiB. These pinned-host
+diagnostics are not isolated release measurements.
+
+Round 8 audits subscription masking and fanout without another source change.
+At 100 fresh subscriptions/s, 3,800 sessions validate 22,664 notifications.
+The default 50-connection limit rejects the 200/s diagnostic with HTTP 503;
+those failed runs are excluded from timings. A private 100-connection limit
+then accepts all 7,600 sessions and 45,535 notifications. The C allocation
+trace records 63,538 calls and 50,269,838 requested bytes in its 20-second
+window. Requested bytes and mmap sizes are not RSS. Subscription copies must
+remain connection-owned rather than borrowing request arenas.
+
+Round 9 completes 3,800 fresh WebSocket config sessions, checking the entire
+328 KiB reply. Its 1,379 CPU samples distribute work among copies, decoding,
+encoding and socket writes. No speculative streaming/ownership rewrite is
+retained. Existing outbound TLS certificate/hostname and allocation-failure
+tests pass; TLS is not separately profiled and inbound TLS is not implemented.
+The WebSocket limit remains 10 MiB; the Klippy ETX frame limit is 20 MiB.
+
+Round 10 completes all 34,200 requests across nine paths with populated history,
+console and heater fixtures. Its 3,968 samples identify remaining copies,
+sendmsg, parsing, encoding and SQLite/history work. Compilation runs alongside
+this diagnostic, so its absolute timing is not release comparison evidence.
+No further source change is justified by these last three audits.
+
+Evidence is retained in `.scratch/speed28/round07-exact-*`,
+`round08-subscriptions-*`, `round09-websocket-config/`,
+`round10-combined/` and `rounds.json`. Combined source passes Debug,
+ReleaseSafe and ReleaseFast: 1,768 passed, one gated local real-Klippy skip,
+zero failures and 335 fuzz tests. On the user's fresh release request, the
+package becomes 0.2.3 and all seven ReleaseFast assets are rebuilt before
+isolated measurements, physical validation and publication. The remote sudo
+rule and both hosts' sleep blockers remain in place at the user's request.
+
+### 2026-10-23: v0.2.3 final measurements, printer installation and release
+
+The user requested refreshed graphics, a release, physical testing and
+publication. All seven static ReleaseFast profiles pass ELF, ABI and checksum
+validation. The native benchmark executable is byte-identical to the matrix
+asset. Final Debug, ReleaseSafe and ReleaseFast each pass 1,768 tests, one
+gated local real-Klippy skip, zero failures and 335 fuzz tests. All 110 Python
+tooling tests, four build-policy tests, formatting, shell checks, lint/type
+checks and harness cleanup smoke checks pass. SQLite source hashes match.
+API registration remains 123/123 endpoints, 130/130 methods and 27/27
+notifications; the generated API table passes its freshness check unchanged.
+
+Independent local and remote KVM studies each complete 36 trials and 72 history
+comparisons. They complete 479,975 and 479,993 successful requests respectively.
+Each uses the actual stripped v0.2.3 asset, matched rich/empty seeds, at least
+2,000 offered requests per trial, locked 4 GiB RAM, an isolated physical L3
+group, pinned vCPUs and no guest NIC. Local aggregate guest steal is six ticks;
+remote steal counters remain zero. Maximum server-vCPU host run-queue delays
+are 0.050139% locally and 0.002091% remotely. Neither VM swaps or encounters
+quota throttling. CPU partitions are removed, prior slice limits restored and
+frequency policies left unchanged. The remote sudo rule and sleep inhibitor
+are retained, as requested. Literal zero scheduling delay and fixed physical
+frequency are not claimed.
+
+The Forge-X chroot study completes all 24 HTTP trials, 10,440 requests,
+126 full 268-object subscriptions and 36 matching history comparisons using
+private databases on loopback 7126. Production is paused during load and
+restored afterward. Every measured HTTP case has lower median p99 and sampled
+RSS with phobos. Remote large-config CPU remains 2.0% above Moonraker,
+1.025 versus 1.005 ms/request; every other HTTP workload CPU median favors
+phobos. Subscription latency ranges overlap. All twelve active graphics now
+show only v0.2.3 and Moonraker, with metric directions and trial ranges.
+Numeric sources, executable/source hashes, isolation windows, rejected
+experiments and limits are under `docs/perf/optimization-20261023/`.
+
+All five compatible ARM32 daemon assets then pass against real Klippy using
+the full Forge-X config, private copied seeds, disabled automatic updates and
+disabled job-queue startup. Each verifies all 26 production components,
+262/262 requested objects, directory capacity, Fluidd array keys, config/history
+reads and all four temperature stores advancing. All five C/Zig floating-point
+probes pass. Only this Cortex-A7 board is physically certified. Native AArch64
+execution is delegated to the existing hosted CI. Probe processes and owned
+printer scratch files are removed afterward.
+
+The authorized production switch installs `/data/phobos-v0.2.3`, SHA256
+`ea85ea002a5c138821951f646f56deddf2aa6e001a84eef22c0f549a7fc2372d`,
+as PID 13619 on 7125. The launcher, running executable and stopped database
+with WAL/SHM sidecars are saved in
+`/data/phobos-backups/v0.2.3-20261022T164357Z/`, with rollback guards. Production
+is ready and idle, both targets zero, all 26 components healthy and all 262
+subscription objects returned. No probe listens on 7126. Board boot ID stays
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117`. No hardware command, board reboot,
+Klipper restart or firmware restart is used.
+
+Post-install checks match all 273 history job IDs and seven null end times
+against an owned copy of the stopped backup, including its WAL. An initial
+backup check omitted sidecars and saw only 266 legacy rows; copying the saved
+WAL/SHM exposes the seven KV jobs and makes the check pass. Another check
+incorrectly expected the default database path in config output; descriptor
+inode comparison verifies the actual open database without opening its live
+file. Both are corrected harness assumptions, not daemon failures. Deployment
+and preservation JSON remain separate from benchmark snapshots. All four
+production temperature stores advance; sampled production RSS is 5,876 KiB
+with zero process swap after the read checks, not a matched benchmark value.
+
+Package version and release notes become 0.2.3. README, build, standard-library,
+memory, performance and harness documentation are updated. The local release
+assembler validates all seven assets and versioned note links before commit.
+Graphify is skipped because its executable is absent; `graphify-out` is not a
+deliverable. Long soaks, printing/uploads, maximum capacity, file-backend
+performance and other physical printer models remain unchecked. Main CI and
+tag publication follow this verified source commit; their run IDs are reported
+with publication rather than asserted in advance.

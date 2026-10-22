@@ -1,13 +1,19 @@
 # Performance
 
-Current measurements compare **phobos 0.2.2 development with Moonraker**, measured
-2026-10-22. The candidate uses ReleaseFast, a single parsed Klippy response,
-vectorized buffered JSON strings, SQL history pagination, batched status delivery
-and Zig's standard startup allocator. It is not the published v0.2.2 asset.
+Current measurements compare **phobos v0.2.3 with Moonraker**, measured
+2026-10-23. The candidate uses ReleaseFast, bulk ASCII JSON values, buffered
+encoding, reused SQLite statements, metadata-only file checks, compact console
+snapshots and bounded worker stacks. Its hashes match the release matrix.
 Exact source blobs, binary hashes, fixtures and controls accompany the
-[capture method](perf/optimization-20261022-2/METHOD.md). Earlier [results](perf/optimization-20261022/)
+[capture method](perf/optimization-20261023/METHOD.md). Earlier [results](perf/optimization-20261022/)
 and rejected/intermediate [experiments](perf/optimization-20261022-2/experiments/) remain archived.
 Every active graphic shows only the current build and Moonraker.
+
+Phobos has lower median p99 and sampled RSS in every measured HTTP case on both
+PCs and the printer. Remote large-config CPU remains 2.0% above Moonraker:
+1.025 versus 1.005 ms/request. All other HTTP workload CPU medians favor phobos.
+Subscription latency ranges overlap; these are measured cases, not a claim
+about every workload or printer.
 
 **Lower CPU time, latency and RSS are better. Higher successful throughput is
 better.** These fixed-arrival tests measure whether each server meets the offered
@@ -31,31 +37,31 @@ history comparisons. Request content is checked before timing.
 
 | Workload | phobos CPU ms/req ↓ | Moonraker CPU ms/req ↓ | phobos p99 ms ↓ | Moonraker p99 ms ↓ |
 | --- | ---: | ---: | ---: | ---: |
-| database64k10 | 4.08 | 15.4 | 21.7 | 46 |
-| history10 | 8.17 | 27.2 | 27.1 | 60.6 |
-| independent75 | 2.09 | 10.9 | 20.7 | 54.8 |
-| info50 | 0.5 | 7.68 | 15.5 | 31.8 |
+| database64k10 | 3.92 | 15.3 | 23.5 | 29.1 |
+| history10 | 8.08 | 26.8 | 26.2 | 41.3 |
+| independent75 | 2.08 | 10.7 | 19.7 | 52.1 |
+| info50 | 0.5 | 7.63 | 15.1 | 32.8 |
 
-![printer cpu, current phobos versus Moonraker](perf/optimization-20261022-2/printer/cpu.png)
-![printer latency, current phobos versus Moonraker](perf/optimization-20261022-2/printer/latency.png)
-![printer throughput, current phobos versus Moonraker](perf/optimization-20261022-2/printer/throughput.png)
+![printer cpu, current phobos versus Moonraker](perf/optimization-20261023/printer/cpu.png)
+![printer latency, current phobos versus Moonraker](perf/optimization-20261023/printer/latency.png)
+![printer throughput, current phobos versus Moonraker](perf/optimization-20261023/printer/throughput.png)
 
 Each subscription requests all 268 objects visible in the private config,
 including six pins hidden by production's Fluidd config. Twenty-one fresh
 connections arrive at 1.75/s in each repetition. The rate samples seven phases
 of Klippy's 250 ms subscription tick, rather than locking to one phase at 1 Hz.
-CPU time per subscription is **46.19 versus 88.10 ms**.
-Median scheduled-arrival through decoded-reply latency is **284.33
-versus 320.30 ms**. Median time after Klippy's snapshot is
-**149.90 versus 156.40 ms**, using its CLOCK_MONOTONIC_RAW
+CPU time per subscription is **48.10 versus 86.19 ms**.
+Median scheduled-arrival through decoded-reply latency is **299.98
+versus 314.14 ms**. Median time after Klippy's snapshot is
+**153.02 versus 154.65 ms**, using its CLOCK_MONOTONIC_RAW
 eventtime. All names match. These measurements include client decoding and are
-not Fluidd page-loading times. [All subscription trials](perf/optimization-20261022-2/printer/subscriptions.json)
+not Fluidd page-loading times. [All subscription trials](perf/optimization-20261023/printer/subscriptions.json)
 retain ranges and every request; no trial is dropped for its result.
 
-The [benchmark final state](perf/optimization-20261022-2/printer/final-state.json) records the original
+The [benchmark final state](perf/optimization-20261023/printer/final-state.json) records the original
 production daemon restored on 7125, ready and idle with zero targets, unchanged
 board boot ID and no listener on 7126. Deployment afterward is recorded
-separately. [Known differences](perf/optimization-20261022-2/mismatches.json) distinguish identity,
+separately. [Known differences](perf/optimization-20261023/mismatches.json) distinguish identity,
 supported defaults, deliberate policy and private-fixture environment from bugs.
 The API stays 1.5.0 with phobos identity; the Python stub, CAN empty-list fallback
 and optional component implementations remain intact.
@@ -73,53 +79,45 @@ SMT siblings. vCPUs pin to separate physical cores 10/11/12/13; the emulator
 uses CPU 8. The guest server uses CPU 1, generator 2/3 and stub/controller 0.
 Scheduling is SCHED_OTHER with nice -20, without idle polling. Existing frequency
 policies stay unchanged. **Fixed frequency and literal zero steal are not
-established.** Guest steal tick sums are `{"cpu": 1, "cpu0": 1, "cpu1": 0, "cpu2": 0, "cpu3": 0}`. Maximum server-vCPU run-queue delay is 0.000693% of its trial window; the maximum for any vCPU is 0.000989%. Locked RAM stays at least 4,837,408 KiB. VM/cgroup swap and quota throttling remain zero.
-[Every isolation window](perf/optimization-20261022-2/vm-isolation-summary.json) and
-[cleanup](perf/optimization-20261022-2/vm-cleanup.json) remain available.
+established.** Guest steal tick sums are `{"cpu": 0, "cpu0": 0, "cpu1": 0, "cpu2": 0, "cpu3": 0}`. Maximum server-vCPU run-queue delay is 0.002091% of its trial window; the maximum for any vCPU is 0.004400%. Locked RAM stays at least 4,837,408 KiB. VM/cgroup swap and quota throttling remain zero.
+[Every isolation window](perf/optimization-20261023/vm-isolation-summary.json) and
+[cleanup](perf/optimization-20261023/vm-cleanup.json) remain available.
 
 ### Populated history
 
 | Workload | phobos CPU ms/req ↓ | Moonraker CPU ms/req ↓ | phobos p99 ms ↓ | Moonraker p99 ms ↓ |
 | --- | ---: | ---: | ---: | ---: |
-| database64k-200 | 0.255 | 0.435 | 0.346 | 0.485 |
-| history-200 | 0.515 | 0.805 | 0.63 | 0.884 |
-| independent-1200 | 0.108 | 0.293 | 0.678 | 0.868 |
-| info-5000 | 0.0112 | 0.165 | 0.151 | 1.29 |
-| klippy-config-50 | 1.53 | 0.995 | 3.02 | 2.68 |
+| database64k-200 | 0.195 | 0.44 | 0.294 | 0.487 |
+| history-200 | 0.505 | 0.8 | 0.622 | 0.874 |
+| independent-1200 | 0.11 | 0.295 | 0.663 | 0.921 |
+| info-5000 | 0.0114 | 0.165 | 0.148 | 1.3 |
+| klippy-config-50 | 1.03 | 1 | 2.42 | 2.76 |
 
-![vm-rich cpu, current phobos versus Moonraker](perf/optimization-20261022-2/vm-rich/cpu.png)
-![vm-rich latency, current phobos versus Moonraker](perf/optimization-20261022-2/vm-rich/latency.png)
-![vm-rich throughput, current phobos versus Moonraker](perf/optimization-20261022-2/vm-rich/throughput.png)
+![vm-rich cpu, current phobos versus Moonraker](perf/optimization-20261023/vm-rich/cpu.png)
+![vm-rich latency, current phobos versus Moonraker](perf/optimization-20261023/vm-rich/latency.png)
+![vm-rich throughput, current phobos versus Moonraker](perf/optimization-20261023/vm-rich/throughput.png)
 
 ### Empty history
 
 | Workload | phobos CPU ms/req ↓ | Moonraker CPU ms/req ↓ | phobos p99 ms ↓ | Moonraker p99 ms ↓ |
 | --- | ---: | ---: | ---: | ---: |
-| independent-1200 | 0.0242 | 0.247 | 0.139 | 0.602 |
+| independent-1200 | 0.0225 | 0.246 | 0.13 | 0.602 |
 
-![vm-empty cpu, current phobos versus Moonraker](perf/optimization-20261022-2/vm-empty/cpu.png)
-![vm-empty latency, current phobos versus Moonraker](perf/optimization-20261022-2/vm-empty/latency.png)
-![vm-empty throughput, current phobos versus Moonraker](perf/optimization-20261022-2/vm-empty/throughput.png)
+![vm-empty cpu, current phobos versus Moonraker](perf/optimization-20261023/vm-empty/cpu.png)
+![vm-empty latency, current phobos versus Moonraker](perf/optimization-20261023/vm-empty/latency.png)
+![vm-empty throughput, current phobos versus Moonraker](perf/optimization-20261023/vm-empty/throughput.png)
 
-The remote config reply remains slower: phobos uses 1.525 versus 0.995 ms CPU
-per request, 53.3% more, and p99 is 3.02 versus 2.68 ms, 12.7% higher. Other
-measured remote workloads favor phobos for median CPU, p99 and sampled RSS.
-The local config result is much closer (0.850 versus 0.885 ms CPU, 1.483 versus
-1.495 ms p99); timings from one host do not establish a universal win. Further
-profiling must address the remote gap rather than discard that host's result.
-
-All **54 trials and 719,980 requests** succeed, with 108 matching
-history comparisons. Totals include the retained earlier ReleaseSmall baseline;
-active plots contain only the candidate and Moonraker. Trials last at least
+All **36 trials and 479,993 requests** succeed, with 72 matching
+history comparisons. Every trial compares v0.2.3 with Moonraker; no earlier executable appears in active plots. Trials last at least
 10 seconds and offer at least 2,000 requests, so the 50/s config case lasts
 40 seconds. This minimum was chosen before the final studies to improve p99
 sampling. Every backend receives the same rate and duration.
 
-An independent local Ryzen 9 5950X corroboration completes **54 trials
-and 719,983 successful requests** with the same build, method and seed.
-Its [measurements](perf/optimization-20261022-2/local-vm/trials.json),
-[isolation](perf/optimization-20261022-2/local-vm/isolation-summary.json) and
-[cleanup](perf/optimization-20261022-2/local-vm/cleanup.json) are separate from the remote results;
+An independent local Ryzen 9 5950X corroboration completes **36 trials
+and 479,975 successful requests** with the same build, method and seed.
+Its [measurements](perf/optimization-20261023/local-vm/trials.json),
+[isolation](perf/optimization-20261023/local-vm/isolation-summary.json) and
+[cleanup](perf/optimization-20261023/local-vm/cleanup.json) are separate from the remote results;
 timings from the two hosts are not pooled.
 
 ## Why these paths changed
@@ -147,9 +145,21 @@ against live Klippy sources before the final study. Neither failure is presented
 as a daemon crash or a performance win. Earlier shorter config trials are not
 used for cross-duration speedup percentages.
 
+The [ten profiling rounds](perf/optimization-20261023/profiling/README.md)
+retain CPU attribution, paired diagnostics and rejected variants. Seven rounds
+produce retained fixes; the last three audits justify no further source change.
+Their optimized symbol builds and instrumented timings are separate from the
+release-binary comparisons above. Console snapshots now reserve only requested
+entries and three map fields. SQLite reuses two statements without caching
+results; file existence uses checked metadata. Long ASCII values use the
+standard token parser with a bulk-copy adapter, while short documents, Unicode,
+keys and structure keep the standard path. Worker stacks are bounded to 1 MiB
+and child processes receive the actual startup environment.
+
 These studies do not establish maximum capacity, universal superiority,
 printing/upload performance, file-backend performance, long-soak behavior or
-notification-flood throughput. Other release profiles pass build/ABI validation,
-not physical-printer daemon tests. The printer kernel disables perf events;
+notification-flood throughput. All five ARM32 daemon assets and floating-point
+probes pass on this Cortex-A7. Other physical printer models are not certified;
+native AArch64 execution belongs to CI. The printer kernel disables perf events;
 on-device microbenchmarks use process CPU counters rather than a sampled profile.
-See the [method](perf/optimization-20261022-2/METHOD.md) for reproducible plotting commands and limits.
+See the [method](perf/optimization-20261023/METHOD.md) for reproducible plotting commands and limits.

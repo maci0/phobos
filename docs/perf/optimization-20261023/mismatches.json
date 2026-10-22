@@ -1,0 +1,44 @@
+{
+  "scope": "Seven read endpoints, six history cases across fresh processes, exact synthetic database contents and full live Klippy subscriptions. This is not an exhaustive API behavior audit.",
+  "code_bugs_observed": [],
+  "identity_and_capabilities_kept": [
+    {
+      "fields": ["server.info.api_version", "server.info.api_version_string", "server.info.moonraker_version"],
+      "reason": "Phobos retains API 1.5.0 and software identity phobos. The older Forge-X Moonraker reports API 1.4.0 and unknown software version. Matching that older identity would misrepresent the implementation."
+    },
+    {
+      "fields": ["machine.system_info.python.version", "machine.system_info.python.version_string"],
+      "reason": "The documented Python stub is retained. Other system-info values match inside the Forge-X chroot. Phobos does not impersonate CPython 3.11.10."
+    },
+    {
+      "fields": ["server.info.components"],
+      "reason": "The minimal probe config exposes 25 phobos components versus 23 Moonraker components. Phobos retains update_manager and octoprint_compat. No update remotes are configured. This does not describe the full production configuration."
+    },
+    {
+      "fields": ["server.config.config.file_manager.enable_inotify_warnings", "server.config.config.file_manager.excludes", "server.config.config.klippy_apis.hidden_objects", "server.config.config.machine.script_path", "server.config.config.machine.script_timeout"],
+      "reason": "Phobos reports supported defaults not read or reported by the older Forge-X Moonraker. Their implementations remain intact."
+    },
+    {
+      "fields": ["server.config.config.file_manager.default_metadata_parser_timeout", "serialized response byte lengths"],
+      "reason": "The timeout is the same JSON number, serialized as 20 versus 20.0. Whitespace, number formatting and identity/default fields also change response lengths. Measurements use the bytes each server actually delivers."
+    }
+  ],
+  "intentional_policy_kept": [
+    {
+      "fields": ["server.database.list.namespaces"],
+      "reason": "Phobos hides the forbidden authorized_users namespace name. The older Forge-X lists it. Credential reads remain forbidden; namespace ordering is immaterial."
+    }
+  ],
+  "environment": [
+    {
+      "fields": ["server.info.warnings"],
+      "reason": "Moonraker warns that its private config directory differs from Klippy's /opt/config. Phobos with validation disabled has no warning. The private probe directories protect production."
+    },
+    {
+      "fields": ["subscription object count"],
+      "reason": "The minimal probe config exposes 268 objects, including six pins hidden by the production Fluidd configuration. Every backend returns all requested probe objects."
+    }
+  ],
+  "matching_reads": ["history pages, offsets, ordering and time filters", "access.info", "exact 64 KiB database item", "full subscription object names"],
+  "outside_this_capture": "CAN empty-list fallback, optional components absent from Forge-X, no-op reboot/shutdown and excluded full Jinja2, LDAP and Apprise remain unchanged. They were not retested by this benchmark. Continuous status-flood cost, uploads, printing and long soaks are not measured."
+}

@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const json = std.json;
+const json_parse = @import("../json/parse.zig");
 const c = @import("sqlite_c.zig");
 const ds = @import("datastore.zig");
 const Error = ds.Error;
@@ -30,6 +31,9 @@ pub const SqliteStore = struct {
     /// read-modify-write or the table/KV history transaction. Readers must not
     /// observe that transaction before it commits. Mirrors FileStore.
     rmw_lock: std.Io.Mutex = .init,
+    // Reuse under rmw_lock; results are read anew on every execution.
+    namespace_list_stmt: ?*c.sqlite3_stmt = null,
+    table_exists_stmt: ?*c.sqlite3_stmt = null,
 
     fn lockRmw(self: *SqliteStore) void {
         self.rmw_lock.lockUncancelable(self.io);
@@ -79,6 +83,8 @@ pub const SqliteStore = struct {
     }
 
     pub fn deinit(self: *SqliteStore) void {
+        if (self.namespace_list_stmt) |stmt| _ = c.sqlite3_finalize(stmt);
+        if (self.table_exists_stmt) |stmt| _ = c.sqlite3_finalize(stmt);
         _ = c.sqlite3_close(self.db);
     }
 
@@ -161,7 +167,7 @@ pub const SqliteStore = struct {
                 if (!std.unicode.utf8ValidateSlice(bytes[1..])) return Error.BackendError;
                 return .{ .string = try arena.dupe(u8, bytes[1..]) };
             },
-            '[', '{' => return json.parseFromSliceLeaky(json.Value, arena, bytes, .{}) catch |err| switch (err) {
+            '[', '{' => return json_parse.parseLeaky(arena, bytes) catch |err| switch (err) {
                 error.OutOfMemory => Error.OutOfMemory,
                 else => Error.BackendError,
             },
@@ -285,8 +291,10 @@ pub const SqliteStore = struct {
     pub fn listNamespaces(self: *SqliteStore, arena: std.mem.Allocator) Error![][]const u8 {
         self.lockRmw();
         defer self.unlockRmw();
-        const stmt = try self.prepare("SELECT DISTINCT namespace FROM namespace_store");
-        defer _ = c.sqlite3_finalize(stmt);
+        if (self.namespace_list_stmt == null)
+            self.namespace_list_stmt = try self.prepare("SELECT DISTINCT namespace FROM namespace_store");
+        const stmt = self.namespace_list_stmt.?;
+        errdefer _ = c.sqlite3_reset(stmt);
         var out: std.ArrayList([]const u8) = .empty;
         var rc = c.sqlite3_step(stmt);
         while (rc == c.SQLITE_ROW) : (rc = c.sqlite3_step(stmt)) {
@@ -295,6 +303,7 @@ pub const SqliteStore = struct {
             try out.append(arena, try arena.dupe(u8, txt[0..n]));
         }
         if (rc != c.SQLITE_DONE) return Error.BackendError;
+        if (c.sqlite3_reset(stmt) != c.SQLITE_OK) return Error.BackendError;
         return out.toOwnedSlice(arena);
     }
 
@@ -422,14 +431,22 @@ pub const SqliteStore = struct {
     /// True when the database has a table named `name`. Distinguishes a fresh
     /// phobos database from a failing read of a migrated Moonraker table.
     fn hasTable(self: *SqliteStore, name: []const u8) Error!bool {
-        const stmt = try self.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1");
-        defer _ = c.sqlite3_finalize(stmt);
+        if (self.table_exists_stmt == null)
+            self.table_exists_stmt = try self.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1");
+        const stmt = self.table_exists_stmt.?;
+        errdefer {
+            _ = c.sqlite3_reset(stmt);
+            _ = c.sqlite3_clear_bindings(stmt);
+        }
         try bindText(stmt, 1, name);
-        return switch (c.sqlite3_step(stmt)) {
+        const exists = switch (c.sqlite3_step(stmt)) {
             c.SQLITE_ROW => true,
             c.SQLITE_DONE => false,
-            else => Error.BackendError,
+            else => return Error.BackendError,
         };
+        if (c.sqlite3_reset(stmt) != c.SQLITE_OK or c.sqlite3_clear_bindings(stmt) != c.SQLITE_OK)
+            return Error.BackendError;
+        return exists;
     }
 
     /// Add each Moonraker `job_history` row to `obj` in the `{job_id: job}`
@@ -567,7 +584,7 @@ fn colJson(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt, idx: c_int, default:
     const t = c.sqlite3_column_text(stmt, idx) orelse return default;
     const n: usize = @intCast(c.sqlite3_column_bytes(stmt, idx));
     if (n == 0) return default;
-    return json.parseFromSliceLeaky(json.Value, arena, t[0..n], .{}) catch |err| switch (err) {
+    return json_parse.parseLeaky(arena, t[0..n]) catch |err| switch (err) {
         error.OutOfMemory => Error.OutOfMemory,
         else => default,
     };
@@ -1311,6 +1328,93 @@ test "SqliteStore: insert/get/update/delete + persistence (in-file)" {
         try testing.expectEqualStrings("abc", removed.string);
         try testing.expect((try s.getItem(a, "moonraker", "instance_id")) == null);
     }
+}
+
+test "SqliteStore reuses read statements while observing namespace and schema changes" {
+    const Authorizer = struct {
+        extern "c" fn sqlite3_set_authorizer(db: ?*c.sqlite3, callback: ?*const fn (?*anyopaque, c_int, ?[*:0]const u8, ?[*:0]const u8, ?[*:0]const u8, ?[*:0]const u8) callconv(.c) c_int, context: ?*anyopaque) c_int;
+
+        fn count(context: ?*anyopaque, action: c_int, _: ?[*:0]const u8, _: ?[*:0]const u8, _: ?[*:0]const u8, _: ?[*:0]const u8) callconv(.c) c_int {
+            const prepares: *usize = @ptrCast(@alignCast(context.?));
+            if (action == 21) prepares.* += 1; // SQLITE_SELECT authorizes each preparation.
+            return c.SQLITE_OK;
+        }
+    };
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prepares: usize = 0;
+    try testing.expectEqual(c.SQLITE_OK, Authorizer.sqlite3_set_authorizer(s.db, Authorizer.count, &prepares));
+    defer _ = Authorizer.sqlite3_set_authorizer(s.db, null, null);
+    try s.insertItem(a, "first", "key", .null);
+    try testing.expectEqual(@as(usize, 1), (try s.listNamespaces(a)).len);
+    prepares = 0;
+    try s.insertItem(a, "second", "key", .null);
+    const names = try s.listNamespaces(a);
+    try testing.expectEqual(@as(usize, 2), names.len);
+    try testing.expectEqual(@as(usize, 0), prepares);
+    try testing.expect(try s.hasTable("namespace_store"));
+    prepares = 0;
+    try testing.expect(!try s.hasTable("probe"));
+    try testing.expect(try s.hasTable("namespace_store"));
+    try testing.expectEqual(@as(usize, 0), prepares);
+    try s.execSql("CREATE TABLE probe (value INTEGER)");
+    try testing.expect(try s.hasTable("probe"));
+    try s.execSql("DROP TABLE probe");
+    try testing.expect(!try s.hasTable("probe"));
+    try testing.expectEqual(@as(usize, 2), (try s.listNamespaces(a)).len);
+}
+
+test "fuzz SqliteStore reused table query observes alternating schema changes" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var s = try SqliteStore.open(testing.io, ":memory:");
+            defer s.deinit();
+            var present = false;
+            const count = smith.valueRangeAtMostWithHash(u32, 1, 8, 0);
+            for (0..count) |index| {
+                if (smith.valueWithHash(bool, @intCast(index + 1))) {
+                    try s.execSql(if (present) "DROP TABLE probe" else "CREATE TABLE probe (value INTEGER)");
+                    present = !present;
+                }
+                try testing.expectEqual(present, try s.hasTable("probe"));
+                try testing.expect(try s.hasTable("namespace_store"));
+            }
+        }
+    }.run, .{});
+}
+
+test "SqliteStore reused namespace query recovers after every request allocation failure" {
+    var s = try SqliteStore.open(testing.io, ":memory:");
+    defer s.deinit();
+    try s.execSql("INSERT INTO namespace_store VALUES ('first','key',x'00'),('second','key',x'00')");
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    try testing.checkAllAllocationFailures(no_resize.allocator(), struct {
+        fn run(alloc: std.mem.Allocator, store: *SqliteStore) !void {
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            defer arena.deinit();
+            const names = try store.listNamespaces(arena.allocator());
+            try testing.expectEqual(@as(usize, 2), names.len);
+            try testing.expectEqualStrings("first", names[0]);
+            try testing.expectEqualStrings("second", names[1]);
+        }
+    }.run, .{&s});
+}
+
+test "SqliteStore long JSON records own their bytes within a bounded request arena" {
+    const a = testing.allocator;
+    const text: [256 * 1024]u8 = @splat('x');
+    const wire = try json.Stringify.valueAlloc(a, .{ .payload = &text }, .{});
+    defer a.free(wire);
+    var tracked = testing.FailingAllocator.init(a, .{});
+    var arena = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer arena.deinit();
+    const value = try SqliteStore.decodeRecord(arena.allocator(), wire);
+    @memset(wire, 'z');
+    try testing.expectEqualStrings(&text, value.object.get("payload").?.string);
+    try testing.expect(tracked.allocated_bytes < wire.len * 2 + 4096);
 }
 
 test "SqliteStore: reads Moonraker job_history/job_totals tables (drop-in compat)" {
