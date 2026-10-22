@@ -2,8 +2,8 @@
 //! checked float conversion.
 const std = @import("std");
 
-/// Dynamic API values with a vectorized plain-ASCII string path. Other strings
-/// and all JSON punctuation, options and scalar formatting use std.json.
+/// Dynamic API values with vectorized plain ASCII and buffered UTF-8 strings.
+/// Escapes, punctuation, options and scalar formatting follow std.json.
 pub const StringifyValue = struct {
     value: std.json.Value,
 
@@ -12,6 +12,8 @@ pub const StringifyValue = struct {
             .string => |text| {
                 if (!stream.options.escape_unicode and !stream.options.emit_strings_as_arrays and plainAscii(text)) {
                     try stream.print("\"{s}\"", .{text});
+                } else if (!stream.options.escape_unicode and !stream.options.emit_strings_as_arrays and text.len >= string_buffer_size and std.unicode.utf8ValidateSlice(text)) {
+                    try writeBufferedString(stream, text);
                 } else try stream.write(text);
             },
             .array => |items| {
@@ -32,6 +34,70 @@ pub const StringifyValue = struct {
         }
     }
 };
+
+const string_buffer_size = 1024;
+const StringEscape = struct { bytes: [6]u8 = @splat(0), len: u3 = 0 };
+// Derive JSON's 34 mandatory escapes from the standard encoder at compile time.
+const string_escapes: [128]StringEscape = blk: {
+    @setEvalBranchQuota(10000);
+    var table: [128]StringEscape = @splat(.{});
+    for (&table, 0..) |*entry, byte| {
+        if (byte >= 0x20 and byte != '"' and byte != '\\') continue;
+        var writer = std.Io.Writer.fixed(&entry.bytes);
+        std.json.Stringify.encodeJsonStringChars(&.{byte}, .{}, &writer) catch unreachable;
+        entry.len = @intCast(writer.end);
+    }
+    break :blk table;
+};
+
+fn writeBufferedString(stream: *std.json.Stringify, text: []const u8) std.Io.Writer.Error!void {
+    try stream.beginWriteRaw();
+    try stream.writer.writeByte('"');
+    var buffer: [string_buffer_size]u8 = undefined;
+    var used: usize = 0;
+    var offset: usize = 0;
+    if (std.simd.suggestVectorLength(u8)) |width| {
+        const Vector = @Vector(width, u8);
+        while (text.len - offset >= width) {
+            if (buffer.len - used < width + 6) {
+                try stream.writer.writeAll(buffer[0..used]);
+                used = 0;
+            }
+            const bytes: Vector = text[offset..][0..width].*;
+            const special = (bytes < @as(Vector, @splat(0x20))) |
+                (bytes == @as(Vector, @splat('"'))) |
+                (bytes == @as(Vector, @splat('\\')));
+            const mask: @Int(.unsigned, width) = @bitCast(special);
+            const plain: usize = @ctz(mask);
+            @memcpy(buffer[used..][0..width], text[offset..][0..width]);
+            used += plain;
+            offset += plain;
+            if (plain < width) {
+                const escape = string_escapes[text[offset]];
+                @memcpy(buffer[used..][0..6], &escape.bytes);
+                used += escape.len;
+                offset += 1;
+            }
+        }
+    }
+    for (text[offset..]) |byte| {
+        if (used > buffer.len - 6) {
+            try stream.writer.writeAll(buffer[0..used]);
+            used = 0;
+        }
+        if (byte < 0x20 or byte == '"' or byte == '\\') {
+            const escape = string_escapes[byte];
+            @memcpy(buffer[used..][0..6], &escape.bytes);
+            used += escape.len;
+        } else {
+            buffer[used] = byte;
+            used += 1;
+        }
+    }
+    try stream.writer.writeAll(buffer[0..used]);
+    try stream.writer.writeByte('"');
+    stream.endWriteRaw();
+}
 
 fn plainAscii(text: []const u8) bool {
     const width = std.simd.suggestVectorLength(u8) orelse return false;
@@ -54,8 +120,8 @@ fn plainAscii(text: []const u8) bool {
 
 test "StringifyValue matches std.json for every byte at vector boundaries and options" {
     const alloc = std.testing.allocator;
-    var text: [129]u8 = @splat('x');
-    for ([_]usize{ 0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129 }) |len| {
+    var text: [2049]u8 = @splat('x');
+    for ([_]usize{ 0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 1023, 1024, 1025, 2048, 2049 }) |len| {
         for (0..256) |byte| {
             for ([_]usize{ 0, len / 2, len -| 1 }) |position| {
                 if (len > 0) text[position] = @intCast(byte);
@@ -73,6 +139,26 @@ test "StringifyValue matches std.json for every byte at vector boundaries and op
                 }
             }
         }
+    }
+}
+
+test "StringifyValue buffers escaped UTF-8 across blocks and propagates short writes" {
+    const alloc = std.testing.allocator;
+    const line = "M117 \"quoted\"\\\n\ré水😀\x00\x01\t";
+    var text: [line.len * 200]u8 = undefined;
+    for (0..200) |index| @memcpy(text[index * line.len ..][0..line.len], line);
+    const value: std.json.Value = .{ .string = &text };
+    for ([_]std.json.Stringify.Options{ .{}, .{ .whitespace = .indent_2 }, .{ .escape_unicode = true }, .{ .emit_strings_as_arrays = true } }) |options| {
+        const expected = try std.json.Stringify.valueAlloc(alloc, value, options);
+        defer alloc.free(expected);
+        const actual = try std.json.Stringify.valueAlloc(alloc, StringifyValue{ .value = value }, options);
+        defer alloc.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    var bytes: [4096]u8 = undefined;
+    for ([_]usize{ 0, 1, 16, 1024, bytes.len }) |len| {
+        var writer = std.Io.Writer.fixed(bytes[0..len]);
+        try std.testing.expectError(error.WriteFailed, std.json.Stringify.value(StringifyValue{ .value = value }, .{}, &writer));
     }
 }
 
@@ -103,8 +189,11 @@ test "StringifyValue preserves nested values, Unicode, escaping and writer failu
 test "fuzz StringifyValue matches std.json for bounded byte strings" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) !void {
-            var text: [512]u8 = undefined;
+            var text: [4096]u8 = undefined;
             smith.bytesWithHash(&text, 0);
+            if (smith.value(bool)) for (&text) |*byte| {
+                byte.* &= 0x7f;
+            };
             const len = smith.valueRangeAtMostWithHash(u16, 0, text.len, 1);
             const value: std.json.Value = .{ .string = text[0..len] };
             const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});

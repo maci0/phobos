@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build local release artifacts and check their ELF architecture and float ABI.
+# Build static ReleaseFast artifacts and check their ELF architecture and float ABI.
 set -euo pipefail
 export LC_ALL=C
 
@@ -23,7 +23,7 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'USAGE'
 Usage: scripts/build-release.sh [--output DIR] [--verify-only] [PROFILE ...]
-Build every profile by default, or select profiles from:
+Build every profile in ReleaseFast by default, or select profiles from:
   armv6-hardfp armv7-soft armv7-softfp-c armv7-hardfp
   cortex-a7-hardfp aarch64 x86_64
 
@@ -137,7 +137,7 @@ for selected in "${SELECTED[@]}"; do
     if ! $VERIFY_ONLY; then
         mkdir -p -- "$prefix"
         printf 'building %s (%s, %s)\n' "$selected" "$TARGET" "$CPU"
-        if ! timeout "$BUILD_TIMEOUT_SECONDS" "$ZIG" build -Doptimize=ReleaseSmall -Dtarget="$TARGET" -Dcpu="$CPU" -Dsoftfp="$SOFTFP" -j"$BUILD_JOBS" --prefix "$prefix" > "$prefix/build.log" 2>&1; then
+        if ! timeout "$BUILD_TIMEOUT_SECONDS" "$ZIG" build -Doptimize=ReleaseFast -Dtarget="$TARGET" -Dcpu="$CPU" -Dsoftfp="$SOFTFP" -j"$BUILD_JOBS" --prefix "$prefix" > "$prefix/build.log" 2>&1; then
             cat "$prefix/build.log" >&2
             fail "$selected: build failed"
         fi

@@ -218,7 +218,8 @@ primitives are gone, so use `std.Io.Mutex`.
   checksums are in `vendor/sqlite/README.md`. The file backend stores JSON
   through Zig I/O; the binary still links SQLite.
 - Test binary without the build runner's `--listen=-` hang:
-  `scripts/test.sh Debug` or `scripts/test.sh ReleaseSafe`. The build's
+  `scripts/test.sh Debug`, `scripts/test.sh ReleaseSafe` or
+  `scripts/test.sh ReleaseFast`. The build's
   `test-artifact` step installs `bin/phobos-tests` under its prefix. Do not pass
   `--test-filter` to the standalone runner or expand all cached test binaries.
 - CI and tag publication: `.github/workflows/ci.yml`, documented in `docs/CI.md`.
@@ -230,8 +231,8 @@ primitives are gone, so use `std.Io.Mutex`.
 - Coverage gate (must stay 100%):
   `mkdir -p .scratch && zig build && zig-out/bin/phobos --data-path "$PWD/.scratch/api-dump-data" --dump-api > .scratch/api-dump.json &&
    PYTHONPATH=tools uv run --with tree-sitter --with tree-sitter-python python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/api-dump.json`
-- Release (LTO, stripped): add `-Doptimize=ReleaseSmall`.
-- Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall`
+- Release (LTO, stripped): add `-Doptimize=ReleaseFast`.
+- Cross-compile (deploy): `zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseFast`
 - Release matrix: `scripts/build-release.sh` builds isolated static Linux
   profiles and checks their ELF, ABI and checksums. `--verify-only` repeats
   validation without compiling. See `docs/BUILDS.md` for CPU/kernel requirements

@@ -1,0 +1,2465 @@
+[
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 50.01879115950039,
+      "latencies": {
+        "50th": 3184827.5,
+        "99th": 11343889,
+        "mean": 3672315.5383333336,
+        "min": 2918337,
+        "max": 34294942
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 500.0,
+      "cpu_percent_one_core": 2.496921814554315,
+      "rss_kib_max": 4772,
+      "available_min_kib": 50512,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357438611539264,
+        "ticks": 46,
+        "VmRSS": 4772,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 51716,
+        "SwapFree": 276
+      },
+      "after": {
+        "monotonic_ns": 357450626332769,
+        "ticks": 76,
+        "VmRSS": 4772,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 50592,
+        "SwapFree": 276
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.95494546924529,
+      "latencies": {
+        "50th": 3652797.5,
+        "99th": 20922073,
+        "mean": 5798345.38,
+        "min": 2778034,
+        "max": 33486252
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 2088.8888888888887,
+      "cpu_percent_one_core": 15.629772713215303,
+      "rss_kib_max": 4804,
+      "available_min_kib": 49904,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 357453481497126,
+        "ticks": 77,
+        "VmRSS": 4772,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 51684,
+        "SwapFree": 276
+      },
+      "after": {
+        "monotonic_ns": 357465509823030,
+        "ticks": 265,
+        "VmRSS": 4804,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 50016,
+        "SwapFree": 276
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ],
+      "6647": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.073077704123998,
+      "latencies": {
+        "50th": 10538242.5,
+        "99th": 24348825,
+        "mean": 11812128.475,
+        "min": 10029492,
+        "max": 33463321
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 8333.333333333334,
+      "cpu_percent_one_core": 8.379004669346985,
+      "rss_kib_max": 4804,
+      "available_min_kib": 50832,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 357468453930166,
+        "ticks": 266,
+        "VmRSS": 4804,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 51564,
+        "SwapFree": 276
+      },
+      "after": {
+        "monotonic_ns": 357480388521916,
+        "ticks": 366,
+        "VmRSS": 4804,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 50888,
+        "SwapFree": 276
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ],
+      "6647": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ],
+      "6647": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.075629866710115,
+      "latencies": {
+        "50th": 7489069.5,
+        "99th": 25395692,
+        "mean": 8434947.366666667,
+        "min": 6488495,
+        "max": 33683445
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 4083.3333333333335,
+      "cpu_percent_one_core": 4.108015902877722,
+      "rss_kib_max": 4804,
+      "available_min_kib": 50708,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 357482576788084,
+        "ticks": 366,
+        "VmRSS": 4804,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 51560,
+        "SwapFree": 276
+      },
+      "after": {
+        "monotonic_ns": 357494504687381,
+        "ticks": 415,
+        "VmRSS": 4804,
+        "VmHWM": 6616,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 50768,
+        "SwapFree": 276
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ],
+      "6647": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6465": [
+        1
+      ],
+      "6469": [
+        1
+      ],
+      "6470": [
+        1
+      ],
+      "6471": [
+        1
+      ],
+      "6472": [
+        1
+      ],
+      "6473": [
+        1
+      ],
+      "6474": [
+        1
+      ],
+      "6475": [
+        1
+      ],
+      "6476": [
+        1
+      ],
+      "6477": [
+        1
+      ],
+      "6478": [
+        1
+      ],
+      "6647": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 49.994709647315865,
+      "latencies": {
+        "50th": 8751000.5,
+        "99th": 43591663,
+        "mean": 10755231.643333333,
+        "min": 8173889,
+        "max": 80012698
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 7716.666666666667,
+      "cpu_percent_one_core": 38.497057235098325,
+      "rss_kib_max": 36992,
+      "available_min_kib": 23888,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357527728586845,
+        "ticks": 589,
+        "VmRSS": 37136,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 29796,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357539755480152,
+        "ticks": 1052,
+        "VmRSS": 36880,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 28452,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.96279467813993,
+      "latencies": {
+        "50th": 16899162.5,
+        "99th": 48485236,
+        "mean": 18721782.80666667,
+        "min": 8224074,
+        "max": 114614580
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 10877.777777777777,
+      "cpu_percent_one_core": 81.32471868125485,
+      "rss_kib_max": 36936,
+      "available_min_kib": 24620,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357542361013232,
+        "ticks": 1059,
+        "VmRSS": 36880,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25700,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357554399173534,
+        "ticks": 2038,
+        "VmRSS": 35952,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 28216,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.056263081538463,
+      "latencies": {
+        "50th": 25384300.5,
+        "99th": 60877384,
+        "mean": 28490318.758333333,
+        "min": 24198983,
+        "max": 74087530
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 27166.666666666668,
+      "cpu_percent_one_core": 27.268772583623658,
+      "rss_kib_max": 35952,
+      "available_min_kib": 24968,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357556957332327,
+        "ticks": 2043,
+        "VmRSS": 35952,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25672,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357568912399208,
+        "ticks": 2369,
+        "VmRSS": 35952,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 24972,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.068908703771223,
+      "latencies": {
+        "50th": 13900298.5,
+        "99th": 41033105,
+        "mean": 15658369.45,
+        "min": 13413367,
+        "max": 46968000
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 15583.333333333334,
+      "cpu_percent_one_core": 15.666310501754372,
+      "rss_kib_max": 35952,
+      "available_min_kib": 24104,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357570892311666,
+        "ticks": 2375,
+        "VmRSS": 35952,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25680,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357582828753241,
+        "ticks": 2562,
+        "VmRSS": 35952,
+        "VmHWM": 37896,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 24928,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "6888": [
+        1
+      ],
+      "6937": [
+        1
+      ],
+      "7029": [
+        1
+      ],
+      "7033": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.070109104921018,
+      "latencies": {
+        "50th": 13619965.0,
+        "99th": 48227178,
+        "mean": 15620284.75,
+        "min": 13016994,
+        "max": 48325535
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 15416.666666666666,
+      "cpu_percent_one_core": 15.50060990312626,
+      "rss_kib_max": 37888,
+      "available_min_kib": 28900,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357616709591079,
+        "ticks": 582,
+        "VmRSS": 37884,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 29628,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357628644605324,
+        "ticks": 767,
+        "VmRSS": 37888,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 28920,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.060828638533446,
+      "latencies": {
+        "50th": 25638205.5,
+        "99th": 50512137,
+        "mean": 27309735.575,
+        "min": 24091311,
+        "max": 70925456
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 27166.666666666668,
+      "cpu_percent_one_core": 27.2818955104361,
+      "rss_kib_max": 37888,
+      "available_min_kib": 24988,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357631427055229,
+        "ticks": 774,
+        "VmRSS": 37888,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25584,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357643376371576,
+        "ticks": 1100,
+        "VmRSS": 36764,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 29056,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.9193221664604,
+      "latencies": {
+        "50th": 17311536.5,
+        "99th": 58751993,
+        "mean": 19446268.016666666,
+        "min": 8395930,
+        "max": 115668556
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 10888.888888888889,
+      "cpu_percent_one_core": 80.46305798875491,
+      "rss_kib_max": 36764,
+      "available_min_kib": 23840,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357645926188096,
+        "ticks": 1107,
+        "VmRSS": 36764,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25588,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357658105690398,
+        "ticks": 2087,
+        "VmRSS": 35716,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 28228,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 50.00541524059977,
+      "latencies": {
+        "50th": 8624625.0,
+        "99th": 27518325,
+        "mean": 10127280.551666666,
+        "min": 8112128,
+        "max": 51055127
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 7683.333333333333,
+      "cpu_percent_one_core": 38.35238395786011,
+      "rss_kib_max": 35716,
+      "available_min_kib": 24256,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357660718472877,
+        "ticks": 2093,
+        "VmRSS": 35716,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 29704,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357672738586164,
+        "ticks": 2554,
+        "VmRSS": 35716,
+        "VmHWM": 37888,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 24416,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "7469": [
+        1
+      ],
+      "7514": [
+        1
+      ],
+      "7600": [
+        1
+      ],
+      "7602": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.076074369889392,
+      "latencies": {
+        "50th": 6794968.5,
+        "99th": 16714268,
+        "mean": 7476004.775,
+        "min": 6484799,
+        "max": 31532124
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 4000.0,
+      "cpu_percent_one_core": 4.024439309179397,
+      "rss_kib_max": 4548,
+      "available_min_kib": 46688,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357699906358975,
+        "ticks": 46,
+        "VmRSS": 4548,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47576,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357711833486287,
+        "ticks": 94,
+        "VmRSS": 4548,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46788,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.073051321954983,
+      "latencies": {
+        "50th": 10834210.0,
+        "99th": 27581857,
+        "mean": 12093153.85,
+        "min": 10357435,
+        "max": 34200485
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 8166.666666666667,
+      "cpu_percent_one_core": 8.21158091026825,
+      "rss_kib_max": 4548,
+      "available_min_kib": 46848,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357714442607212,
+        "ticks": 95,
+        "VmRSS": 4548,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47592,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357726376971748,
+        "ticks": 193,
+        "VmRSS": 4548,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46872,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.95418716381705,
+      "latencies": {
+        "50th": 3738552.5,
+        "99th": 20667868,
+        "mean": 5898295.3533333335,
+        "min": 2872242,
+        "max": 29154068
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 2100.0,
+      "cpu_percent_one_core": 15.71620375103383,
+      "rss_kib_max": 4608,
+      "available_min_kib": 45936,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357728471625325,
+        "ticks": 193,
+        "VmRSS": 4548,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47572,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357740497430220,
+        "ticks": 382,
+        "VmRSS": 4608,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46044,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 50.018915899351995,
+      "latencies": {
+        "50th": 2904490.0,
+        "99th": 15461901,
+        "mean": 3483403.7,
+        "min": 2732063,
+        "max": 26088320
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 516.6666666666666,
+      "cpu_percent_one_core": 2.5806639102835747,
+      "rss_kib_max": 4608,
+      "available_min_kib": 46476,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357743315741580,
+        "ticks": 383,
+        "VmRSS": 4608,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47560,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357755328154307,
+        "ticks": 414,
+        "VmRSS": 4608,
+        "VmHWM": 6392,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46528,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8044": [
+        1
+      ],
+      "8056": [
+        1
+      ],
+      "8057": [
+        1
+      ],
+      "8058": [
+        1
+      ],
+      "8059": [
+        1
+      ],
+      "8060": [
+        1
+      ],
+      "8061": [
+        1
+      ],
+      "8062": [
+        1
+      ],
+      "8063": [
+        1
+      ],
+      "8064": [
+        1
+      ],
+      "8065": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 50.01568404741077,
+      "latencies": {
+        "50th": 3079403.0,
+        "99th": 16165909,
+        "mean": 3676635.525,
+        "min": 2918918,
+        "max": 25519323
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 483.3333333333333,
+      "cpu_percent_one_core": 2.4138861130634433,
+      "rss_kib_max": 4720,
+      "available_min_kib": 46320,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357780446243276,
+        "ticks": 43,
+        "VmRSS": 4720,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47456,
+        "SwapFree": 4
+      },
+      "after": {
+        "monotonic_ns": 357792460066067,
+        "ticks": 72,
+        "VmRSS": 4720,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46408,
+        "SwapFree": 4
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.9495875583157,
+      "latencies": {
+        "50th": 3620635.0,
+        "99th": 20330334,
+        "mean": 5745867.022222222,
+        "min": 2931464,
+        "max": 27607520
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 2077.777777777778,
+      "cpu_percent_one_core": 15.550028210345618,
+      "rss_kib_max": 4724,
+      "available_min_kib": 45876,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357795251192581,
+        "ticks": 74,
+        "VmRSS": 4720,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47496,
+        "SwapFree": 4
+      },
+      "after": {
+        "monotonic_ns": 357807276894237,
+        "ticks": 261,
+        "VmRSS": 4724,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 45964,
+        "SwapFree": 4
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.072781218129768,
+      "latencies": {
+        "50th": 10740464.0,
+        "99th": 27092743,
+        "mean": 12163789.141666668,
+        "min": 10274876,
+        "max": 34358110
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 8166.666666666667,
+      "cpu_percent_one_core": 8.208785284522467,
+      "rss_kib_max": 4724,
+      "available_min_kib": 46716,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357810051380425,
+        "ticks": 262,
+        "VmRSS": 4724,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47460,
+        "SwapFree": 4
+      },
+      "after": {
+        "monotonic_ns": 357821989809389,
+        "ticks": 360,
+        "VmRSS": 4724,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46748,
+        "SwapFree": 4
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.07606413425838,
+      "latencies": {
+        "50th": 7184632.5,
+        "99th": 21690331,
+        "mean": 7947016.725,
+        "min": 6479354,
+        "max": 28739222
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 4083.3333333333335,
+      "cpu_percent_one_core": 4.108323065994686,
+      "rss_kib_max": 4792,
+      "available_min_kib": 46592,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 357824406815519,
+        "ticks": 360,
+        "VmRSS": 4724,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47460,
+        "SwapFree": 4
+      },
+      "after": {
+        "monotonic_ns": 357836333823014,
+        "ticks": 409,
+        "VmRSS": 4724,
+        "VmHWM": 6564,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46664,
+        "SwapFree": 4
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8477": [
+        1
+      ],
+      "8481": [
+        1
+      ],
+      "8482": [
+        1
+      ],
+      "8483": [
+        1
+      ],
+      "8484": [
+        1
+      ],
+      "8485": [
+        1
+      ],
+      "8486": [
+        1
+      ],
+      "8487": [
+        1
+      ],
+      "8488": [
+        1
+      ],
+      "8489": [
+        1
+      ],
+      "8508": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 50.006849959143594,
+      "latencies": {
+        "50th": 8852963.0,
+        "99th": 31810253,
+        "mean": 10479025.938333333,
+        "min": 8161222,
+        "max": 78925206
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 7666.666666666667,
+      "cpu_percent_one_core": 38.263226381774906,
+      "rss_kib_max": 36636,
+      "available_min_kib": 28192,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357871786008879,
+        "ticks": 590,
+        "VmRSS": 36636,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 29460,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357883807995614,
+        "ticks": 1050,
+        "VmRSS": 35396,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 28332,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.93972049347258,
+      "latencies": {
+        "50th": 16987294.0,
+        "99th": 54849884,
+        "mean": 18773079.697777778,
+        "min": 8355315,
+        "max": 140807970
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 10855.555555555555,
+      "cpu_percent_one_core": 81.17456460330031,
+      "rss_kib_max": 35396,
+      "available_min_kib": 22960,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357886864788819,
+        "ticks": 1057,
+        "VmRSS": 35396,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25356,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357898900578660,
+        "ticks": 2034,
+        "VmRSS": 34872,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 27904,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.056955520159898,
+      "latencies": {
+        "50th": 25802235.5,
+        "99th": 60624220,
+        "mean": 28665831.175,
+        "min": 24035171,
+        "max": 78763526
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 27000.0,
+      "cpu_percent_one_core": 27.095039581415598,
+      "rss_kib_max": 34872,
+      "available_min_kib": 24612,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357901624602299,
+        "ticks": 2043,
+        "VmRSS": 34872,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25352,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357913582510647,
+        "ticks": 2367,
+        "VmRSS": 34872,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 24644,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    }
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.069029781782339,
+      "latencies": {
+        "50th": 13389742.0,
+        "99th": 46038464,
+        "mean": 16128635.716666667,
+        "min": 13071920,
+        "max": 50592539
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 15250.0,
+      "cpu_percent_one_core": 15.331330882068164,
+      "rss_kib_max": 34872,
+      "available_min_kib": 24528,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 357916131556716,
+        "ticks": 2373,
+        "VmRSS": 34872,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25364,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 357928067898147,
+        "ticks": 2556,
+        "VmRSS": 34872,
+        "VmHWM": 37656,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 24612,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "5c1eb59cb45b067af198fcbc3ba853bfe22cf5756cf537319ddeca5dda96d3b5",
+    "server_affinities_before": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "8906": [
+        1
+      ],
+      "8951": [
+        1
+      ],
+      "9040": [
+        1
+      ],
+      "9043": [
+        1
+      ]
+    }
+  }
+]

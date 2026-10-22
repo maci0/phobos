@@ -1,0 +1,1202 @@
+[
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "requested_rate": 1.75,
+    "requests": 21,
+    "cpu_us_per_request": 46666.666666666664,
+    "before": {
+      "monotonic_ns": 354678665806937,
+      "ticks": 412,
+      "VmRSS": 4488,
+      "VmHWM": 6296,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 51652,
+      "SwapFree": 648
+    },
+    "after": {
+      "monotonic_ns": 354690474787896,
+      "ticks": 510,
+      "VmRSS": 4640,
+      "VmHWM": 6296,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 48716,
+      "SwapFree": 656
+    },
+    "rss_kib_max": 5824,
+    "available_min_kib": 47228,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 226.657838,
+        "service_ms": 219.685789,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354680.534999832,
+        "after_snapshot_ms": 158.217791991774
+      },
+      {
+        "latency_ms": 397.60368,
+        "service_ms": 396.827038,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354681.287410499,
+        "after_snapshot_ms": 148.19154201541096
+      },
+      {
+        "latency_ms": 338.801617,
+        "service_ms": 338.148995,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354681.789311583,
+        "after_snapshot_ms": 158.9085000450723
+      },
+      {
+        "latency_ms": 260.306525,
+        "service_ms": 259.65355,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354682.291585333,
+        "after_snapshot_ms": 149.5690830051899
+      },
+      {
+        "latency_ms": 200.015802,
+        "service_ms": 198.826725,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354682.793097167,
+        "after_snapshot_ms": 159.20070803258568
+      },
+      {
+        "latency_ms": 369.419735,
+        "service_ms": 368.579553,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354683.545516459,
+        "after_snapshot_ms": 147.61779102263972
+      },
+      {
+        "latency_ms": 297.475278,
+        "service_ms": 296.784658,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354684.047100167,
+        "after_snapshot_ms": 145.5186249804683
+      },
+      {
+        "latency_ms": 224.351826,
+        "service_ms": 223.659352,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354684.548518542,
+        "after_snapshot_ms": 142.41158397635445
+      },
+      {
+        "latency_ms": 413.636203,
+        "service_ms": 413.000625,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354685.303879459,
+        "after_snapshot_ms": 147.7638340438716
+      },
+      {
+        "latency_ms": 355.758969,
+        "service_ms": 355.152245,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354685.806630501,
+        "after_snapshot_ms": 158.56620902195573
+      },
+      {
+        "latency_ms": 292.669967,
+        "service_ms": 292.085264,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 354686.30872096,
+        "after_snapshot_ms": 164.81770802056417
+      },
+      {
+        "latency_ms": 211.195266,
+        "service_ms": 210.543668,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354686.810149585,
+        "after_snapshot_ms": 153.34562497446314
+      },
+      {
+        "latency_ms": 393.021304,
+        "service_ms": 392.155353,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354687.562515794,
+        "after_snapshot_ms": 154.2345000198111
+      },
+      {
+        "latency_ms": 320.350642,
+        "service_ms": 319.759544,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354688.063280752,
+        "after_snapshot_ms": 152.23350102314726
+      },
+      {
+        "latency_ms": 251.628669,
+        "service_ms": 251.108176,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354688.565395878,
+        "after_snapshot_ms": 152.82370802015066
+      },
+      {
+        "latency_ms": 176.60231,
+        "service_ms": 176.075963,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354689.06721467,
+        "after_snapshot_ms": 147.41379098268226
+      },
+      {
+        "latency_ms": 369.440336,
+        "service_ms": 368.84401,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354689.81991117,
+        "after_snapshot_ms": 158.98641699459404
+      },
+      {
+        "latency_ms": 292.027906,
+        "service_ms": 291.426685,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354690.32126892,
+        "after_snapshot_ms": 151.64362505311146
+      },
+      {
+        "latency_ms": 215.652596,
+        "service_ms": 215.018771,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354690.822976962,
+        "after_snapshot_ms": 144.99487495049834
+      },
+      {
+        "latency_ms": 397.566092,
+        "service_ms": 396.68629,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354691.574844754,
+        "after_snapshot_ms": 146.47329197032377
+      },
+      {
+        "latency_ms": 327.082836,
+        "service_ms": 325.584891,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354692.077023713,
+        "after_snapshot_ms": 145.24104102747515
+      }
+    ]
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "requested_rate": 1.75,
+    "requests": 21,
+    "cpu_us_per_request": 87619.04761904762,
+    "before": {
+      "monotonic_ns": 354768098780904,
+      "ticks": 2575,
+      "VmRSS": 34552,
+      "VmHWM": 37824,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 26152,
+      "SwapFree": 0
+    },
+    "after": {
+      "monotonic_ns": 354779853485206,
+      "ticks": 2759,
+      "VmRSS": 35604,
+      "VmHWM": 37824,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 23680,
+      "SwapFree": 0
+    },
+    "rss_kib_max": 37760,
+    "available_min_kib": 20988,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 419.284511,
+        "service_ms": 415.307322,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354770.152130417,
+        "after_snapshot_ms": 167.15462499996647
+      },
+      {
+        "latency_ms": 334.262326,
+        "service_ms": 333.560809,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354770.653871625,
+        "after_snapshot_ms": 151.8045839620754
+      },
+      {
+        "latency_ms": 270.306122,
+        "service_ms": 269.639792,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354771.154948125,
+        "after_snapshot_ms": 158.204166975338
+      },
+      {
+        "latency_ms": 195.537636,
+        "service_ms": 194.889828,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354771.656060292,
+        "after_snapshot_ms": 153.77245901618153
+      },
+      {
+        "latency_ms": 566.951487,
+        "service_ms": 566.220118,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354772.408873959,
+        "after_snapshot_ms": 343.78975100116804
+      },
+      {
+        "latency_ms": 300.031576,
+        "service_ms": 262.309828,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354772.910073335,
+        "after_snapshot_ms": 147.0997910364531
+      },
+      {
+        "latency_ms": 238.709025,
+        "service_ms": 238.013157,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354773.412535585,
+        "after_snapshot_ms": 154.74566700868309
+      },
+      {
+        "latency_ms": 415.52617,
+        "service_ms": 414.643075,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354774.165987835,
+        "after_snapshot_ms": 149.55808402737603
+      },
+      {
+        "latency_ms": 363.697655,
+        "service_ms": 362.964205,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354774.668067419,
+        "after_snapshot_ms": 167.06574999261647
+      },
+      {
+        "latency_ms": 288.07255,
+        "service_ms": 287.468621,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354775.169062836,
+        "after_snapshot_ms": 161.8688750313595
+      },
+      {
+        "latency_ms": 204.646565,
+        "service_ms": 204.06245,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354775.670552003,
+        "after_snapshot_ms": 148.38833297835663
+      },
+      {
+        "latency_ms": 392.25245,
+        "service_ms": 391.555773,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354776.423655711,
+        "after_snapshot_ms": 154.32291699107736
+      },
+      {
+        "latency_ms": 325.636632,
+        "service_ms": 325.000393,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354776.925472087,
+        "after_snapshot_ms": 157.32270799344406
+      },
+      {
+        "latency_ms": 254.375046,
+        "service_ms": 253.760328,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354777.427461503,
+        "after_snapshot_ms": 155.5052509647794
+      },
+      {
+        "latency_ms": 203.238652,
+        "service_ms": 202.470541,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354777.929394795,
+        "after_snapshot_ms": 173.86516701662913
+      },
+      {
+        "latency_ms": 364.252877,
+        "service_ms": 363.644953,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354778.681789462,
+        "after_snapshot_ms": 153.91533402726054
+      },
+      {
+        "latency_ms": 297.146271,
+        "service_ms": 296.540909,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354779.183044338,
+        "after_snapshot_ms": 156.9842500030063
+      },
+      {
+        "latency_ms": 220.68071,
+        "service_ms": 220.020662,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354779.685088963,
+        "after_snapshot_ms": 149.9067079857923
+      },
+      {
+        "latency_ms": 411.513787,
+        "service_ms": 410.854052,
+        "objects": 268,
+        "response_json_bytes": 377638,
+        "klippy_eventtime": 354780.437526338,
+        "after_snapshot_ms": 159.73579202545807
+      },
+      {
+        "latency_ms": 355.12621,
+        "service_ms": 354.460039,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354780.938970755,
+        "after_snapshot_ms": 173.50508394883946
+      },
+      {
+        "latency_ms": 267.340915,
+        "service_ms": 266.221268,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354781.439815547,
+        "after_snapshot_ms": 156.1332499841228
+      }
+    ]
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "requested_rate": 1.75,
+    "requests": 21,
+    "cpu_us_per_request": 89523.80952380953,
+    "before": {
+      "monotonic_ns": 354859667895286,
+      "ticks": 2579,
+      "VmRSS": 36604,
+      "VmHWM": 37748,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 30036,
+      "SwapFree": 0
+    },
+    "after": {
+      "monotonic_ns": 354871644025776,
+      "ticks": 2767,
+      "VmRSS": 35392,
+      "VmHWM": 37748,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 23872,
+      "SwapFree": 0
+    },
+    "rss_kib_max": 37628,
+    "available_min_kib": 21268,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 303.78779,
+        "service_ms": 299.836518,
+        "objects": 268,
+        "response_json_bytes": 377638,
+        "klippy_eventtime": 354861.622012002,
+        "after_snapshot_ms": 151.23212500475347
+      },
+      {
+        "latency_ms": 258.314785,
+        "service_ms": 257.636976,
+        "objects": 268,
+        "response_json_bytes": 377638,
+        "klippy_eventtime": 354862.12398796,
+        "after_snapshot_ms": 175.2164590288885
+      },
+      {
+        "latency_ms": 420.454711,
+        "service_ms": 419.760424,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354862.876908586,
+        "after_snapshot_ms": 155.8599579730071
+      },
+      {
+        "latency_ms": 343.484528,
+        "service_ms": 342.713556,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354863.378444711,
+        "after_snapshot_ms": 148.78475002478808
+      },
+      {
+        "latency_ms": 279.172033,
+        "service_ms": 270.84312,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354863.87925467,
+        "after_snapshot_ms": 155.09291598573327
+      },
+      {
+        "latency_ms": 342.794445,
+        "service_ms": 342.034975,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354864.380506378,
+        "after_snapshot_ms": 288.8924169819802
+      },
+      {
+        "latency_ms": 394.829125,
+        "service_ms": 394.07276,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354865.133349337,
+        "after_snapshot_ms": 159.52950000064448
+      },
+      {
+        "latency_ms": 322.252086,
+        "service_ms": 321.519202,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354865.634736587,
+        "after_snapshot_ms": 156.99091699207202
+      },
+      {
+        "latency_ms": 258.039091,
+        "service_ms": 257.400728,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354866.136549379,
+        "after_snapshot_ms": 162.38670801976696
+      },
+      {
+        "latency_ms": 188.945994,
+        "service_ms": 188.36586,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354866.638009879,
+        "after_snapshot_ms": 163.26479200506583
+      },
+      {
+        "latency_ms": 351.376668,
+        "service_ms": 350.637516,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354867.389355755,
+        "after_snapshot_ms": 145.782791019883
+      },
+      {
+        "latency_ms": 286.032553,
+        "service_ms": 285.445797,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354867.892282047,
+        "after_snapshot_ms": 148.95787497516721
+      },
+      {
+        "latency_ms": 220.803312,
+        "service_ms": 220.203495,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354868.394188463,
+        "after_snapshot_ms": 153.2385839964263
+      },
+      {
+        "latency_ms": 412.416676,
+        "service_ms": 411.761506,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354869.145849505,
+        "after_snapshot_ms": 164.62254204088822
+      },
+      {
+        "latency_ms": 339.57618,
+        "service_ms": 339.042907,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354869.646916756,
+        "after_snapshot_ms": 162.1431660023518
+      },
+      {
+        "latency_ms": 254.281747,
+        "service_ms": 253.739703,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354870.149247506,
+        "after_snapshot_ms": 145.9529580315575
+      },
+      {
+        "latency_ms": 186.174354,
+        "service_ms": 185.525791,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354870.651713506,
+        "after_snapshot_ms": 146.81045897305012
+      },
+      {
+        "latency_ms": 377.364219,
+        "service_ms": 376.631221,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 354871.40491959,
+        "after_snapshot_ms": 156.22304199496284
+      },
+      {
+        "latency_ms": 304.424059,
+        "service_ms": 303.82779,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354871.906185298,
+        "after_snapshot_ms": 153.46754202619195
+      },
+      {
+        "latency_ms": 241.210849,
+        "service_ms": 240.65631,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354872.408065799,
+        "after_snapshot_ms": 159.78645801078528
+      },
+      {
+        "latency_ms": 405.481431,
+        "service_ms": 404.377417,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 354873.160341091,
+        "after_snapshot_ms": 143.21466599358246
+      }
+    ]
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "requested_rate": 1.75,
+    "requests": 21,
+    "cpu_us_per_request": 46666.666666666664,
+    "before": {
+      "monotonic_ns": 354942977690823,
+      "ticks": 416,
+      "VmRSS": 4512,
+      "VmHWM": 6320,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 48012,
+      "SwapFree": 0
+    },
+    "after": {
+      "monotonic_ns": 354954841038488,
+      "ticks": 514,
+      "VmRSS": 4652,
+      "VmHWM": 6320,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 45728,
+      "SwapFree": 12
+    },
+    "rss_kib_max": 5792,
+    "available_min_kib": 44404,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 281.98048,
+        "service_ms": 274.93539,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354944.893798167,
+        "after_snapshot_ms": 168.1630410021171
+      },
+      {
+        "latency_ms": 204.493258,
+        "service_ms": 203.876866,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354945.394969292,
+        "after_snapshot_ms": 160.92683299211785
+      },
+      {
+        "latency_ms": 379.503538,
+        "service_ms": 378.852127,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354946.147359417,
+        "after_snapshot_ms": 154.98087502783164
+      },
+      {
+        "latency_ms": 298.630165,
+        "service_ms": 297.96611,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354946.649130251,
+        "after_snapshot_ms": 143.76787497894838
+      },
+      {
+        "latency_ms": 245.219449,
+        "service_ms": 244.585666,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 354947.154657251,
+        "after_snapshot_ms": 156.26149997115135
+      },
+      {
+        "latency_ms": 174.925648,
+        "service_ms": 174.259721,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354947.655788126,
+        "after_snapshot_ms": 156.26550000160933
+      },
+      {
+        "latency_ms": 364.387815,
+        "service_ms": 363.699868,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354948.408474918,
+        "after_snapshot_ms": 164.47495901957154
+      },
+      {
+        "latency_ms": 274.967817,
+        "service_ms": 274.063186,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354948.910173377,
+        "after_snapshot_ms": 144.7890419512987
+      },
+      {
+        "latency_ms": 211.301735,
+        "service_ms": 210.683208,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 354949.41212796,
+        "after_snapshot_ms": 150.59604198904708
+      },
+      {
+        "latency_ms": 389.312833,
+        "service_ms": 388.66312,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354950.165310877,
+        "after_snapshot_ms": 146.85770898358896
+      },
+      {
+        "latency_ms": 321.886769,
+        "service_ms": 321.300078,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354950.667546878,
+        "after_snapshot_ms": 148.62495800480247
+      },
+      {
+        "latency_ms": 263.894242,
+        "service_ms": 263.305281,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354951.168845961,
+        "after_snapshot_ms": 160.76125000836328
+      },
+      {
+        "latency_ms": 186.49031,
+        "service_ms": 181.679976,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354951.67119692,
+        "after_snapshot_ms": 152.4411670397967
+      },
+      {
+        "latency_ms": 368.047307,
+        "service_ms": 367.45985,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354952.423296545,
+        "after_snapshot_ms": 153.33108400227502
+      },
+      {
+        "latency_ms": 300.896616,
+        "service_ms": 300.171599,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354952.924517795,
+        "after_snapshot_ms": 156.38595900963992
+      },
+      {
+        "latency_ms": 224.455139,
+        "service_ms": 223.77006,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354953.426236587,
+        "after_snapshot_ms": 149.66083399485797
+      },
+      {
+        "latency_ms": 410.527405,
+        "service_ms": 409.928764,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 354954.178470588,
+        "after_snapshot_ms": 154.9316250020638
+      },
+      {
+        "latency_ms": 339.906273,
+        "service_ms": 339.386988,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354954.680238005,
+        "after_snapshot_ms": 153.9698329870589
+      },
+      {
+        "latency_ms": 273.393455,
+        "service_ms": 265.608186,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354955.183391838,
+        "after_snapshot_ms": 155.73904203483835
+      },
+      {
+        "latency_ms": 206.767345,
+        "service_ms": 206.091481,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354955.685902547,
+        "after_snapshot_ms": 158.03208301076666
+      },
+      {
+        "latency_ms": 379.944425,
+        "service_ms": 378.84571,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 354956.438191922,
+        "after_snapshot_ms": 150.35333402920514
+      }
+    ]
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "requested_rate": 1.75,
+    "requests": 21,
+    "cpu_us_per_request": 46666.666666666664,
+    "before": {
+      "monotonic_ns": 355023544742997,
+      "ticks": 412,
+      "VmRSS": 4416,
+      "VmHWM": 6224,
+      "VmSwap": 0,
+      "Threads": 11,
+      "MemAvailable": 47972,
+      "SwapFree": 16
+    },
+    "after": {
+      "monotonic_ns": 355035289746282,
+      "ticks": 510,
+      "VmRSS": 4540,
+      "VmHWM": 6224,
+      "VmSwap": 0,
+      "Threads": 11,
+      "MemAvailable": 45032,
+      "SwapFree": 16
+    },
+    "rss_kib_max": 5952,
+    "available_min_kib": 43580,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 410.453012,
+        "service_ms": 396.240249,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355025.605579497,
+        "after_snapshot_ms": 152.00870798435062
+      },
+      {
+        "latency_ms": 342.760199,
+        "service_ms": 342.158099,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355026.107036497,
+        "after_snapshot_ms": 154.2832080158405
+      },
+      {
+        "latency_ms": 262.97703,
+        "service_ms": 262.311328,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355026.608243372,
+        "after_snapshot_ms": 144.72554199164733
+      },
+      {
+        "latency_ms": 196.822167,
+        "service_ms": 196.192571,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355027.110688414,
+        "after_snapshot_ms": 147.55591697758064
+      },
+      {
+        "latency_ms": 378.993619,
+        "service_ms": 378.310962,
+        "objects": 268,
+        "response_json_bytes": 377003,
+        "klippy_eventtime": 355027.862412998,
+        "after_snapshot_ms": 149.43466702243313
+      },
+      {
+        "latency_ms": 314.592414,
+        "service_ms": 313.852948,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355028.364505998,
+        "after_snapshot_ms": 154.3674580170773
+      },
+      {
+        "latency_ms": 244.411489,
+        "service_ms": 243.567254,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 355028.866085165,
+        "after_snapshot_ms": 154.12199997808784
+      },
+      {
+        "latency_ms": 169.45592,
+        "service_ms": 168.757665,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 355029.36729104,
+        "after_snapshot_ms": 149.30958399781957
+      },
+      {
+        "latency_ms": 348.182555,
+        "service_ms": 347.577614,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355030.119193499,
+        "after_snapshot_ms": 147.56333304103464
+      },
+      {
+        "latency_ms": 276.235181,
+        "service_ms": 275.646887,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 355030.619528874,
+        "after_snapshot_ms": 146.7149169766344
+      },
+      {
+        "latency_ms": 205.548757,
+        "service_ms": 204.956695,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 355031.121341208,
+        "after_snapshot_ms": 145.6439159810543
+      },
+      {
+        "latency_ms": 410.567679,
+        "service_ms": 409.947014,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 355031.873880375,
+        "after_snapshot_ms": 169.5603749831207
+      },
+      {
+        "latency_ms": 311.447438,
+        "service_ms": 310.842463,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 355032.3751485,
+        "after_snapshot_ms": 140.601749997586
+      },
+      {
+        "latency_ms": 242.205508,
+        "service_ms": 241.307057,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355032.875649792,
+        "after_snapshot_ms": 142.29012496070936
+      },
+      {
+        "latency_ms": 176.110812,
+        "service_ms": 175.495799,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 355033.377482625,
+        "after_snapshot_ms": 145.7897509681061
+      },
+      {
+        "latency_ms": 368.911002,
+        "service_ms": 368.320261,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355034.131050334,
+        "after_snapshot_ms": 156.45404200768098
+      },
+      {
+        "latency_ms": 289.184416,
+        "service_ms": 288.587114,
+        "objects": 268,
+        "response_json_bytes": 377000,
+        "klippy_eventtime": 355034.631856126,
+        "after_snapshot_ms": 147.35691697569564
+      },
+      {
+        "latency_ms": 225.045377,
+        "service_ms": 224.504806,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 355035.133700126,
+        "after_snapshot_ms": 152.80299994628876
+      },
+      {
+        "latency_ms": 399.189202,
+        "service_ms": 398.645945,
+        "objects": 268,
+        "response_json_bytes": 376998,
+        "klippy_eventtime": 355035.88595171,
+        "after_snapshot_ms": 146.12662501167506
+      },
+      {
+        "latency_ms": 326.435496,
+        "service_ms": 325.823721,
+        "objects": 268,
+        "response_json_bytes": 376997,
+        "klippy_eventtime": 355036.387013627,
+        "after_snapshot_ms": 143.74404202681035
+      },
+      {
+        "latency_ms": 263.793242,
+        "service_ms": 262.338244,
+        "objects": 268,
+        "response_json_bytes": 376999,
+        "klippy_eventtime": 355036.888264252,
+        "after_snapshot_ms": 151.28154202830046
+      }
+    ]
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "requested_rate": 1.75,
+    "requests": 21,
+    "cpu_us_per_request": 87142.85714285714,
+    "before": {
+      "monotonic_ns": 355113398368770,
+      "ticks": 2557,
+      "VmRSS": 35548,
+      "VmHWM": 37812,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 25748,
+      "SwapFree": 0
+    },
+    "after": {
+      "monotonic_ns": 355125090253143,
+      "ticks": 2740,
+      "VmRSS": 35504,
+      "VmHWM": 37812,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 26864,
+      "SwapFree": 0
+    },
+    "rss_kib_max": 37796,
+    "available_min_kib": 24060,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 368.746426,
+        "service_ms": 364.497656,
+        "objects": 268,
+        "response_json_bytes": 377638,
+        "klippy_eventtime": 355115.39867629,
+        "after_snapshot_ms": 171.20350000914186
+      },
+      {
+        "latency_ms": 297.687296,
+        "service_ms": 297.049614,
+        "objects": 268,
+        "response_json_bytes": 377638,
+        "klippy_eventtime": 355115.900174665,
+        "after_snapshot_ms": 170.06491700885817
+      },
+      {
+        "latency_ms": 204.002237,
+        "service_ms": 203.057745,
+        "objects": 268,
+        "response_json_bytes": 377637,
+        "klippy_eventtime": 355116.40152829,
+        "after_snapshot_ms": 146.44054201198742
+      },
+      {
+        "latency_ms": 395.128685,
+        "service_ms": 394.367466,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 355117.153243874,
+        "after_snapshot_ms": 157.2914999560453
+      },
+      {
+        "latency_ms": 322.925061,
+        "service_ms": 322.287572,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355117.654592624,
+        "after_snapshot_ms": 155.16270801890641
+      },
+      {
+        "latency_ms": 373.99941,
+        "service_ms": 373.255279,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355118.156783791,
+        "after_snapshot_ms": 275.4770419560373
+      },
+      {
+        "latency_ms": 443.629709,
+        "service_ms": 442.926684,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355118.909517458,
+        "after_snapshot_ms": 163.80600002594292
+      },
+      {
+        "latency_ms": 371.636042,
+        "service_ms": 370.92629,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 355119.410793666,
+        "after_snapshot_ms": 161.9670840445906
+      },
+      {
+        "latency_ms": 281.326133,
+        "service_ms": 280.727028,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355119.912077875,
+        "after_snapshot_ms": 141.8019580305554
+      },
+      {
+        "latency_ms": 222.881774,
+        "service_ms": 222.083026,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355120.413568917,
+        "after_snapshot_ms": 153.29633298097178
+      },
+      {
+        "latency_ms": 409.547786,
+        "service_ms": 408.925811,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355121.166514834,
+        "after_snapshot_ms": 158.44758303137496
+      },
+      {
+        "latency_ms": 326.96138,
+        "service_ms": 326.377177,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355121.667928959,
+        "after_snapshot_ms": 145.88108396856114
+      },
+      {
+        "latency_ms": 264.521957,
+        "service_ms": 263.89532,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355122.169900543,
+        "after_snapshot_ms": 152.89754199329764
+      },
+      {
+        "latency_ms": 193.682409,
+        "service_ms": 193.101669,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355122.670934418,
+        "after_snapshot_ms": 152.45900000445545
+      },
+      {
+        "latency_ms": 370.027013,
+        "service_ms": 369.494297,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355123.423135168,
+        "after_snapshot_ms": 148.03233405109495
+      },
+      {
+        "latency_ms": 309.311416,
+        "service_ms": 308.734556,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355123.925166252,
+        "after_snapshot_ms": 156.71541698975489
+      },
+      {
+        "latency_ms": 238.743701,
+        "service_ms": 237.923323,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355124.426225711,
+        "after_snapshot_ms": 156.5229999832809
+      },
+      {
+        "latency_ms": 404.763898,
+        "service_ms": 404.170001,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355125.179089169,
+        "after_snapshot_ms": 141.11283398233354
+      },
+      {
+        "latency_ms": 342.913681,
+        "service_ms": 342.324515,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355125.680339419,
+        "after_snapshot_ms": 149.44158401340246
+      },
+      {
+        "latency_ms": 271.913925,
+        "service_ms": 271.328574,
+        "objects": 268,
+        "response_json_bytes": 377639,
+        "klippy_eventtime": 355126.182073545,
+        "after_snapshot_ms": 148.13950000097975
+      },
+      {
+        "latency_ms": 205.1459,
+        "service_ms": 204.055199,
+        "objects": 268,
+        "response_json_bytes": 377640,
+        "klippy_eventtime": 355126.683569712,
+        "after_snapshot_ms": 151.30741603206843
+      }
+    ]
+  }
+]

@@ -43,12 +43,13 @@ open work; this file covers how to work in the codebase.
 # Full suite (the first compile of the SQLite amalgamation is slow, so wrap in a timeout)
 scripts/test.sh Debug
 scripts/test.sh ReleaseSafe
+scripts/test.sh ReleaseFast
 
 # A single file with no ../ imports (e.g. config, jsonrpc, store):
 zig test -target x86_64-linux-musl src/config/confighelper.zig
 
 # Cross-compile the deploy binary:
-zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall
+zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseFast
 file zig-out/bin/phobos   # -> ELF 32-bit ARM, statically linked
 
 # Seven static Linux release profiles, with isolated prefixes and ELF/ABI checks:
@@ -88,9 +89,12 @@ Notes:
 
 These differ from older Zig docs:
 
-- **Allocator**: `var gpa: std.heap.DebugAllocator(.{}) = .init; defer _ = gpa.deinit();`
+- **Allocator**: use `std.process.Init.gpa` at startup and pass `std.mem.Allocator`
+  into components. Debug/ReleaseSafe use the checked startup allocator; this
+  musl-linked ReleaseFast program uses the libc allocator.
   (`GeneralPurposeAllocator` is gone). Tests: `std.testing.allocator`. The
-  thread-safe allocator for `Threaded.init` is `std.heap.smp_allocator`.
+  owned `Threaded.init` backends need a thread-safe allocator, such as
+  `std.heap.smp_allocator`.
 - **ArrayList is unmanaged**: `var xs: std.ArrayList(T) = .empty;` then
   `try xs.append(alloc, item)`, `xs.deinit(alloc)`, `xs.items`.
 - **Fuzzing**: `try std.testing.fuzz(ctx, testOne, .{});` where

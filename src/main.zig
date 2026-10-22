@@ -179,12 +179,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn run(init: std.process.Init) !void {
-    // `init.gpa` is std's DebugAllocator — it captures a dwarf stack trace on
-    // every allocation for leak/UAF detection. That tracing dominates the hot
-    // path (allocation-heavy Klippy-proxy requests) and is pointless in a
-    // long-running release daemon, so use the lock-sharded `smp_allocator` in
-    // release and keep the checked allocator only for Debug builds.
-    const alloc = if (@import("builtin").mode == .debug) init.gpa else std.heap.smp_allocator;
+    const alloc = init.gpa;
     // On 32-bit targets (armv7) the runtime-default IO backend's 16 MB handler
     // stacks reserve ~2 GB of VSZ at the ~128-thread peak — enough to exhaust the
     // 3 GB user address space. Own the backend there with a 1 MB stack (handlers

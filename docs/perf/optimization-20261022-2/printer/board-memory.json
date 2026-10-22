@@ -1,0 +1,10 @@
+{
+  "minimum_available_kib": 20508,
+  "maximum_probe_swap_kib": 0,
+  "swap_free_kib_range": [
+    0,
+    472
+  ],
+  "http_requests": 10440,
+  "subscription_requests": 126
+}

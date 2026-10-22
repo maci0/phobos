@@ -1,0 +1,517 @@
+[
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "info50",
+    "requested_rate": 50,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 600,
+      "success": 1,
+      "errors": [],
+      "rate": 50.0,
+      "throughput": 50.017653668340174,
+      "latencies": {
+        "50th": 3235535.5,
+        "99th": 14923221,
+        "mean": 3968286.8566666665,
+        "min": 3029342,
+        "max": 26032288
+      },
+      "status_codes": {
+        "200": 600
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 550.0,
+      "cpu_percent_one_core": 2.7470719957699914,
+      "rss_kib_max": 4596,
+      "available_min_kib": 46600,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 354310959073349,
+        "ticks": 46,
+        "VmRSS": 4596,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47672,
+        "SwapFree": 1032
+      },
+      "after": {
+        "monotonic_ns": 354322971863713,
+        "ticks": 79,
+        "VmRSS": 4596,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 46572,
+        "SwapFree": 1032
+      }
+    },
+    "generator": "Python stdlib fixed-arrival loopback; server CPU 1, generator CPU 0",
+    "generator_source_sha256": "9a4ca8f302b10021aac57190624c19ef7556b6ead5ec1a1cafd3b48b52829c2d",
+    "server_affinities_before": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ]
+    },
+    "service_median_ms": 2.6324865
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "independent75",
+    "requested_rate": 75,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 900,
+      "success": 1,
+      "errors": [],
+      "rate": 75.0,
+      "throughput": 74.94963143679466,
+      "latencies": {
+        "50th": 3666314.0,
+        "99th": 22468912,
+        "mean": 5947512.524444444,
+        "min": 2890347,
+        "max": 36060547
+      },
+      "status_codes": {
+        "200": 900
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 2111.1111111111113,
+      "cpu_percent_one_core": 15.797333680840973,
+      "rss_kib_max": 4632,
+      "available_min_kib": 45676,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 354325820968763,
+        "ticks": 79,
+        "VmRSS": 4596,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47636,
+        "SwapFree": 1032
+      },
+      "after": {
+        "monotonic_ns": 354337848314886,
+        "ticks": 269,
+        "VmRSS": 4632,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 46040,
+        "SwapFree": 1032
+      }
+    },
+    "generator": "Python stdlib fixed-arrival loopback; server CPU 1, generator CPU 0",
+    "generator_source_sha256": "9a4ca8f302b10021aac57190624c19ef7556b6ead5ec1a1cafd3b48b52829c2d",
+    "server_affinities_before": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ],
+      "3008": [
+        1
+      ]
+    },
+    "service_median_ms": 2.9483185
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "history10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.072759091242418,
+      "latencies": {
+        "50th": 11269287.0,
+        "99th": 25042031,
+        "mean": 12487999.433333334,
+        "min": 10248700,
+        "max": 37460565
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 8333.333333333334,
+      "cpu_percent_one_core": 8.37875146443441,
+      "rss_kib_max": 4664,
+      "available_min_kib": 46780,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 354340468180818,
+        "ticks": 270,
+        "VmRSS": 4632,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 47548,
+        "SwapFree": 1032
+      },
+      "after": {
+        "monotonic_ns": 354352403133230,
+        "ticks": 370,
+        "VmRSS": 4664,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 46824,
+        "SwapFree": 1032
+      }
+    },
+    "generator": "Python stdlib fixed-arrival loopback; server CPU 1, generator CPU 0",
+    "generator_source_sha256": "9a4ca8f302b10021aac57190624c19ef7556b6ead5ec1a1cafd3b48b52829c2d",
+    "server_affinities_before": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ],
+      "3008": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ],
+      "3008": [
+        1
+      ]
+    },
+    "service_median_ms": 10.43374
+  },
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "workload": "database64k10",
+    "requested_rate": 10,
+    "duration_seconds": 12,
+    "vegeta": {
+      "requests": 120,
+      "success": 1,
+      "errors": [],
+      "rate": 10.0,
+      "throughput": 10.075884147748393,
+      "latencies": {
+        "50th": 6864626.5,
+        "99th": 23224927,
+        "mean": 7623118.791666667,
+        "min": 6517664,
+        "max": 30712223
+      },
+      "status_codes": {
+        "200": 120
+      }
+    },
+    "process": {
+      "cpu_us_per_request": 4083.3333333333335,
+      "cpu_percent_one_core": 4.1082999603956365,
+      "rss_kib_max": 4664,
+      "available_min_kib": 46768,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 354354540674378,
+        "ticks": 370,
+        "VmRSS": 4664,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 47516,
+        "SwapFree": 1032
+      },
+      "after": {
+        "monotonic_ns": 354366467748952,
+        "ticks": 419,
+        "VmRSS": 4664,
+        "VmHWM": 6440,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 46768,
+        "SwapFree": 1032
+      }
+    },
+    "generator": "Python stdlib fixed-arrival loopback; server CPU 1, generator CPU 0",
+    "generator_source_sha256": "9a4ca8f302b10021aac57190624c19ef7556b6ead5ec1a1cafd3b48b52829c2d",
+    "server_affinities_before": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ],
+      "3008": [
+        1
+      ]
+    },
+    "server_affinities_after": {
+      "2842": [
+        1
+      ],
+      "2851": [
+        1
+      ],
+      "2852": [
+        1
+      ],
+      "2853": [
+        1
+      ],
+      "2854": [
+        1
+      ],
+      "2855": [
+        1
+      ],
+      "2856": [
+        1
+      ],
+      "2857": [
+        1
+      ],
+      "2858": [
+        1
+      ],
+      "2859": [
+        1
+      ],
+      "2860": [
+        1
+      ],
+      "3008": [
+        1
+      ]
+    },
+    "service_median_ms": 6.1037825
+  }
+]

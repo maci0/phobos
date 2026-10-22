@@ -1789,3 +1789,107 @@ New PID 27463 and the executable hash match. The board boot ID remains
 `6213a6c1-a3b6-4b38-b637-5aa9a116a117`. The
 [deployment record](perf/optimization-20261022/deployment.json) is separate
 from the earlier benchmark cleanup state.
+
+## 2026-10-22: remove the remaining measured read bottlenecks
+
+The user requested fixes for the cases where Moonraker remained faster, including
+the largest Klippy config-reply gap, and updated measurements on the printer and
+isolated VM. The development version remains 0.2.2; no published asset or tag is
+replaced. Source parent is `40ff6db18306`; exact candidate source blobs and binary
+hashes are recorded in `perf/optimization-20261022-2/`.
+
+Klippy replies now receive one full standard JSON parse and depth check. The
+waiter owns that parsed arena until it copies the result to its caller. A 64 KiB
+standard reader reduces socket-read overhead. Long valid UTF-8 JSON strings use
+a 1 KiB output buffer, portable vector comparisons and mask/ctz scans. A 896-byte
+escape table is generated at compile time by the standard JSON encoder;
+nondefault options and invalid UTF-8 retain its runtime encoder. No parser or
+dependency is added. CPU microbenchmarks on both native and physical ARM support
+the selected vector path; slower parser/inlining and vector alternatives remain
+in the experiment archive.
+
+Legacy job-history pages without KV overrides use ordered SQL LIMIT/OFFSET,
+preserving negative-ID exclusion, ordering, offsets, unlimited semantics and
+null end times. Mixed/noncanonical histories retain their validation/fallback.
+A 10,000-job, one-row-page regression fails before this change and passes after,
+checking content and request allocation below 64 KiB. Each incoming Klippy status
+push now becomes one notification per interested client after object/field
+filtering. A regression fails before batching and verifies one frame, exact
+masks, unauthenticated/unsubscribed exclusion and unchanged input afterward.
+Connection references, Core ordering and write deadlines stay intact.
+
+The entry point now uses `std.process.Init.gpa`, whose selection in installed
+Zig 0.17 `lib/std/start.zig:780` uses a checked allocator in Debug/ReleaseSafe
+and libc for this linked ReleaseFast program. The prior comment incorrectly
+described all startup modes as debug allocation and overrode release modes
+with SMP. Focused comparisons retain their overlapping RSS ranges. The larger
+parsed-reply arena is a documented peak-memory tradeoff, not an RSS reduction.
+The 256 KiB reply test observes 594,223 allocation bytes, below 2.5 times wire
+size plus 4 KiB, and checks ownership after overwriting input.
+
+The release helper and documented deployment/memory/profile builds now use
+ReleaseFast; published v0.2.2 assets remain ReleaseSmall. Hosted CI adds full
+ReleaseFast suites on x86-64 and native AArch64 and runs floating-point ABI
+probes in the shipped mode. Two existing allocation-failure tests use the
+existing no-remap test allocator pattern to make every failpoint reproducible
+under optimized execution; no failpoint is skipped.
+
+Verification on the selected source: Debug, ReleaseSafe and ReleaseFast each
+pass 1,750 tests, skip the gated local real-Klippy fixture and find 331 fuzz
+tests. The local real-printer substitute is verified separately on hardware.
+All seven static profiles pass ELF/ABI/hash checks. All five compatible ARM32
+floating-point profiles run on the printer and pass five C/Zig return/addition
+checks each; the native probe also passes. Build-policy tests pass four cases
+including two fuzz tests. Python scanner/client/harness/release tests pass 110.
+The current Debug CLI API gate remains 123/123 HTTP endpoints, 130/130 RPC methods
+and 27/27 notifications. Generated coverage documentation is already current
+and is not regenerated. Zig formatting, shell syntax, shellcheck -x, Black,
+Ruff, mypy, harness failure/cleanup smoke and `git diff --check` pass.
+
+The local corroborating KVM study completes 54 trials and 719,983 successful
+requests, with 108 matching history comparisons. Each trial lasts at least
+10 seconds and offers at least 2,000 requests; config trials last 40 seconds.
+Phobos has lower median CPU, p99 and sampled RSS for every measured workload;
+the closest config p99 result is only 0.8% lower, with overlapping ranges.
+Aggregate guest steal sums to 18 exported ticks; maximum host server-vCPU
+run-queue delay is 0.047250% of its window. Locked memory stays at least
+4,838,196 KiB, with no VM/cgroup swap or quota throttling. CPU limits are restored
+and the owned VM stops. No literal zero-steal or fixed-frequency guarantee is
+made. A separate local FIFO/idle-poll trial was invalidated after starving a
+host kernel worker; none of the accepted studies uses either setting.
+
+The physical printer completes 24 HTTP trials, 10,440 successful requests,
+126 full subscriptions and 36 matching history comparisons. Subscription
+arrivals sample seven phases of live Klippy's 250 ms timer at 1.75/s. Klippy
+uses CLOCK_MONOTONIC_RAW; an earlier mixed-clock harness assertion and transient
+startup restoration check are corrected against live source hashes. Earlier
+completed/negative results and both harness failures are retained. The old
+production binary is restored afterward, ready on 7125 with 26 components,
+262/262 subscription objects, valid console/disk-usage responses, print complete,
+idle and zero heater targets. Boot ID is unchanged and 7126 is closed. No
+hardware command, board/Klippy restart or production database probe is used.
+
+The user explicitly requested retaining the remote sudo rule and preventing
+sleep. `/etc/sudoers.d/phobos-bench` is retained on 192.168.0.99; the
+`phobos-benchmark-awake` systemd service blocks sleep/idle there. The controller
+also remains inhibited during the work. Cleanup must not remove the sudo rule
+or the remote inhibitor. `graphify-out/graph.json` exists but the executable is
+absent, so graph updates are skipped and that directory is not a deliverable.
+
+The subsequent remote KVM study on 192.168.0.99 completes 54 trials and 719,980
+successful requests, with 108 matching history checks. Aggregate guest steal
+is one tick (CPU 0); server/generator per-CPU steal deltas are zero at exported
+counter resolution. Maximum server-vCPU host run-queue delay is 0.000693% of its
+window, locked RAM stays at least 4,837,408 KiB and VM/cgroup swap/throttling stay
+zero. The remote disk is 8 GiB, the local disk 16 GiB; body retention is disabled
+for both and each backend receives matched controls. Cleanup restores CPU limits.
+
+The remote config CPU median falls from the retained baseline's 3.185 to
+1.525 ms, but remains above Moonraker's 0.995 ms; p99 is 3.020 versus 2.679 ms.
+All other measured remote workloads favor phobos for median CPU, p99 and sampled
+RSS. The remote config result is a remaining performance gap, not excluded as
+noise. The user then requested ten further bpftrace profiling/optimization rounds,
+including memory improvements. This capture is their starting baseline; deployment
+of the new build is deferred until those rounds finish. Current performance and
+memory reports, twelve current-versus-Moonraker graphics, all trial statistics,
+negative experiments and verification evidence are updated from measured JSON.

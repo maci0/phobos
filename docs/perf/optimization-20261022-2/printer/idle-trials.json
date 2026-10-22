@@ -1,0 +1,50 @@
+[
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "rss_kib_median": 4772,
+    "rss_kib_max": 4772,
+    "cpu_percent_one_core": 0.37037037036877346,
+    "elapsed_seconds": 5.400000000023283
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "rss_kib_median": 4548.0,
+    "rss_kib_max": 4548,
+    "cpu_percent_one_core": 0.17605633802838552,
+    "elapsed_seconds": 5.679999999993015
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "rss_kib_median": 4720,
+    "rss_kib_max": 4720,
+    "cpu_percent_one_core": 0.37037037036877346,
+    "elapsed_seconds": 5.400000000023283
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "rss_kib_median": 37880,
+    "rss_kib_max": 37880,
+    "cpu_percent_one_core": 2.2222222222365944,
+    "elapsed_seconds": 5.399999999965075
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "rss_kib_median": 37884,
+    "rss_kib_max": 37884,
+    "cpu_percent_one_core": 2.2222222222126407,
+    "elapsed_seconds": 5.400000000023283
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "rss_kib_median": 37640.0,
+    "rss_kib_max": 37640,
+    "cpu_percent_one_core": 1.9292604501513835,
+    "elapsed_seconds": 6.220000000030268
+  }
+]

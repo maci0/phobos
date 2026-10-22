@@ -1,0 +1,1 @@
+Invalidated FIFO and idle-poll study. A host kernel block worker starved and RCU stalled. Completed partial requests are not accepted performance evidence. The owned VM was stopped and CPU limits restored.

@@ -19,7 +19,7 @@ new_run profile
 OUTPUT=${4:-$PERF_RUN/flamegraph.svg}
 SOCK="$PERF_RUN/k.sock"
 
-"${ZIG:-zig}" build -Doptimize=ReleaseSmall -Dprofile --prefix "$PERF_RUN/build"
+"${ZIG:-zig}" build -Doptimize=ReleaseFast -Dprofile --prefix "$PERF_RUN/build"
 mkdir -p "$PERF_RUN/data" "$(dirname -- "$OUTPUT")"
 printf '[server]\nhost: 127.0.0.1\nport: %s\nklippy_uds_address: %s\n[machine]\nprovider: none\n[authorization]\ntrusted_clients:\n 127.0.0.1\n[announcements]\ndev_mode: true\n[update_manager]\nenable_auto_refresh: false\nenable_system_updates: false\n' "$PORT" "$SOCK" > "$PERF_RUN/phobos.conf"
 start_child uv run --offline python tools/perf_harness/klippy_stub.py "$SOCK" > "$PERF_RUN/stub.log" 2>&1

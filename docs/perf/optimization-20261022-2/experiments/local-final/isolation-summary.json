@@ -1,0 +1,683 @@
+{
+  "measured_trials": 54,
+  "guest_steal_ticks_sum": {
+    "cpu": 14,
+    "cpu0": 1,
+    "cpu1": 3,
+    "cpu2": 5,
+    "cpu3": 5
+  },
+  "maximum_server_vcpu_runqueue_delay_percent": 0.03547544593506728,
+  "maximum_any_vcpu_runqueue_delay_percent": 0.049494015614614556,
+  "qemu_locked_kib_min": 4839224,
+  "qemu_swap_kib_max": 0,
+  "cgroup_swap_bytes_max": 0,
+  "frequency_khz_range": {
+    "10": [
+      4261015,
+      5332856
+    ],
+    "11": [
+      624194,
+      5282377
+    ],
+    "12": [
+      624194,
+      5284299
+    ],
+    "13": [
+      624194,
+      5283067
+    ]
+  },
+  "trials": [
+    {
+      "trial_id": "rich-candidate-r1-info-5000",
+      "elapsed_ns": 10337986589,
+      "vcpu_runqueue_delay_ns": {
+        "0": 148674,
+        "1": 192828,
+        "2": 381317,
+        "3": 350314
+      },
+      "server_vcpu_delay_percent": 0.0018652374748210267,
+      "maximum_vcpu_delay_percent": 0.003688503527425112
+    },
+    {
+      "trial_id": "rich-candidate-r1-independent-1200",
+      "elapsed_ns": 10270527082,
+      "vcpu_runqueue_delay_ns": {
+        "0": 237072,
+        "1": 527637,
+        "2": 1775353,
+        "3": 1651289
+      },
+      "server_vcpu_delay_percent": 0.0051373896956537915,
+      "maximum_vcpu_delay_percent": 0.01728589960209016
+    },
+    {
+      "trial_id": "rich-candidate-r1-history-200",
+      "elapsed_ns": 10289025537,
+      "vcpu_runqueue_delay_ns": {
+        "0": 39954,
+        "1": 262759,
+        "2": 435016,
+        "3": 388328
+      },
+      "server_vcpu_delay_percent": 0.002553779257861706,
+      "maximum_vcpu_delay_percent": 0.004227961126499826
+    },
+    {
+      "trial_id": "rich-candidate-r1-database64k-200",
+      "elapsed_ns": 10276039234,
+      "vcpu_runqueue_delay_ns": {
+        "0": 44655,
+        "1": 63848,
+        "2": 269222,
+        "3": 266596
+      },
+      "server_vcpu_delay_percent": 0.000621328885050849,
+      "maximum_vcpu_delay_percent": 0.0026199004681612525
+    },
+    {
+      "trial_id": "rich-candidate-r1-klippy328k-50",
+      "elapsed_ns": 10278040539,
+      "vcpu_runqueue_delay_ns": {
+        "0": 565511,
+        "1": 484132,
+        "2": 173231,
+        "3": 137844
+      },
+      "server_vcpu_delay_percent": 0.0047103530888301355,
+      "maximum_vcpu_delay_percent": 0.005502128522009326
+    },
+    {
+      "trial_id": "rich-baseline-r1-info-5000",
+      "elapsed_ns": 10356128362,
+      "vcpu_runqueue_delay_ns": {
+        "0": 176099,
+        "1": 285109,
+        "2": 533555,
+        "3": 464386
+      },
+      "server_vcpu_delay_percent": 0.0027530462160565484,
+      "maximum_vcpu_delay_percent": 0.0051520701689811675
+    },
+    {
+      "trial_id": "rich-baseline-r1-independent-1200",
+      "elapsed_ns": 10271913808,
+      "vcpu_runqueue_delay_ns": {
+        "0": 75881,
+        "1": 729135,
+        "2": 1917227,
+        "3": 1913251
+      },
+      "server_vcpu_delay_percent": 0.007098336431056626,
+      "maximum_vcpu_delay_percent": 0.018664749683810822
+    },
+    {
+      "trial_id": "rich-baseline-r1-history-200",
+      "elapsed_ns": 10302998389,
+      "vcpu_runqueue_delay_ns": {
+        "0": 54734,
+        "1": 494649,
+        "2": 293463,
+        "3": 418247
+      },
+      "server_vcpu_delay_percent": 0.00480101987134262,
+      "maximum_vcpu_delay_percent": 0.00480101987134262
+    },
+    {
+      "trial_id": "rich-baseline-r1-database64k-200",
+      "elapsed_ns": 10280263876,
+      "vcpu_runqueue_delay_ns": {
+        "0": 213126,
+        "1": 136596,
+        "2": 242211,
+        "3": 297510
+      },
+      "server_vcpu_delay_percent": 0.0013287207570507307,
+      "maximum_vcpu_delay_percent": 0.0028939918623544095
+    },
+    {
+      "trial_id": "rich-baseline-r1-klippy328k-50",
+      "elapsed_ns": 10260467242,
+      "vcpu_runqueue_delay_ns": {
+        "0": 77423,
+        "1": 214430,
+        "2": 18153,
+        "3": 81993
+      },
+      "server_vcpu_delay_percent": 0.002089865840828928,
+      "maximum_vcpu_delay_percent": 0.002089865840828928
+    },
+    {
+      "trial_id": "rich-moonraker-r1-info-5000",
+      "elapsed_ns": 10366993009,
+      "vcpu_runqueue_delay_ns": {
+        "0": 39405,
+        "1": 3677737,
+        "2": 3266484,
+        "3": 3413810
+      },
+      "server_vcpu_delay_percent": 0.03547544593506728,
+      "maximum_vcpu_delay_percent": 0.03547544593506728
+    },
+    {
+      "trial_id": "rich-moonraker-r1-independent-1200",
+      "elapsed_ns": 10282114180,
+      "vcpu_runqueue_delay_ns": {
+        "0": 923731,
+        "1": 1232822,
+        "2": 2224006,
+        "3": 2360625
+      },
+      "server_vcpu_delay_percent": 0.01198996605579418,
+      "maximum_vcpu_delay_percent": 0.022958556564093707
+    },
+    {
+      "trial_id": "rich-moonraker-r1-history-200",
+      "elapsed_ns": 10277815505,
+      "vcpu_runqueue_delay_ns": {
+        "0": 20997,
+        "1": 234615,
+        "2": 77275,
+        "3": 68989
+      },
+      "server_vcpu_delay_percent": 0.002282732161186036,
+      "maximum_vcpu_delay_percent": 0.002282732161186036
+    },
+    {
+      "trial_id": "rich-moonraker-r1-database64k-200",
+      "elapsed_ns": 10309105801,
+      "vcpu_runqueue_delay_ns": {
+        "0": 69641,
+        "1": 583059,
+        "2": 571804,
+        "3": 658043
+      },
+      "server_vcpu_delay_percent": 0.005655766962285345,
+      "maximum_vcpu_delay_percent": 0.006383123936279408
+    },
+    {
+      "trial_id": "rich-moonraker-r1-klippy328k-50",
+      "elapsed_ns": 10280988325,
+      "vcpu_runqueue_delay_ns": {
+        "0": 159861,
+        "1": 210585,
+        "2": 73747,
+        "3": 131425
+      },
+      "server_vcpu_delay_percent": 0.00204829529363365,
+      "maximum_vcpu_delay_percent": 0.00204829529363365
+    },
+    {
+      "trial_id": "rich-moonraker-r2-klippy328k-50",
+      "elapsed_ns": 10260701319,
+      "vcpu_runqueue_delay_ns": {
+        "0": 78216,
+        "1": 112874,
+        "2": 41628,
+        "3": 73957
+      },
+      "server_vcpu_delay_percent": 0.0011000612579082519,
+      "maximum_vcpu_delay_percent": 0.0011000612579082519
+    },
+    {
+      "trial_id": "rich-moonraker-r2-database64k-200",
+      "elapsed_ns": 10292955349,
+      "vcpu_runqueue_delay_ns": {
+        "0": 40185,
+        "1": 408069,
+        "2": 266588,
+        "3": 317296
+      },
+      "server_vcpu_delay_percent": 0.003964546489941254,
+      "maximum_vcpu_delay_percent": 0.003964546489941254
+    },
+    {
+      "trial_id": "rich-moonraker-r2-history-200",
+      "elapsed_ns": 10276631298,
+      "vcpu_runqueue_delay_ns": {
+        "0": 45214,
+        "1": 442509,
+        "2": 167513,
+        "3": 205444
+      },
+      "server_vcpu_delay_percent": 0.004305973301641361,
+      "maximum_vcpu_delay_percent": 0.004305973301641361
+    },
+    {
+      "trial_id": "rich-moonraker-r2-independent-1200",
+      "elapsed_ns": 10302003926,
+      "vcpu_runqueue_delay_ns": {
+        "0": 116939,
+        "1": 526750,
+        "2": 956690,
+        "3": 904260
+      },
+      "server_vcpu_delay_percent": 0.005113082889345426,
+      "maximum_vcpu_delay_percent": 0.009286445694177267
+    },
+    {
+      "trial_id": "rich-moonraker-r2-info-5000",
+      "elapsed_ns": 10369299949,
+      "vcpu_runqueue_delay_ns": {
+        "0": 975384,
+        "1": 2483702,
+        "2": 2306513,
+        "3": 2370884
+      },
+      "server_vcpu_delay_percent": 0.023952455924852713,
+      "maximum_vcpu_delay_percent": 0.023952455924852713
+    },
+    {
+      "trial_id": "rich-baseline-r2-klippy328k-50",
+      "elapsed_ns": 10276264376,
+      "vcpu_runqueue_delay_ns": {
+        "0": 118714,
+        "1": 562451,
+        "2": 65462,
+        "3": 101299
+      },
+      "server_vcpu_delay_percent": 0.005473302159426654,
+      "maximum_vcpu_delay_percent": 0.005473302159426654
+    },
+    {
+      "trial_id": "rich-baseline-r2-database64k-200",
+      "elapsed_ns": 10302350626,
+      "vcpu_runqueue_delay_ns": {
+        "0": 37903,
+        "1": 256174,
+        "2": 573324,
+        "3": 461638
+      },
+      "server_vcpu_delay_percent": 0.0024865587408129434,
+      "maximum_vcpu_delay_percent": 0.005564982408510778
+    },
+    {
+      "trial_id": "rich-baseline-r2-history-200",
+      "elapsed_ns": 10254519572,
+      "vcpu_runqueue_delay_ns": {
+        "0": 221658,
+        "1": 279400,
+        "2": 157618,
+        "3": 147265
+      },
+      "server_vcpu_delay_percent": 0.002724652267112568,
+      "maximum_vcpu_delay_percent": 0.002724652267112568
+    },
+    {
+      "trial_id": "rich-baseline-r2-independent-1200",
+      "elapsed_ns": 10289993291,
+      "vcpu_runqueue_delay_ns": {
+        "0": 93612,
+        "1": 45014,
+        "2": 187261,
+        "3": 225865
+      },
+      "server_vcpu_delay_percent": 0.00043745412389501625,
+      "maximum_vcpu_delay_percent": 0.002194996572034208
+    },
+    {
+      "trial_id": "rich-baseline-r2-info-5000",
+      "elapsed_ns": 10327065477,
+      "vcpu_runqueue_delay_ns": {
+        "0": 68480,
+        "1": 136963,
+        "2": 149570,
+        "3": 156029
+      },
+      "server_vcpu_delay_percent": 0.0013262528479657475,
+      "maximum_vcpu_delay_percent": 0.0015108745107455853
+    },
+    {
+      "trial_id": "rich-candidate-r2-klippy328k-50",
+      "elapsed_ns": 10265100200,
+      "vcpu_runqueue_delay_ns": {
+        "0": 89095,
+        "1": 235745,
+        "2": 85962,
+        "3": 94507
+      },
+      "server_vcpu_delay_percent": 0.002296567938031428,
+      "maximum_vcpu_delay_percent": 0.002296567938031428
+    },
+    {
+      "trial_id": "rich-candidate-r2-database64k-200",
+      "elapsed_ns": 10294012398,
+      "vcpu_runqueue_delay_ns": {
+        "0": 874947,
+        "1": 674193,
+        "2": 538025,
+        "3": 388216
+      },
+      "server_vcpu_delay_percent": 0.0065493703906067515,
+      "maximum_vcpu_delay_percent": 0.008499572044133067
+    },
+    {
+      "trial_id": "rich-candidate-r2-history-200",
+      "elapsed_ns": 10273086873,
+      "vcpu_runqueue_delay_ns": {
+        "0": 84398,
+        "1": 209009,
+        "2": 447822,
+        "3": 386239
+      },
+      "server_vcpu_delay_percent": 0.002034529665560631,
+      "maximum_vcpu_delay_percent": 0.004359176609096704
+    },
+    {
+      "trial_id": "rich-candidate-r2-independent-1200",
+      "elapsed_ns": 10318559559,
+      "vcpu_runqueue_delay_ns": {
+        "0": 134928,
+        "1": 199455,
+        "2": 1517548,
+        "3": 1458715
+      },
+      "server_vcpu_delay_percent": 0.0019329732881759878,
+      "maximum_vcpu_delay_percent": 0.01470697524516755
+    },
+    {
+      "trial_id": "rich-candidate-r2-info-5000",
+      "elapsed_ns": 10309038770,
+      "vcpu_runqueue_delay_ns": {
+        "0": 69700,
+        "1": 196609,
+        "2": 271841,
+        "3": 355728
+      },
+      "server_vcpu_delay_percent": 0.0019071516208877348,
+      "maximum_vcpu_delay_percent": 0.003450641790534269
+    },
+    {
+      "trial_id": "rich-baseline-r3-info-5000",
+      "elapsed_ns": 10357582716,
+      "vcpu_runqueue_delay_ns": {
+        "0": 124434,
+        "1": 685382,
+        "2": 739690,
+        "3": 706247
+      },
+      "server_vcpu_delay_percent": 0.006617200352561491,
+      "maximum_vcpu_delay_percent": 0.007141531188134805
+    },
+    {
+      "trial_id": "rich-baseline-r3-independent-1200",
+      "elapsed_ns": 10269322335,
+      "vcpu_runqueue_delay_ns": {
+        "0": 428386,
+        "1": 1720771,
+        "2": 4455054,
+        "3": 5082700
+      },
+      "server_vcpu_delay_percent": 0.01675642212666022,
+      "maximum_vcpu_delay_percent": 0.049494015614614556
+    },
+    {
+      "trial_id": "rich-baseline-r3-history-200",
+      "elapsed_ns": 10269948713,
+      "vcpu_runqueue_delay_ns": {
+        "0": 148746,
+        "1": 725398,
+        "2": 682601,
+        "3": 913679
+      },
+      "server_vcpu_delay_percent": 0.007063306938249556,
+      "maximum_vcpu_delay_percent": 0.008896626707039331
+    },
+    {
+      "trial_id": "rich-baseline-r3-database64k-200",
+      "elapsed_ns": 10276977932,
+      "vcpu_runqueue_delay_ns": {
+        "0": 250097,
+        "1": 199032,
+        "2": 468116,
+        "3": 591347
+      },
+      "server_vcpu_delay_percent": 0.0019366782853572444,
+      "maximum_vcpu_delay_percent": 0.005754094286401937
+    },
+    {
+      "trial_id": "rich-baseline-r3-klippy328k-50",
+      "elapsed_ns": 10267571215,
+      "vcpu_runqueue_delay_ns": {
+        "0": 807535,
+        "1": 496106,
+        "2": 127897,
+        "3": 167463
+      },
+      "server_vcpu_delay_percent": 0.00483177559338701,
+      "maximum_vcpu_delay_percent": 0.007864907708848066
+    },
+    {
+      "trial_id": "rich-candidate-r3-info-5000",
+      "elapsed_ns": 10333110006,
+      "vcpu_runqueue_delay_ns": {
+        "0": 110006,
+        "1": 382225,
+        "2": 606408,
+        "3": 551384
+      },
+      "server_vcpu_delay_percent": 0.003699031557566484,
+      "maximum_vcpu_delay_percent": 0.005868591350018383
+    },
+    {
+      "trial_id": "rich-candidate-r3-independent-1200",
+      "elapsed_ns": 10274974374,
+      "vcpu_runqueue_delay_ns": {
+        "0": 72880,
+        "1": 259051,
+        "2": 860451,
+        "3": 1427282
+      },
+      "server_vcpu_delay_percent": 0.002521183903441237,
+      "maximum_vcpu_delay_percent": 0.01389085702842844
+    },
+    {
+      "trial_id": "rich-candidate-r3-history-200",
+      "elapsed_ns": 10296015985,
+      "vcpu_runqueue_delay_ns": {
+        "0": 740447,
+        "1": 37669,
+        "2": 146865,
+        "3": 185369
+      },
+      "server_vcpu_delay_percent": 0.0003658599603465942,
+      "maximum_vcpu_delay_percent": 0.0071915875138377616
+    },
+    {
+      "trial_id": "rich-candidate-r3-database64k-200",
+      "elapsed_ns": 10263563973,
+      "vcpu_runqueue_delay_ns": {
+        "0": 34022,
+        "1": 72505,
+        "2": 129468,
+        "3": 209751
+      },
+      "server_vcpu_delay_percent": 0.0007064310232852484,
+      "maximum_vcpu_delay_percent": 0.0020436468321509433
+    },
+    {
+      "trial_id": "rich-candidate-r3-klippy328k-50",
+      "elapsed_ns": 10295566163,
+      "vcpu_runqueue_delay_ns": {
+        "0": 103131,
+        "1": 102471,
+        "2": 26211,
+        "3": 50243
+      },
+      "server_vcpu_delay_percent": 0.000995292520854834,
+      "maximum_vcpu_delay_percent": 0.0010017030473819899
+    },
+    {
+      "trial_id": "rich-moonraker-r3-info-5000",
+      "elapsed_ns": 10373543799,
+      "vcpu_runqueue_delay_ns": {
+        "0": 54214,
+        "1": 1784887,
+        "2": 1164000,
+        "3": 1252393
+      },
+      "server_vcpu_delay_percent": 0.017206145118624373,
+      "maximum_vcpu_delay_percent": 0.017206145118624373
+    },
+    {
+      "trial_id": "rich-moonraker-r3-independent-1200",
+      "elapsed_ns": 10293704400,
+      "vcpu_runqueue_delay_ns": {
+        "0": 1129834,
+        "1": 975201,
+        "2": 1647905,
+        "3": 1667561
+      },
+      "server_vcpu_delay_percent": 0.009473761457537094,
+      "maximum_vcpu_delay_percent": 0.016199814325346278
+    },
+    {
+      "trial_id": "rich-moonraker-r3-history-200",
+      "elapsed_ns": 10296116009,
+      "vcpu_runqueue_delay_ns": {
+        "0": 36927,
+        "1": 201700,
+        "2": 66082,
+        "3": 70021
+      },
+      "server_vcpu_delay_percent": 0.001958991136305096,
+      "maximum_vcpu_delay_percent": 0.001958991136305096
+    },
+    {
+      "trial_id": "rich-moonraker-r3-database64k-200",
+      "elapsed_ns": 10280791356,
+      "vcpu_runqueue_delay_ns": {
+        "0": 33706,
+        "1": 116211,
+        "2": 97912,
+        "3": 149978
+      },
+      "server_vcpu_delay_percent": 0.0011303701823710077,
+      "maximum_vcpu_delay_percent": 0.001458817661078891
+    },
+    {
+      "trial_id": "rich-moonraker-r3-klippy328k-50",
+      "elapsed_ns": 10269178047,
+      "vcpu_runqueue_delay_ns": {
+        "0": 189975,
+        "1": 344796,
+        "2": 57530,
+        "3": 106813
+      },
+      "server_vcpu_delay_percent": 0.003357581282766126,
+      "maximum_vcpu_delay_percent": 0.003357581282766126
+    },
+    {
+      "trial_id": "empty-candidate-r1-independent-1200",
+      "elapsed_ns": 10312189950,
+      "vcpu_runqueue_delay_ns": {
+        "0": 415388,
+        "1": 362552,
+        "2": 2774776,
+        "3": 2565386
+      },
+      "server_vcpu_delay_percent": 0.0035157614605421422,
+      "maximum_vcpu_delay_percent": 0.026907727780945308
+    },
+    {
+      "trial_id": "empty-baseline-r1-independent-1200",
+      "elapsed_ns": 10302017227,
+      "vcpu_runqueue_delay_ns": {
+        "0": 168057,
+        "1": 120527,
+        "2": 2293993,
+        "3": 2184718
+      },
+      "server_vcpu_delay_percent": 0.00116993591977421,
+      "maximum_vcpu_delay_percent": 0.022267415686199766
+    },
+    {
+      "trial_id": "empty-moonraker-r1-independent-1200",
+      "elapsed_ns": 10306915477,
+      "vcpu_runqueue_delay_ns": {
+        "0": 158425,
+        "1": 2459605,
+        "2": 4205989,
+        "3": 4487316
+      },
+      "server_vcpu_delay_percent": 0.023863638015550206,
+      "maximum_vcpu_delay_percent": 0.04353694381227339
+    },
+    {
+      "trial_id": "empty-moonraker-r2-independent-1200",
+      "elapsed_ns": 10307017061,
+      "vcpu_runqueue_delay_ns": {
+        "0": 821161,
+        "1": 2407909,
+        "2": 3086318,
+        "3": 3297217
+      },
+      "server_vcpu_delay_percent": 0.0233618416050859,
+      "maximum_vcpu_delay_percent": 0.0319900217539768
+    },
+    {
+      "trial_id": "empty-baseline-r2-independent-1200",
+      "elapsed_ns": 10299999168,
+      "vcpu_runqueue_delay_ns": {
+        "0": 122166,
+        "1": 51157,
+        "2": 1458776,
+        "3": 1735876
+      },
+      "server_vcpu_delay_percent": 0.0004966699430319799,
+      "maximum_vcpu_delay_percent": 0.01685316640988684
+    },
+    {
+      "trial_id": "empty-candidate-r2-independent-1200",
+      "elapsed_ns": 10293146295,
+      "vcpu_runqueue_delay_ns": {
+        "0": 113612,
+        "1": 122397,
+        "2": 959613,
+        "3": 878125
+      },
+      "server_vcpu_delay_percent": 0.0011891116330431987,
+      "maximum_vcpu_delay_percent": 0.009322834559012746
+    },
+    {
+      "trial_id": "empty-baseline-r3-independent-1200",
+      "elapsed_ns": 10276737872,
+      "vcpu_runqueue_delay_ns": {
+        "0": 140524,
+        "1": 62615,
+        "2": 1621463,
+        "3": 1548139
+      },
+      "server_vcpu_delay_percent": 0.000609288674868324,
+      "maximum_vcpu_delay_percent": 0.015777993174447294
+    },
+    {
+      "trial_id": "empty-candidate-r3-independent-1200",
+      "elapsed_ns": 10294856252,
+      "vcpu_runqueue_delay_ns": {
+        "0": 138422,
+        "1": 56916,
+        "2": 679639,
+        "3": 848441
+      },
+      "server_vcpu_delay_percent": 0.0005528586180010316,
+      "maximum_vcpu_delay_percent": 0.008241406963163491
+    },
+    {
+      "trial_id": "empty-moonraker-r3-independent-1200",
+      "elapsed_ns": 10303226866,
+      "vcpu_runqueue_delay_ns": {
+        "0": 944686,
+        "1": 1791738,
+        "2": 3262453,
+        "3": 3434978
+      },
+      "server_vcpu_delay_percent": 0.017390066464639566,
+      "maximum_vcpu_delay_percent": 0.03333885630855331
+    }
+  ]
+}

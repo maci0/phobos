@@ -1,0 +1,1 @@
+Complete 54-trial study with SIMD, SQL pagination, batched status, 16 KiB reader and SMP startup allocator. Config p99 median remained 2.3% above Moonraker, with overlapping ranges. Config trials lasted 10 seconds.

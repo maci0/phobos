@@ -30,8 +30,8 @@
 //!
 //! Subscription gating: `notify_status_update` is delivered only to connections
 //! subscribed to the relevant topics (Moonraker masks unsubscribed uids); every
-//! other notification broadcasts to all authenticated connections. `emitStatus` applies
-//! the per-topic gate; `emit` broadcasts.
+//! other notification broadcasts to all authenticated connections. `emitStatus`
+//! filters a complete update by each client's object and field subscriptions.
 //!
 //! Backpressure / slow clients: Moonraker queues messages per connection
 //! without bound and never blocks its loop. Here fan-out writes straight to
@@ -47,6 +47,7 @@ const Core = @import("core.zig").Core;
 const connections = @import("connections.zig");
 const Connections = connections.Connections;
 const Connection = connections.Connection;
+const jv = @import("../json/value.zig");
 
 /// The 27 known Moonraker notification method names (authoritative list from
 /// `api_scanner scan --source vendor/moonraker/moonraker` → `notifications[]`).
@@ -109,8 +110,8 @@ pub fn buildFrame(
     method: []const u8,
     params: std.json.Value,
 ) error{OutOfMemory}![]u8 {
-    const Frame = struct { jsonrpc: []const u8 = "2.0", method: []const u8, params: ?std.json.Value };
-    const frame: Frame = .{ .method = method, .params = if (hasPayload(params)) params else null };
+    const Frame = struct { jsonrpc: []const u8 = "2.0", method: []const u8, params: ?jv.StringifyValue };
+    const frame: Frame = .{ .method = method, .params = if (hasPayload(params)) .{ .value = params } else null };
     return std.json.Stringify.valueAlloc(alloc, frame, .{ .emit_null_optional_fields = false });
 }
 
@@ -149,7 +150,7 @@ pub const NotifyBus = struct {
     ) !void {
         self.core.lock(io);
         defer self.core.unlock(io);
-        return self.fanout(io, method, params, null);
+        return self.fanout(io, method, params, false);
     }
 
     /// Like `emit`, but assumes the caller ALREADY holds the `Core` lock (e.g.
@@ -164,22 +165,19 @@ pub const NotifyBus = struct {
         method: []const u8,
         params: std.json.Value,
     ) !void {
-        return self.fanout(io, method, params, null);
+        return self.fanout(io, method, params, false);
     }
 
-    /// Like `emit`, but for status updates: deliver only to connections
-    /// subscribed to `topic`. Matches Moonraker masking unsubscribed uids for
-    /// `notify_status_update`.
+    /// Like `emit`, but send one filtered status update per subscribed client.
     pub fn emitStatus(
         self: *NotifyBus,
         io: Io,
         method: []const u8,
         params: std.json.Value,
-        topic: []const u8,
     ) !void {
         self.core.lock(io);
         defer self.core.unlock(io);
-        return self.fanout(io, method, params, topic);
+        return self.fanout(io, method, params, true);
     }
 
     /// Like `emitStatus`, but assumes the caller ALREADY holds the `Core` lock.
@@ -188,13 +186,12 @@ pub const NotifyBus = struct {
         io: Io,
         method: []const u8,
         params: std.json.Value,
-        topic: []const u8,
     ) !void {
-        return self.fanout(io, method, params, topic);
+        return self.fanout(io, method, params, true);
     }
 
-    /// Core fan-out. Assumes the Core lock is held. Builds the frame once and
-    /// writes it to every (optionally subscription-gated) connection. The
+    /// Core fan-out. Assumes Core is held. Generic frames are built once;
+    /// status frames are filtered per client. The
     /// registry is snapshotted first so per-connection write mutexes are never
     /// taken while holding the registry mutex.
     fn fanout(
@@ -202,19 +199,19 @@ pub const NotifyBus = struct {
         io: Io,
         method: []const u8,
         params: std.json.Value,
-        topic: ?[]const u8,
+        status: bool,
     ) !void {
         var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer arena.deinit();
         const a = arena.allocator();
 
-        const frame = try buildFrame(a, method, params);
+        const frame = if (status) "" else try buildFrame(a, method, params);
         // Refcounted fan-out: broadcast pins target connections under the registry
         // mutex, releases it during the socket writes (so a slow client cannot
         // stall connection add/remove), then drops the refs. A concurrent WS
         // teardown (`Connections.remove`) defers the free while a ref is held, so
         // there is no use-after-free against background-thread emits.
-        self.conns.broadcast(io, a, frame, topic, if (topic != null) .{ .method = method, .params = params } else null);
+        self.conns.broadcast(io, a, frame, null, if (status) .{ .method = method, .params = params } else null);
     }
 };
 
@@ -363,7 +360,8 @@ test "emitStatus delivers only to subscribed connections" {
     var requested: std.json.ObjectMap = .empty;
     try requested.put(arena.allocator(), "toolhead", .null);
     try conns.replaceSubscriptions(io, sub, .{ .object = requested });
-    try bus.emitStatus(io, names.status_update, try paramsArray(arena.allocator(), "s"), "toolhead");
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "[{\"toolhead\":{\"position\":[1,2,3]}},12.5]", .{});
+    try bus.emitStatus(io, names.status_update, params);
 
     try std.testing.expectEqual(@as(usize, 1), rs.frames.items.len);
     try std.testing.expectEqual(@as(usize, 0), ru.frames.items.len);

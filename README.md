@@ -97,7 +97,7 @@ zig-out/bin/phobos schema
 tools/coverage.sh
 
 # Static binary for the Cortex-A7 target
-zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseSmall
+zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseFast
 
 # Build and validate the Linux release matrix in isolated scratch prefixes
 scripts/build-release.sh

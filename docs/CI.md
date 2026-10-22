@@ -12,9 +12,9 @@ printer credentials and does not deploy to a printer.
 - Formatting, build-policy tests, SQLite source hashes, Python tests and API
   registration/table checks must pass. Python lint/format/type checks cover the
   maintained performance and release helpers; scanner behavior is tested.
-- The complete standalone daemon suite runs in Debug and ReleaseSafe on
-  x86-64, and ReleaseSafe on native AArch64. The physical-Klippy fixture may
-  skip. OpenSSL and socat are installed so the MQTT/WebSocket TLS fixtures run.
+- The complete standalone daemon suite runs in Debug, ReleaseSafe and ReleaseFast
+  on x86-64, and ReleaseSafe and ReleaseFast on native AArch64. The physical-Klippy
+  fixture may skip. OpenSSL and socat are installed so MQTT/WebSocket TLS fixtures run.
   Logs are retained as artifacts. No test uses a live printer database.
 - All seven [Linux profiles](BUILDS.md) build independently. The build helper
   checks ELF class/machine, static linkage, ARM ABI/FPU attributes and checksums.
@@ -64,6 +64,7 @@ does not itself prevent a maintainer from pushing an unverified main commit.
 uv sync --locked --python 3.12
 scripts/test.sh Debug
 scripts/test.sh ReleaseSafe
+scripts/test.sh ReleaseFast
 uv run --locked python -m pytest tools/api_scanner/tests \
   tools/client_api_scanner/tests tools/perf_harness/tests tools/release/tests \
   --basetemp=.scratch/ci-pytest

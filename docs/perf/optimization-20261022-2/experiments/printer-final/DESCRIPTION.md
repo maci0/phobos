@@ -1,0 +1,1 @@
+Interrupted 16 KiB/SMP physical run: a benchmark assertion mixed CLOCK_MONOTONIC with Klippy CLOCK_MONOTONIC_RAW. Four completed HTTP trials retained. A transient-startup readiness check in the restoration guard was also fixed. Production was restored. No daemon crash established.

@@ -1703,7 +1703,9 @@ test "auth startup preserves loaded users and keys across allocation failures" {
             try testing.expectEqual(@as(usize, 2), mem.writes);
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Check.run, .{});
+    // Keep arena growth independent of the backing heap's in-place remaps.
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    try testing.checkAllAllocationFailures(no_resize.allocator(), Check.run, .{});
 }
 
 test "auth creation remains absent after every allocation failure before persistence" {

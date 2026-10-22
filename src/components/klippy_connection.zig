@@ -29,13 +29,14 @@ const SocketDeadline = @import("../util/socket_deadline.zig").SocketDeadline;
 const DeadlineWriter = @import("../util/deadline_writer.zig").DeadlineWriter;
 const MessageBuffer = @import("../util/ws_message.zig").MessageBuffer;
 const connections = @import("../server/connections.zig");
+const read_buffer_size = 64 * 1024;
 
 /// One in-flight request awaiting its response. The persistent reader routes
 /// a matching response frame here and posts the semaphore.
 const Waiter = struct {
     sem: std.Io.Semaphore = .{},
-    /// gpa-owned response frame, set by the reader before posting.
-    payload: ?[]u8 = null,
+    /// gpa-owned decoded frame, set by the reader before posting.
+    response: ?std.json.Parsed(std.json.Value) = null,
     /// Set when the connection drops while waiting.
     failed: bool = false,
 };
@@ -132,20 +133,9 @@ fn frameIdMatches(alloc: std.mem.Allocator, payload: []const u8, id: u64) bool {
     return (std.fmt.parseInt(u64, value.string, 10) catch return false) == id;
 }
 
-// Replies are decoded by their waiter. Skip the result tree while routing;
-// a present null method must still be rejected, rather than treated as absent.
+// The handshake matches IDs without retaining a decoded result.
 const FrameRoute = struct {
     id: std.json.Value = .null,
-    method: Method = .absent,
-
-    const Method = union(enum) {
-        absent,
-        present: std.json.Value,
-
-        pub fn jsonParse(alloc: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!@This() {
-            return .{ .present = try std.json.Value.jsonParse(alloc, source, options) };
-        }
-    };
 };
 
 /// A JSON number (int or float) as f64; null for absent/non-numeric.
@@ -281,7 +271,7 @@ pub const KlippyCtx = struct {
     /// Guards `stream` and serializes socket writes. Only the Klippy task reads.
     write_mutex: std.Io.Mutex = std.Io.Mutex.init,
 
-    read_buffer: [4096]u8 = undefined,
+    read_buffer: [read_buffer_size]u8 = undefined,
     reader: ?net.Stream.Reader = null,
     /// Active Unix socket stream; null when disconnected.
     stream: ?net.Stream = null,
@@ -669,29 +659,24 @@ pub const KlippyCtx = struct {
     /// `call_remote_method`) run under Core; Moonraker sends no reply to them.
     /// Responses go to the waiter registered under their string id.
     pub fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
-        const route = std.json.parseFromSlice(FrameRoute, self.gpa, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
-            error.UnexpectedToken => return error.InvalidFrame,
-            else => return err,
-        };
-        defer route.deinit();
-        if (route.value.method == .present) {
-            const method = route.value.method.present;
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{ .allocate = .alloc_always });
+        var retained = false;
+        defer if (!retained) parsed.deinit();
+        const frame = parsed.value;
+        if (frame != .object or jv.exceedsDepth(frame, jv.max_value_depth)) return error.InvalidFrame;
+        if (frame.object.get("method")) |method| {
             if (method != .string) return error.InvalidFrame;
-            const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
-            defer parsed.deinit();
-            const frame = parsed.value;
-            if (jv.exceedsDepth(frame, jv.max_value_depth)) return error.InvalidFrame;
             return self.bus.core.run(io, dispatchRemoteMethod, .{ self, io, method.string, frame });
         }
-        const id = route.value.id;
+        const id = frame.object.get("id") orelse return;
         if (id != .string) return;
         const id_num = std.fmt.parseInt(u64, id.string, 10) catch return;
         self.pending_mutex.lockUncancelable(io);
         defer self.pending_mutex.unlock(io);
         const waiter = self.pending.get(id_num) orelse return;
-        if (waiter.payload != null or waiter.failed) return;
-        // On OOM the waiter wakes without a payload and reports it.
-        waiter.payload = self.gpa.dupe(u8, payload) catch null;
+        if (waiter.response != null or waiter.failed) return;
+        waiter.response = parsed;
+        retained = true;
         waiter.sem.post(io);
     }
 
@@ -757,24 +742,9 @@ pub const KlippyCtx = struct {
 
         if (self.on_status) |callback| if (self.event_ctx) |ctx| callback(ctx, io, status_dict, eventtime);
 
-        // Reuse one map + array across objects: emit copies params into its
-        // own frame, so the scaffolding can be recycled.
-        const scratch = std.heap.smp_allocator;
-        var per_obj_map: std.json.ObjectMap = .empty;
-        defer per_obj_map.deinit(scratch);
-        var params_arr: std.json.Array = .init(scratch);
-        defer params_arr.deinit();
-
         var it = status_dict.object.iterator();
         while (it.next()) |entry| {
             const obj_name = entry.key_ptr.*;
-            per_obj_map.clearRetainingCapacity();
-            try per_obj_map.put(scratch, obj_name, entry.value_ptr.*);
-            params_arr.clearRetainingCapacity();
-            try params_arr.append(.{ .object = per_obj_map });
-            try params_arr.append(eventtime);
-            _ = self.bus.emitStatusLocked(io, notify.names.status_update, .{ .array = params_arr }, obj_name) catch {};
-
             // Any object with a numeric `temperature` is a heater, sensor or fan.
             if (self.temp_store) |ts| {
                 if (entry.value_ptr.* == .object) {
@@ -782,6 +752,14 @@ pub const KlippyCtx = struct {
                     ts.pushTemp(io, obj_name, numField(od, "temperature"), numField(od, "target"), numField(od, "power"), numField(od, "speed"));
                 }
             }
+        }
+
+        if (status_dict.object.count() != 0) {
+            var params_arr = try std.json.Array.initCapacity(std.heap.smp_allocator, 2);
+            defer params_arr.deinit();
+            params_arr.appendAssumeCapacity(status_dict);
+            params_arr.appendAssumeCapacity(eventtime);
+            self.bus.emitStatusLocked(io, notify.names.status_update, .{ .array = params_arr }) catch {};
         }
 
         if (status_dict.object.get("print_stats")) |ps| {
@@ -865,7 +843,7 @@ pub const KlippyCtx = struct {
             self.pending_mutex.lockUncancelable(io);
             _ = self.pending.remove(id);
             self.pending_mutex.unlock(io);
-            if (waiter.payload) |p| self.gpa.free(p);
+            if (waiter.response) |response| response.deinit();
         }
 
         const frame = try formatRequest(alloc, method, id, params_json);
@@ -879,7 +857,10 @@ pub const KlippyCtx = struct {
                 error.Canceled => return error.Canceled,
             };
         }
-        if (waiter.payload) |payload| return parseKlippyResult(alloc, payload);
+        if (waiter.response) |response| {
+            if (response.value.object.contains("error")) return error.KlippyRequestFailed;
+            return jv.deepCopy(alloc, response.value.object.get("result") orelse .null);
+        }
         return if (waiter.failed) error.KlippyDisconnected else error.OutOfMemory;
     }
 
@@ -1598,16 +1579,61 @@ test "processStatusUpdate: malformed params return early" {
 const GcodeCapture = struct {
     buf: [512]u8 = undefined,
     len: usize = 0,
+    count: usize = 0,
     fn write(ctx: *anyopaque, bytes: []const u8) anyerror!void {
         const self: *GcodeCapture = @ptrCast(@alignCast(ctx));
         const n = @min(bytes.len, self.buf.len);
         @memcpy(self.buf[0..n], bytes[0..n]);
         self.len = n;
+        self.count += 1;
     }
     fn slice(self: *const GcodeCapture) []const u8 {
         return self.buf[0..self.len];
     }
 };
+
+test "Klippy status changes reach each authorized subscriber in one filtered frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io_handle = std.testing.io;
+    const nb = try NullBus.init(a);
+    defer nb.deinit(a);
+    var ctx = try KlippyCtx.init(a, &nb.bus);
+    defer ctx.deinit();
+    var captures: [4]GcodeCapture = @splat(.{});
+    for (&captures, 0..) |*capture, index| {
+        const conn = try nb.conns_obj.add(io_handle, index == 3);
+        nb.conns_obj.attachWriter(io_handle, conn, capture, GcodeCapture.write);
+        const raw = switch (index) {
+            0, 3 => "{\"toolhead\":[\"position\"],\"extruder\":[\"temperature\"]}",
+            1 => "{\"heater_bed\":null}",
+            else => "{}",
+        };
+        try nb.conns_obj.replaceSubscriptions(io_handle, conn, try std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}));
+    }
+    const params = try std.json.parseFromSliceLeaky(std.json.Value, a,
+        \\{"status":{"toolhead":{"position":[1,2,3],"velocity":4},"extruder":{"temperature":200,"target":0},"heater_bed":{"temperature":30,"target":0}},"eventtime":12.5}
+    , .{});
+    try nb.bus.core.run(io_handle, KlippyCtx.processStatusUpdate, .{ &ctx, io_handle, params });
+    for (captures, 0..) |capture, index| try std.testing.expectEqual(@as(usize, if (index < 2) 1 else 0), capture.count);
+    const frame = try std.json.parseFromSliceLeaky(std.json.Value, a, captures[0].slice(), .{});
+    try std.testing.expectEqualStrings(notify.names.status_update, frame.object.get("method").?.string);
+    const arguments = frame.object.get("params").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), arguments.len);
+    try std.testing.expectEqual(@as(f64, 12.5), arguments[1].float);
+    const status = arguments[0].object;
+    try std.testing.expectEqual(@as(usize, 2), status.count());
+    try std.testing.expectEqual(@as(usize, 1), status.get("toolhead").?.object.count());
+    try std.testing.expect(status.get("toolhead").?.object.contains("position"));
+    try std.testing.expectEqual(@as(usize, 1), status.get("extruder").?.object.count());
+    try std.testing.expect(status.get("extruder").?.object.contains("temperature"));
+    const bed = try std.json.parseFromSliceLeaky(std.json.Value, a, captures[1].slice(), .{});
+    const bed_status = bed.object.get("params").?.array.items[0].object;
+    try std.testing.expectEqual(@as(usize, 1), bed_status.count());
+    try std.testing.expectEqual(@as(usize, 2), bed_status.get("heater_bed").?.object.count());
+    try std.testing.expectEqual(@as(usize, 3), params.object.get("status").?.object.count());
+}
 
 test "process_gcode_response: forwards the response STRING as a [response] array" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1654,7 +1680,7 @@ test "dispatchFrame rejects non-object roots and non-string methods" {
     try ctx.dispatchFrame(std.testing.io, "{\"id\":7,\"result\":{}}");
 }
 
-test "dispatchFrame routes a large reply with one owned payload copy" {
+test "dispatchFrame retains one decoded reply independently of its input" {
     const alloc = std.testing.allocator;
     const nb = try NullBus.init(alloc);
     defer nb.deinit(alloc);
@@ -1663,7 +1689,7 @@ test "dispatchFrame routes a large reply with one owned payload copy" {
     defer ctx.deinit();
     var waiter: Waiter = .{};
     try ctx.pending.put(ctx.gpa, 7, &waiter);
-    defer if (waiter.payload) |payload| ctx.gpa.free(payload);
+    defer if (waiter.response) |response| response.deinit();
     const text = try alloc.alloc(u8, 256 * 1024);
     defer alloc.free(text);
     @memset(text, 'x');
@@ -1671,13 +1697,36 @@ test "dispatchFrame routes a large reply with one owned payload copy" {
     defer alloc.free(wire);
     const before = tracked.allocated_bytes;
     try ctx.dispatchFrame(std.testing.io, wire);
-    try std.testing.expectEqualStrings(wire, waiter.payload.?);
-    try std.testing.expect(tracked.allocated_bytes - before < wire.len + 4096);
+    try std.testing.expectEqualStrings(text, waiter.response.?.value.object.get("result").?.object.get("payload").?.string);
+    // std.json grows both its string ArrayList and arena by 1.5; no wire copy remains.
+    try std.testing.expect(tracked.allocated_bytes - before < wire.len * 5 / 2 + 4096);
     @memset(wire, ' ');
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
-    const result = try parseKlippyResult(arena.allocator(), waiter.payload.?);
+    const result = try jv.deepCopy(arena.allocator(), waiter.response.?.value.object.get("result").?);
     try std.testing.expectEqualStrings(text, result.object.get("payload").?.string);
+}
+
+test "dispatchFrame releases partial decoded replies on allocation failure" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            const nb = try NullBus.init(std.testing.allocator);
+            defer nb.deinit(std.testing.allocator);
+            var ctx = try KlippyCtx.init(alloc, &nb.bus);
+            defer ctx.deinit();
+            var waiter: Waiter = .{};
+            try ctx.pending.put(alloc, 7, &waiter);
+            defer if (waiter.response) |response| response.deinit();
+            try ctx.dispatchFrame(std.testing.io,
+                \\{"id":"7","result":{"config":{"macro":"M117 test\nM117 \"quoted\"\n"},"status":[1,true,null]}}
+            );
+            var arena = std.heap.ArenaAllocator.init(alloc);
+            defer arena.deinit();
+            const copy = try jv.deepCopy(arena.allocator(), waiter.response.?.value);
+            try std.testing.expectEqualStrings("M117 test\nM117 \"quoted\"\n", copy.object.get("result").?.object.get("config").?.object.get("macro").?.string);
+        }
+    }.run, .{});
 }
 
 test "frame routing validates skipped JSON and escaped route keys" {
@@ -1696,7 +1745,7 @@ test "frame routing validates skipped JSON and escaped route keys" {
     try std.testing.expectError(error.InvalidFrame, ctx.dispatchFrame(std.testing.io, "{\"id\":\"7\",\"me\\u0074hod\":null}"));
 }
 
-test "fuzz frame routing preserves reply IDs without decoding results" {
+test "fuzz frame routing preserves reply IDs and decoded result ownership" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) !void {
             const alloc = std.testing.allocator;
@@ -1709,6 +1758,20 @@ test "fuzz frame routing preserves reply IDs without decoding results" {
             defer alloc.free(wire);
             try std.testing.expect(frameIdMatches(alloc, wire, id));
             try std.testing.expect(!frameIdMatches(alloc, wire, id +% 1));
+            const nb = try NullBus.init(alloc);
+            defer nb.deinit(alloc);
+            var ctx = try KlippyCtx.init(alloc, &nb.bus);
+            defer ctx.deinit();
+            var waiter: Waiter = .{};
+            try ctx.pending.put(alloc, id, &waiter);
+            defer if (waiter.response) |response| response.deinit();
+            const expected = try std.json.Stringify.valueAlloc(alloc, .{ .payload = &bytes }, .{});
+            defer alloc.free(expected);
+            try ctx.dispatchFrame(std.testing.io, wire);
+            @memset(wire, ' ');
+            const actual = try std.json.Stringify.valueAlloc(alloc, waiter.response.?.value.object.get("result").?, .{});
+            defer alloc.free(actual);
+            try std.testing.expectEqualStrings(expected, actual);
         }
     }.run, .{});
 }
@@ -1755,6 +1818,49 @@ test "subscription snapshots seed owned print state" {
 // ===========================================================================
 // Tests: sockets
 // ===========================================================================
+
+test "Klippy reader preserves a large frame and its pipelined successor" {
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = 1 << 20 });
+    defer threaded.deinit();
+    const aio = threaded.io();
+    const nb = try NullBus.init(std.testing.allocator);
+    defer nb.deinit(std.testing.allocator);
+    var ctx = try KlippyCtx.init(std.testing.allocator, &nb.bus);
+    defer ctx.deinit();
+    ctx.setIo(aio);
+    var listener = try (try net.IpAddress.parse("127.0.0.1", 0)).listen(aio, .{});
+    defer listener.deinit(aio);
+    const stream = try listener.socket.address.connect(aio, .{ .mode = .stream });
+    ctx.stream = stream;
+    const peer = try listener.accept(aio);
+    var peer_owned = true;
+    defer if (peer_owned) peer.close(aio);
+    var deadline: SocketDeadline = .{ .base_io = aio, .timeout = .{ .deadline = .fromNow(aio, .{ .raw = .fromSeconds(5), .clock = .awake }) } };
+    ctx.reader = stream.reader(deadline.io(), &ctx.read_buffer);
+    const Peer = struct {
+        fn send(io_handle: std.Io, socket: net.Stream) !void {
+            defer socket.close(io_handle);
+            var buffer: [512]u8 = undefined;
+            var writer = socket.writer(io_handle, &buffer);
+            const large: [64 * 1024 + 1]u8 = @splat('x');
+            try framing.write(&writer.interface, &large);
+            try framing.write(&writer.interface, "{}");
+            try writer.interface.flush();
+        }
+    };
+    var sender = try aio.concurrent(Peer.send, .{ aio, peer });
+    peer_owned = false;
+    defer _ = sender.cancel(aio) catch {};
+    const large = try ctx.readFrame();
+    defer std.testing.allocator.free(large);
+    try std.testing.expectEqual(@as(usize, 64 * 1024 + 1), large.len);
+    for (large) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+    const next = try ctx.readFrame();
+    defer std.testing.allocator.free(next);
+    try std.testing.expectEqualStrings("{}", next);
+    try std.testing.expectError(error.EndOfStream, ctx.readFrame());
+    try sender.await(aio);
+}
 
 test "postMethod sends a frame without waiting for a reply" {
     const aio = std.testing.io;

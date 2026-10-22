@@ -1478,7 +1478,9 @@ test "Spoolman selection and accounting survive persistence and allocation failu
             _ = try std.json.parseFromSliceLeaky(std.json.Value, alloc, wire, .{});
         }
     };
-    try testing.checkAllAllocationFailures(testing.allocator, Allocation.run, .{});
+    // Keep arena growth independent of the backing heap's in-place remaps.
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    try testing.checkAllAllocationFailures(no_resize.allocator(), Allocation.run, .{});
 }
 
 test "Spoolman initialization rejects unreadable or corrupt persisted selection" {

@@ -183,16 +183,16 @@ pub const Connections = struct {
                 var message = frame;
                 if (topic) |t| {
                     if (!conn.subs.contains(t)) continue;
-                    if (conn.subs.get(t).? == .array) if (status) |s| {
-                        if (s.params != .array or s.params.array.items.len != 2) continue;
-                        const filtered = filterStatus(alloc, conn.subs, s.params.array.items[0], false) catch continue;
-                        if (filtered.object.count() == 0) continue;
-                        message = std.json.Stringify.valueAlloc(alloc, .{
-                            .jsonrpc = "2.0",
-                            .method = s.method,
-                            .params = [_]std.json.Value{ filtered, s.params.array.items[1] },
-                        }, .{}) catch continue;
-                    };
+                }
+                if (status) |s| {
+                    if (s.params != .array or s.params.array.items.len != 2) continue;
+                    const filtered = filterStatus(alloc, conn.subs, s.params.array.items[0], false) catch continue;
+                    if (filtered.object.count() == 0) continue;
+                    message = std.json.Stringify.valueAlloc(alloc, .{
+                        .jsonrpc = "2.0",
+                        .method = s.method,
+                        .params = .{ jv.StringifyValue{ .value = filtered }, jv.StringifyValue{ .value = s.params.array.items[1] } },
+                    }, .{}) catch continue;
                 }
                 conn.refs += 1;
                 targets.append(alloc, .{ .conn = conn, .frame = message }) catch {
@@ -887,6 +887,21 @@ test "fuzz subscription replacement and status filtering keep only requested fie
                 }
             }
             try std.testing.expect(filtered.object.count() <= request.count());
+            var record: RecordWriter = .{ .alloc = a };
+            defer record.deinit();
+            conns.attachWriter(io, conn, &record, RecordWriter.write);
+            var params: std.json.Array = .init(a);
+            try params.append(status);
+            try params.append(.{ .integer = 42 });
+            conns.broadcast(io, a, "", null, .{ .method = "notify_status_update", .params = .{ .array = params } });
+            const expected = try filterStatus(a, conn.subs, status, false);
+            try std.testing.expectEqual(@as(usize, if (expected.object.count() == 0) 0 else 1), record.frames.items.len);
+            if (record.frames.items.len != 0) {
+                const actual = try std.json.parseFromSliceLeaky(std.json.Value, a, record.frames.items[0], .{});
+                const args = actual.object.get("params").?.array.items;
+                try std.testing.expectEqual(@as(i64, 42), args[1].integer);
+                try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(a, expected, .{}), try std.json.Stringify.valueAlloc(a, args[0], .{}));
+            }
         }
     }.run, .{});
 }

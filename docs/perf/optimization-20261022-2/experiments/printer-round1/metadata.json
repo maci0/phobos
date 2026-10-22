@@ -1,0 +1,12 @@
+{
+  "source_commit": "40ff6db18306dddcc788813dd190152f15efce65",
+  "seed_sha256": "efb48c2e2a3606d18a55ba8d96e546e283926a3432ae5449d053135dff175079",
+  "timestamp_utc": "2026-10-22T11:10:02Z",
+  "duration_seconds": 12,
+  "transport": "Printer-local Python stdlib open-loop generator on CPU 0, all server threads on CPU 1; SSH carries monitoring only",
+  "profiles": [
+    "baseline",
+    "candidate",
+    "moonraker"
+  ]
+}

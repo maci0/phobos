@@ -1,0 +1,143 @@
+{
+  "source_parent_commit": "40ff6db18306dddcc788813dd190152f15efce65",
+  "candidate_source_blobs_match_checkout": true,
+  "native_benchmark_binary_matches_release_matrix": true,
+  "host_suites": {
+    "Debug": {
+      "passed": 1750,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 331
+    },
+    "ReleaseSafe": {
+      "passed": 1750,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 331
+    },
+    "ReleaseFast": {
+      "passed": 1750,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 331
+    }
+  },
+  "skip": "Gated local real-Klippy fixture; physical Klippy was verified separately.",
+  "python_tool_tests_passed": 110,
+  "build_policy_tests_passed": 4,
+  "build_policy_fuzz_tests_found": 2,
+  "api_surface": {
+    "http_endpoints": [
+      123,
+      123
+    ],
+    "rpc_methods": [
+      130,
+      130
+    ],
+    "notifications": [
+      27,
+      27
+    ],
+    "generated_document": "up to date; not regenerated"
+  },
+  "static_ReleaseFast_profiles": {
+    "phobos-v0.2.2-arm-linux-musleabihf": {
+      "sha256": "e781ef494d935820640a4b81d0e294b917592d1641496179af5308c315b9b9ab",
+      "bytes": 5291960
+    },
+    "phobos-v0.2.2-x86_64-linux-musl": {
+      "sha256": "1ae22976bdc63c4ecca80e2eb643839b91f48ddb8e7496c22f5bae892390823d",
+      "bytes": 4920728
+    },
+    "phobos-v0.2.2-aarch64-linux-musl": {
+      "sha256": "abc0a74170f5fb1d033c46c510f506f01de2c57c2e4c1b52ed24cfeaf9faf32f",
+      "bytes": 4323056
+    },
+    "phobos-v0.2.2-armv6-linux-musleabihf": {
+      "sha256": "be7b7b823a1fe74007126ed7abc87d6f470b7b794830e6538cf66cec1728ab70",
+      "bytes": 4838068
+    },
+    "phobos-v0.2.2-armv7-linux-musleabihf": {
+      "sha256": "757a23cb8fd8102b4c9611b2d62b515de895f2687184dc0f7bc9aa336b52440c",
+      "bytes": 4778788
+    },
+    "phobos-v0.2.2-armv7-linux-musleabi-soft": {
+      "sha256": "1560ddef3d9902fe40741e7dc24d834191eec40cdb33520305598b1485e74ebd",
+      "bytes": 4747936
+    },
+    "phobos-v0.2.2-armv7-linux-musleabi-softfp-c": {
+      "sha256": "aa4920dcccc0af34b5652d2e9e1abf603ebc7982456a997c6f1d9f57c62dba22",
+      "bytes": 4750372
+    }
+  },
+  "native_float_abi_probe": "passed",
+  "physical_ARM_float_abi_probe": {
+    "profiles": [
+      {
+        "profile": "cortex-a7-hardfp",
+        "sha256": "e58a716afea5ed6b64f4d4cb38ca48c97b5557321831076a7b5c2e339cac2e2b",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv6-hardfp",
+        "sha256": "f4bbad38839e77cf7086fdba48858dfb85a5a3dedf20163a0e81d2a6f72f1f7f",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv7-hardfp",
+        "sha256": "523b9069b07528db87af8b61a98813e60aeba26eab4e27a25e5f79429f33f45a",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv7-soft",
+        "sha256": "0b07014ee7bc4ad3e5df24c5c7c99a3879e03f506b781a82c51132be6bd9c0bb",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      },
+      {
+        "profile": "armv7-softfp-c",
+        "sha256": "7309e97b20fd0d9cdb5752076aa1c493256a5eb2880987deb72102316df30acd",
+        "passed": true,
+        "output": "return[0] c=3ff4000000000000 zig=3ff4000000000000\nreturn[1] c=c004000000000000 zig=c004000000000000\nreturn[2] c=41dab55cb1f9e8d1 zig=41dab55cb1f9e8d1\nreturn[3] c=40bec7ec0c1fbe70 zig=40bec7ec0c1fbe70\nadd c=bff4000000000000 zig=bff4000000000000\n"
+      }
+    ],
+    "after": {
+      "extruder": {
+        "target": 0
+      },
+      "heater_bed": {
+        "target": 0
+      },
+      "print_stats": {
+        "state": "complete"
+      },
+      "idle_timeout": {
+        "state": "Idle"
+      }
+    }
+  },
+  "other_checks": [
+    "Zig formatting",
+    "git diff --check",
+    "shellcheck -x",
+    "shell syntax",
+    "harness failure/cleanup smoke",
+    "Black",
+    "Ruff",
+    "mypy"
+  ],
+  "graphify": "Skipped: graphify-out/graph.json exists, graphify executable absent. Not a deliverable.",
+  "unperformed": [
+    "printing",
+    "uploads",
+    "long soaks",
+    "maximum capacity",
+    "file backend performance",
+    "notification-flood throughput",
+    "physical daemon testing of other ARM/AArch64 printers"
+  ]
+}

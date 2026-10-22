@@ -1,6 +1,8 @@
 # Linux build profiles
 
-All profiles produce a static musl binary with Zig 0.17.0 and `ReleaseSmall`.
+The current build helper produces static musl binaries with Zig 0.17.0 and
+`ReleaseFast`. Published v0.2.2 assets used `ReleaseSmall`. `ReleaseSmall` remains
+available through direct Zig builds when executable size matters more than speed.
 The executable includes SQLite and libc. It needs no host glibc, musl shared
 library, or dynamic loader. CPU instructions, Linux execution mode, kernel
 interfaces, configuration and device permissions still determine whether a
@@ -127,14 +129,14 @@ The direct Cortex-A7 build remains:
 
 ```sh
 zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 \
-  -Doptimize=ReleaseSmall --prefix .scratch/cortex-a7
+  -Doptimize=ReleaseFast --prefix .scratch/cortex-a7
 ```
 
 The mixed C softfp build adds the explicit option:
 
 ```sh
 zig build -Dtarget=arm-linux-musleabi -Dcpu=generic+has_v7+aclass+vfp3 \
-  -Dsoftfp=true -Doptimize=ReleaseSmall --prefix .scratch/armv7-softfp-c
+  -Dsoftfp=true -Doptimize=ReleaseFast --prefix .scratch/armv7-softfp-c
 ```
 
 Build-option validation has standalone unit and bounded fuzz tests:
@@ -152,7 +154,7 @@ all five checks passed:
 ```sh
 zig build float-abi-probe -Dtarget=arm-linux-musleabi \
   -Dcpu=generic+has_v7+aclass+vfp3 -Dsoftfp=true \
-  -Doptimize=ReleaseSmall --prefix .scratch/armv7-softfp-c
+  -Doptimize=ReleaseFast --prefix .scratch/armv7-softfp-c
 ```
 
 Copy `.scratch/armv7-softfp-c/bin/float-abi-probe` to matching ARM hardware and

@@ -262,18 +262,31 @@ Owned JSON snapshots still require a recursive copy and matching cleanup.
 detach a snapshot from a request arena. Inputs must pass the existing depth
 guard before copying or serialization.
 
-HTTP and JSON-RPC results use `json/value.zig.StringifyValue` to scan long plain
-ASCII strings with `std.simd.suggestVectorLength`, vector comparisons and
-`@reduce`. It delegates escaping, Unicode, scalar formatting, options and JSON
-punctuation to `std.json.Stringify`. Targets without a suggested byte vector use
-the standard string path. Differential tests cover every byte, vector boundaries,
-formatting options, nested values and writer/allocation failures.
+HTTP, JSON-RPC and notification payloads use `json/value.zig.StringifyValue`.
+Plain ASCII uses vector comparisons and `@reduce`. Long valid UTF-8 strings use
+a 1 KiB output buffer; their 34 mandatory escapes are generated at compile time
+by `std.json.Stringify.encodeJsonStringChars`. Vector masks, `@ctz` and fixed-width
+copies process ordinary byte runs; targets without byte vectors use a scalar
+loop. Other options and invalid UTF-8 use the standard encoder. Punctuation and
+scalar formatting remain in `std.json.Stringify`. Differential tests cover every
+byte, vector/buffer boundaries, Unicode, options and writer/allocation failures.
 
-Klippy reply routing uses a typed `std.json` envelope with unknown fields skipped.
-The waiting handler decodes the result once; routing keeps one owned wire copy
-without building another result tree. Method frames still receive a complete
-dynamic parse and the existing depth check before dispatch. A tagged field
-distinguishes an absent method from a present null method.
+Klippy frames receive one complete `std.json` parse and depth check on the reader.
+Response waiters retain the parsed arena, then copy the result into their caller's
+allocator before releasing it. The reader uses a 64 KiB standard I/O buffer.
+Method frames dispatch under Core; present null methods are rejected. Handshake
+ID matching uses a typed envelope. Tests cover owned replies, allocation failure,
+large pipelined frames and continuous pushes during requests.
+
+Each Klippy status update produces one notification per interested client,
+filtered by its object and field subscriptions. Status frames are serialized
+after filtering; generic notifications share a prebuilt frame. Connection pins,
+Core ordering and the existing per-frame write deadline remain in force.
+
+The entry point uses `std.process.Init.gpa`. Zig 0.17 selects its checked
+allocator in Debug and ReleaseSafe, and `std.heap.c_allocator` for this
+libc-linked program in ReleaseFast and ReleaseSmall. Component and request
+allocators remain explicit; the entry point does not override that choice.
 
 TCP listeners set `TCP_NODELAY` through `std.c.setsockopt`; the installed
 `std.Io.net` exposes no socket-option setter. Linux inherits the flag on accepted

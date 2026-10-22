@@ -77,8 +77,12 @@ jobs:
             mode: Debug
           - runner: ubuntu-24.04
             mode: ReleaseSafe
+          - runner: ubuntu-24.04
+            mode: ReleaseFast
           - runner: ubuntu-24.04-arm
             mode: ReleaseSafe
+          - runner: ubuntu-24.04-arm
+            mode: ReleaseFast
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
@@ -122,7 +126,7 @@ jobs:
           IFS=$'\t' read -r profile target cpu softfp asset < <(tail -1 .scratch/release-artifacts/profiles.tsv)
           test "$profile" = "$PROFILE"
           test -s ".scratch/release-artifacts/$asset"
-          zig build float-abi-probe -Dtarget="$target" -Dcpu="$cpu" -Dsoftfp="$softfp" -Doptimize=ReleaseSmall -j2 --prefix .scratch/float-probe
+          zig build float-abi-probe -Dtarget="$target" -Dcpu="$cpu" -Dsoftfp="$softfp" -Doptimize=ReleaseFast -j2 --prefix .scratch/float-probe
           cp .scratch/float-probe/bin/float-abi-probe .scratch/release-artifacts/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
