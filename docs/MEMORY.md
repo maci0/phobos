@@ -47,6 +47,10 @@ unchanged. [Board samples](perf/optimization-20261022/printer/board-memory.json)
 limits. The board boot ID is unchanged, Klippy is ready, heaters target zero,
 and the probe listener is absent.
 
+The exact tested development binary was installed afterward; the
+[deployment record](perf/optimization-20261022/deployment.json) records its
+backup, production subscription check and unchanged board boot ID.
+
 ## KVM guest, populated history
 
 Four vCPUs and 4 GiB locked RAM, with server, generator and stub/controller on

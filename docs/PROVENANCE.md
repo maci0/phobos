@@ -1764,3 +1764,28 @@ physical testing of the other release architectures. The native optimized
 profile guides hot-path selection; shared-host timing is excluded from the
 comparison. `graphify-out/graph.json` exists but the executable is absent, so
 graph updates are skipped and that directory is not a deliverable.
+
+## 2026-10-22: install the verified optimization build
+
+The user's earlier production-deployment authorization and printer takeover
+instruction cover installing the tested ARM binary after the idle benchmarks.
+Source commit `00ba70f14869` is installed as `/data/phobos-speed-20261022`,
+SHA256 `a31858612a226140fdc435f61b17c773360f4a0d2d61b322cc7fda7bb1890ad8`.
+It remains a 0.2.2 development build, not a new published release.
+
+The old executable and launcher are backed up under
+`/data/phobos-backups/speed-20261022T102807Z`. The production database and any
+sidecars are copied only after the old daemon stops; the backup directory is
+mode 0700. The launcher points to the new binary and starts it inside the
+Forge-X chroot on 7125. A failure trap restores the previous database/launcher
+and daemon if startup validation fails. No board or Klippy restart is used.
+
+Immediate and later read-only checks pass: ready, 26 components, no failures
+or warnings, all 262 requested subscription objects returned without an RPC
+error, directory disk usage valid, print complete, idle and both heater targets
+zero. The console store endpoint returns its expected list; it has no new
+entries after the daemon restart and no gcode is issued to manufacture output.
+New PID 27463 and the executable hash match. The board boot ID remains
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117`. The
+[deployment record](perf/optimization-20261022/deployment.json) is separate
+from the earlier benchmark cleanup state.

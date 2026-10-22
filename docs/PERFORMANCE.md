@@ -87,6 +87,13 @@ board restart, swap change or candidate installation was used.
 [subscriptions](perf/optimization-20261022/printer/subscriptions.json) and
 [environment](perf/optimization-20261022/printer/environment.json) retain the evidence.
 
+After the study and source verification, the exact tested ARM binary was
+installed on production port 7125 under the existing deployment authorization.
+The previous executable, launcher and quiescent database are backed up.
+All 262 production subscription objects return successfully, Klippy is ready
+and heater targets remain zero. The [deployment record](perf/optimization-20261022/deployment.json)
+is separate from the benchmark's earlier restored-production snapshot.
+
 ## KVM guest: isolated physical cores
 
 The benchmark PC at 192.168.0.99 is a Ryzen 9 5950X. Its private four-vCPU
