@@ -1634,3 +1634,35 @@ Publication is skipped because this is a main-branch fix, not a release tag.
 A read-only 60-second production WebSocket observation also accepts the exact
 262-object subscription; no natural console event occurs during that idle
 window, so it adds no claim of real-printer console event or visual verification.
+
+## 2026-10-22: visual Fluidd verification and startup timings
+
+The user authorized browser testing against the real printer and reported slow
+initial data loading. Fluidd 1.37.7-b2edab5 was opened against the running patched
+phobos. Rendered Chromium screenshots verify the dashboard, temperature graph,
+console, Jobs, History, Configuration and System pages. The console displays 130
+real stored entries from the printer. No Invalid params or disconnected banner,
+API response error, browser exception or blocked mutating request occurs in the
+captured runs. This visual evidence supersedes the earlier unavailable-browser
+limitation; it does not claim a new live console event during this test.
+
+Three fresh browser profiles load heater/job data and console history in
+1.504, 1.502 and 1.401 seconds. The complete 262-object subscription returns
+about 369 KB and takes 386, 493 and 317 milliseconds respectively. Browser-side
+timings run from request send to response delivery, including queueing, transfer
+and parsing; they are not measurements of server CPU time. Reopening the cached
+profile takes 1.180 seconds, followed by two warm reloads at 0.904 and 0.901
+seconds. The temperature graph also renders after its deferred component loads.
+No longer stall is reproduced. These observations use an already-running
+daemon, not a cold server or a controlled load-independent benchmark.
+
+Evidence is retained in ignored `.scratch/fluidd-visual/`: asserted browser
+checks, request timings, cold/warm JSON captures and screenshots. Request
+instrumentation observes responses without replacing them and guards printer,
+file and database mutations. Only navigation links were clicked; no printer
+control or console command was used. Browser sessions are closed. The printer
+remains idle with zero heater targets, the same executable and board boot ID,
+and no listener on probe port 7126. No daemon restart, configuration edit or
+source change was needed. Verification for this evidence-only update is the
+browser assertions, image inspection and `git diff --check`; source suites and
+published performance graphics are unchanged.
