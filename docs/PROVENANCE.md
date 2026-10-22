@@ -2140,3 +2140,33 @@ This release's publication procedure also downloads and compares all seven
 main-CI assets with the measured matrix before creating its annotated tag.
 Evidence is `docs/perf/optimization-20261023/post-capture-verification.json`,
 the failed hosted run and `.scratch/speed28/mqtt-sync-*` logs/binaries.
+
+### 2026-10-23: publication and live temperature-store verification
+
+The user-authorized release is published at https://github.com/maci0/phobos/releases/tag/v0.2.3.
+Annotated tag v0.2.3 points to c1dfde028063656e5e6a5a23e7c31179c8877ea6; main and tag pushes succeed.
+Main CI 39820286081 and tag CI 39822018131 pass every build, native suite,
+asset smoke, packaging and publication check. Before tagging, all seven main-CI
+binaries match the measured matrix byte for byte. After publication, the seven
+downloaded binaries and both manifests also match. No asset or tag is moved or
+overwritten. The initial failed CI remains recorded with its test-race fix.
+
+The installed Cortex-A7 hash matches the published asset. A read-only live
+check confirms Klippy ready, 26 components, all four temperature stores at
+1,200 samples, an unchanged board boot ID and no probe listener on 7126.
+The stopped backup preserves all 273 job IDs and seven null end times, as
+recorded separately. The test-only synchronization change requires no second
+printer restart. Both owned VM images/guest trees are removed after copying
+their captures and harness; templates and frequency policies are untouched,
+CPU reservations are restored, and the sudo rule and sleep blockers remain.
+
+Evidence is `docs/perf/optimization-20261023/publication.json`,
+`printer/post-publication-state.json`, the linked hosted runs and
+`.scratch/speed28/publication.json`. This documentation follow-up changes no
+runtime source, measured data, release assets or annotated tag.
+
+GitHub's aggregate tag-workflow status remains in progress despite all 17
+job records showing completed/success and successful public publication.
+Independent downloads and checksum/byte comparisons complete without
+fabricating a workflow conclusion. The actual aggregate and job states are
+retained in the publication JSON.

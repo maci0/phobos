@@ -1,0 +1,30 @@
+{
+  "board_boot_unchanged": true,
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "components": 26,
+  "executable_sha256": "ea85ea002a5c138821951f646f56deddf2aa6e001a84eef22c0f549a7fc2372d",
+  "klippy_state": "ready",
+  "probe_listener_absent": true,
+  "production_pid": 13619,
+  "status": {
+    "extruder": {
+      "target": 0
+    },
+    "heater_bed": {
+      "target": 0
+    },
+    "idle_timeout": {
+      "state": "Idle"
+    },
+    "print_stats": {
+      "state": "complete"
+    }
+  },
+  "temperature_samples": {
+    "extruder": 1200,
+    "heater_bed": 1200,
+    "temperature_sensor tvocValue": 1200,
+    "temperature_sensor weightValue": 1200
+  },
+  "checked_at_utc": "2026-10-22T17:41:57.213410+00:00"
+}

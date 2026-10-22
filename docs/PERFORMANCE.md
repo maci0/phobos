@@ -163,3 +163,8 @@ probes pass on this Cortex-A7. Other physical printer models are not certified;
 native AArch64 execution belongs to CI. The printer kernel disables perf events;
 on-device microbenchmarks use process CPU counters rather than a sampled profile.
 See the [method](perf/optimization-20261023/METHOD.md) for reproducible plotting commands and limits.
+
+The [publication record](perf/optimization-20261023/publication.json) verifies
+both successful CI runs and every downloaded asset against the measured bytes.
+A separate [live check](perf/optimization-20261023/printer/post-publication-state.json)
+confirms the installed published executable and all four 1,200-sample stores.

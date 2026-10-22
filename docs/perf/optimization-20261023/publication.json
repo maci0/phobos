@@ -1,0 +1,140 @@
+{
+  "commit": "c1dfde028063656e5e6a5a23e7c31179c8877ea6",
+  "annotated_tag": "v0.2.3",
+  "main_push": "fast-forward succeeded",
+  "tag_push": "succeeded",
+  "main_ci": {
+    "conclusion": "success",
+    "headSha": "c1dfde028063656e5e6a5a23e7c31179c8877ea6",
+    "status": "completed",
+    "url": "https://github.com/maci0/phobos/actions/runs/39820286081"
+  },
+  "tag_ci": {
+    "status": "in_progress",
+    "conclusion": null,
+    "headSha": "c1dfde028063656e5e6a5a23e7c31179c8877ea6",
+    "url": "https://github.com/maci0/phobos/actions/runs/39822018131",
+    "jobs_all_succeeded": true,
+    "jobs": [
+      {
+        "name": "checks",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:25:07Z"
+      },
+      {
+        "name": "tests (ubuntu-24.04, Debug)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:01Z"
+      },
+      {
+        "name": "tests (ubuntu-24.04-arm, ReleaseFast)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:32:30Z"
+      },
+      {
+        "name": "tests (ubuntu-24.04, ReleaseFast)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:47Z"
+      },
+      {
+        "name": "tests (ubuntu-24.04-arm, ReleaseSafe)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:31:49Z"
+      },
+      {
+        "name": "tests (ubuntu-24.04, ReleaseSafe)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:32:35Z"
+      },
+      {
+        "name": "build (aarch64)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:16Z"
+      },
+      {
+        "name": "build (armv6-hardfp)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:00Z"
+      },
+      {
+        "name": "build (armv7-hardfp)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:08Z"
+      },
+      {
+        "name": "build (x86_64)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:29:04Z"
+      },
+      {
+        "name": "build (armv7-softfp-c)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:29:17Z"
+      },
+      {
+        "name": "build (armv7-soft)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:06Z"
+      },
+      {
+        "name": "build (cortex-a7-hardfp)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:23Z"
+      },
+      {
+        "name": "native-smoke (ubuntu-24.04-arm, aarch64)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:53Z"
+      },
+      {
+        "name": "native-smoke (ubuntu-24.04, x86_64)",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:30:57Z"
+      },
+      {
+        "name": "package",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:32:59Z"
+      },
+      {
+        "name": "publish",
+        "status": "completed",
+        "conclusion": "success",
+        "completed_at": "2026-10-22T17:33:12Z"
+      }
+    ]
+  },
+  "release_url": "https://github.com/maci0/phobos/releases/tag/v0.2.3",
+  "published_at": "2026-10-22T17:33:10Z",
+  "draft": false,
+  "all_downloaded_assets_match_tested_release_matrix": true,
+  "assets_sha256": {
+    "SHA256SUMS": "cfa33b714a39bd3bd531ae9c641035cb18f40d53805b8f2866b22149989c1b59",
+    "phobos-v0.2.3-aarch64-linux-musl": "43837e8ce2c950869e817444fa37f4676387968a0408b1cfa7379333a225fc77",
+    "phobos-v0.2.3-arm-linux-musleabihf": "ea85ea002a5c138821951f646f56deddf2aa6e001a84eef22c0f549a7fc2372d",
+    "phobos-v0.2.3-armv6-linux-musleabihf": "2b166a929e8c86baa74a8b6458a1c811c6817bd72b33d8d39f84a18b825d81a3",
+    "phobos-v0.2.3-armv7-linux-musleabi-soft": "5dea9fc9670c596a9efa2c8e087027db259c07c4cbdfef3d141c497b00567885",
+    "phobos-v0.2.3-armv7-linux-musleabi-softfp-c": "e8816afd4bdc87462220a1b3c8fabf5c92c246246c771e9c887210b92df559a6",
+    "phobos-v0.2.3-armv7-linux-musleabihf": "7eef46e7528c27ee3870813704683043b352acd7262122420dd38120fcca5bc9",
+    "phobos-v0.2.3-x86_64-linux-musl": "f155232e783e3a91585617b485d6c078a0c809e1e90b15e7bdc56ea2dc83c229",
+    "profiles.tsv": "718105f903ca67fbebab1fb07a14e0312a8d850ce59bac4754cfb355788b64e4"
+  },
+  "checked_at_utc": "2026-10-22T17:41:57.213410+00:00",
+  "annotated_tag_object": "beedc05bc60dcf05c8a340438cd7ec68e22de8ca"
+}
