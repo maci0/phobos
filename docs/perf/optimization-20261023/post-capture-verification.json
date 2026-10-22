@@ -1,0 +1,35 @@
+{
+  "measured_source_commit": "15370cd8b9f474b15f6aa1225643c51b46b56b03",
+  "initial_CI_run": "https://github.com/maci0/phobos/actions/runs/39817668216",
+  "initial_CI_result": "Only native AArch64 ReleaseFast MQTT reconnect receipt assertion failed: expected 130, observed 100.",
+  "changed_file": "src/components/mqtt.zig",
+  "source_blob_before": "ea8b8b986d71a20f2506c15c81fa6b097fa1730d",
+  "source_blob_after": "d458998c91236346fd649445169d3002ca469e13",
+  "change": "Use the existing bounded wait for broker receipt before asserting exactly 130 subscriptions. The connection hook follows queued writes, not broker receipt.",
+  "production_code_changed": false,
+  "rebuilt_binary_sha256_unchanged": {
+    "phobos-v0.2.3-x86_64-linux-musl": "f155232e783e3a91585617b485d6c078a0c809e1e90b15e7bdc56ea2dc83c229",
+    "phobos-v0.2.3-arm-linux-musleabihf": "ea85ea002a5c138821951f646f56deddf2aa6e001a84eef22c0f549a7fc2372d"
+  },
+  "host_suites": {
+    "Debug": {
+      "passed": 1768,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 335
+    },
+    "ReleaseSafe": {
+      "passed": 1768,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 335
+    },
+    "ReleaseFast": {
+      "passed": 1768,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests_found": 335
+    }
+  },
+  "publication_gate": "All seven CI assets must match the measured release matrix before the annotated tag is created."
+}

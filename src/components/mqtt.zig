@@ -2012,6 +2012,8 @@ test "live MQTT reconnect drains subscription acknowledgements beyond the packet
     var second_peer = try io.concurrent(mqtt_client.TestBroker.run, .{ &broker, @as(usize, 256) });
     defer second_peer.cancel(io);
     try testing.expect(waitFor(io, &observed.connected, 2));
+    // The connection hook follows queued writes, not broker receipt.
+    try testing.expect(waitFor(io, &broker.subscribes, filter_count * 2));
     try testing.expectEqual(@as(u32, filter_count * 2), broker.subscribes.load(.acquire));
 }
 

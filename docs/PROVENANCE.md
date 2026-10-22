@@ -2117,3 +2117,26 @@ deliverable. Long soaks, printing/uploads, maximum capacity, file-backend
 performance and other physical printer models remain unchecked. Main CI and
 tag publication follow this verified source commit; their run IDs are reported
 with publication rather than asserted in advance.
+
+### 2026-10-23: MQTT test synchronization after native AArch64 CI
+
+Main CI run 39817668216 passes every profile build, both native asset smoke
+checks, all x86-64 suites and AArch64 ReleaseSafe. AArch64 ReleaseFast catches
+the existing reconnect test asserting 130 subscriptions when the broker has
+observed only 100. `MqttCtx.connectBroker` queues subscription writes before
+calling its connection hook; the hook does not promise broker receipt. The
+test awaited that hook and immediately inspected the independently running
+broker. It now also waits for the broker's full count using the existing
+bounded wait, retaining the exact assertion. No production code or timeout
+is changed. Publication stops before any tag is created.
+
+After correction, Debug, ReleaseSafe and ReleaseFast each pass 1,768 tests,
+one skip, zero failures and 335 fuzz tests. Rebuilt native and Cortex-A7 assets
+are byte-identical to the measured/printer-tested matrix, so no deployment
+restart or replacement measurements are needed. Other captured source blobs
+match commit 15370cd8b9f474b15f6aa1225643c51b46b56b03. The capture verification
+now names that immutable commit and records the test-only change separately.
+This release's publication procedure also downloads and compares all seven
+main-CI assets with the measured matrix before creating its annotated tag.
+Evidence is `docs/perf/optimization-20261023/post-capture-verification.json`,
+the failed hosted run and `.scratch/speed28/mqtt-sync-*` logs/binaries.

@@ -139,3 +139,15 @@ before deployment. The board boot ID stays unchanged. No hardware command is
 issued. Full raw logs and copied databases remain private scratch files.
 
 Dates in the report use Asia/Singapore; raw captures retain UTC timestamps.
+
+## Post-capture test synchronization
+
+The first native AArch64 ReleaseFast CI run catches an MQTT test race: the
+connection hook follows queued subscription writes, while broker receipt may
+still lag. The test now uses its existing bounded wait before
+asserting exactly 130 subscriptions. Production MQTT code is unchanged.
+Captured source blobs match commit `15370cd8b9f474b15f6aa1225643c51b46b56b03`.
+The [follow-up verification](post-capture-verification.json) records the
+test-only source change and byte-identical rebuilt native/Cortex-A7 assets.
+This release's tag is withheld until all seven CI assets match the measured
+assets, preserving the benchmark's relevance to the published binaries.

@@ -1,7 +1,6 @@
 {
   "package_version": "0.2.3",
   "source_parent_commit": "b381577f869a76ed112bd004cdb64f44ad49a532",
-  "source_blobs_match_checkout": true,
   "build_files_sha256": {
     "build.zig": "1401f231923ae8b1fea5739ed2ece9177efccfe61faf8d11f537bb0e8595fc35",
     "build.zig.zon": "c74e9f99dc2c9e5cfdbce9b433a5f0d3a9d9c83b35292dfc20560d3cb35f16fa"
@@ -472,5 +471,7 @@
     "No maximum-capacity, printing, upload, file-backend or long-soak benchmark",
     "Other physical printer models and native ARMv6 hardware not certified",
     "Native AArch64 execution belongs to hosted CI"
-  ]
+  ],
+  "source_blobs_match_commit": "15370cd8b9f474b15f6aa1225643c51b46b56b03",
+  "post_capture_test_synchronization": "post-capture-verification.json"
 }
