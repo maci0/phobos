@@ -4,6 +4,13 @@ Append dated entries. Record the request, change, source evidence, verification
 and unperformed checks. Corrections are new entries; do not rewrite an earlier
 result as if it had been measured differently.
 
+## 2026-10-22: private security reporting contact
+
+Requested by the user for security scanner enrollment. Added `SECURITY.md`
+with the maintainer mailbox and linked it from `README.md`. Verified the
+mailbox against the existing enrollment contact and checked the documentation
+diff. Runtime code is unchanged; live printer checks do not apply to this edit.
+
 ## 2026-10-20: source review and documentation reconciliation
 
 Requested by the user: finish the whole-codebase review and the unfinished

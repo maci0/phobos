@@ -142,3 +142,5 @@ Change and verification history: [`docs/PROVENANCE.md`](docs/PROVENANCE.md).
 ## License
 
 [GPL-3.0-only](LICENSE), matching Moonraker. SQLite is public domain.
+
+For private vulnerability reports, see [SECURITY.md](SECURITY.md).
