@@ -1,12 +1,80 @@
+import http.server
 import io
 import json
+import shutil
 import socket
+import subprocess
 import threading
 from pathlib import Path
 
 import pytest
 
 from tools.perf_harness import klippy_stub, report
+
+
+@pytest.mark.skipif(shutil.which("vegeta") is None, reason="requires Vegeta")
+def test_loadtest_drains_large_responses_without_retaining_their_bodies() -> None:
+    root = next(
+        path
+        for path in Path(__file__).resolve().parents
+        if (path / "build.zig.zon").is_file()
+    )
+    payload = b"x" * (128 * 1024)
+    sent: list[int] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            sent.append(len(payload))
+
+        def log_message(self, _format: str, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = threading.Thread(target=server.serve_forever)
+    worker.start()
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                str(root / "tools/perf_harness/loadtest.sh"),
+                f"127.0.0.1:{server.server_port}",
+                "bounded-body",
+                "50",
+                "1s",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+        directory = root / next(
+            line.removeprefix("captures: ")
+            for line in result.stdout.splitlines()
+            if line.startswith("captures: ")
+        )
+        assert directory.is_relative_to(root / ".scratch")
+        capture = directory / "results.bin"
+        measured = json.loads(
+            subprocess.check_output(
+                ["vegeta", "report", "-type=json", str(capture)], timeout=5
+            )
+        )
+        assert measured["success"] == 1 and measured["requests"] >= 49
+        assert len(sent) == measured["requests"]
+        assert sum(sent) >= 49 * len(payload)
+        assert measured["bytes_in"]["total"] == 0
+        assert capture.stat().st_size < 100_000
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=2)
+        assert not worker.is_alive()
 
 
 def test_report_formats_observed_metrics(

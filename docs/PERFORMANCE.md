@@ -1,236 +1,207 @@
 # Performance
 
-Current comparison: **phobos v0.2.2 versus Moonraker**, measured 2026-10-21.
-Both phobos binaries are the published static musl ReleaseSmall assets from
-tag `v0.2.2`, commit `b079b773823c0d655823f91c1d08f0f96a67ad39`, built with
-Zig 0.17.0 and SQLite 3.54.1. No earlier phobos build appears in these tables
-or graphics.
+Current measurements compare the **0.2.2 development build with Moonraker**,
+measured 2026-10-22. This includes the JSON, history allocation, Klippy reply
+routing and TCP delivery changes in this tree. It is not the published v0.2.2
+asset. Exact source blobs, binary hashes, seeds and configuration are recorded
+with each capture. The pre-change build at `7764f3697a04` remains in the
+before/after evidence; every active graphic contains only the development
+build and Moonraker. [Published v0.2.2 captures](perf/v0.2.2/) remain archived.
 
-**Higher throughput is better. Lower p99 latency, CPU time per request and
-RSS are better.** CPU percentage uses 100% for one core. At a paced rate,
-meeting that rate is the goal; this is not a maximum-capacity test. Tables
-show medians of three trial statistics, not pooled request percentiles.
-Plot whiskers show trial minima/maxima, not confidence intervals. Idle bars
-show the median of three fresh-process trial medians, without whiskers.
+**Lower CPU time, latency and RSS are better. Higher successful throughput is
+better.** At a paced rate the goal is to meet the offered rate; these are not
+maximum-capacity tests. Tables show medians of three trial statistics, not
+pooled request percentiles. Plot whiskers show trial minima/maxima, not
+confidence intervals. Idle bars show the median of three fresh-process trial
+medians. CPU percentage uses 100% for one core.
 
 ## Real Forge-X printer
 
-Earlier capture, 2026-10-21. The VM followup did not contact the printer;
-all printer states in this section describe that earlier capture.
+Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores and 110,404 KiB RAM.
+The reference is the installed Moonraker on Python 3.11.10, API 1.4.0.
+Production was paused during the study. All probes ran sequentially inside
+the chroot on `127.0.0.1:7126`, using separate copies of the same 266-job
+seed and a synthetic 64 KiB record. No probe opened the production database.
+The smaller benchmark config differs from production; the
+[remaining differences](perf/optimization-20261022/mismatches.json) are identity, supported
+defaults, policy and private-fixture environment differences, with no new
+code bug observed in these reads.
 
-Forge-X 1.4.2 chroot, Linux 5.4.61, two Cortex-A7 cores, 110,404 KiB RAM.
-The reference is the actual installed Moonraker on Python 3.11.10, reporting
-API 1.4.0 and software version `?`. Both probes ran sequentially on loopback
-7126 while production phobos v0.2.2 continues on 7125. They use independent
-copies of the same seed: 266 migrated history jobs, including seven null end
-times, plus a synthetic 64 KiB JSON record.
+The fixed-arrival Python stdlib generator runs on printer CPU 0; all server
+threads run on CPU 1. HTTP uses printer loopback, keepalive, at most eight
+workers and a three-second timeout. Latency includes generator queueing.
+SSH is outside the timed request path. Local health checks require readiness,
+complete/standby state and zero heater targets throughout load, with a
+16 MiB board-memory floor. The independent six-endpoint mix does not query
+Klippy; focused reads select info, a 20-job history page or the 64 KiB item.
 
-The common core config disables file observation, automatic queue transitions
-and startup queue loading. It omits update components/remotes to avoid initial
-network refresh. Phobos still registers compatibility components; see the
-[observed differences](perf/v0.2.2/mismatches.json). The smaller probe config
-differs from the 26-component production config. Config and executable/source
-hashes are in the [printer environment](perf/v0.2.2/printer/environment.json).
+All 36 twelve-second HTTP trials succeeded: **15,660 requests**, plus
+**108 full WebSocket subscriptions** and **54 matching history comparisons**.
+The HTTP count includes all three builds used in the before/after study;
+the two plotted backends account for 10,440 requests.
 
-All 30 eight-second trials succeeded, totaling
-8,159 HTTP requests. The independent
-mix cycles through `/server/info`, `/server/config`, `/machine/system_info`,
-`/server/database/list`, `/server/history/list?limit=20` and `/access/info`.
-It makes no Klippy query. Focused trials read info, the history page or the
-64 KiB database item. Vegeta uses keepalive with two initial and at most
-eight workers, eight connections
-and a three-second timeout.
-
-| Workload | v0.2.2 CPU ms/req ↓ | Moonraker CPU ms/req ↓ | v0.2.2 req/s ↑ / p99 ms ↓ | Moonraker req/s ↑ / p99 ms ↓ |
+| Workload | Development CPU ms/req ↓ | Moonraker CPU ms/req ↓ | Development req/s ↑ / p99 ms ↓ | Moonraker req/s ↑ / p99 ms ↓ |
 | --- | ---: | ---: | ---: | ---: |
-| info50 | 0.525 | 7.900 | 50.09 / 25.10 | 50.03 / 24.18 |
-| independent25 | 3.050 | 12.000 | 25.11 / 31.11 | 25.07 / 47.22 |
-| independent75 | 3.017 | 11.850 | 75.02 / 33.82 | 74.50 / 118.66 |
-| history10 | 13.500 | 27.125 | 10.09 / 36.98 | 10.08 / 64.49 |
-| database64k10 | 5.696 | 14.250 | 10.10 / 41.85 | 10.09 / 46.70 |
+| database64k10 | 5.33 | 15.58 | 10.08 / 22.41 | 10.07 / 35.12 |
+| history10 | 12.92 | 27.33 | 10.07 / 32.56 | 10.06 / 45.48 |
+| independent75 | 2.91 | 10.90 | 74.93 / 25.53 | 74.91 / 57.58 |
+| info50 | 0.567 | 7.67 | 50.02 / 14.98 | 50.00 / 35.13 |
 
-Phobos uses less CPU per request in every measured printer workload. In the
-75/s mix the median is 74.5% lower. Moonraker has slightly lower median info
-p99 latency, and overlapping trial ranges remain visible in the plots.
-One phobos 64 KiB trial delivered 8.96/s against the offered 10/s despite
-100% request success. The median does not erase that shortfall.
+![printer cpu, development build versus Moonraker](perf/optimization-20261022/printer/cpu.png)
+![printer latency, development build versus Moonraker](perf/optimization-20261022/printer/latency.png)
+![printer throughput, development build versus Moonraker](perf/optimization-20261022/printer/throughput.png)
 
-![Forge-X CPU, v0.2.2 versus Moonraker, lower at matched rate is better](perf/v0.2.2/printer/cpu.png)
-![Forge-X p99 latency, v0.2.2 versus Moonraker, lower is better](perf/v0.2.2/printer/latency.png)
-![Forge-X throughput, v0.2.2 versus Moonraker, higher is better](perf/v0.2.2/printer/throughput.png)
+Full subscriptions request 268 live Klippy objects, including six pins hidden
+by production's Fluidd config. Each backend starts 12 new WebSocket
+connections at one per second in each repetition. CPU time per subscription
+is 78.33 ms for development phobos versus
+106.67 ms for Moonraker. Median scheduled-arrival
+through decoded-reply latency is 286.43 versus
+242.62 ms. This includes client JSON decoding;
+it is not a browser-page loading benchmark. All requested object names match.
 
-Vegeta runs on the desktop through SSH forwarding and WiFi. Latency includes
-transport and desktop scheduling. CPU counts only the probe process, excluding
-the generator, production and Klippy. The printer has 100 Hz process counters;
-short low-CPU trials have coarse resolution. `CONFIG_PERF_EVENTS` is disabled,
-so no on-device sampled CPU profile is claimed.
+Before/after CPU medians change from 5.75 to 5.33 ms for the 64 KiB response
+(7.2% lower) and from 94.17 to 78.33 ms per full subscription (16.8% lower).
+History and small info CPU medians are unchanged at printer counter resolution.
+Info scheduled-arrival p99 is worse: 14.98 versus 11.79 ms, with overlapping
+trial ranges. Its median worker-start service p99 is 8.65 versus 8.04 ms;
+generator queue p99 spans 5.93 to 10.93 ms across the two builds. No universal
+latency improvement is claimed. Results cover the combined changes, not an
+isolated speedup attribution to each change.
 
-Each repetition starts fresh processes in phobos/Moonraker, Moonraker/phobos,
-then phobos/Moonraker order. Workload order reverses in repetition 2. Each
-process has eight one-second idle sleeps plus readiness/guard overhead before
-load; actual idle observation durations are retained. A roughly 250 ms sampler
-records RSS, threads, board memory and swap. Readiness, standby/complete state
-and zero heater targets are checked before each case and about once a second
-during load, with a 16 MiB MemAvailable stop guard.
+An earlier host-forwarded study showed a larger history p99 regression; it
+did not recur consistently with printer-local generation. Another study
+stopped when a host health request timed out during a baseline run. No daemon
+crash was recorded; its exact cause remains unknown. The final study moved
+timed health checks onto the printer and captures thread wait channels on
+failure. All completed negative results and the interruption remain in
+the [experiment records](perf/optimization-20261022/experiments/).
 
-All 24 [history comparisons](perf/v0.2.2/printer/history-parity.json) match
-Moonraker across default pages, ascending pages with offsets, huge offsets
-and time filters. The [complete trials](perf/v0.2.2/printer/summary.json) and
-[median/min/max aggregates](perf/v0.2.2/printer/aggregate.json) retain every
-result. All probes stopped and their owned directory was removed. Production
-PID 29180, executable and boot ID remained unchanged during benchmarking;
-Klippy was ready, print state standby, both targets zero, and
-7126 had no listener. No live database was opened by the probes; no printer
-control, board restart or swap adjustment was used.
+The original production executable was restored on 7125, ready with zero
+heater targets, print complete and idle. The probe listener is absent and
+the board boot ID is unchanged. The accepted-socket TCP_NODELAY test also
+passed on the physical ARM printer for IPv4 and IPv6. No hardware command,
+board restart, swap change or candidate installation was used.
+[Final state](perf/optimization-20261022/printer/final-state.json),
+[all builds](perf/optimization-20261022/printer/all-builds.json),
+[subscriptions](perf/optimization-20261022/printer/subscriptions.json) and
+[environment](perf/optimization-20261022/printer/environment.json) retain the evidence.
 
 ## KVM guest: isolated physical cores
 
-Measured 2026-10-21 UTC (2026-10-22 in Singapore). This study replaces the
-active shared-desktop host figures.
-The printer was not contacted during VM setup, testing or cleanup. The VM has
-no network device; both daemons, the load generator and a Klippy stub run
-entirely inside it. Requests use guest loopback and the six-endpoint independent
-mix above, with no Klippy query or external service in the load path.
+The benchmark PC at 192.168.0.99 is a Ryzen 9 5950X. Its private four-vCPU
+KVM guest has 4 GiB preallocated locked RAM and no network card. Both daemons,
+Vegeta and the synthetic Klippy stub run entirely inside it. The same
+266-job seed and 64 KiB item are used; the empty fixture contains only that
+item. Moonraker is pinned to `9008485843740c93e0154ccbdac1fc2b02b03aaa`.
+Python and SQLite versions are recorded in the
+[guest environment](perf/optimization-20261022/vm-environment.json).
 
-The VM runs the same published x86-64 v0.2.2 ReleaseSmall asset and Moonraker
-pin `9008485843740c93e0154ccbdac1fc2b02b03aaa` on Python 3.12.12. Phobos embeds
-SQLite 3.54.1; Moonraker's copied Python runtime uses SQLite 3.50.4. The private
-populated fixture retains 266 migrated jobs and the synthetic 64 KiB value;
-the empty fixture contains the value only. All 72 history checks match.
+An isolated cgroup reserves host CPUs 8-15/24-31, a complete L3 group including
+SMT siblings. User/system slices exclude them. vCPUs pin to host cores
+10/11/12/13 with FIFO priority 10, the emulator to CPU 8. In the guest the
+server uses CPU 1, generator 2/3 and stub/controller 0. No vCPU shares a
+physical core. Idle polling occupies four host cores and is not a deployment
+setting. Existing frequency policies remain unchanged; fixed-frequency
+performance is not claimed.
 
-QEMU 11.1.2/KVM runs Linux 7.2.9-2-cachyos with four vCPUs and 4 GiB RAM on
-the second PC, a Ryzen 9 5950X with 64 GiB host RAM. A cgroup v2
-`isolated` partition reserves a complete L3 group on host CPUs
-8-15/24-31, including all SMT siblings. User/system slices are verified to
-exclude those CPUs. vCPUs 0/1/2/3 pin to physical CPUs 10/11/12/13 with
-SCHED_FIFO priority 10; the emulator pins to CPU 8. The server uses guest CPU 1,
-generator CPUs 2/3, and stub/controller CPU 0. No vCPU shares an SMT core.
-Unlike the prior native capture, each server has one CPU here. Results across
-the two environments are separate studies, not an isolation speedup estimate.
-
-RAM is preallocated and locked; observed locked memory stays above
-4,838,436 KiB. VM swap and cgroup memory swap stay
-zero, and cgroup counters record no quota throttling. Guest `idle=poll` keeps
-vCPUs runnable to avoid halt/wake scheduling delays. Process CPU figures
-exclude those idle polls: this setup occupies four host cores even when the
-measured server is idle, and is not a deployment CPU-saving recommendation.
-
-**The requested absolute zero-steal/guaranteed-performance condition was not
-established.** Kernel KVM guest accounting and `kvm-steal-time` are enabled.
-Across the 42 measured windows, the recorded guest steal-tick deltas sum to
-cpu: 2, cpu0: 0, cpu1: 0, cpu2: 0, cpu3: 0. These are 100 Hz exported counters;
-aggregate and per-CPU rounding can differ. Host vCPU scheduling counters retain nanosecond
-run-queue delay: maximum server-vCPU delay is
-0.00115% of its observed window,
-and the maximum for any vCPU is
-0.00117%. Windows include the
-250 ms start lead and result collection. No trial is removed for nonzero
-interference. Exclusive cores prevent normal workload sharing but do not
-eliminate host kernel, interrupt, thermal or memory-bus effects. The existing
-performance governor and its original min/max bounds remain in use;
-fixed-frequency operation is not claimed. Observed frequency ranges
-remain in the [isolation summary](perf/v0.2.2/vm-isolation-summary.json).
-
-The [kernel cpuset documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#cpuset)
-describes isolated partitions; [KVM steal accounting](https://docs.kernel.org/virt/kvm/x86/msr.html#custom-msr-list)
-defines runnable time when a vCPU did not run. A displayed zero is not a
-substitute for a CPU reservation or an independent scheduling measurement.
+**Literal zero steal and guaranteed physical performance were not established.**
+Guest steal deltas sum to {"cpu": 1, "cpu0": 0, "cpu1": 0, "cpu2": 0, "cpu3": 0}.
+These are 100 Hz exported counters; aggregate and per-CPU rounding can differ.
+Host scheduler counters record a maximum server-vCPU run-queue delay of
+0.00061% of its observed
+window, and 0.00061% for any
+vCPU. No trial is removed for positive interference. VM/cgroup swap and quota
+throttling remain zero. RAM locking stays above
+4,838,436 KiB. The
+[isolation summary](perf/optimization-20261022/vm-isolation-summary.json) retains every window
+and frequency range. Host kernel, interrupt, thermal and memory-bus effects
+remain possible despite exclusive cores.
 
 ### Populated history
 
-| Workload | v0.2.2 CPU ms/req ↓ | Moonraker CPU ms/req ↓ | v0.2.2 req/s ↑ / p99 ms ↓ | Moonraker req/s ↑ / p99 ms ↓ |
+| Workload | Development CPU ms/req ↓ | Moonraker CPU ms/req ↓ | Development req/s ↑ / p99 ms ↓ | Moonraker req/s ↑ / p99 ms ↓ |
 | --- | ---: | ---: | ---: | ---: |
-| info-5000 | 0.013 | 0.166 | 5000.05 / 0.125 | 4999.98 / 1.093 |
-| independent-600 | 0.145 | 0.305 | 600.05 / 0.736 | 600.05 / 0.679 |
-| independent-1200 | 0.145 | 0.298 | 1200.03 / 0.829 | 1200.04 / 0.904 |
-| history-200 | 0.688 | 0.667 | 200.04 / 0.877 | 200.04 / 0.821 |
-| database64k-200 | 0.300 | 0.357 | 200.04 / 0.534 | 200.04 / 0.547 |
+| database64k-200 | 0.270 | 0.360 | 200.09 / 0.320 | 200.09 / 0.375 |
+| history-200 | 0.695 | 0.670 | 200.09 / 0.732 | 200.08 / 0.696 |
+| independent-1200 | 0.146 | 0.299 | 1200.10 / 0.829 | 1200.12 / 0.890 |
+| info-5000 | 0.013 | 0.166 | 5000.05 / 0.117 | 4999.93 / 1.05 |
+| klippy-config-50 | 3.10 | 0.860 | 50.08 / 3.89 | 50.09 / 1.74 |
 
-Phobos uses less CPU per request in four of five populated-history workloads.
-For the history page it uses 3.0% more CPU per request than Moonraker, with
-nonoverlapping trial ranges. Moonraker also has lower median p99 latency for
-the history page and the 600/s mix. Phobos has lower sampled RSS throughout;
-the results do not establish a universal performance winner.
+![vm-rich cpu, development build versus Moonraker](perf/optimization-20261022/vm-rich/cpu.png)
+![vm-rich latency, development build versus Moonraker](perf/optimization-20261022/vm-rich/latency.png)
+![vm-rich throughput, development build versus Moonraker](perf/optimization-20261022/vm-rich/throughput.png)
 
-![KVM populated-history CPU, v0.2.2 versus Moonraker](perf/v0.2.2/vm-rich/cpu.png)
-![KVM populated-history tail latency, v0.2.2 versus Moonraker](perf/v0.2.2/vm-rich/latency.png)
-![KVM populated-history throughput, v0.2.2 versus Moonraker](perf/v0.2.2/vm-rich/throughput.png)
+The config workload queries a large synthetic configfile reply through the
+local Klippy stub. Other workloads have no Klippy round trip in their load
+path. The stub executes nothing and does not reproduce continuous status floods.
+
+Compared with the pre-change build, the 64 KiB response uses 6.9% less CPU
+(0.290 to 0.270 ms/request), and the synthetic config reply uses 3.1% less
+(3.20 to 3.10 ms/request). History CPU is unchanged at 0.695 ms/request.
+Moonraker remains faster for history and the synthetic config reply: phobos
+uses 3.7% and 260.5% more CPU respectively. Phobos uses less CPU for the other
+populated-fixture workloads and less sampled RSS throughout. There is no
+universal performance winner.
 
 ### Empty history
 
-| Workload | v0.2.2 CPU ms/req ↓ | Moonraker CPU ms/req ↓ | v0.2.2 req/s ↑ / p99 ms ↓ | Moonraker req/s ↑ / p99 ms ↓ |
+| Workload | Development CPU ms/req ↓ | Moonraker CPU ms/req ↓ | Development req/s ↑ / p99 ms ↓ | Moonraker req/s ↑ / p99 ms ↓ |
 | --- | ---: | ---: | ---: | ---: |
-| info-5000 | 0.013 | 0.167 | 5000.04 / 0.122 | 5000.16 / 1.141 |
-| independent-1200 | 0.025 | 0.245 | 1200.03 / 0.105 | 1200.00 / 0.582 |
+| independent-1200 | 0.025 | 0.247 | 1200.05 / 0.108 | 1200.00 / 0.583 |
 
-![KVM empty-history CPU, v0.2.2 versus Moonraker](perf/v0.2.2/vm-empty/cpu.png)
-![KVM empty-history tail latency, v0.2.2 versus Moonraker](perf/v0.2.2/vm-empty/latency.png)
-![KVM empty-history throughput, v0.2.2 versus Moonraker](perf/v0.2.2/vm-empty/throughput.png)
+![vm-empty cpu, development build versus Moonraker](perf/optimization-20261022/vm-empty/cpu.png)
+![vm-empty latency, development build versus Moonraker](perf/optimization-20261022/vm-empty/latency.png)
+![vm-empty throughput, development build versus Moonraker](perf/optimization-20261022/vm-empty/throughput.png)
 
-All 42 twenty-second trials completed with 100% HTTP success,
-1,607,980 requests in total. Three fresh-process repetitions
-alternate phobos/Moonraker, Moonraker/phobos, then phobos/Moonraker. Workload
-order reverses in repetition 2. Each process runs endpoint/history preflights,
-settles for two seconds, has a five-second idle capture, then a two-second
-200/s mix warmup. Vegeta has eight fixed workers, keepalive and a two-second
-timeout. Process sampling is about 100 ms. Only successful requests enter the
-CPU/request denominator; actual throughput and every trial range stay visible.
+All **54 ten-second trials** completed with 100% HTTP
+success, **706,480 requests**, and 108 matching history checks.
+Those totals include baseline, development and Moonraker; plotted figures
+contain only the latter two. Each fixture/backend gets three fresh processes,
+endpoint/history preflights, two seconds to settle, five seconds idle and a
+two-second 200/s mix warmup. Vegeta uses eight fixed workers, keepalive and a
+two-second timeout. Backend and workload orders vary by repetition. No trial
+is discarded for an unfavorable result.
 
-The VM was stopped, its private CPU partition removed, and original host CPU
-policies verified after cleanup. The host user slice again has CPUs 0-31.
-Sleep/idle inhibition covers the test and is released afterward. The temporary
-sudo rule is removed after root cleanup. QEMU, BusyBox and Vegeta packages
-remain installed on the second PC. No printer, golden image or existing VM
-was modified.
-[Host configuration](perf/v0.2.2/vm-host-environment.json),
-[all scheduling boundaries](perf/v0.2.2/vm-host-events.json),
-[resource samples](perf/v0.2.2/vm-resource-samples.json),
-[parity](perf/v0.2.2/vm-history-parity.json) and
-[cleanup](perf/v0.2.2/vm-cleanup.json) are checked in. The
-[controller cleanup](perf/v0.2.2/vm-controller-cleanup.json) records release of
-the local sleep inhibitor. The
-[capture method](perf/v0.2.2/VM_METHOD.md) records configuration, workload
-order and counter definitions. The first PC's
-[partial study](perf/v0.2.2/vm-local-partial/README.md) retains 30 complete
-populated-history trials and its disk-capacity failure; it is excluded from
-these active figures. The earlier shared-host
-[populated](perf/v0.2.2/host-rich/summary.json) and
-[empty](perf/v0.2.2/host-empty/summary.json) captures remain archived unchanged.
+Vegeta retains no response bodies after full-content preflights. It drains
+each response; its zero `bytes_in` is retained bytes, not wire traffic. A first
+twenty-second study filled its 8 GiB private capture disk while recording large
+bodies. Its 44 completed trials and disk-capacity failure remain in the
+[experiment archive](perf/optimization-20261022/experiments/vm-capacity-failure.json).
+The fresh final study uses a 16 GiB disk, a 2 GiB free-space floor and the same
+ten-second/body-retention settings for every backend. Earlier partial trials
+are excluded from active tables and plots.
+
+The guest stops its children and remounts its private disk read-only before
+completion. The manager stops QEMU, removes its private CPU partition and
+restores exact prior CPU slice limits and frequency settings.
+[Cleanup](perf/optimization-20261022/vm-cleanup.json) records these checks. The
+[host environment](perf/optimization-20261022/vm-host-environment.json),
+[scheduler boundaries](perf/optimization-20261022/vm-host-events.json) and
+[resource samples](perf/optimization-20261022/vm-host-resource-samples.json) remain checked in.
 
 ## Reproduce and limits
 
-Use the [published assets](https://github.com/maci0/phobos/releases/tag/v0.2.2)
-and the exact hashes/configurations/rates in each environment record. The
-[harness](../tools/perf_harness/README.md) documents isolated databases, stub
-setup, Vegeta collection, process metrics and owned-process cleanup. Workloads
-and raw numerical summaries are checked in; private databases, response bodies,
-logs and binary load captures remain in ignored scratch storage.
-
-Regenerate the three four-figure sets from their checked-in inputs:
+The [capture method](perf/optimization-20261022/METHOD.md) specifies fixtures, rates, order,
+affinity, collectors and cleanup. The [harness](../tools/perf_harness/README.md)
+documents the existing local generator and plotting tools. Each environment
+contains `summary.json`, both idle summaries and plot-input hashes. Regenerate
+each four-figure set with:
 
 ```sh
 uv run tools/perf_harness/plot_perf.py \
-  --input docs/perf/v0.2.2/printer/summary.json \
-  --output-dir docs/perf/v0.2.2/printer \
-  --title 'phobos v0.2.2 vs Moonraker, Forge-X Cortex-A7'
-uv run tools/perf_harness/plot_perf.py \
-  --input docs/perf/v0.2.2/vm-rich/summary.json \
-  --output-dir docs/perf/v0.2.2/vm-rich \
-  --title 'phobos v0.2.2 vs Moonraker, KVM populated history'
-uv run tools/perf_harness/plot_perf.py \
-  --input docs/perf/v0.2.2/vm-empty/summary.json \
-  --output-dir docs/perf/v0.2.2/vm-empty \
-  --title 'phobos v0.2.2 vs Moonraker, KVM empty history'
+  --input docs/perf/optimization-20261022/printer/summary.json \
+  --output-dir docs/perf/optimization-20261022/printer \
+  --title 'phobos development vs Moonraker, Forge-X Cortex-A7'
 ```
 
-Every chart records its input SHA256s. [Memory results](MEMORY.md) include
-idle/load RSS, threads and board swap. This study does not measure maximum
-capacity, printing, upload throughput, optional hardware, the file backend or
-long-soak behavior. Measurements cover x86-64 and one Cortex-A7 printer; other
-release profiles are build/test coverage, not physical-printer benchmarks.
+Repeat with `vm-rich` or `vm-empty` and the corresponding title. Private
+databases, response bodies, logs and binary load captures stay in ignored
+scratch storage. The native optimized perf capture guides hot-path selection;
+its shared-host timing is excluded from these comparisons. The printer kernel
+disables perf events, so no on-device sampled CPU profile is claimed.
 
-Earlier [optimization captures](perf/history-memory-20261021/host/aggregate.json),
-[three-round tuning evidence](perf/history-tuning-20261021/summary.json) and
-[v0.2.1 release captures](perf/host-v0.2.1/summary.json) stay archived under their
-original versions, including negative results. They are excluded from every
-current comparison above.
+[Memory results](MEMORY.md) separate allocation work from resident pages.
+These studies do not measure maximum capacity, printing, uploads, hardware
+drivers, the file backend, long soaks or notification-flood throughput. Other
+ARM/AArch64 profiles pass build/ABI verification, not physical-printer testing.

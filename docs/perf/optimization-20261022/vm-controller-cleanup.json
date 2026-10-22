@@ -1,0 +1,10 @@
+{
+  "vm_stopped": true,
+  "owned_cgroup_removed": true,
+  "slice_limits_restored": true,
+  "frequency_policies_restored": true,
+  "sleep_inhibitor_released": true,
+  "owned_guest_disks_removed": true,
+  "temporary_sudo_rule_removed": true,
+  "user_cpus_after": "0-31"
+}

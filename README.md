@@ -33,9 +33,10 @@ remain no-ops; package execution requires an injected runner. Full Jinja2, LDAP
 and Apprise are out of scope.
 
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
-compare the published v0.2.2 assets with Moonraker in an isolated KVM guest and
-the earlier Forge-X capture, with metric directions, trial ranges and measured
-scheduling limits. The VM study does not contact the printer. The latest release is
+compare the current 0.2.2 development build with Moonraker in fresh Forge-X
+printer probes and an isolated KVM guest, with metric directions, trial ranges
+and measured scheduling limits. Published-release captures remain archived.
+The latest release is
 [v0.2.2](docs/releases/v0.2.2.md).
 
 ## Architecture

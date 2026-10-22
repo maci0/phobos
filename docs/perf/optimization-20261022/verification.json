@@ -1,0 +1,70 @@
+{
+  "suite": {
+    "Debug": {
+      "passed": 1745,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests": 331
+    },
+    "ReleaseSafe": {
+      "passed": 1745,
+      "skipped": 1,
+      "failed": 0,
+      "fuzz_tests": 331
+    }
+  },
+  "suite_skip": "Real-Klippy proxy integration requires its gated local socket. Live physical Klippy probes are recorded separately.",
+  "api_surface": {
+    "http_endpoints": [
+      123,
+      123
+    ],
+    "rpc_methods": [
+      130,
+      130
+    ],
+    "notifications": [
+      27,
+      27
+    ]
+  },
+  "static_elf_abi_matrix_sha256": {
+    "phobos-v0.2.2-armv6-linux-musleabihf": "3775ccd8fcbcad447d19a54ac2883a65aea15559e5ae5b2c21cdfc532ec240de",
+    "phobos-v0.2.2-armv7-linux-musleabi-soft": "131557ac2247fd12d2f97647460521ac6052b544d71c2a7d5643f97206669029",
+    "phobos-v0.2.2-armv7-linux-musleabi-softfp-c": "ded3dd3c17037eaa919a794ab75a7428cf63ba1d5d7777d0c79b844cf647cb8e",
+    "phobos-v0.2.2-armv7-linux-musleabihf": "44d3ec4a967f3110a74d5fbf3aea9ca131a840ab2e177ffd0fdf17d1afe5e83f",
+    "phobos-v0.2.2-arm-linux-musleabihf": "a31858612a226140fdc435f61b17c773360f4a0d2d61b322cc7fda7bb1890ad8",
+    "phobos-v0.2.2-aarch64-linux-musl": "af4fd4062a48bb81737129b3b636df6de7a9ac0444c7184021b25ee80f64cfe2",
+    "phobos-v0.2.2-x86_64-linux-musl": "dd4203852eb934ddd9170799bab2ced1fb4ccd3703b27c917199763d3c1d1bb1"
+  },
+  "physical_arm_tcp_nodelay_test": {
+    "ipv4_passed": true,
+    "ipv6_passed": true
+  },
+  "harness_pytest": {
+    "passed": 23,
+    "skipped": 0,
+    "failed": 0
+  },
+  "harness_smoke": "passed, including failed-load and owned-child cleanup checks",
+  "bounded_body_check": {
+    "requests": 50,
+    "status_codes": {
+      "200": 50
+    },
+    "server_bytes_written": 6553600,
+    "retained_body_bytes": 0,
+    "capture_bytes": 8154
+  },
+  "baseline_explicit_x86_64_cpu_baseline_rebuild_sha256": "e4260bc114a8c63d132f41303faf5553d3b90429256700584467a97cccbbccc6",
+  "baseline_explicit_rebuild_matches_measured_binary": true,
+  "checks": [
+    "zig fmt --check",
+    "shellcheck including sourced common.sh",
+    "black --check",
+    "ruff check",
+    "mypy test_metrics.py",
+    "git diff --check"
+  ],
+  "graphify": "Skipped: graph.json exists, executable is not installed. Not a deliverable."
+}

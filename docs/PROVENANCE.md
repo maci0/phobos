@@ -1673,3 +1673,94 @@ and no listener on probe port 7126. No daemon restart, configuration edit or
 source change was needed. Verification for this evidence-only update is the
 browser assertions, image inspection and `git diff --check`; source suites and
 published performance graphics are unchanged.
+
+## 2026-10-22: measured reply and serialization optimizations
+
+Requested by the user: profile optimized code, improve speed and allocation
+work, benchmark on the physical printer first and then the isolated benchmark
+PC, and keep that PC awake. Production could be stopped for printer tests.
+
+`src/json/value.zig` adds a portable vector scan for long plain ASCII API
+strings. Escaping, Unicode, punctuation, options and scalar formatting remain
+in `std.json`. HTTP and JSON-RPC results use the same wrapper. Differential
+tests cover all byte values around vector boundaries, nested values, options,
+writer failures, allocation failures and bounded fuzz input. The Cortex-A7
+disassembly contains NEON loads/comparisons for this path.
+
+`history.zig` reserves known response map/array sizes; `sqlite_store.zig`
+uses the already-reserved row capacity. Field-preservation and allocation-failure
+tests accompany a capacity-boundary fuzz test. `klippy_connection.zig` routes
+replies through a typed envelope without constructing a second result tree.
+The waiter keeps one owned payload and decodes the result once. Notifications
+still receive full parsing and depth validation. Tests cover ownership after
+source clobbering, invalid skipped JSON, escaped keys, present-null methods and
+reply IDs. A 256 KiB reply must route with less than payload-size plus 4 KiB
+of allocation.
+
+TCP listeners set TCP_NODELAY through typed libc because the installed
+`std.Io.net` has no socket-option setter. IPv4/IPv6 inheritance and failure
+tests plus a bounded fuzz test cover the adapter; the accepted-socket test
+also passes on the physical ARM printer. Transfers and cancellation stay in
+`std.Io`. `AGENTS.md` and `docs/STDLIB.md` record the checked exception.
+
+The existing load/profile tools disable response-body retention. An initial
+VM study filled its private 8 GiB capture disk during the last populated-history
+trial; all 44 completed trials and the exact storage failure remain archived.
+The fresh accepted study uses 16 GiB, a 2 GiB free-space floor and identical
+ten-second/body-retention settings for every backend. A regression test drives
+the real load script against 128 KiB loopback replies and checks successful
+delivery with bounded capture size. A separate 50-request check transfers
+6,553,600 bytes while retaining an 8,154-byte capture. Retained-byte counters
+are explicitly distinguished from uncollected wire throughput.
+
+The [capture directory](perf/optimization-20261022/) records exact source blobs,
+executable hashes, fixtures, all trials, scheduling and cleanup. A frozen
+baseline at `7764f3697a04` is retained for before/after comparisons; rebuilding
+it with explicit x86-64 baseline CPU settings reproduces the measured hash.
+Active tables and 12 graphics show only the current 0.2.2 development build
+and Moonraker. Published v0.2.2 captures remain archived unchanged. The
+performance, memory and harness docs distinguish the development build from
+published release assets and label which metric direction is better.
+
+The printer completes 36 twelve-second HTTP trials, 15,660 requests, 108 full
+268-object subscriptions and 54 exact history comparisons. Compared with the
+pre-change build, median CPU falls 7.2% for the 64 KiB response and 16.8% for a
+full subscription. Info p99 worsens with overlapping trial ranges; it is
+reported rather than omitted. Earlier host-forwarded and interrupted runs
+remain archived, including an unexplained host monitoring timeout. The final
+study moves timed health checks onto the printer. No new behavior bug is
+observed in the tested reads; retained identity/default/policy/environment
+differences are listed in `mismatches.json`.
+
+The isolated four-vCPU KVM run completes 54 ten-second trials and 706,480
+successful requests with 108 matching history checks. The 64 KiB and synthetic
+config reply CPU medians fall 6.9% and 3.1% respectively. Moonraker remains
+faster for history and the synthetic config reply. Resident-memory changes
+over baseline are inconsistent; no universal reduction is claimed. Guest
+aggregate steal increases one exported tick, with zero per-CPU tick deltas.
+Maximum host server-vCPU run-queue delay is 0.000608% of its window. Locked RAM
+stays at least 4,838,436 KiB; VM/cgroup swap and quota throttling stay zero.
+These controls do not prove literal zero steal or fixed physical performance.
+
+Verification: Debug and ReleaseSafe each pass 1,745 tests, skip the gated local
+real-Klippy test and find 331 fuzz tests. API surface coverage remains 123/123
+HTTP endpoints, 130/130 RPC methods and 27/27 notifications; generated API
+coverage docs need no regeneration. All seven static profiles pass ELF/ABI and
+checksum verification. The harness passes 23 Python tests, failure/cleanup
+smoke tests, shell syntax and shellcheck, Black, Ruff, mypy, Zig formatting and
+`git diff --check`. Plot-input hashes, source blobs and trial counts are checked;
+representative graphics are visually inspected.
+
+Production is restored with its original executable hash on port 7125,
+PID 27309, ready, print complete/idle and both heater targets zero. The board
+boot ID is unchanged, port 7126 is closed and owned probe files are removed.
+No candidate is installed, no live database is opened by a probe and no hardware
+control, board restart or swap adjustment is used. The VM is stopped, exact
+prior CPU slice limits/frequency policies restored, owned partitions/disks
+removed, and remote sleep inhibition and temporary sudo access released.
+
+Unperformed: printing, uploads, long soaks, notification-flood throughput and
+physical testing of the other release architectures. The native optimized
+profile guides hot-path selection; shared-host timing is excluded from the
+comparison. `graphify-out/graph.json` exists but the executable is absent, so
+graph updates are skipped and that directory is not a deliverable.

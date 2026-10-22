@@ -1,0 +1,3721 @@
+{
+  "status": "complete",
+  "candidate_binary_sha256": "6debd538185e896a9335bf53f3fbd12f68800f0df8625590515900a919f6add0",
+  "transport": "Host Vegeta and WebSocket helper through SSH forwarding and WiFi",
+  "http_trials": [
+    {
+      "backend": "baseline",
+      "repetition": 1,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3034797812,
+          "mean": 5057996,
+          "50th": 4478934,
+          "90th": 7008946,
+          "95th": 7772022,
+          "99th": 12751690,
+          "max": 40860019,
+          "min": 2905758
+        },
+        "bytes_in": {
+          "total": 399000,
+          "mean": 665
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T16:59:51.007817782+08:00",
+        "latest": "2026-10-22T17:00:02.987721868+08:00",
+        "end": "2026-10-22T17:00:02.995934562+08:00",
+        "duration": 11979904086,
+        "wait": 8212694,
+        "requests": 600,
+        "rate": 50.08387343444379,
+        "throughput": 50.04956249683781,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 550.0,
+        "cpu_percent_one_core": 2.4830699774305516,
+        "before": {
+          "uptime": 343763.56,
+          "ticks": 50,
+          "VmRSS": 3024,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 53948,
+          "SwapFree": 2192
+        },
+        "after": {
+          "uptime": 343776.85,
+          "ticks": 83,
+          "VmRSS": 3024,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 53932,
+          "SwapFree": 2192
+        },
+        "rss_kib_max": 3024,
+        "threads_max": 12,
+        "swap_kib_max": 0,
+        "available_min_kib": 54000
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 1,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 9520285827,
+          "mean": 10578095,
+          "50th": 7158671,
+          "90th": 21060240,
+          "95th": 23783917,
+          "99th": 43371700,
+          "max": 147737717,
+          "min": 2883997
+        },
+        "bytes_in": {
+          "total": 3815250,
+          "mean": 4239.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:00:05.550465371+08:00",
+        "latest": "2026-10-22T17:00:17.536484377+08:00",
+        "end": "2026-10-22T17:00:17.543954755+08:00",
+        "duration": 11986019006,
+        "wait": 7470378,
+        "requests": 900,
+        "rate": 75.08748313760184,
+        "throughput": 75.04071343913068,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 3077.777777777778,
+        "cpu_percent_one_core": 21.640625000019682,
+        "before": {
+          "uptime": 343778.12,
+          "ticks": 83,
+          "VmRSS": 3024,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 53920,
+          "SwapFree": 2192
+        },
+        "after": {
+          "uptime": 343790.92,
+          "ticks": 360,
+          "VmRSS": 3532,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 53564,
+          "SwapFree": 2192
+        },
+        "rss_kib_max": 3532,
+        "threads_max": 17,
+        "swap_kib_max": 0,
+        "available_min_kib": 53600
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 1,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2620053949,
+          "mean": 21833782,
+          "50th": 20914696,
+          "90th": 26019287,
+          "95th": 29093381,
+          "99th": 38262337,
+          "max": 42333842,
+          "min": 17569011
+        },
+        "bytes_in": {
+          "total": 2554320,
+          "mean": 21286
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:00:19.739862063+08:00",
+        "latest": "2026-10-22T17:00:31.63895945+08:00",
+        "end": "2026-10-22T17:00:31.661553457+08:00",
+        "duration": 11899097387,
+        "wait": 22594007,
+        "requests": 120,
+        "rate": 10.084798543719996,
+        "throughput": 10.065685818741636,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 13416.666666666666,
+        "cpu_percent_one_core": 12.637362637371876,
+        "before": {
+          "uptime": 343792.23,
+          "ticks": 361,
+          "VmRSS": 3532,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 53520,
+          "SwapFree": 2192
+        },
+        "after": {
+          "uptime": 343804.97,
+          "ticks": 522,
+          "VmRSS": 3532,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 53448,
+          "SwapFree": 2192
+        },
+        "rss_kib_max": 3532,
+        "threads_max": 17,
+        "swap_kib_max": 0,
+        "available_min_kib": 53636
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 1,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2313897985,
+          "mean": 19282483,
+          "50th": 18666666,
+          "90th": 22392452,
+          "95th": 25318027,
+          "99th": 29256156,
+          "max": 32193830,
+          "min": 15158705
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:00:33.776408968+08:00",
+        "latest": "2026-10-22T17:00:45.67647731+08:00",
+        "end": "2026-10-22T17:00:45.696643087+08:00",
+        "duration": 11900068342,
+        "wait": 20165777,
+        "requests": 120,
+        "rate": 10.083975700918709,
+        "throughput": 10.066916371107896,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 6000.0,
+        "cpu_percent_one_core": 5.633802816889092,
+        "before": {
+          "uptime": 343806.25,
+          "ticks": 522,
+          "VmRSS": 3532,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 53516,
+          "SwapFree": 2192
+        },
+        "after": {
+          "uptime": 343819.03,
+          "ticks": 594,
+          "VmRSS": 3532,
+          "VmHWM": 4856,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 53488,
+          "SwapFree": 2192
+        },
+        "rss_kib_max": 3600,
+        "threads_max": 17,
+        "swap_kib_max": 0,
+        "available_min_kib": 53584
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3245309460,
+          "mean": 5408849,
+          "50th": 5059094,
+          "90th": 7323985,
+          "95th": 8386618,
+          "99th": 10402660,
+          "max": 19367294,
+          "min": 2912029
+        },
+        "bytes_in": {
+          "total": 399000,
+          "mean": 665
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:01:10.568879072+08:00",
+        "latest": "2026-10-22T17:01:22.548726744+08:00",
+        "end": "2026-10-22T17:01:22.553897263+08:00",
+        "duration": 11979847672,
+        "wait": 5170519,
+        "requests": 600,
+        "rate": 50.084109283155165,
+        "throughput": 50.062502237215,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 550.0,
+        "cpu_percent_one_core": 2.4981074943185204,
+        "before": {
+          "uptime": 343843.13,
+          "ticks": 48,
+          "VmRSS": 3308,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 53668,
+          "SwapFree": 2448
+        },
+        "after": {
+          "uptime": 343856.34,
+          "ticks": 81,
+          "VmRSS": 3308,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 53632,
+          "SwapFree": 2448
+        },
+        "rss_kib_max": 3308,
+        "threads_max": 12,
+        "swap_kib_max": 0,
+        "available_min_kib": 53760
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 9095039842,
+          "mean": 10105599,
+          "50th": 7432823,
+          "90th": 21005844,
+          "95th": 23412933,
+          "99th": 29635643,
+          "max": 62161962,
+          "min": 3593903
+        },
+        "bytes_in": {
+          "total": 3815250,
+          "mean": 4239.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:01:25.114737234+08:00",
+        "latest": "2026-10-22T17:01:37.10115017+08:00",
+        "end": "2026-10-22T17:01:37.108902959+08:00",
+        "duration": 11986412936,
+        "wait": 7752789,
+        "requests": 900,
+        "rate": 75.08501540915042,
+        "throughput": 75.03648195589693,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 3011.1111111111113,
+        "cpu_percent_one_core": 21.254901960784313,
+        "before": {
+          "uptime": 343857.68,
+          "ticks": 82,
+          "VmRSS": 3308,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 53688,
+          "SwapFree": 2448
+        },
+        "after": {
+          "uptime": 343870.43,
+          "ticks": 353,
+          "VmRSS": 3364,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 57600,
+          "SwapFree": 2448
+        },
+        "rss_kib_max": 3364,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 53916
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2734169398,
+          "mean": 22784744,
+          "50th": 21141577,
+          "90th": 27276482,
+          "95th": 31502630,
+          "99th": 57936699,
+          "max": 69118042,
+          "min": 17257474
+        },
+        "bytes_in": {
+          "total": 2554320,
+          "mean": 21286
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:01:39.259802072+08:00",
+        "latest": "2026-10-22T17:01:51.159749825+08:00",
+        "end": "2026-10-22T17:01:51.179051947+08:00",
+        "duration": 11899947753,
+        "wait": 19302122,
+        "requests": 120,
+        "rate": 10.084077887631715,
+        "throughput": 10.067747656813008,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 13166.666666666666,
+        "cpu_percent_one_core": 12.37274862958258,
+        "before": {
+          "uptime": 343871.74,
+          "ticks": 354,
+          "VmRSS": 3364,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 57604,
+          "SwapFree": 2448
+        },
+        "after": {
+          "uptime": 343884.51,
+          "ticks": 512,
+          "VmRSS": 3364,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 57620,
+          "SwapFree": 2448
+        },
+        "rss_kib_max": 3364,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 57704
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2400732526,
+          "mean": 20006104,
+          "50th": 18940275,
+          "90th": 23492797,
+          "95th": 27737735,
+          "99th": 43423153,
+          "max": 51506361,
+          "min": 15564539
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:01:53.329987041+08:00",
+        "latest": "2026-10-22T17:02:05.230425481+08:00",
+        "end": "2026-10-22T17:02:05.246875105+08:00",
+        "duration": 11900438440,
+        "wait": 16449624,
+        "requests": 120,
+        "rate": 10.083662094049703,
+        "throughput": 10.069742986217245,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 5416.666666666667,
+        "cpu_percent_one_core": 5.114083398890074,
+        "before": {
+          "uptime": 343885.81,
+          "ticks": 513,
+          "VmRSS": 3364,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 57600,
+          "SwapFree": 2448
+        },
+        "after": {
+          "uptime": 343898.52,
+          "ticks": 578,
+          "VmRSS": 3364,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 53564,
+          "SwapFree": 2448
+        },
+        "rss_kib_max": 3364,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 53632
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 1,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 7396255055,
+          "mean": 12327091,
+          "50th": 11048794,
+          "90th": 14877835,
+          "95th": 20648702,
+          "99th": 42084466,
+          "max": 73163453,
+          "min": 8438178
+        },
+        "bytes_in": {
+          "total": 679800,
+          "mean": 1133
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:02:36.990801794+08:00",
+        "latest": "2026-10-22T17:02:48.970719857+08:00",
+        "end": "2026-10-22T17:02:48.979824199+08:00",
+        "duration": 11979918063,
+        "wait": 9104342,
+        "requests": 600,
+        "rate": 50.08381500146493,
+        "throughput": 50.045781860393475,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 8400.0,
+        "cpu_percent_one_core": 39.436619718223646,
+        "before": {
+          "uptime": 343929.54,
+          "ticks": 589,
+          "VmRSS": 36776,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 33464,
+          "SwapFree": 1140
+        },
+        "after": {
+          "uptime": 343942.32,
+          "ticks": 1093,
+          "VmRSS": 36780,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37768,
+          "SwapFree": 1140
+        },
+        "rss_kib_max": 36780,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 33592
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 1,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 78455918041,
+          "mean": 89357537,
+          "50th": 26040127,
+          "90th": 456320929,
+          "95th": 512057444,
+          "99th": 558630142,
+          "max": 571730396,
+          "min": 10076732
+        },
+        "bytes_in": {
+          "total": 3823546,
+          "mean": 4354.835990888383
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:02:51.011717414+08:00",
+        "latest": "2026-10-22T17:03:02.997969424+08:00",
+        "end": "2026-10-22T17:03:03.145888686+08:00",
+        "duration": 11986252010,
+        "wait": 147919262,
+        "requests": 878,
+        "rate": 73.25058736187877,
+        "throughput": 72.3576402803885,
+        "success": 1,
+        "status_codes": {
+          "200": 878
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 12927.107061503417,
+        "cpu_percent_one_core": 87.91634391961671,
+        "before": {
+          "uptime": 343943.58,
+          "ticks": 1097,
+          "VmRSS": 36780,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37768,
+          "SwapFree": 1140
+        },
+        "after": {
+          "uptime": 343956.49,
+          "ticks": 2232,
+          "VmRSS": 36908,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37768,
+          "SwapFree": 1140
+        },
+        "rss_kib_max": 36908,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 37880
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 1,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 13241200920,
+          "mean": 110343341,
+          "50th": 34091420,
+          "90th": 195180459,
+          "95th": 795723104,
+          "99th": 1162799263,
+          "max": 1191546953,
+          "min": 27404778
+        },
+        "bytes_in": {
+          "total": 2575680,
+          "mean": 21464
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:03:05.221726727+08:00",
+        "latest": "2026-10-22T17:03:17.122338504+08:00",
+        "end": "2026-10-22T17:03:17.154768579+08:00",
+        "duration": 11900611777,
+        "wait": 32430075,
+        "requests": 120,
+        "rate": 10.083515221622543,
+        "throughput": 10.056111550458342,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 29416.666666666668,
+        "cpu_percent_one_core": 27.578125000025082,
+        "before": {
+          "uptime": 343957.71,
+          "ticks": 2236,
+          "VmRSS": 36908,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37752,
+          "SwapFree": 1140
+        },
+        "after": {
+          "uptime": 343970.51,
+          "ticks": 2589,
+          "VmRSS": 36908,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37752,
+          "SwapFree": 1140
+        },
+        "rss_kib_max": 36908,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 37800
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 1,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3205960618,
+          "mean": 26716338,
+          "50th": 25109053,
+          "90th": 32742712,
+          "95th": 34658617,
+          "99th": 49591808,
+          "max": 75967159,
+          "min": 19893283
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:03:19.328836475+08:00",
+        "latest": "2026-10-22T17:03:31.228718548+08:00",
+        "end": "2026-10-22T17:03:31.253023704+08:00",
+        "duration": 11899882073,
+        "wait": 24305156,
+        "requests": 120,
+        "rate": 10.084133545514002,
+        "throughput": 10.06357898408004,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 16666.666666666668,
+        "cpu_percent_one_core": 15.723270440214158,
+        "before": {
+          "uptime": 343971.81,
+          "ticks": 2595,
+          "VmRSS": 36908,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37868,
+          "SwapFree": 1140
+        },
+        "after": {
+          "uptime": 343984.53,
+          "ticks": 2795,
+          "VmRSS": 37036,
+          "VmHWM": 37228,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 37712,
+          "SwapFree": 1140
+        },
+        "rss_kib_max": 37036,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 37768
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 2,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3394811109,
+          "mean": 28290092,
+          "50th": 25086069,
+          "90th": 33360504,
+          "95th": 45718934,
+          "99th": 86691299,
+          "max": 94135205,
+          "min": 21060399
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:04:04.264789332+08:00",
+        "latest": "2026-10-22T17:04:16.164715526+08:00",
+        "end": "2026-10-22T17:04:16.187858705+08:00",
+        "duration": 11899926194,
+        "wait": 23143179,
+        "requests": 120,
+        "rate": 10.084096156874029,
+        "throughput": 10.064522502212569,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 16833.333333333332,
+        "cpu_percent_one_core": 15.80594679182773,
+        "before": {
+          "uptime": 344016.75,
+          "ticks": 581,
+          "VmRSS": 37268,
+          "VmHWM": 37268,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38600,
+          "SwapFree": 140
+        },
+        "after": {
+          "uptime": 344029.53,
+          "ticks": 783,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38608,
+          "SwapFree": 144
+        },
+        "rss_kib_max": 37388,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38672
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 2,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 4028954210,
+          "mean": 33574618,
+          "50th": 31445045,
+          "90th": 39171459,
+          "95th": 45193130,
+          "99th": 60913764,
+          "max": 67019300,
+          "min": 27134278
+        },
+        "bytes_in": {
+          "total": 2575680,
+          "mean": 21464
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:04:18.35290328+08:00",
+        "latest": "2026-10-22T17:04:30.252747583+08:00",
+        "end": "2026-10-22T17:04:30.290778626+08:00",
+        "duration": 11899844303,
+        "wait": 38031043,
+        "requests": 120,
+        "rate": 10.084165552464203,
+        "throughput": 10.05203995870238,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 28833.333333333332,
+        "cpu_percent_one_core": 27.073552425729222,
+        "before": {
+          "uptime": 344030.84,
+          "ticks": 788,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38608,
+          "SwapFree": 144
+        },
+        "after": {
+          "uptime": 344043.62,
+          "ticks": 1134,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38600,
+          "SwapFree": 144
+        },
+        "rss_kib_max": 37388,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38648
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 2,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 27066771717,
+          "mean": 30074190,
+          "50th": 22940642,
+          "90th": 50125784,
+          "95th": 77550574,
+          "99th": 151629901,
+          "max": 285275844,
+          "min": 10116045
+        },
+        "bytes_in": {
+          "total": 3925050,
+          "mean": 4361.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:04:32.33584352+08:00",
+        "latest": "2026-10-22T17:04:44.322011532+08:00",
+        "end": "2026-10-22T17:04:44.345880166+08:00",
+        "duration": 11986168012,
+        "wait": 23868634,
+        "requests": 900,
+        "rate": 75.08654968785365,
+        "throughput": 74.93732338441693,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 12211.111111111111,
+        "cpu_percent_one_core": 85.39238539241629,
+        "before": {
+          "uptime": 344044.9,
+          "ticks": 1138,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38604,
+          "SwapFree": 144
+        },
+        "after": {
+          "uptime": 344057.77,
+          "ticks": 2237,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38684,
+          "SwapFree": 144
+        },
+        "rss_kib_max": 37388,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38684
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 2,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 7178458349,
+          "mean": 11964097,
+          "50th": 11145208,
+          "90th": 14382363,
+          "95th": 16598608,
+          "99th": 24578168,
+          "max": 65640215,
+          "min": 8458737
+        },
+        "bytes_in": {
+          "total": 679800,
+          "mean": 1133
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:04:46.407730861+08:00",
+        "latest": "2026-10-22T17:04:58.386738103+08:00",
+        "end": "2026-10-22T17:04:58.398011276+08:00",
+        "duration": 11979007242,
+        "wait": 11273173,
+        "requests": 600,
+        "rate": 50.08762311256644,
+        "throughput": 50.04053109962232,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 8300.0,
+        "cpu_percent_one_core": 38.87587821997093,
+        "before": {
+          "uptime": 344058.97,
+          "ticks": 2243,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38596,
+          "SwapFree": 144
+        },
+        "after": {
+          "uptime": 344071.78,
+          "ticks": 2741,
+          "VmRSS": 37388,
+          "VmHWM": 37388,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38596,
+          "SwapFree": 144
+        },
+        "rss_kib_max": 37388,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38672
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 2,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2330114996,
+          "mean": 19417624,
+          "50th": 18017920,
+          "90th": 23692512,
+          "95th": 26595489,
+          "99th": 49414081,
+          "max": 52716126,
+          "min": 14345353
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:05:24.154576158+08:00",
+        "latest": "2026-10-22T17:05:36.053824101+08:00",
+        "end": "2026-10-22T17:05:36.072482521+08:00",
+        "duration": 11899247943,
+        "wait": 18658420,
+        "requests": 120,
+        "rate": 10.08467094515773,
+        "throughput": 10.068882599426075,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 5500.0,
+        "cpu_percent_one_core": 5.288461538469432,
+        "before": {
+          "uptime": 344096.63,
+          "ticks": 48,
+          "VmRSS": 3220,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60492,
+          "SwapFree": 244
+        },
+        "after": {
+          "uptime": 344109.11,
+          "ticks": 114,
+          "VmRSS": 3220,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60480,
+          "SwapFree": 244
+        },
+        "rss_kib_max": 3288,
+        "threads_max": 12,
+        "swap_kib_max": 0,
+        "available_min_kib": 60632
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 2,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2635200249,
+          "mean": 21960002,
+          "50th": 20377499,
+          "90th": 25188226,
+          "95th": 26121802,
+          "99th": 66190896,
+          "max": 97075977,
+          "min": 17344887
+        },
+        "bytes_in": {
+          "total": 2554320,
+          "mean": 21286
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:05:37.903797223+08:00",
+        "latest": "2026-10-22T17:05:49.803564781+08:00",
+        "end": "2026-10-22T17:05:49.825126493+08:00",
+        "duration": 11899767558,
+        "wait": 21561712,
+        "requests": 120,
+        "rate": 10.084230588128266,
+        "throughput": 10.065991575451218,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 13250.0,
+        "cpu_percent_one_core": 12.451057165269603,
+        "before": {
+          "uptime": 344110.39,
+          "ticks": 114,
+          "VmRSS": 3220,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60460,
+          "SwapFree": 244
+        },
+        "after": {
+          "uptime": 344123.16,
+          "ticks": 273,
+          "VmRSS": 3228,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60460,
+          "SwapFree": 244
+        },
+        "rss_kib_max": 3228,
+        "threads_max": 12,
+        "swap_kib_max": 0,
+        "available_min_kib": 60780
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 2,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 9926630576,
+          "mean": 11029589,
+          "50th": 7498047,
+          "90th": 20699374,
+          "95th": 23506475,
+          "99th": 42937485,
+          "max": 156160917,
+          "min": 3066921
+        },
+        "bytes_in": {
+          "total": 3815250,
+          "mean": 4239.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:05:51.865766698+08:00",
+        "latest": "2026-10-22T17:06:03.851406709+08:00",
+        "end": "2026-10-22T17:06:03.862649073+08:00",
+        "duration": 11985640011,
+        "wait": 11242364,
+        "requests": 900,
+        "rate": 75.08985746059548,
+        "throughput": 75.01949021984971,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 3022.222222222222,
+        "cpu_percent_one_core": 21.233411397349684,
+        "before": {
+          "uptime": 344124.43,
+          "ticks": 274,
+          "VmRSS": 3228,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60488,
+          "SwapFree": 244
+        },
+        "after": {
+          "uptime": 344137.24,
+          "ticks": 546,
+          "VmRSS": 3344,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 60024,
+          "SwapFree": 244
+        },
+        "rss_kib_max": 3344,
+        "threads_max": 17,
+        "swap_kib_max": 0,
+        "available_min_kib": 60044
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 2,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3652125173,
+          "mean": 6086875,
+          "50th": 5426769,
+          "90th": 8164814,
+          "95th": 9956454,
+          "99th": 15129023,
+          "max": 68992653,
+          "min": 2950602
+        },
+        "bytes_in": {
+          "total": 399000,
+          "mean": 665
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:06:06.029607496+08:00",
+        "latest": "2026-10-22T17:06:18.011981849+08:00",
+        "end": "2026-10-22T17:06:18.01734988+08:00",
+        "duration": 11982374353,
+        "wait": 5368031,
+        "requests": 600,
+        "rate": 50.07354822375244,
+        "throughput": 50.051125623188064,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 566.6666666666666,
+        "cpu_percent_one_core": 2.67927501970006,
+        "before": {
+          "uptime": 344138.59,
+          "ticks": 547,
+          "VmRSS": 3344,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 60020,
+          "SwapFree": 244
+        },
+        "after": {
+          "uptime": 344151.28,
+          "ticks": 581,
+          "VmRSS": 3344,
+          "VmHWM": 5056,
+          "VmSwap": 0,
+          "Threads": 17,
+          "MemAvailable": 60020,
+          "SwapFree": 244
+        },
+        "rss_kib_max": 3344,
+        "threads_max": 17,
+        "swap_kib_max": 0,
+        "available_min_kib": 60192
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 2,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2489721722,
+          "mean": 20747681,
+          "50th": 19699659,
+          "90th": 25256044,
+          "95th": 26866990,
+          "99th": 50692309,
+          "max": 66070644,
+          "min": 14749203
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:06:42.947359118+08:00",
+        "latest": "2026-10-22T17:06:54.846420407+08:00",
+        "end": "2026-10-22T17:06:54.86483636+08:00",
+        "duration": 11899061289,
+        "wait": 18415953,
+        "requests": 120,
+        "rate": 10.08482913781889,
+        "throughput": 10.069245156776276,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 6000.0,
+        "cpu_percent_one_core": 5.616224648982899,
+        "before": {
+          "uptime": 344175.43,
+          "ticks": 46,
+          "VmRSS": 3264,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 60444,
+          "SwapFree": 320
+        },
+        "after": {
+          "uptime": 344188.25,
+          "ticks": 118,
+          "VmRSS": 3264,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 60448,
+          "SwapFree": 320
+        },
+        "rss_kib_max": 3332,
+        "threads_max": 11,
+        "swap_kib_max": 0,
+        "available_min_kib": 60424
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 2,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2650944447,
+          "mean": 22091203,
+          "50th": 21097639,
+          "90th": 25956341,
+          "95th": 29720759,
+          "99th": 42437308,
+          "max": 49198135,
+          "min": 17138600
+        },
+        "bytes_in": {
+          "total": 2554320,
+          "mean": 21286
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:06:57.063938423+08:00",
+        "latest": "2026-10-22T17:07:08.965468498+08:00",
+        "end": "2026-10-22T17:07:08.989117558+08:00",
+        "duration": 11901530075,
+        "wait": 23649060,
+        "requests": 120,
+        "rate": 10.08273719797326,
+        "throughput": 10.06274192123488,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 13583.333333333334,
+        "cpu_percent_one_core": 13.008778930537632,
+        "before": {
+          "uptime": 344189.55,
+          "ticks": 118,
+          "VmRSS": 3264,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 60444,
+          "SwapFree": 320
+        },
+        "after": {
+          "uptime": 344202.08,
+          "ticks": 281,
+          "VmRSS": 3264,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 60436,
+          "SwapFree": 320
+        },
+        "rss_kib_max": 3264,
+        "threads_max": 11,
+        "swap_kib_max": 0,
+        "available_min_kib": 60548
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 2,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 9062333298,
+          "mean": 10069259,
+          "50th": 7475873,
+          "90th": 21213580,
+          "95th": 23488715,
+          "99th": 30034768,
+          "max": 55690902,
+          "min": 3931047
+        },
+        "bytes_in": {
+          "total": 3815250,
+          "mean": 4239.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:07:10.84676089+08:00",
+        "latest": "2026-10-22T17:07:22.83289829+08:00",
+        "end": "2026-10-22T17:07:22.843826844+08:00",
+        "duration": 11986137400,
+        "wait": 10928554,
+        "requests": 900,
+        "rate": 75.0867414551747,
+        "throughput": 75.01834227225588,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 3133.3333333333335,
+        "cpu_percent_one_core": 22.187254130569244,
+        "before": {
+          "uptime": 344203.41,
+          "ticks": 283,
+          "VmRSS": 3264,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 60416,
+          "SwapFree": 320
+        },
+        "after": {
+          "uptime": 344216.12,
+          "ticks": 565,
+          "VmRSS": 3428,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60096,
+          "SwapFree": 320
+        },
+        "rss_kib_max": 3428,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 60340
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 2,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3376983035,
+          "mean": 5628305,
+          "50th": 5151658,
+          "90th": 7677882,
+          "95th": 9072353,
+          "99th": 13096338,
+          "max": 35388489,
+          "min": 3030091
+        },
+        "bytes_in": {
+          "total": 399000,
+          "mean": 665
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:07:24.891103493+08:00",
+        "latest": "2026-10-22T17:07:36.871542541+08:00",
+        "end": "2026-10-22T17:07:36.876505049+08:00",
+        "duration": 11980439048,
+        "wait": 4962508,
+        "requests": 600,
+        "rate": 50.08163704152088,
+        "throughput": 50.060900938244714,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 550.0,
+        "cpu_percent_one_core": 2.65486725663866,
+        "before": {
+          "uptime": 344217.45,
+          "ticks": 565,
+          "VmRSS": 3428,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60108,
+          "SwapFree": 320
+        },
+        "after": {
+          "uptime": 344229.88,
+          "ticks": 598,
+          "VmRSS": 3428,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60092,
+          "SwapFree": 320
+        },
+        "rss_kib_max": 3428,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 60148
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 3,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3325690009,
+          "mean": 5542816,
+          "50th": 4888320,
+          "90th": 7386045,
+          "95th": 9015538,
+          "99th": 18184998,
+          "max": 63805912,
+          "min": 2964619
+        },
+        "bytes_in": {
+          "total": 399000,
+          "mean": 665
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:08:00.691417749+08:00",
+        "latest": "2026-10-22T17:08:12.670863421+08:00",
+        "end": "2026-10-22T17:08:12.674850975+08:00",
+        "duration": 11979445672,
+        "wait": 3987554,
+        "requests": 600,
+        "rate": 50.08578997961501,
+        "throughput": 50.069123654663734,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 550.0,
+        "cpu_percent_one_core": 2.590266875983055,
+        "before": {
+          "uptime": 344253.25,
+          "ticks": 46,
+          "VmRSS": 3284,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60280,
+          "SwapFree": 400
+        },
+        "after": {
+          "uptime": 344265.99,
+          "ticks": 79,
+          "VmRSS": 3284,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 60128,
+          "SwapFree": 400
+        },
+        "rss_kib_max": 3284,
+        "threads_max": 13,
+        "swap_kib_max": 0,
+        "available_min_kib": 60308
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 3,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 9477044489,
+          "mean": 10530049,
+          "50th": 7473164,
+          "90th": 21692600,
+          "95th": 24605217,
+          "99th": 39215280,
+          "max": 63535043,
+          "min": 3177289
+        },
+        "bytes_in": {
+          "total": 3815250,
+          "mean": 4239.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:08:14.521712446+08:00",
+        "latest": "2026-10-22T17:08:26.508721965+08:00",
+        "end": "2026-10-22T17:08:26.514275966+08:00",
+        "duration": 11987009519,
+        "wait": 5554001,
+        "requests": 900,
+        "rate": 75.0812784934771,
+        "throughput": 75.04650682058676,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 3077.777777777778,
+        "cpu_percent_one_core": 21.640625000019682,
+        "before": {
+          "uptime": 344267.09,
+          "ticks": 80,
+          "VmRSS": 3284,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 60180,
+          "SwapFree": 400
+        },
+        "after": {
+          "uptime": 344279.89,
+          "ticks": 357,
+          "VmRSS": 3336,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60104,
+          "SwapFree": 400
+        },
+        "rss_kib_max": 3336,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 60196
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 3,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2786360691,
+          "mean": 23219672,
+          "50th": 21266602,
+          "90th": 27654711,
+          "95th": 29835065,
+          "99th": 67172215,
+          "max": 92071539,
+          "min": 18295526
+        },
+        "bytes_in": {
+          "total": 2554320,
+          "mean": 21286
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:08:28.698719874+08:00",
+        "latest": "2026-10-22T17:08:40.597199382+08:00",
+        "end": "2026-10-22T17:08:40.615913105+08:00",
+        "duration": 11898479508,
+        "wait": 18713723,
+        "requests": 120,
+        "rate": 10.085322239645615,
+        "throughput": 10.06948512740785,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 13416.666666666666,
+        "cpu_percent_one_core": 12.57812500001144,
+        "before": {
+          "uptime": 344281.17,
+          "ticks": 358,
+          "VmRSS": 3336,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60080,
+          "SwapFree": 400
+        },
+        "after": {
+          "uptime": 344293.97,
+          "ticks": 519,
+          "VmRSS": 3428,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60080,
+          "SwapFree": 400
+        },
+        "rss_kib_max": 3428,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 60140
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 3,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2432489168,
+          "mean": 20270743,
+          "50th": 18797530,
+          "90th": 23385920,
+          "95th": 26474255,
+          "99th": 61734688,
+          "max": 66809283,
+          "min": 15255446
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:08:42.770317626+08:00",
+        "latest": "2026-10-22T17:08:54.671720718+08:00",
+        "end": "2026-10-22T17:08:54.689783617+08:00",
+        "duration": 11901403092,
+        "wait": 18062899,
+        "requests": 120,
+        "rate": 10.082844776567795,
+        "throughput": 10.067565114964722,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 5916.666666666667,
+        "cpu_percent_one_core": 5.581761006301568,
+        "before": {
+          "uptime": 344295.25,
+          "ticks": 520,
+          "VmRSS": 3428,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60052,
+          "SwapFree": 400
+        },
+        "after": {
+          "uptime": 344307.97,
+          "ticks": 591,
+          "VmRSS": 3428,
+          "VmHWM": 5120,
+          "VmSwap": 0,
+          "Threads": 14,
+          "MemAvailable": 60052,
+          "SwapFree": 400
+        },
+        "rss_kib_max": 3496,
+        "threads_max": 14,
+        "swap_kib_max": 0,
+        "available_min_kib": 60100
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 3,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3059274265,
+          "mean": 5098790,
+          "50th": 4833061,
+          "90th": 7064025,
+          "95th": 8147375,
+          "99th": 10091559,
+          "max": 23182652,
+          "min": 2823483
+        },
+        "bytes_in": {
+          "total": 399000,
+          "mean": 665
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:09:18.889916398+08:00",
+        "latest": "2026-10-22T17:09:30.869873163+08:00",
+        "end": "2026-10-22T17:09:30.876021742+08:00",
+        "duration": 11979956765,
+        "wait": 6148579,
+        "requests": 600,
+        "rate": 50.08365320256646,
+        "throughput": 50.057961512940295,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 566.6666666666666,
+        "cpu_percent_one_core": 2.69627279936857,
+        "before": {
+          "uptime": 344331.45,
+          "ticks": 46,
+          "VmRSS": 3052,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60120,
+          "SwapFree": 460
+        },
+        "after": {
+          "uptime": 344344.06,
+          "ticks": 80,
+          "VmRSS": 3052,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60152,
+          "SwapFree": 460
+        },
+        "rss_kib_max": 3052,
+        "threads_max": 12,
+        "swap_kib_max": 0,
+        "available_min_kib": 60176
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 3,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 8162651944,
+          "mean": 9069613,
+          "50th": 6217376,
+          "90th": 19725714,
+          "95th": 22673568,
+          "99th": 30325248,
+          "max": 44554577,
+          "min": 2514822
+        },
+        "bytes_in": {
+          "total": 3815250,
+          "mean": 4239.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:09:32.753065934+08:00",
+        "latest": "2026-10-22T17:09:44.739800948+08:00",
+        "end": "2026-10-22T17:09:44.744363964+08:00",
+        "duration": 11986735014,
+        "wait": 4563016,
+        "requests": 900,
+        "rate": 75.08299790967583,
+        "throughput": 75.05442678085119,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 3022.222222222222,
+        "cpu_percent_one_core": 21.707901037562415,
+        "before": {
+          "uptime": 344345.33,
+          "ticks": 80,
+          "VmRSS": 3052,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 60144,
+          "SwapFree": 460
+        },
+        "after": {
+          "uptime": 344357.86,
+          "ticks": 352,
+          "VmRSS": 3056,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 60024,
+          "SwapFree": 460
+        },
+        "rss_kib_max": 3056,
+        "threads_max": 13,
+        "swap_kib_max": 0,
+        "available_min_kib": 60136
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 3,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2665319924,
+          "mean": 22210999,
+          "50th": 20095047,
+          "90th": 25196181,
+          "95th": 28422872,
+          "99th": 94687577,
+          "max": 100411110,
+          "min": 17805805
+        },
+        "bytes_in": {
+          "total": 2554320,
+          "mean": 21286
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:09:46.726702192+08:00",
+        "latest": "2026-10-22T17:09:58.626106154+08:00",
+        "end": "2026-10-22T17:09:58.644037385+08:00",
+        "duration": 11899403962,
+        "wait": 17931231,
+        "requests": 120,
+        "rate": 10.084538720024337,
+        "throughput": 10.069365177416975,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 13416.666666666666,
+        "cpu_percent_one_core": 12.637362637314137,
+        "before": {
+          "uptime": 344359.22,
+          "ticks": 352,
+          "VmRSS": 3056,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 59988,
+          "SwapFree": 460
+        },
+        "after": {
+          "uptime": 344371.96,
+          "ticks": 513,
+          "VmRSS": 3104,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 60020,
+          "SwapFree": 460
+        },
+        "rss_kib_max": 3104,
+        "threads_max": 13,
+        "swap_kib_max": 0,
+        "available_min_kib": 60156
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 3,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 2365126377,
+          "mean": 19709386,
+          "50th": 17850328,
+          "90th": 24020473,
+          "95th": 31575945,
+          "99th": 50301807,
+          "max": 51903495,
+          "min": 14053914
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:10:00.745551419+08:00",
+        "latest": "2026-10-22T17:10:12.645246385+08:00",
+        "end": "2026-10-22T17:10:12.660912794+08:00",
+        "duration": 11899694966,
+        "wait": 15666409,
+        "requests": 120,
+        "rate": 10.084292105206556,
+        "throughput": 10.071033200199519,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 5500.0,
+        "cpu_percent_one_core": 5.288461538444766,
+        "before": {
+          "uptime": 344373.23,
+          "ticks": 513,
+          "VmRSS": 3104,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 60008,
+          "SwapFree": 460
+        },
+        "after": {
+          "uptime": 344385.71,
+          "ticks": 579,
+          "VmRSS": 3104,
+          "VmHWM": 4868,
+          "VmSwap": 0,
+          "Threads": 13,
+          "MemAvailable": 60020,
+          "SwapFree": 460
+        },
+        "rss_kib_max": 3172,
+        "threads_max": 13,
+        "swap_kib_max": 0,
+        "available_min_kib": 60196
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 3,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 8155764392,
+          "mean": 13592940,
+          "50th": 10530962,
+          "90th": 17930158,
+          "95th": 30497617,
+          "99th": 67933573,
+          "max": 108504188,
+          "min": 8024399
+        },
+        "bytes_in": {
+          "total": 679800,
+          "mean": 1133
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:10:43.794211753+08:00",
+        "latest": "2026-10-22T17:10:55.774148487+08:00",
+        "end": "2026-10-22T17:10:55.782825013+08:00",
+        "duration": 11979936734,
+        "wait": 8676526,
+        "requests": 600,
+        "rate": 50.08373694471632,
+        "throughput": 50.04748981284596,
+        "success": 1,
+        "status_codes": {
+          "200": 600
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 8433.333333333334,
+        "cpu_percent_one_core": 39.68627450980392,
+        "before": {
+          "uptime": 344416.36,
+          "ticks": 586,
+          "VmRSS": 37288,
+          "VmHWM": 37288,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38608,
+          "SwapFree": 388
+        },
+        "after": {
+          "uptime": 344429.11,
+          "ticks": 1092,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38616,
+          "SwapFree": 388
+        },
+        "rss_kib_max": 37328,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38620
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 3,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 28636707515,
+          "mean": 31818563,
+          "50th": 23013224,
+          "90th": 56812337,
+          "95th": 105568406,
+          "99th": 165542119,
+          "max": 207029920,
+          "min": 8767027
+        },
+        "bytes_in": {
+          "total": 3925050,
+          "mean": 4361.166666666667
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:10:57.832898955+08:00",
+        "latest": "2026-10-22T17:11:09.820774674+08:00",
+        "end": "2026-10-22T17:11:09.868686518+08:00",
+        "duration": 11987875719,
+        "wait": 47911844,
+        "requests": 900,
+        "rate": 75.07585339523989,
+        "throughput": 74.77699280492028,
+        "success": 1,
+        "status_codes": {
+          "200": 900
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 12566.666666666666,
+        "cpu_percent_one_core": 88.29039812647974,
+        "before": {
+          "uptime": 344430.4,
+          "ticks": 1097,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38600,
+          "SwapFree": 388
+        },
+        "after": {
+          "uptime": 344443.21,
+          "ticks": 2228,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38668,
+          "SwapFree": 388
+        },
+        "rss_kib_max": 37328,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38700
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 3,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 4136803867,
+          "mean": 34473365,
+          "50th": 32372905,
+          "90th": 43846770,
+          "95th": 47185737,
+          "99th": 55443756,
+          "max": 58198960,
+          "min": 28363090
+        },
+        "bytes_in": {
+          "total": 2575680,
+          "mean": 21464
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:11:11.97387801+08:00",
+        "latest": "2026-10-22T17:11:23.873864399+08:00",
+        "end": "2026-10-22T17:11:23.903012767+08:00",
+        "duration": 11899986389,
+        "wait": 29148368,
+        "requests": 120,
+        "rate": 10.084045147389789,
+        "throughput": 10.059405182725778,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 29166.666666666668,
+        "cpu_percent_one_core": 27.386541471113375,
+        "before": {
+          "uptime": 344444.45,
+          "ticks": 2233,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38636,
+          "SwapFree": 388
+        },
+        "after": {
+          "uptime": 344457.23,
+          "ticks": 2583,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38664,
+          "SwapFree": 388
+        },
+        "rss_kib_max": 37328,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38672
+      }
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 3,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "latencies": {
+          "total": 3252473829,
+          "mean": 27103948,
+          "50th": 25348893,
+          "90th": 33407817,
+          "95th": 38149349,
+          "99th": 48059728,
+          "max": 55179048,
+          "min": 21483003
+        },
+        "bytes_in": {
+          "total": 7872480,
+          "mean": 65604
+        },
+        "bytes_out": {
+          "total": 0,
+          "mean": 0
+        },
+        "earliest": "2026-10-22T17:11:26.061790287+08:00",
+        "latest": "2026-10-22T17:11:37.962049408+08:00",
+        "end": "2026-10-22T17:11:37.984108406+08:00",
+        "duration": 11900259121,
+        "wait": 22058998,
+        "requests": 120,
+        "rate": 10.083814039665734,
+        "throughput": 10.065156692033073,
+        "success": 1,
+        "status_codes": {
+          "200": 120
+        },
+        "errors": []
+      },
+      "process": {
+        "cpu_us_per_request": 16416.666666666668,
+        "cpu_percent_one_core": 15.450980392156863,
+        "before": {
+          "uptime": 344458.53,
+          "ticks": 2588,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38612,
+          "SwapFree": 388
+        },
+        "after": {
+          "uptime": 344471.28,
+          "ticks": 2785,
+          "VmRSS": 37328,
+          "VmHWM": 37328,
+          "VmSwap": 0,
+          "Threads": 4,
+          "MemAvailable": 38596,
+          "SwapFree": 388
+        },
+        "rss_kib_max": 37328,
+        "threads_max": 4,
+        "swap_kib_max": 0,
+        "available_min_kib": 38752
+      }
+    }
+  ],
+  "subscription_trials": [
+    {
+      "backend": "baseline",
+      "repetition": 1,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 98333.33333333333,
+      "before": {
+        "uptime": 343820.06,
+        "ticks": 595,
+        "VmRSS": 3536,
+        "VmHWM": 4856,
+        "VmSwap": 0,
+        "Threads": 17,
+        "MemAvailable": 53428,
+        "SwapFree": 2192
+      },
+      "after": {
+        "uptime": 343832.27,
+        "ticks": 713,
+        "VmRSS": 3660,
+        "VmHWM": 5076,
+        "VmSwap": 0,
+        "Threads": 17,
+        "MemAvailable": 53092,
+        "SwapFree": 2448
+      },
+      "trials": [
+        {
+          "scheduled": 228760.655252617,
+          "started": 228761.163539304,
+          "ended": 228761.580375804,
+          "latency_ms": 925.1231870148331,
+          "service_ms": 416.8365000223275,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228761.655252617,
+          "started": 228762.140572833,
+          "ended": 228762.543847675,
+          "latency_ms": 888.5950580006465,
+          "service_ms": 403.27484198496677,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228762.655252617,
+          "started": 228763.14217239,
+          "ended": 228763.547574404,
+          "latency_ms": 892.3217869887594,
+          "service_ms": 405.4020139737986,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228763.655252617,
+          "started": 228764.169049422,
+          "ended": 228764.589531062,
+          "latency_ms": 934.2784449981991,
+          "service_ms": 420.4816400015261,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228764.655252617,
+          "started": 228765.150359799,
+          "ended": 228765.538832656,
+          "latency_ms": 883.5800389933866,
+          "service_ms": 388.47285698284395,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228765.655252617,
+          "started": 228766.162039383,
+          "ended": 228766.549412601,
+          "latency_ms": 894.1599839890841,
+          "service_ms": 387.3732179927174,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228766.655252617,
+          "started": 228767.161189179,
+          "ended": 228767.55493049,
+          "latency_ms": 899.6778730070218,
+          "service_ms": 393.7413110106718,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228767.655252617,
+          "started": 228768.153644537,
+          "ended": 228768.557858635,
+          "latency_ms": 902.6060180040076,
+          "service_ms": 404.2140980018303,
+          "objects": 268,
+          "response_json_bytes": 377004
+        },
+        {
+          "scheduled": 228768.655252617,
+          "started": 228769.177617023,
+          "ended": 228769.556692446,
+          "latency_ms": 901.4398290019017,
+          "service_ms": 379.0754229994491,
+          "objects": 268,
+          "response_json_bytes": 377002
+        },
+        {
+          "scheduled": 228769.655252617,
+          "started": 228770.181028858,
+          "ended": 228770.620449956,
+          "latency_ms": 965.1973390136845,
+          "service_ms": 439.421098009916,
+          "objects": 268,
+          "response_json_bytes": 377004
+        },
+        {
+          "scheduled": 228770.655252617,
+          "started": 228771.2030335,
+          "ended": 228771.567191853,
+          "latency_ms": 911.9392360153142,
+          "service_ms": 364.1583530115895,
+          "objects": 268,
+          "response_json_bytes": 377003
+        },
+        {
+          "scheduled": 228771.655252617,
+          "started": 228772.180538444,
+          "ended": 228772.575891988,
+          "latency_ms": 920.6393710046541,
+          "service_ms": 395.3535440086853,
+          "objects": 268,
+          "response_json_bytes": 377004
+        }
+      ],
+      "rss_kib_max": 4548,
+      "swap_kib_max": 0,
+      "available_min_kib": 52516
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 82500.0,
+      "before": {
+        "uptime": 343899.57,
+        "ticks": 579,
+        "VmRSS": 3368,
+        "VmHWM": 5144,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 53516,
+        "SwapFree": 2448
+      },
+      "after": {
+        "uptime": 343911.77,
+        "ticks": 678,
+        "VmRSS": 3484,
+        "VmHWM": 5144,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 53336,
+        "SwapFree": 2448
+      },
+      "trials": [
+        {
+          "scheduled": 228840.157181288,
+          "started": 228840.646159834,
+          "ended": 228841.038500402,
+          "latency_ms": 881.3191140070558,
+          "service_ms": 392.3405680106953,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228841.157181288,
+          "started": 228841.657562439,
+          "ended": 228842.037077844,
+          "latency_ms": 879.8965559981298,
+          "service_ms": 379.5154049876146,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228842.157181288,
+          "started": 228842.655186607,
+          "ended": 228843.035756536,
+          "latency_ms": 878.5752480034716,
+          "service_ms": 380.5699289951008,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228843.157181288,
+          "started": 228843.674310351,
+          "ended": 228844.037063544,
+          "latency_ms": 879.8822560056578,
+          "service_ms": 362.75319301057607,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228844.157181288,
+          "started": 228844.672859519,
+          "ended": 228845.046495271,
+          "latency_ms": 889.313983003376,
+          "service_ms": 373.6357520101592,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228845.157181288,
+          "started": 228845.671503696,
+          "ended": 228846.045978807,
+          "latency_ms": 888.7975190009456,
+          "service_ms": 374.4751109916251,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228846.157181288,
+          "started": 228846.690577085,
+          "ended": 228847.059757211,
+          "latency_ms": 902.5759230135009,
+          "service_ms": 369.1801259992644,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228847.157181288,
+          "started": 228847.69153775,
+          "ended": 228848.054559619,
+          "latency_ms": 897.3783309920691,
+          "service_ms": 363.02186897955835,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228848.157181288,
+          "started": 228848.689028496,
+          "ended": 228849.053534096,
+          "latency_ms": 896.3528079912066,
+          "service_ms": 364.5055999804754,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228849.157181288,
+          "started": 228849.692844484,
+          "ended": 228850.057595616,
+          "latency_ms": 900.414328003535,
+          "service_ms": 364.75113200140186,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 228850.157181288,
+          "started": 228850.689036866,
+          "ended": 228851.068085222,
+          "latency_ms": 910.903934011003,
+          "service_ms": 379.04835600056686,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 228851.157181288,
+          "started": 228851.698894292,
+          "ended": 228852.078522088,
+          "latency_ms": 921.3408000068739,
+          "service_ms": 379.62779600638896,
+          "objects": 268,
+          "response_json_bytes": 376996
+        }
+      ],
+      "rss_kib_max": 4764,
+      "swap_kib_max": 0,
+      "available_min_kib": 52480
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 1,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 114166.66666666667,
+      "before": {
+        "uptime": 343985.59,
+        "ticks": 2800,
+        "VmRSS": 37036,
+        "VmHWM": 37228,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 37712,
+        "SwapFree": 1140
+      },
+      "after": {
+        "uptime": 343997.73,
+        "ticks": 2937,
+        "VmRSS": 38260,
+        "VmHWM": 38572,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 32508,
+        "SwapFree": 1208
+      },
+      "trials": [
+        {
+          "scheduled": 228926.174346869,
+          "started": 228926.662105661,
+          "ended": 228927.024068331,
+          "latency_ms": 849.7214620001614,
+          "service_ms": 361.9626699946821,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 228927.174346869,
+          "started": 228927.663037106,
+          "ended": 228928.024693319,
+          "latency_ms": 850.3464499954134,
+          "service_ms": 361.6562130046077,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 228928.174346869,
+          "started": 228928.663322295,
+          "ended": 228929.017254814,
+          "latency_ms": 842.9079450143036,
+          "service_ms": 353.9325190067757,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 228929.174346869,
+          "started": 228929.668307548,
+          "ended": 228930.011362608,
+          "latency_ms": 837.0157390017994,
+          "service_ms": 343.0550599878188,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 228930.174346869,
+          "started": 228930.669621131,
+          "ended": 228931.026896901,
+          "latency_ms": 852.5500319956336,
+          "service_ms": 357.27576998760924,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 228931.174346869,
+          "started": 228931.66746714,
+          "ended": 228932.117563511,
+          "latency_ms": 943.2166420156136,
+          "service_ms": 450.09637100156397,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 228932.174346869,
+          "started": 228932.689054743,
+          "ended": 228933.037585367,
+          "latency_ms": 863.2384980155621,
+          "service_ms": 348.53062400361523,
+          "objects": 268,
+          "response_json_bytes": 377641
+        },
+        {
+          "scheduled": 228933.174346869,
+          "started": 228933.687064209,
+          "ended": 228934.021854597,
+          "latency_ms": 847.5077280018013,
+          "service_ms": 334.79038800578564,
+          "objects": 268,
+          "response_json_bytes": 377638
+        },
+        {
+          "scheduled": 228934.174346869,
+          "started": 228934.684028748,
+          "ended": 228935.039651206,
+          "latency_ms": 865.304336999543,
+          "service_ms": 355.6224580097478,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 228935.174346869,
+          "started": 228935.696568795,
+          "ended": 228936.021644594,
+          "latency_ms": 847.2977250057738,
+          "service_ms": 325.07579898810945,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 228936.174346869,
+          "started": 228936.676040598,
+          "ended": 228937.034657331,
+          "latency_ms": 860.3104620124213,
+          "service_ms": 358.6167330213357,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 228937.174346869,
+          "started": 228937.712052953,
+          "ended": 228938.042343725,
+          "latency_ms": 867.996856017271,
+          "service_ms": 330.2907720208168,
+          "objects": 268,
+          "response_json_bytes": 377638
+        }
+      ],
+      "rss_kib_max": 38260,
+      "swap_kib_max": 0,
+      "available_min_kib": 32704
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 2,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 111666.66666666667,
+      "before": {
+        "uptime": 344072.77,
+        "ticks": 2748,
+        "VmRSS": 37388,
+        "VmHWM": 37388,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 38580,
+        "SwapFree": 144
+      },
+      "after": {
+        "uptime": 344084.98,
+        "ticks": 2882,
+        "VmRSS": 38048,
+        "VmHWM": 38560,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 37576,
+        "SwapFree": 244
+      },
+      "trials": [
+        {
+          "scheduled": 229013.356331223,
+          "started": 229013.850374564,
+          "ended": 229014.229538215,
+          "latency_ms": 873.2069919933565,
+          "service_ms": 379.1636509995442,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229014.356331223,
+          "started": 229014.896399707,
+          "ended": 229015.230697064,
+          "latency_ms": 874.3658409803174,
+          "service_ms": 334.2973569815513,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229015.356331223,
+          "started": 229015.87204638,
+          "ended": 229016.235835711,
+          "latency_ms": 879.5044879952911,
+          "service_ms": 363.78933099331334,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229016.356331223,
+          "started": 229016.892023779,
+          "ended": 229017.242384282,
+          "latency_ms": 886.0530589881819,
+          "service_ms": 350.3605030127801,
+          "objects": 268,
+          "response_json_bytes": 377638
+        },
+        {
+          "scheduled": 229017.356331223,
+          "started": 229017.908055454,
+          "ended": 229018.241804538,
+          "latency_ms": 885.4733149928506,
+          "service_ms": 333.7490840058308,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229018.356331223,
+          "started": 229018.908637506,
+          "ended": 229019.337067081,
+          "latency_ms": 980.7358580001164,
+          "service_ms": 428.42957499669865,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229019.356331223,
+          "started": 229019.898087853,
+          "ended": 229020.242469705,
+          "latency_ms": 886.1384819902014,
+          "service_ms": 344.3818519881461,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229020.356331223,
+          "started": 229020.915042884,
+          "ended": 229021.245302743,
+          "latency_ms": 888.9715199766215,
+          "service_ms": 330.25985897984356,
+          "objects": 268,
+          "response_json_bytes": 377638
+        },
+        {
+          "scheduled": 229021.356331223,
+          "started": 229021.906887004,
+          "ended": 229022.253863318,
+          "latency_ms": 897.5320949975867,
+          "service_ms": 346.9763140019495,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229022.356331223,
+          "started": 229022.91963001,
+          "ended": 229023.262285283,
+          "latency_ms": 905.9540599992033,
+          "service_ms": 342.6552730088588,
+          "objects": 268,
+          "response_json_bytes": 377638
+        },
+        {
+          "scheduled": 229023.356331223,
+          "started": 229023.918276389,
+          "ended": 229024.26571305,
+          "latency_ms": 909.381826990284,
+          "service_ms": 347.4366609880235,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229024.356331223,
+          "started": 229024.913567044,
+          "ended": 229025.264001606,
+          "latency_ms": 907.6703829923645,
+          "service_ms": 350.43456201674417,
+          "objects": 268,
+          "response_json_bytes": 377639
+        }
+      ],
+      "rss_kib_max": 38288,
+      "swap_kib_max": 0,
+      "available_min_kib": 37488
+    },
+    {
+      "backend": "candidate",
+      "repetition": 2,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 80833.33333333333,
+      "before": {
+        "uptime": 344152.3,
+        "ticks": 582,
+        "VmRSS": 3372,
+        "VmHWM": 5056,
+        "VmSwap": 0,
+        "Threads": 17,
+        "MemAvailable": 60060,
+        "SwapFree": 244
+      },
+      "after": {
+        "uptime": 344164.54,
+        "ticks": 679,
+        "VmRSS": 3516,
+        "VmHWM": 5056,
+        "VmSwap": 0,
+        "Threads": 17,
+        "MemAvailable": 59808,
+        "SwapFree": 320
+      },
+      "trials": [
+        {
+          "scheduled": 229092.898492715,
+          "started": 229093.390333666,
+          "ended": 229093.781693933,
+          "latency_ms": 883.2012180064339,
+          "service_ms": 391.3602670072578,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229093.898492715,
+          "started": 229094.394335844,
+          "ended": 229094.799710732,
+          "latency_ms": 901.2180170102511,
+          "service_ms": 405.3748880105559,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229094.898492715,
+          "started": 229095.406040145,
+          "ended": 229095.791942452,
+          "latency_ms": 893.4497369918972,
+          "service_ms": 385.9023069962859,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229095.898492715,
+          "started": 229096.419408316,
+          "ended": 229096.791950243,
+          "latency_ms": 893.457527999999,
+          "service_ms": 372.5419270049315,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229096.898492715,
+          "started": 229097.432264164,
+          "ended": 229097.801639833,
+          "latency_ms": 903.1471179914661,
+          "service_ms": 369.3756689899601,
+          "objects": 268,
+          "response_json_bytes": 376998
+        },
+        {
+          "scheduled": 229097.898492715,
+          "started": 229098.453061274,
+          "ended": 229098.807704381,
+          "latency_ms": 909.2116660031024,
+          "service_ms": 354.64310701354407,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229098.898492715,
+          "started": 229099.421444227,
+          "ended": 229099.80417717,
+          "latency_ms": 905.684455006849,
+          "service_ms": 382.7329430205282,
+          "objects": 268,
+          "response_json_bytes": 376998
+        },
+        {
+          "scheduled": 229099.898492715,
+          "started": 229100.463558199,
+          "ended": 229100.801882289,
+          "latency_ms": 903.3895739994477,
+          "service_ms": 338.324090000242,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229100.898492715,
+          "started": 229101.422320819,
+          "ended": 229101.806930434,
+          "latency_ms": 908.4377189865336,
+          "service_ms": 384.6096149936784,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229101.898492715,
+          "started": 229102.439660423,
+          "ended": 229102.818600139,
+          "latency_ms": 920.1074239972513,
+          "service_ms": 378.9397159998771,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229102.898492715,
+          "started": 229103.442164431,
+          "ended": 229103.825586841,
+          "latency_ms": 927.0941260037944,
+          "service_ms": 383.4224099991843,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229103.898492715,
+          "started": 229104.432832798,
+          "ended": 229104.820489085,
+          "latency_ms": 921.9963699870277,
+          "service_ms": 387.6562869991176,
+          "objects": 268,
+          "response_json_bytes": 377000
+        }
+      ],
+      "rss_kib_max": 4348,
+      "swap_kib_max": 0,
+      "available_min_kib": 59400
+    },
+    {
+      "backend": "baseline",
+      "repetition": 2,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 97500.0,
+      "before": {
+        "uptime": 344230.94,
+        "ticks": 599,
+        "VmRSS": 3432,
+        "VmHWM": 5120,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 60088,
+        "SwapFree": 320
+      },
+      "after": {
+        "uptime": 344243.16,
+        "ticks": 716,
+        "VmRSS": 3512,
+        "VmHWM": 5120,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 59904,
+        "SwapFree": 400
+      },
+      "trials": [
+        {
+          "scheduled": 229171.53121834,
+          "started": 229171.998080604,
+          "ended": 229172.423710953,
+          "latency_ms": 892.4926129984669,
+          "service_ms": 425.6303489964921,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229172.53121834,
+          "started": 229173.017234434,
+          "ended": 229173.428298544,
+          "latency_ms": 897.0802039839327,
+          "service_ms": 411.06410999782383,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229173.53121834,
+          "started": 229174.020040972,
+          "ended": 229174.431833042,
+          "latency_ms": 900.6147019972559,
+          "service_ms": 411.79206999368034,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229174.53121834,
+          "started": 229175.031382731,
+          "ended": 229175.420889247,
+          "latency_ms": 889.6709069958888,
+          "service_ms": 389.50651601771824,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229175.53121834,
+          "started": 229176.138172733,
+          "ended": 229176.426641388,
+          "latency_ms": 895.4230480012484,
+          "service_ms": 288.4686550241895,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229176.53121834,
+          "started": 229177.072618569,
+          "ended": 229177.434314624,
+          "latency_ms": 903.0962839897256,
+          "service_ms": 361.6960550134536,
+          "objects": 268,
+          "response_json_bytes": 376998
+        },
+        {
+          "scheduled": 229177.53121834,
+          "started": 229178.03636034,
+          "ended": 229178.45348263,
+          "latency_ms": 922.2642899840139,
+          "service_ms": 417.12229000404477,
+          "objects": 268,
+          "response_json_bytes": 376997
+        },
+        {
+          "scheduled": 229178.53121834,
+          "started": 229179.053420419,
+          "ended": 229179.437348958,
+          "latency_ms": 906.1306179792155,
+          "service_ms": 383.9285389985889,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229179.53121834,
+          "started": 229180.058920195,
+          "ended": 229180.436885984,
+          "latency_ms": 905.6676439940929,
+          "service_ms": 377.9657889972441,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229180.53121834,
+          "started": 229181.049312894,
+          "ended": 229181.442532316,
+          "latency_ms": 911.313975986559,
+          "service_ms": 393.21942199603654,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229181.53121834,
+          "started": 229182.055916857,
+          "ended": 229182.432732192,
+          "latency_ms": 901.5138520044275,
+          "service_ms": 376.8153350101784,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229182.53121834,
+          "started": 229183.060663716,
+          "ended": 229183.449845811,
+          "latency_ms": 918.6274709936697,
+          "service_ms": 389.1820950084366,
+          "objects": 268,
+          "response_json_bytes": 377000
+        }
+      ],
+      "rss_kib_max": 4304,
+      "swap_kib_max": 0,
+      "available_min_kib": 59480
+    },
+    {
+      "backend": "baseline",
+      "repetition": 3,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 96666.66666666667,
+      "before": {
+        "uptime": 344309.0,
+        "ticks": 592,
+        "VmRSS": 3432,
+        "VmHWM": 5120,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 60060,
+        "SwapFree": 400
+      },
+      "after": {
+        "uptime": 344321.25,
+        "ticks": 708,
+        "VmRSS": 3568,
+        "VmHWM": 5120,
+        "VmSwap": 0,
+        "Threads": 14,
+        "MemAvailable": 59816,
+        "SwapFree": 460
+      },
+      "trials": [
+        {
+          "scheduled": 229249.595793884,
+          "started": 229250.083497582,
+          "ended": 229250.485468258,
+          "latency_ms": 889.6743740187958,
+          "service_ms": 401.9706760009285,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229250.595793884,
+          "started": 229251.083047976,
+          "ended": 229251.501603229,
+          "latency_ms": 905.809345014859,
+          "service_ms": 418.55525301070884,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229251.595793884,
+          "started": 229252.108057385,
+          "ended": 229252.488317289,
+          "latency_ms": 892.5234050257131,
+          "service_ms": 380.2599040209316,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229252.595793884,
+          "started": 229253.097054701,
+          "ended": 229253.515473868,
+          "latency_ms": 919.6799840137828,
+          "service_ms": 418.4191669919528,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229253.595793884,
+          "started": 229254.152395895,
+          "ended": 229254.538813716,
+          "latency_ms": 943.0198320187628,
+          "service_ms": 386.4178209914826,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229254.595793884,
+          "started": 229255.142519481,
+          "ended": 229255.549829152,
+          "latency_ms": 954.035268019652,
+          "service_ms": 407.3096709907986,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229255.595793884,
+          "started": 229256.160618055,
+          "ended": 229256.548655614,
+          "latency_ms": 952.8617300093174,
+          "service_ms": 388.03755899425596,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229256.595793884,
+          "started": 229257.15825566,
+          "ended": 229257.555637691,
+          "latency_ms": 959.8438070097473,
+          "service_ms": 397.3820309911389,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229257.595793884,
+          "started": 229258.160359117,
+          "ended": 229258.550559685,
+          "latency_ms": 954.7658010269515,
+          "service_ms": 390.2005680138245,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229258.595793884,
+          "started": 229259.153046155,
+          "ended": 229259.558127324,
+          "latency_ms": 962.33344002394,
+          "service_ms": 405.08116901037283,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229259.595793884,
+          "started": 229260.174772737,
+          "ended": 229260.551515622,
+          "latency_ms": 955.7217380206566,
+          "service_ms": 376.7428850114811,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229260.595793884,
+          "started": 229261.177364974,
+          "ended": 229261.557599168,
+          "latency_ms": 961.8052840232849,
+          "service_ms": 380.2341940172482,
+          "objects": 268,
+          "response_json_bytes": 376995
+        }
+      ],
+      "rss_kib_max": 4620,
+      "swap_kib_max": 0,
+      "available_min_kib": 59264
+    },
+    {
+      "backend": "candidate",
+      "repetition": 3,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 80833.33333333333,
+      "before": {
+        "uptime": 344386.77,
+        "ticks": 580,
+        "VmRSS": 3104,
+        "VmHWM": 4868,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 59980,
+        "SwapFree": 460
+      },
+      "after": {
+        "uptime": 344399.02,
+        "ticks": 677,
+        "VmRSS": 3284,
+        "VmHWM": 4868,
+        "VmSwap": 0,
+        "Threads": 13,
+        "MemAvailable": 59728,
+        "SwapFree": 520
+      },
+      "trials": [
+        {
+          "scheduled": 229327.358319448,
+          "started": 229327.844081278,
+          "ended": 229328.237968661,
+          "latency_ms": 879.649213020457,
+          "service_ms": 393.8873830193188,
+          "objects": 268,
+          "response_json_bytes": 376998
+        },
+        {
+          "scheduled": 229328.358319448,
+          "started": 229328.932203067,
+          "ended": 229329.237673189,
+          "latency_ms": 879.353741009254,
+          "service_ms": 305.4701219953131,
+          "objects": 268,
+          "response_json_bytes": 376998
+        },
+        {
+          "scheduled": 229329.358319448,
+          "started": 229329.892368976,
+          "ended": 229330.245948503,
+          "latency_ms": 887.6290550106205,
+          "service_ms": 353.5795269999653,
+          "objects": 268,
+          "response_json_bytes": 376998
+        },
+        {
+          "scheduled": 229330.358319448,
+          "started": 229330.869755177,
+          "ended": 229331.262152987,
+          "latency_ms": 903.8335390214343,
+          "service_ms": 392.3978100065142,
+          "objects": 268,
+          "response_json_bytes": 376994
+        },
+        {
+          "scheduled": 229331.358319448,
+          "started": 229331.899254628,
+          "ended": 229332.237963935,
+          "latency_ms": 879.6444870240521,
+          "service_ms": 338.7093070195988,
+          "objects": 268,
+          "response_json_bytes": 376994
+        },
+        {
+          "scheduled": 229332.358319448,
+          "started": 229332.864619739,
+          "ended": 229333.246168485,
+          "latency_ms": 887.8490370116197,
+          "service_ms": 381.5487459942233,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "scheduled": 229333.358319448,
+          "started": 229333.887609682,
+          "ended": 229334.251996154,
+          "latency_ms": 893.6767060076818,
+          "service_ms": 364.3864720070269,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229334.358319448,
+          "started": 229334.912356299,
+          "ended": 229335.336167388,
+          "latency_ms": 977.8479400265496,
+          "service_ms": 423.8110890146345,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229335.358319448,
+          "started": 229335.915869382,
+          "ended": 229336.308932334,
+          "latency_ms": 950.6128860230092,
+          "service_ms": 393.0629520036746,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229336.358319448,
+          "started": 229336.922502105,
+          "ended": 229337.308967563,
+          "latency_ms": 950.64811501652,
+          "service_ms": 386.465457995655,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229337.358319448,
+          "started": 229337.924952739,
+          "ended": 229338.316522681,
+          "latency_ms": 958.2032330217771,
+          "service_ms": 391.569942003116,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "scheduled": 229338.358319448,
+          "started": 229338.923492403,
+          "ended": 229339.312627144,
+          "latency_ms": 954.3076960253529,
+          "service_ms": 389.1347410099115,
+          "objects": 268,
+          "response_json_bytes": 376998
+        }
+      ],
+      "rss_kib_max": 4072,
+      "swap_kib_max": 0,
+      "available_min_kib": 59440
+    },
+    {
+      "backend": "moonraker",
+      "repetition": 3,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 115833.33333333333,
+      "before": {
+        "uptime": 344472.34,
+        "ticks": 2789,
+        "VmRSS": 37328,
+        "VmHWM": 37328,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 38548,
+        "SwapFree": 388
+      },
+      "after": {
+        "uptime": 344484.47,
+        "ticks": 2928,
+        "VmRSS": 38036,
+        "VmHWM": 38440,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 37684,
+        "SwapFree": 392
+      },
+      "trials": [
+        {
+          "scheduled": 229412.930439761,
+          "started": 229413.393763457,
+          "ended": 229413.768923529,
+          "latency_ms": 838.4837679914199,
+          "service_ms": 375.1600719988346,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229413.930439761,
+          "started": 229414.38818648,
+          "ended": 229414.735004362,
+          "latency_ms": 804.5646010141354,
+          "service_ms": 346.81788200396113,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229414.930439761,
+          "started": 229415.396121037,
+          "ended": 229415.745439164,
+          "latency_ms": 814.9994029954541,
+          "service_ms": 349.3181270023342,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229415.930439761,
+          "started": 229416.426174624,
+          "ended": 229416.756746767,
+          "latency_ms": 826.3070060056634,
+          "service_ms": 330.5721429933328,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229416.930439761,
+          "started": 229417.404176428,
+          "ended": 229417.752504491,
+          "latency_ms": 822.0647300186101,
+          "service_ms": 348.3280630025547,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229417.930439761,
+          "started": 229418.421707502,
+          "ended": 229418.852665607,
+          "latency_ms": 922.2258460067678,
+          "service_ms": 430.9581049892586,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229418.930439761,
+          "started": 229419.41887084,
+          "ended": 229419.763770293,
+          "latency_ms": 833.3305320120417,
+          "service_ms": 344.8994530190248,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229419.930439761,
+          "started": 229420.432524408,
+          "ended": 229420.813075334,
+          "latency_ms": 882.6355730125215,
+          "service_ms": 380.55092599825,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229420.930439761,
+          "started": 229421.440931734,
+          "ended": 229421.772333949,
+          "latency_ms": 841.8941879936028,
+          "service_ms": 331.40221500070766,
+          "objects": 268,
+          "response_json_bytes": 377640
+        },
+        {
+          "scheduled": 229421.930439761,
+          "started": 229422.451593652,
+          "ended": 229422.764626012,
+          "latency_ms": 834.1862510133069,
+          "service_ms": 313.0323600198608,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229422.930439761,
+          "started": 229423.423023579,
+          "ended": 229423.768918906,
+          "latency_ms": 838.479144993471,
+          "service_ms": 345.8953269873746,
+          "objects": 268,
+          "response_json_bytes": 377639
+        },
+        {
+          "scheduled": 229423.930439761,
+          "started": 229424.424284378,
+          "ended": 229424.776147854,
+          "latency_ms": 845.7080929947551,
+          "service_ms": 351.86347598209977,
+          "objects": 268,
+          "response_json_bytes": 377640
+        }
+      ],
+      "rss_kib_max": 38244,
+      "swap_kib_max": 0,
+      "available_min_kib": 36716
+    }
+  ],
+  "notes": [
+    "Subscription latency_ms includes time spent in host guards before worker submission; use service_ms for worker-start through decoded reply.",
+    "Candidate history p99 was worse than baseline. This did not recur consistently in the printer-local studies; no universal latency improvement is claimed."
+  ]
+}

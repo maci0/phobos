@@ -11,7 +11,7 @@ DURATION=${4:-15s}
 [[ "$TARGET" =~ ^[a-zA-Z0-9.:-]+$ ]] || { echo 'invalid host:port' >&2; exit 1; }
 new_run load
 sed "s#TARGET#$TARGET#g" tools/perf_harness/targets.txt |
-    vegeta attack -rate="$RATE" -duration="$DURATION" -timeout=10s -keepalive=true |
+    vegeta attack -rate="$RATE" -duration="$DURATION" -max-body=0 -timeout=10s -keepalive=true |
     tee "$PERF_RUN/results.bin" |
     vegeta report -type=text
 printf 'latency histogram (%s)\n' "$LABEL"

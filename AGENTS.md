@@ -64,7 +64,8 @@ primitives are gone, so use `std.Io.Mutex`.
     - platform exceptions: termios in `serial.zig`, system identity in
       `machine.zig`, V4L2 layouts in `video_modes.zig`, CAN socket creation and
       binding in `canbus.zig`, GPIO event layouts in `gpio_input.zig`, and the C
-      `statvfs` and local-time shims. Use typed
+      `statvfs` and local-time shims, and `TCP_NODELAY` in `io.zig` (the
+      installed `std.Io.net` has no socket-option setter). Use typed
       platform declarations; transfers, close, cancellation and device control
       go through `std.Io`.
       `docs/STDLIB.md` lists the checked APIs and adapter limits.

@@ -567,18 +567,18 @@ fn mapJobRow(arena: std.mem.Allocator, stmt: *c.sqlite3_stmt) Error!?MappedJob {
     const jid = std.math.cast(u64, c.sqlite3_column_int64(stmt, 0)) orelse return null;
     var job: json.ObjectMap = .empty;
     try job.ensureTotalCapacity(arena, job_history_field_count);
-    try job.put(arena, "filename", .{ .string = try colText(arena, stmt, 2) });
-    try job.put(arena, "status", .{ .string = try colText(arena, stmt, 3) });
-    try job.put(arena, "user", .{ .string = try colText(arena, stmt, 1) });
-    try job.put(arena, "start_time", .{ .float = c.sqlite3_column_double(stmt, 4) });
-    try job.put(arena, "end_time", if (c.sqlite3_column_type(stmt, 5) == c.SQLITE_NULL) .null else .{ .float = c.sqlite3_column_double(stmt, 5) });
-    try job.put(arena, "print_duration", .{ .float = c.sqlite3_column_double(stmt, 6) });
-    try job.put(arena, "total_duration", .{ .float = c.sqlite3_column_double(stmt, 7) });
-    try job.put(arena, "filament_used", .{ .float = c.sqlite3_column_double(stmt, 8) });
-    try job.put(arena, "metadata", try colJson(arena, stmt, 9, .{ .object = .empty }));
-    try job.put(arena, "auxiliary_data", try colJson(arena, stmt, 10, .{ .array = .init(arena) }));
+    job.putAssumeCapacity("filename", .{ .string = try colText(arena, stmt, 2) });
+    job.putAssumeCapacity("status", .{ .string = try colText(arena, stmt, 3) });
+    job.putAssumeCapacity("user", .{ .string = try colText(arena, stmt, 1) });
+    job.putAssumeCapacity("start_time", .{ .float = c.sqlite3_column_double(stmt, 4) });
+    job.putAssumeCapacity("end_time", if (c.sqlite3_column_type(stmt, 5) == c.SQLITE_NULL) .null else .{ .float = c.sqlite3_column_double(stmt, 5) });
+    job.putAssumeCapacity("print_duration", .{ .float = c.sqlite3_column_double(stmt, 6) });
+    job.putAssumeCapacity("total_duration", .{ .float = c.sqlite3_column_double(stmt, 7) });
+    job.putAssumeCapacity("filament_used", .{ .float = c.sqlite3_column_double(stmt, 8) });
+    job.putAssumeCapacity("metadata", try colJson(arena, stmt, 9, .{ .object = .empty }));
+    job.putAssumeCapacity("auxiliary_data", try colJson(arena, stmt, 10, .{ .array = .init(arena) }));
     const key = try std.fmt.allocPrint(arena, "{X:0>6}", .{jid});
-    try job.put(arena, "job_id", .{ .string = key });
+    job.putAssumeCapacity("job_id", .{ .string = key });
     return .{ .key = key, .value = .{ .object = job } };
 }
 

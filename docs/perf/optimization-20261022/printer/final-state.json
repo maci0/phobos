@@ -1,0 +1,28 @@
+{
+  "production_pid": 27309,
+  "production_executable_sha256": "a224e2699893895523acda2e95af90699abbae13e9ecd85a4a337281fcb97944",
+  "production_executable": "/data/.mod/.forge-x/data/phobos-fluidd-20261022",
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117",
+  "board_boot_unchanged": true,
+  "probe_listener_absent": true,
+  "klippy_state": "ready",
+  "failed_components": [],
+  "status": {
+    "extruder": {
+      "target": 0
+    },
+    "heater_bed": {
+      "target": 0
+    },
+    "print_stats": {
+      "state": "complete"
+    },
+    "idle_timeout": {
+      "state": "Idle"
+    }
+  },
+  "arm_tcp_nodelay_test_passed": true,
+  "production_was_restored_without_installing_candidate": true,
+  "observed_utc": "2026-10-22T10:22:38Z",
+  "owned_probe_directory_removed": true
+}

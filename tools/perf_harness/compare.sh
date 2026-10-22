@@ -16,7 +16,7 @@ run() {
   target="$1"; label="$2"
   echo "================ $label  ($target, $RATE req/s, $DUR) ================"
   sed "s#TARGET#${target}#g" "$DIR/targets.txt" \
-    | vegeta attack -rate="$RATE" -duration="$DUR" -timeout=10s -keepalive=true 2>/dev/null \
+    | vegeta attack -rate="$RATE" -duration="$DUR" -max-body=0 -timeout=10s -keepalive=true 2>/dev/null \
     | vegeta report -type=text 2>/dev/null \
     | grep -iE 'Requests|Latencies|Success|Throughput'
   echo

@@ -1,0 +1,1199 @@
+[
+  {
+    "backend": "candidate",
+    "repetition": 1,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 78333.33333333333,
+    "before": {
+      "monotonic_ns": 346595283768116,
+      "ticks": 576,
+      "VmRSS": 3320,
+      "VmHWM": 5080,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 52736,
+      "SwapFree": 1184
+    },
+    "after": {
+      "monotonic_ns": 346606633823850,
+      "ticks": 670,
+      "VmRSS": 3428,
+      "VmHWM": 5080,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 49948,
+      "SwapFree": 1188
+    },
+    "rss_kib_max": 4480,
+    "available_min_kib": 48956,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 288.605258,
+        "service_ms": 281.672333,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 261.017152,
+        "service_ms": 260.353517,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 274.569601,
+        "service_ms": 273.917328,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 273.963075,
+        "service_ms": 273.277081,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 280.671223,
+        "service_ms": 279.947466,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 276.430131,
+        "service_ms": 275.771944,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 297.096213,
+        "service_ms": 296.413804,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 287.546729,
+        "service_ms": 286.842974,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 285.48921,
+        "service_ms": 284.888942,
+        "objects": 268,
+        "response_json_bytes": 376997
+      },
+      {
+        "latency_ms": 303.373096,
+        "service_ms": 302.786732,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 287.380435,
+        "service_ms": 286.782433,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 296.928361,
+        "service_ms": 296.005806,
+        "objects": 268,
+        "response_json_bytes": 376998
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 78333.33333333333,
+      "cpu_percent_one_core": 8.281897657860435,
+      "rss_kib_max": 4480,
+      "available_min_kib": 48700,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 346595283768116,
+        "ticks": 576,
+        "VmRSS": 3320,
+        "VmHWM": 5080,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 52736,
+        "SwapFree": 1184
+      },
+      "after": {
+        "monotonic_ns": 346606633823850,
+        "ticks": 670,
+        "VmRSS": 3428,
+        "VmHWM": 5080,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 49948,
+        "SwapFree": 1188
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "baseline",
+    "repetition": 1,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 95833.33333333333,
+    "before": {
+      "monotonic_ns": 346674465562496,
+      "ticks": 589,
+      "VmRSS": 3316,
+      "VmHWM": 5160,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 48540,
+      "SwapFree": 1188
+    },
+    "after": {
+      "monotonic_ns": 346685885616721,
+      "ticks": 704,
+      "VmRSS": 3440,
+      "VmHWM": 5160,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 51296,
+      "SwapFree": 1196
+    },
+    "rss_kib_max": 4696,
+    "available_min_kib": 45736,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 319.682109,
+        "service_ms": 311.979937,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 306.994595,
+        "service_ms": 306.350048,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 320.113708,
+        "service_ms": 319.411152,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 315.794195,
+        "service_ms": 315.080714,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 303.926676,
+        "service_ms": 303.280895,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 323.16501,
+        "service_ms": 322.522095,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 317.640795,
+        "service_ms": 316.899581,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 317.570553,
+        "service_ms": 316.94533,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 320.908046,
+        "service_ms": 320.232732,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 335.969566,
+        "service_ms": 335.346327,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 328.840941,
+        "service_ms": 328.27761,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 340.235604,
+        "service_ms": 339.275767,
+        "objects": 268,
+        "response_json_bytes": 376995
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 95833.33333333333,
+      "cpu_percent_one_core": 10.070004724517847,
+      "rss_kib_max": 4696,
+      "available_min_kib": 45196,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 346674465562496,
+        "ticks": 589,
+        "VmRSS": 3316,
+        "VmHWM": 5160,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 48540,
+        "SwapFree": 1188
+      },
+      "after": {
+        "monotonic_ns": 346685885616721,
+        "ticks": 704,
+        "VmRSS": 3440,
+        "VmHWM": 5160,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 51296,
+        "SwapFree": 1196
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 1,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 105833.33333333333,
+    "before": {
+      "monotonic_ns": 346762437956004,
+      "ticks": 2588,
+      "VmRSS": 36172,
+      "VmHWM": 37536,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 26956,
+      "SwapFree": 656
+    },
+    "after": {
+      "monotonic_ns": 346773930359537,
+      "ticks": 2715,
+      "VmRSS": 36712,
+      "VmHWM": 37536,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 23092,
+      "SwapFree": 408
+    },
+    "rss_kib_max": 37028,
+    "available_min_kib": 22376,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 391.236851,
+        "service_ms": 387.503369,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 407.857943,
+        "service_ms": 406.064906,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 388.656413,
+        "service_ms": 387.831826,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 391.343528,
+        "service_ms": 390.539521,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 411.740643,
+        "service_ms": 411.031215,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 520.355423,
+        "service_ms": 519.539617,
+        "objects": 268,
+        "response_json_bytes": 377642
+      },
+      {
+        "latency_ms": 413.79064,
+        "service_ms": 413.054581,
+        "objects": 268,
+        "response_json_bytes": 377644
+      },
+      {
+        "latency_ms": 420.949943,
+        "service_ms": 420.107048,
+        "objects": 268,
+        "response_json_bytes": 377644
+      },
+      {
+        "latency_ms": 429.29524,
+        "service_ms": 428.680215,
+        "objects": 268,
+        "response_json_bytes": 377644
+      },
+      {
+        "latency_ms": 421.185907,
+        "service_ms": 420.532921,
+        "objects": 268,
+        "response_json_bytes": 377644
+      },
+      {
+        "latency_ms": 437.665915,
+        "service_ms": 436.394387,
+        "objects": 268,
+        "response_json_bytes": 377643
+      },
+      {
+        "latency_ms": 436.245716,
+        "service_ms": 435.157892,
+        "objects": 268,
+        "response_json_bytes": 377644
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 105833.33333333333,
+      "cpu_percent_one_core": 11.050777988723102,
+      "rss_kib_max": 37028,
+      "available_min_kib": 22364,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 346762437956004,
+        "ticks": 2588,
+        "VmRSS": 36172,
+        "VmHWM": 37536,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 26956,
+        "SwapFree": 656
+      },
+      "after": {
+        "monotonic_ns": 346773930359537,
+        "ticks": 2715,
+        "VmRSS": 36712,
+        "VmHWM": 37536,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 23092,
+        "SwapFree": 408
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 2,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 107500.0,
+    "before": {
+      "monotonic_ns": 346853037533927,
+      "ticks": 2560,
+      "VmRSS": 37584,
+      "VmHWM": 37636,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 27776,
+      "SwapFree": 0
+    },
+    "after": {
+      "monotonic_ns": 346864352505037,
+      "ticks": 2689,
+      "VmRSS": 36044,
+      "VmHWM": 38592,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 25652,
+      "SwapFree": 4
+    },
+    "rss_kib_max": 38288,
+    "available_min_kib": 23652,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 229.700326,
+        "service_ms": 225.987885,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 242.331306,
+        "service_ms": 241.447728,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 223.92835,
+        "service_ms": 223.067857,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 239.915689,
+        "service_ms": 239.203405,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 231.803435,
+        "service_ms": 230.958403,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 356.302675,
+        "service_ms": 355.497436,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 237.231072,
+        "service_ms": 236.392418,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 253.366244,
+        "service_ms": 252.485425,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 242.901542,
+        "service_ms": 242.165891,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 256.037811,
+        "service_ms": 255.238204,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 259.963957,
+        "service_ms": 259.195768,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 259.389041,
+        "service_ms": 258.412439,
+        "objects": 268,
+        "response_json_bytes": 377640
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 107500.0,
+      "cpu_percent_one_core": 11.400824513461794,
+      "rss_kib_max": 38288,
+      "available_min_kib": 23228,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 346853037533927,
+        "ticks": 2560,
+        "VmRSS": 37584,
+        "VmHWM": 37636,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 27776,
+        "SwapFree": 0
+      },
+      "after": {
+        "monotonic_ns": 346864352505037,
+        "ticks": 2689,
+        "VmRSS": 36044,
+        "VmHWM": 38592,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 25652,
+        "SwapFree": 4
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "baseline",
+    "repetition": 2,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 93333.33333333333,
+    "before": {
+      "monotonic_ns": 346934989889276,
+      "ticks": 585,
+      "VmRSS": 3320,
+      "VmHWM": 5140,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 49716,
+      "SwapFree": 8
+    },
+    "after": {
+      "monotonic_ns": 346946400122841,
+      "ticks": 697,
+      "VmRSS": 3456,
+      "VmHWM": 5140,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 47528,
+      "SwapFree": 20
+    },
+    "rss_kib_max": 5008,
+    "available_min_kib": 46452,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 317.312158,
+        "service_ms": 310.154192,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 328.130351,
+        "service_ms": 327.469943,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 326.002563,
+        "service_ms": 325.450494,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 326.104682,
+        "service_ms": 325.467369,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 344.40563,
+        "service_ms": 343.756865,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 330.136776,
+        "service_ms": 329.476225,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 330.500976,
+        "service_ms": 329.831848,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 338.725097,
+        "service_ms": 338.032642,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 347.528674,
+        "service_ms": 346.933433,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 344.143559,
+        "service_ms": 343.554657,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 359.999644,
+        "service_ms": 359.404332,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 355.599659,
+        "service_ms": 354.567772,
+        "objects": 268,
+        "response_json_bytes": 376999
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 93333.33333333333,
+      "cpu_percent_one_core": 9.815749989864472,
+      "rss_kib_max": 5008,
+      "available_min_kib": 46248,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 346934989889276,
+        "ticks": 585,
+        "VmRSS": 3320,
+        "VmHWM": 5140,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 49716,
+        "SwapFree": 8
+      },
+      "after": {
+        "monotonic_ns": 346946400122841,
+        "ticks": 697,
+        "VmRSS": 3456,
+        "VmHWM": 5140,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 47528,
+        "SwapFree": 20
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "candidate",
+    "repetition": 2,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 78333.33333333333,
+    "before": {
+      "monotonic_ns": 347016272597242,
+      "ticks": 577,
+      "VmRSS": 3264,
+      "VmHWM": 5032,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 49584,
+      "SwapFree": 28
+    },
+    "after": {
+      "monotonic_ns": 347027577812925,
+      "ticks": 671,
+      "VmRSS": 3380,
+      "VmHWM": 5032,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 46764,
+      "SwapFree": 32
+    },
+    "rss_kib_max": 4432,
+    "available_min_kib": 45772,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 245.230875,
+        "service_ms": 238.231575,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 224.124757,
+        "service_ms": 223.313271,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 216.925739,
+        "service_ms": 216.179679,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 221.518998,
+        "service_ms": 220.715574,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 227.399918,
+        "service_ms": 226.850336,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 220.774356,
+        "service_ms": 219.986328,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 240.864334,
+        "service_ms": 240.169399,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 237.253715,
+        "service_ms": 236.330291,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 232.317228,
+        "service_ms": 231.596897,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 253.56445,
+        "service_ms": 252.809713,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 257.12488,
+        "service_ms": 256.410654,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 251.020857,
+        "service_ms": 249.910518,
+        "objects": 268,
+        "response_json_bytes": 376997
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 78333.33333333333,
+      "cpu_percent_one_core": 8.31474627603529,
+      "rss_kib_max": 4432,
+      "available_min_kib": 45532,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 347016272597242,
+        "ticks": 577,
+        "VmRSS": 3264,
+        "VmHWM": 5032,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 49584,
+        "SwapFree": 28
+      },
+      "after": {
+        "monotonic_ns": 347027577812925,
+        "ticks": 671,
+        "VmRSS": 3380,
+        "VmHWM": 5032,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 46764,
+        "SwapFree": 32
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "candidate",
+    "repetition": 3,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 79166.66666666667,
+    "before": {
+      "monotonic_ns": 347101442543964,
+      "ticks": 583,
+      "VmRSS": 3248,
+      "VmHWM": 5020,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 49484,
+      "SwapFree": 32
+    },
+    "after": {
+      "monotonic_ns": 347112823863692,
+      "ticks": 678,
+      "VmRSS": 3364,
+      "VmHWM": 5020,
+      "VmSwap": 0,
+      "Threads": 12,
+      "MemAvailable": 46488,
+      "SwapFree": 44
+    },
+    "rss_kib_max": 4252,
+    "available_min_kib": 45892,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 302.546225,
+        "service_ms": 295.41705,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 298.131023,
+        "service_ms": 297.452457,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 302.354614,
+        "service_ms": 301.693688,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 306.609495,
+        "service_ms": 305.98675,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 302.915915,
+        "service_ms": 302.263185,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 310.338489,
+        "service_ms": 309.729107,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 316.749319,
+        "service_ms": 316.022869,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 316.412806,
+        "service_ms": 315.763371,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 323.338466,
+        "service_ms": 322.772045,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 329.264673,
+        "service_ms": 328.730642,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 328.303287,
+        "service_ms": 327.711022,
+        "objects": 268,
+        "response_json_bytes": 376997
+      },
+      {
+        "latency_ms": 322.792548,
+        "service_ms": 321.930091,
+        "objects": 268,
+        "response_json_bytes": 377000
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 79166.66666666667,
+      "cpu_percent_one_core": 8.347010915288118,
+      "rss_kib_max": 4252,
+      "available_min_kib": 45288,
+      "swap_kib_max": 0,
+      "threads_max": 12,
+      "before": {
+        "monotonic_ns": 347101442543964,
+        "ticks": 583,
+        "VmRSS": 3248,
+        "VmHWM": 5020,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 49484,
+        "SwapFree": 32
+      },
+      "after": {
+        "monotonic_ns": 347112823863692,
+        "ticks": 678,
+        "VmRSS": 3364,
+        "VmHWM": 5020,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 46488,
+        "SwapFree": 44
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "baseline",
+    "repetition": 3,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 94166.66666666667,
+    "before": {
+      "monotonic_ns": 347185556716178,
+      "ticks": 586,
+      "VmRSS": 3284,
+      "VmHWM": 5156,
+      "VmSwap": 0,
+      "Threads": 11,
+      "MemAvailable": 49336,
+      "SwapFree": 44
+    },
+    "after": {
+      "monotonic_ns": 347197059531652,
+      "ticks": 699,
+      "VmRSS": 3412,
+      "VmHWM": 5156,
+      "VmSwap": 0,
+      "Threads": 11,
+      "MemAvailable": 47332,
+      "SwapFree": 52
+    },
+    "rss_kib_max": 4464,
+    "available_min_kib": 45844,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 383.383464,
+        "service_ms": 376.307706,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 383.617402,
+        "service_ms": 382.925924,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 384.667211,
+        "service_ms": 383.935294,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 403.977558,
+        "service_ms": 403.326868,
+        "objects": 268,
+        "response_json_bytes": 376997
+      },
+      {
+        "latency_ms": 389.031736,
+        "service_ms": 388.379273,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 429.400524,
+        "service_ms": 428.730122,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 434.803937,
+        "service_ms": 434.159179,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 433.115134,
+        "service_ms": 432.360271,
+        "objects": 268,
+        "response_json_bytes": 377000
+      },
+      {
+        "latency_ms": 441.533408,
+        "service_ms": 440.503649,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 441.332223,
+        "service_ms": 440.681815,
+        "objects": 268,
+        "response_json_bytes": 376998
+      },
+      {
+        "latency_ms": 456.817172,
+        "service_ms": 456.175783,
+        "objects": 268,
+        "response_json_bytes": 376999
+      },
+      {
+        "latency_ms": 448.538817,
+        "service_ms": 447.598199,
+        "objects": 268,
+        "response_json_bytes": 376998
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 94166.66666666667,
+      "cpu_percent_one_core": 9.82368188513636,
+      "rss_kib_max": 4464,
+      "available_min_kib": 46180,
+      "swap_kib_max": 0,
+      "threads_max": 11,
+      "before": {
+        "monotonic_ns": 347185556716178,
+        "ticks": 586,
+        "VmRSS": 3284,
+        "VmHWM": 5156,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 49336,
+        "SwapFree": 44
+      },
+      "after": {
+        "monotonic_ns": 347197059531652,
+        "ticks": 699,
+        "VmRSS": 3412,
+        "VmHWM": 5156,
+        "VmSwap": 0,
+        "Threads": 11,
+        "MemAvailable": 47332,
+        "SwapFree": 52
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  },
+  {
+    "backend": "moonraker",
+    "repetition": 3,
+    "requested_rate": 1,
+    "requests": 12,
+    "cpu_us_per_request": 106666.66666666667,
+    "before": {
+      "monotonic_ns": 347274698546161,
+      "ticks": 2563,
+      "VmRSS": 37420,
+      "VmHWM": 37712,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 27488,
+      "SwapFree": 8
+    },
+    "after": {
+      "monotonic_ns": 347286002639491,
+      "ticks": 2691,
+      "VmRSS": 37108,
+      "VmHWM": 38648,
+      "VmSwap": 0,
+      "Threads": 4,
+      "MemAvailable": 28288,
+      "SwapFree": 0
+    },
+    "rss_kib_max": 38040,
+    "available_min_kib": 25032,
+    "swap_kib_max": 0,
+    "trials": [
+      {
+        "latency_ms": 461.414547,
+        "service_ms": 457.729023,
+        "objects": 268,
+        "response_json_bytes": 377641
+      },
+      {
+        "latency_ms": 208.68198,
+        "service_ms": 208.08184,
+        "objects": 268,
+        "response_json_bytes": 377641
+      },
+      {
+        "latency_ms": 195.356104,
+        "service_ms": 194.650988,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 193.243924,
+        "service_ms": 192.580289,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 217.887949,
+        "service_ms": 217.276921,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 338.034394,
+        "service_ms": 337.395848,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 202.360434,
+        "service_ms": 201.699787,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 216.714634,
+        "service_ms": 216.053636,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 214.826827,
+        "service_ms": 214.279185,
+        "objects": 268,
+        "response_json_bytes": 377639
+      },
+      {
+        "latency_ms": 223.230347,
+        "service_ms": 222.745187,
+        "objects": 268,
+        "response_json_bytes": 377638
+      },
+      {
+        "latency_ms": 218.196139,
+        "service_ms": 217.622462,
+        "objects": 268,
+        "response_json_bytes": 377640
+      },
+      {
+        "latency_ms": 249.445674,
+        "service_ms": 248.430523,
+        "objects": 268,
+        "response_json_bytes": 377640
+      }
+    ],
+    "process": {
+      "cpu_us_per_request": 106666.66666666667,
+      "cpu_percent_one_core": 11.323331846553323,
+      "rss_kib_max": 38040,
+      "available_min_kib": 25936,
+      "swap_kib_max": 0,
+      "threads_max": 4,
+      "before": {
+        "monotonic_ns": 347274698546161,
+        "ticks": 2563,
+        "VmRSS": 37420,
+        "VmHWM": 37712,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 27488,
+        "SwapFree": 8
+      },
+      "after": {
+        "monotonic_ns": 347286002639491,
+        "ticks": 2691,
+        "VmRSS": 37108,
+        "VmHWM": 38648,
+        "VmSwap": 0,
+        "Threads": 4,
+        "MemAvailable": 28288,
+        "SwapFree": 0
+      }
+    },
+    "generator_source_sha256": "99258143c44e737bef571ca0670f80f45c4d5bb0db1c33da0c240878de9c14eb"
+  }
+]

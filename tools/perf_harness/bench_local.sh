@@ -21,7 +21,7 @@ log() { printf '%s\n' "$*" | tee -a "$REPORT"; }
 
 bench() {
     printf 'GET %s\n' "$1" |
-        vegeta attack -rate="$2" -duration=8s -timeout=5s -keepalive=true |
+        vegeta attack -rate="$2" -duration=8s -max-body=0 -timeout=5s -keepalive=true |
         vegeta report -type=json |
         uv run --offline python tools/perf_harness/report.py
 }

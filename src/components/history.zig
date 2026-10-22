@@ -833,10 +833,11 @@ fn prepJob(c: *const HistoryCtx, alloc: std.mem.Allocator, job_val: std.json.Val
     // Copy existing fields
     switch (job_val) {
         .object => |src| {
+            try obj.ensureTotalCapacity(alloc, src.count() + 2);
             var it = src.iterator();
             while (it.next()) |kv| {
                 if (std.mem.eql(u8, kv.key_ptr.*, "instance_id")) continue;
-                try obj.put(alloc, kv.key_ptr.*, kv.value_ptr.*);
+                obj.putAssumeCapacity(kv.key_ptr.*, kv.value_ptr.*);
             }
         },
         else => {},
@@ -919,6 +920,7 @@ pub fn handleList(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Alloca
     }
 
     var jobs_arr: std.json.Array = .init(alloc);
+    try jobs_arr.ensureTotalCapacityPrecise(remaining.len);
     for (remaining) |je| {
         const prepped = try prepJob(c, alloc, je.val, je.key);
         try jobs_arr.append(prepped);
@@ -2228,6 +2230,58 @@ test "prepJob: exists reports whether the gcode file is present" {
     const jobs = result.object.get("jobs").?.array.items;
     try testing.expect(jobs[0].object.get("exists").?.bool);
     try testing.expect(!jobs[1].object.get("exists").?.bool);
+}
+
+test "prepJob preserves arbitrary fields and leaves its source unchanged" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = MemStore.init(a);
+    defer mem.deinit();
+    var bus: NotifyBus = undefined;
+    var ctx: HistoryCtx = .{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+    const source = try mkParams(a, "{\"instance_id\":\"default\",\"job_id\":\"old\",\"exists\":true,\"filename\":\"missing.gcode\",\"metadata\":{\"custom\":42},\"end_time\":null}");
+    const result = try prepJob(&ctx, a, source, "000123");
+    try testing.expect(!result.object.contains("instance_id"));
+    try testing.expectEqualStrings("000123", result.object.get("job_id").?.string);
+    try testing.expect(!result.object.get("exists").?.bool);
+    try testing.expectEqual(@as(i64, 42), result.object.get("metadata").?.object.get("custom").?.integer);
+    try testing.expect(result.object.get("end_time").? == .null);
+    try testing.expect(source.object.contains("instance_id"));
+    try testing.expectEqualStrings("old", source.object.get("job_id").?.string);
+    try testing.expect(source.object.get("exists").?.bool);
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn prepare(allocator: std.mem.Allocator, context: *HistoryCtx, value: std.json.Value) !void {
+            var request_arena = std.heap.ArenaAllocator.init(allocator);
+            defer request_arena.deinit();
+            _ = try prepJob(context, request_arena.allocator(), value, "000123");
+        }
+    }.prepare, .{ &ctx, source });
+}
+
+test "fuzz prepJob retains every extra field across map capacities" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) !void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var mem = MemStore.init(a);
+            defer mem.deinit();
+            var bus: NotifyBus = undefined;
+            var ctx: HistoryCtx = .{ .clock_io = testing.io, .store = mem.dataStore(), .bus = &bus, .io = null, .current_job_id = null, .job_user = "" };
+            var source: std.json.ObjectMap = .empty;
+            const count = smith.valueRangeAtMostWithHash(u8, 0, 40, 0);
+            for (0..count) |index| try source.put(a, try a.print("extra{d}", .{index}), .{ .integer = @intCast(index) });
+            try source.put(a, "instance_id", .{ .string = "default" });
+            const result = try prepJob(&ctx, a, .{ .object = source }, "000123");
+            try testing.expectEqual(@as(usize, count) + 2, result.object.count());
+            var it = source.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "instance_id")) continue;
+                try testing.expectEqual(entry.value_ptr.integer, result.object.get(entry.key_ptr.*).?.integer);
+            }
+        }
+    }.run, .{});
 }
 
 test "finishJob stats guard: discards stats with wrong filename" {

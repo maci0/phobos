@@ -125,13 +125,28 @@ fn collectHeaterNames(result: std.json.Value, field: []const u8, alloc: std.mem.
 
 /// Handshake-only match of phobos's own string id in a raw frame.
 fn frameIdMatches(alloc: std.mem.Allocator, payload: []const u8, id: u64) bool {
-    const parsed = std.json.parseFromSlice(std.json.Value, alloc, payload, .{}) catch return false;
+    const parsed = std.json.parseFromSlice(FrameRoute, alloc, payload, .{ .ignore_unknown_fields = true }) catch return false;
     defer parsed.deinit();
-    if (parsed.value != .object) return false;
-    const value = parsed.value.object.get("id") orelse return false;
+    const value = parsed.value.id;
     if (value != .string) return false;
     return (std.fmt.parseInt(u64, value.string, 10) catch return false) == id;
 }
+
+// Replies are decoded by their waiter. Skip the result tree while routing;
+// a present null method must still be rejected, rather than treated as absent.
+const FrameRoute = struct {
+    id: std.json.Value = .null,
+    method: Method = .absent,
+
+    const Method = union(enum) {
+        absent,
+        present: std.json.Value,
+
+        pub fn jsonParse(alloc: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!@This() {
+            return .{ .present = try std.json.Value.jsonParse(alloc, source, options) };
+        }
+    };
+};
 
 /// A JSON number (int or float) as f64; null for absent/non-numeric.
 fn numField(obj: std.json.ObjectMap, key: []const u8) ?f64 {
@@ -654,17 +669,21 @@ pub const KlippyCtx = struct {
     /// `call_remote_method`) run under Core; Moonraker sends no reply to them.
     /// Responses go to the waiter registered under their string id.
     pub fn dispatchFrame(self: *KlippyCtx, io: std.Io, payload: []const u8) !void {
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
-        defer parsed.deinit();
-
-        const frame = parsed.value;
-        if (frame != .object) return error.InvalidFrame;
-        if (frame.object.get("method")) |method| {
+        const route = std.json.parseFromSlice(FrameRoute, self.gpa, payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+            error.UnexpectedToken => return error.InvalidFrame,
+            else => return err,
+        };
+        defer route.deinit();
+        if (route.value.method == .present) {
+            const method = route.value.method.present;
             if (method != .string) return error.InvalidFrame;
+            const parsed = try std.json.parseFromSlice(std.json.Value, self.gpa, payload, .{});
+            defer parsed.deinit();
+            const frame = parsed.value;
             if (jv.exceedsDepth(frame, jv.max_value_depth)) return error.InvalidFrame;
             return self.bus.core.run(io, dispatchRemoteMethod, .{ self, io, method.string, frame });
         }
-        const id = frame.object.get("id") orelse return;
+        const id = route.value.id;
         if (id != .string) return;
         const id_num = std.fmt.parseInt(u64, id.string, 10) catch return;
         self.pending_mutex.lockUncancelable(io);
@@ -1633,6 +1652,65 @@ test "dispatchFrame rejects non-object roots and non-string methods" {
     // Responses nobody waits for are dropped.
     try ctx.dispatchFrame(std.testing.io, "{\"id\":\"7\",\"result\":{}}");
     try ctx.dispatchFrame(std.testing.io, "{\"id\":7,\"result\":{}}");
+}
+
+test "dispatchFrame routes a large reply with one owned payload copy" {
+    const alloc = std.testing.allocator;
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var tracked = std.testing.FailingAllocator.init(alloc, .{});
+    var ctx = try KlippyCtx.init(tracked.allocator(), &nb.bus);
+    defer ctx.deinit();
+    var waiter: Waiter = .{};
+    try ctx.pending.put(ctx.gpa, 7, &waiter);
+    defer if (waiter.payload) |payload| ctx.gpa.free(payload);
+    const text = try alloc.alloc(u8, 256 * 1024);
+    defer alloc.free(text);
+    @memset(text, 'x');
+    const wire = try std.json.Stringify.valueAlloc(alloc, .{ .id = "7", .result = .{ .payload = text } }, .{});
+    defer alloc.free(wire);
+    const before = tracked.allocated_bytes;
+    try ctx.dispatchFrame(std.testing.io, wire);
+    try std.testing.expectEqualStrings(wire, waiter.payload.?);
+    try std.testing.expect(tracked.allocated_bytes - before < wire.len + 4096);
+    @memset(wire, ' ');
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const result = try parseKlippyResult(arena.allocator(), waiter.payload.?);
+    try std.testing.expectEqualStrings(text, result.object.get("payload").?.string);
+}
+
+test "frame routing validates skipped JSON and escaped route keys" {
+    const alloc = std.testing.allocator;
+    try std.testing.expect(frameIdMatches(alloc, "{\"result\":{\"items\":[true,null,1,{\"id\":\"8\"}]},\"\\u0069d\":\"7\"}", 7));
+    for ([_][]const u8{
+        "{\"id\":\"7\",\"result\":[1,]}",
+        "{\"id\":\"7\",\"result\":{\"x\":}}",
+        "{\"id\":\"7\",\"id\":\"7\"}",
+        "{\"id\":\"7\"} trailing",
+    }) |wire| try std.testing.expect(!frameIdMatches(alloc, wire, 7));
+    const nb = try NullBus.init(alloc);
+    defer nb.deinit(alloc);
+    var ctx = try KlippyCtx.init(alloc, &nb.bus);
+    defer ctx.deinit();
+    try std.testing.expectError(error.InvalidFrame, ctx.dispatchFrame(std.testing.io, "{\"id\":\"7\",\"me\\u0074hod\":null}"));
+}
+
+test "fuzz frame routing preserves reply IDs without decoding results" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const alloc = std.testing.allocator;
+            const id = smith.value(u64);
+            var id_buf: [20]u8 = undefined;
+            const id_text = try std.fmt.bufPrint(&id_buf, "{d}", .{id});
+            var bytes: [512]u8 = undefined;
+            smith.bytesWithHash(&bytes, 1);
+            const wire = try std.json.Stringify.valueAlloc(alloc, .{ .result = .{ .payload = &bytes }, .id = id_text }, .{});
+            defer alloc.free(wire);
+            try std.testing.expect(frameIdMatches(alloc, wire, id));
+            try std.testing.expect(!frameIdMatches(alloc, wire, id +% 1));
+        }
+    }.run, .{});
 }
 
 test "fuzz dispatchFrame: arbitrary frames never crash" {

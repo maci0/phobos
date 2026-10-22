@@ -190,7 +190,7 @@ fn errorResponse(alloc: std.mem.Allocator, status: std.http.Status, message: []c
 
 /// Wrap a handler result as `{"result": <r>}`.
 fn wrapResult(alloc: std.mem.Allocator, result: std.json.Value) ![]const u8 {
-    return std.json.Stringify.valueAlloc(alloc, .{ .result = result }, .{});
+    return std.json.Stringify.valueAlloc(alloc, .{ .result = jv.StringifyValue{ .value = result } }, .{});
 }
 
 /// Handle GET /server/redirect. Mirrors Moonraker's RedirectHandler under the
@@ -340,7 +340,7 @@ pub fn handleParsed(
     const out = if (route.wrap_result)
         try wrapResult(alloc, result)
     else
-        try std.json.Stringify.valueAlloc(alloc, result, .{});
+        try std.json.Stringify.valueAlloc(alloc, jv.StringifyValue{ .value = result }, .{});
 
     return .{ .status = .ok, .body = out };
 }

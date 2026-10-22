@@ -2,6 +2,120 @@
 //! checked float conversion.
 const std = @import("std");
 
+/// Dynamic API values with a vectorized plain-ASCII string path. Other strings
+/// and all JSON punctuation, options and scalar formatting use std.json.
+pub const StringifyValue = struct {
+    value: std.json.Value,
+
+    pub fn jsonStringify(self: @This(), stream: *std.json.Stringify) std.Io.Writer.Error!void {
+        switch (self.value) {
+            .string => |text| {
+                if (!stream.options.escape_unicode and !stream.options.emit_strings_as_arrays and plainAscii(text)) {
+                    try stream.print("\"{s}\"", .{text});
+                } else try stream.write(text);
+            },
+            .array => |items| {
+                try stream.beginArray();
+                for (items.items) |item| try stream.write(StringifyValue{ .value = item });
+                try stream.endArray();
+            },
+            .object => |object| {
+                try stream.beginObject();
+                var it = object.iterator();
+                while (it.next()) |entry| {
+                    try stream.objectField(entry.key_ptr.*);
+                    try stream.write(StringifyValue{ .value = entry.value_ptr.* });
+                }
+                try stream.endObject();
+            },
+            .null, .bool, .integer, .float, .number_string => try stream.write(self.value),
+        }
+    }
+};
+
+fn plainAscii(text: []const u8) bool {
+    const width = std.simd.suggestVectorLength(u8) orelse return false;
+    if (text.len < width) return false;
+    const Vector = @Vector(width, u8);
+    var offset: usize = 0;
+    while (text.len - offset >= width) : (offset += width) {
+        const bytes: Vector = text[offset..][0..width].*;
+        const special = (bytes < @as(Vector, @splat(0x20))) |
+            (bytes >= @as(Vector, @splat(0x80))) |
+            (bytes == @as(Vector, @splat('"'))) |
+            (bytes == @as(Vector, @splat('\\')));
+        if (@reduce(.Or, special)) return false;
+    }
+    for (text[offset..]) |byte| {
+        if (byte < 0x20 or byte >= 0x80 or byte == '"' or byte == '\\') return false;
+    }
+    return true;
+}
+
+test "StringifyValue matches std.json for every byte at vector boundaries and options" {
+    const alloc = std.testing.allocator;
+    var text: [129]u8 = @splat('x');
+    for ([_]usize{ 0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129 }) |len| {
+        for (0..256) |byte| {
+            for ([_]usize{ 0, len / 2, len -| 1 }) |position| {
+                if (len > 0) text[position] = @intCast(byte);
+                defer if (len > 0) {
+                    text[position] = 'x';
+                };
+                const value: std.json.Value = .{ .string = text[0..len] };
+                // Invalid UTF-8 is emitted as a byte array by std.json.
+                for ([_]std.json.Stringify.Options{ .{}, .{ .emit_strings_as_arrays = true } }) |options| {
+                    const expected = try std.json.Stringify.valueAlloc(alloc, value, options);
+                    defer alloc.free(expected);
+                    const actual = try std.json.Stringify.valueAlloc(alloc, StringifyValue{ .value = value }, options);
+                    defer alloc.free(actual);
+                    try std.testing.expectEqualStrings(expected, actual);
+                }
+            }
+        }
+    }
+}
+
+test "StringifyValue preserves nested values, Unicode, escaping and writer failures" {
+    const alloc = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc,
+        \\{"quoted\"key":["abcdefghijklmnopqrstuvwxyz0123456789","Unicode: é水😀","quote: \" slash: \\ newline: \n",null,true,1,-2.5,18446744073709551616],"empty":{}}
+    , .{});
+    defer parsed.deinit();
+    for ([_]std.json.Stringify.Options{ .{}, .{ .whitespace = .indent_2 }, .{ .escape_unicode = true }, .{ .emit_strings_as_arrays = true }, .{ .emit_nonportable_numbers_as_strings = true } }) |options| {
+        const expected = try std.json.Stringify.valueAlloc(alloc, parsed.value, options);
+        defer alloc.free(expected);
+        const actual = try std.json.Stringify.valueAlloc(alloc, StringifyValue{ .value = parsed.value }, options);
+        defer alloc.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    var empty: [0]u8 = .{};
+    var writer = std.Io.Writer.fixed(&empty);
+    try std.testing.expectError(error.WriteFailed, std.json.Stringify.value(StringifyValue{ .value = parsed.value }, .{}, &writer));
+    try std.testing.checkAllAllocationFailures(alloc, struct {
+        fn encode(a: std.mem.Allocator, value: std.json.Value) !void {
+            const output = try successResponse(a, .{ .integer = 42 }, value);
+            defer a.free(output);
+        }
+    }.encode, .{parsed.value});
+}
+
+test "fuzz StringifyValue matches std.json for bounded byte strings" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var text: [512]u8 = undefined;
+            smith.bytesWithHash(&text, 0);
+            const len = smith.valueRangeAtMostWithHash(u16, 0, text.len, 1);
+            const value: std.json.Value = .{ .string = text[0..len] };
+            const expected = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});
+            defer std.testing.allocator.free(expected);
+            const actual = try std.json.Stringify.valueAlloc(std.testing.allocator, StringifyValue{ .value = value }, .{});
+            defer std.testing.allocator.free(actual);
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    }.run, .{});
+}
+
 /// Checked truncation for numeric fields accepted as either JSON integers or floats.
 pub fn floatToInt(value: f64) ?i64 {
     if (!std.math.isFinite(value) or value < -0x1p63 or value >= 0x1p63) return null;
@@ -10,7 +124,7 @@ pub fn floatToInt(value: f64) ?i64 {
 
 /// `{"jsonrpc":"2.0","result":<result>,"id":<id>}`. Caller owns the bytes.
 pub fn successResponse(alloc: std.mem.Allocator, id: std.json.Value, result: std.json.Value) error{OutOfMemory}![]u8 {
-    return std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .result = result, .id = id }, .{});
+    return std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .result = StringifyValue{ .value = result }, .id = id }, .{});
 }
 
 /// `{"jsonrpc":"2.0","error":{"code":<code>,"message":<message>},"id":<id>}`.

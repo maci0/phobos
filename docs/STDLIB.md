@@ -262,6 +262,25 @@ Owned JSON snapshots still require a recursive copy and matching cleanup.
 detach a snapshot from a request arena. Inputs must pass the existing depth
 guard before copying or serialization.
 
+HTTP and JSON-RPC results use `json/value.zig.StringifyValue` to scan long plain
+ASCII strings with `std.simd.suggestVectorLength`, vector comparisons and
+`@reduce`. It delegates escaping, Unicode, scalar formatting, options and JSON
+punctuation to `std.json.Stringify`. Targets without a suggested byte vector use
+the standard string path. Differential tests cover every byte, vector boundaries,
+formatting options, nested values and writer/allocation failures.
+
+Klippy reply routing uses a typed `std.json` envelope with unknown fields skipped.
+The waiting handler decodes the result once; routing keeps one owned wire copy
+without building another result tree. Method frames still receive a complete
+dynamic parse and the existing depth check before dispatch. A tagged field
+distinguishes an absent method from a present null method.
+
+TCP listeners set `TCP_NODELAY` through `std.c.setsockopt`; the installed
+`std.Io.net` exposes no socket-option setter. Linux inherits the flag on accepted
+connections, including WebSocket upgrades. Tests read it back on accepted IPv4
+and IPv6 sockets through the typed `std.c.getsockopt` binding. Transfers,
+deadlines, close and cancellation still use `std.Io`.
+
 HTTP and JSON-RPC serialize handler results before releasing Core, because
 results can borrow mutable component strings. Transport screening runs after
 method, transport, argument and authentication checks for each request, including

@@ -1,0 +1,54 @@
+{
+  "source_commit": "7764f3697a04117543f2d6a793e679fa7ab4a6f3",
+  "seed_sha256": "efb48c2e2a3606d18a55ba8d96e546e283926a3432ae5449d053135dff175079",
+  "timestamp_utc": "2026-10-22T09:45:55Z",
+  "duration_seconds": 12,
+  "transport": "Printer-local Python fixed-arrival generator CPU 0; all server threads CPU 1; local HTTP guards; SSH outside load path",
+  "profiles": [
+    "candidate",
+    "baseline",
+    "moonraker"
+  ],
+  "baseline_source_commit": "7764f3697a04117543f2d6a793e679fa7ab4a6f3",
+  "candidate_source_blobs": {
+    "src/io.zig": "218ed8de4500aff95164fed9e4cba4046efe9546",
+    "src/json/value.zig": "85483dc4e3e5f8102103f9defa61ae002b6c09e7",
+    "src/components/history.zig": "fc0ac28f7e34ebed76a912552e6b421627ec8b8d",
+    "src/components/klippy_connection.zig": "e269f30907aa212e8c1dc384972ef87b014a2af8",
+    "src/store/sqlite_store.zig": "beb72a102d678f04389a1e10416713a84cade0a9",
+    "src/http_transport.zig": "f5cb2db50be174c4d9cf2ab66011a7c6a56f1295"
+  },
+  "binary_sha256": {
+    "baseline": "a224e2699893895523acda2e95af90699abbae13e9ecd85a4a337281fcb97944",
+    "candidate": "a31858612a226140fdc435f61b17c773360f4a0d2d61b322cc7fda7bb1890ad8"
+  },
+  "stub_sha256": "358bb8da029e09be0079fe21f9ab7ba251905bf9e474ca23004583ab0b6b32b8",
+  "moonraker_commit": "9008485843740c93e0154ccbdac1fc2b02b03aaa",
+  "package_version": "0.2.2 development",
+  "build_mode": "ReleaseSmall",
+  "zig_version": "0.17.0",
+  "phobos_sqlite_version": "3.54.1",
+  "repetitions": 3,
+  "clock_ticks_per_second": 100,
+  "fixture_history_jobs": 266,
+  "full_subscription_objects": 268,
+  "config": "[server]\nhost : 127.0.0.1\nport : 7126\nklippy_uds_address : /tmp/uds\n\n[machine]\nprovider : simple\nvalidate_service : false\nvalidate_config : false\n\n[file_manager]\nfile_system_observer : none\n\n[authorization]\nenable_api_key : false\ntrusted_clients : 127.0.0.1\n\n[history]\n\n[announcements]\ndev_mode : true\n\n[job_queue]\nload_on_startup : false\nautomatic_transition : false\n\n",
+  "firmware": "Forge-X 1.4.2",
+  "kernel": "Linux 5.4.61",
+  "cpu": "two Cortex-A7 cores",
+  "ram_kib": 110404,
+  "moonraker_python": "3.11.10",
+  "idle_seconds": 5,
+  "memory_floor_kib": 16384,
+  "workers_max": 8,
+  "request_timeout_seconds": 3,
+  "process_sample_period_seconds": 0.1,
+  "production_during_load": "stopped",
+  "phobos_binary_bytes": 2634312,
+  "moonraker_source_sha256": {
+    "moonraker.py": "c0111c255c60b3465798e4abf70de4492e1b16e016cebffe51c252a9cec94116",
+    "history.py": "09c78f73a5714a67a26b9bc9fc47b0e8f62f6588b7dbe1c8d9e78623aa355c20",
+    "database.py": "a76d7bf63d2574ba2b358acb405168d74cfafd56adab17ed429c911b625bd0bf"
+  },
+  "boot_id": "6213a6c1-a3b6-4b38-b637-5aa9a116a117"
+}

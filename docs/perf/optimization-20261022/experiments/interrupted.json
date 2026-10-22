@@ -1,0 +1,377 @@
+{
+  "status": "interrupted",
+  "candidate_binary_sha256": "a31858612a226140fdc435f61b17c773360f4a0d2d61b322cc7fda7bb1890ad8",
+  "transport": "Printer-local Python fixed arrivals; host health checks through SSH",
+  "http_trials": [
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "requests": 600,
+        "success": 1,
+        "errors": [],
+        "rate": 50,
+        "throughput": 50.000327368810055,
+        "latencies": {
+          "50th": 3278749.5,
+          "99th": 16026721,
+          "mean": 3954385.2866666666,
+          "min": 2945680,
+          "max": 30440191
+        },
+        "status_codes": {
+          "200": 600
+        }
+      },
+      "process": {
+        "cpu_us_per_request": 550.0,
+        "cpu_percent_one_core": 2.7476679244052478,
+        "rss_kib_max": 3304,
+        "available_min_kib": 48716,
+        "swap_kib_max": 0,
+        "threads_max": 11,
+        "before": {
+          "monotonic_ns": 345758354301277,
+          "ticks": 58,
+          "VmRSS": 3304,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 50320,
+          "SwapFree": 100
+        },
+        "after": {
+          "monotonic_ns": 345770364486244,
+          "ticks": 91,
+          "VmRSS": 3304,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 49328,
+          "SwapFree": 100
+        }
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "independent75",
+      "requested_rate": 75,
+      "duration_seconds": 12,
+      "vegeta": {
+        "requests": 900,
+        "success": 1,
+        "errors": [],
+        "rate": 75,
+        "throughput": 74.98382802535559,
+        "latencies": {
+          "50th": 5019460.0,
+          "99th": 29545453,
+          "mean": 7585438.041111111,
+          "min": 2950391,
+          "max": 41764221
+        },
+        "status_codes": {
+          "200": 900
+        }
+      },
+      "process": {
+        "cpu_us_per_request": 2977.777777777778,
+        "cpu_percent_one_core": 22.290130303719415,
+        "rss_kib_max": 3308,
+        "available_min_kib": 48372,
+        "swap_kib_max": 0,
+        "threads_max": 12,
+        "before": {
+          "monotonic_ns": 345772722797324,
+          "ticks": 92,
+          "VmRSS": 3304,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 50340,
+          "SwapFree": 100
+        },
+        "after": {
+          "monotonic_ns": 345784746055885,
+          "ticks": 360,
+          "VmRSS": 3308,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 48768,
+          "SwapFree": 100
+        }
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "history10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "requests": 120,
+        "success": 1,
+        "errors": [],
+        "rate": 10,
+        "throughput": 10.06954545329027,
+        "latencies": {
+          "50th": 15800214.5,
+          "99th": 44475735,
+          "mean": 17754371.283333335,
+          "min": 14479815,
+          "max": 44943914
+        },
+        "status_codes": {
+          "200": 120
+        }
+      },
+      "process": {
+        "cpu_us_per_request": 13000.0,
+        "cpu_percent_one_core": 13.066129332327426,
+        "rss_kib_max": 3340,
+        "available_min_kib": 49360,
+        "swap_kib_max": 0,
+        "threads_max": 12,
+        "before": {
+          "monotonic_ns": 345787274699498,
+          "ticks": 362,
+          "VmRSS": 3308,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 50240,
+          "SwapFree": 100
+        },
+        "after": {
+          "monotonic_ns": 345799213965981,
+          "ticks": 518,
+          "VmRSS": 3340,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 49628,
+          "SwapFree": 100
+        }
+      }
+    },
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "workload": "database64k10",
+      "requested_rate": 10,
+      "duration_seconds": 12,
+      "vegeta": {
+        "requests": 120,
+        "success": 1,
+        "errors": [],
+        "rate": 10,
+        "throughput": 10.075311323299667,
+        "latencies": {
+          "50th": 8259833.0,
+          "99th": 22586155,
+          "mean": 9321115.066666666,
+          "min": 7580702,
+          "max": 42732342
+        },
+        "status_codes": {
+          "200": 120
+        }
+      },
+      "process": {
+        "cpu_us_per_request": 5333.333333333333,
+        "cpu_percent_one_core": 5.368740355382488,
+        "rss_kib_max": 3340,
+        "available_min_kib": 49448,
+        "swap_kib_max": 0,
+        "threads_max": 12,
+        "before": {
+          "monotonic_ns": 345801552451149,
+          "ticks": 519,
+          "VmRSS": 3340,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 50260,
+          "SwapFree": 100
+        },
+        "after": {
+          "monotonic_ns": 345813473310748,
+          "ticks": 583,
+          "VmRSS": 3340,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 12,
+          "MemAvailable": 49632,
+          "SwapFree": 100
+        }
+      }
+    },
+    {
+      "backend": "baseline",
+      "repetition": 1,
+      "workload": "info50",
+      "requested_rate": 50,
+      "duration_seconds": 12,
+      "vegeta": {
+        "requests": 600,
+        "success": 1,
+        "errors": [],
+        "rate": 50,
+        "throughput": 50.01687111160127,
+        "latencies": {
+          "50th": 3415943.0,
+          "99th": 15350316,
+          "mean": 3986548.8316666665,
+          "min": 3038182,
+          "max": 30901063
+        },
+        "status_codes": {
+          "200": 600
+        }
+      },
+      "process": {
+        "cpu_us_per_request": 550.0,
+        "cpu_percent_one_core": 2.7484220150293766,
+        "rss_kib_max": 3256,
+        "available_min_kib": 48888,
+        "swap_kib_max": 0,
+        "threads_max": 11,
+        "before": {
+          "monotonic_ns": 345838495129758,
+          "ticks": 59,
+          "VmRSS": 3256,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 50208,
+          "SwapFree": 112
+        },
+        "after": {
+          "monotonic_ns": 345850502019464,
+          "ticks": 92,
+          "VmRSS": 3256,
+          "VmHWM": 5144,
+          "VmSwap": 0,
+          "Threads": 11,
+          "MemAvailable": 49180,
+          "SwapFree": 112
+        }
+      }
+    }
+  ],
+  "subscription_trials": [
+    {
+      "backend": "candidate",
+      "repetition": 1,
+      "requested_rate": 1,
+      "requests": 12,
+      "cpu_us_per_request": 77500.0,
+      "before": {
+        "monotonic_ns": 345815406326772,
+        "ticks": 584,
+        "VmRSS": 3344,
+        "VmHWM": 5144,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 49964,
+        "SwapFree": 100
+      },
+      "after": {
+        "monotonic_ns": 345826740459735,
+        "ticks": 677,
+        "VmRSS": 3468,
+        "VmHWM": 5144,
+        "VmSwap": 0,
+        "Threads": 12,
+        "MemAvailable": 47164,
+        "SwapFree": 104
+      },
+      "rss_kib_max": 4612,
+      "available_min_kib": 46176,
+      "swap_kib_max": 0,
+      "trials": [
+        {
+          "latency_ms": 259.433784,
+          "service_ms": 253.831686,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 252.080965,
+          "service_ms": 251.458821,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "latency_ms": 250.420286,
+          "service_ms": 249.600455,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 247.414697,
+          "service_ms": 246.774927,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "latency_ms": 287.0697,
+          "service_ms": 286.402741,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "latency_ms": 265.613864,
+          "service_ms": 264.973217,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 270.872027,
+          "service_ms": 269.835985,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 261.844841,
+          "service_ms": 261.148151,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 258.646335,
+          "service_ms": 258.132081,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 293.068195,
+          "service_ms": 292.484712,
+          "objects": 268,
+          "response_json_bytes": 376999
+        },
+        {
+          "latency_ms": 292.384928,
+          "service_ms": 291.795424,
+          "objects": 268,
+          "response_json_bytes": 377000
+        },
+        {
+          "latency_ms": 284.923693,
+          "service_ms": 284.045544,
+          "objects": 268,
+          "response_json_bytes": 377000
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "A host /server/info monitoring request timed out after five seconds during baseline repetition 1 independent75. That incomplete workload has no report and is not counted as success.",
+    "The controller stopped its probe and restored production. No daemon crash was recorded; the exact cause was not established. The final study moved timed-run health checks onto the printer and captures local thread wait channels on failure."
+  ]
+}

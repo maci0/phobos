@@ -4,10 +4,10 @@ Tools to compare phobos against stock Moonraker on identical hardware and to
 profile phobos's on-CPU hot path under load. Current measurements and their
 limits are in [`docs/PERFORMANCE.md`](../../docs/PERFORMANCE.md) and
 [`docs/MEMORY.md`](../../docs/MEMORY.md).
-Current tables and graphics compare only published phobos v0.2.2 with
-Moonraker. The [capture directory](../../docs/perf/v0.2.2/) contains populated
-and empty-history VM trials plus earlier real Forge-X trials, with exact asset,
-source and seed hashes. The [VM method](../../docs/perf/v0.2.2/VM_METHOD.md)
+Current tables and graphics compare the 0.2.2 development build with
+Moonraker. The [capture directory](../../docs/perf/optimization-20261022/) contains populated
+and empty-history VM trials plus real Forge-X trials, with exact binary,
+source and seed hashes. The [capture method](../../docs/perf/optimization-20261022/METHOD.md)
 records exclusive physical cores, locked RAM, guest steal and host run-queue
 delay; these controls do not guarantee zero steal or fixed physical performance.
 No printer is contacted for the VM study. Older captures retain their original
@@ -65,6 +65,12 @@ the server and load generator under the caller's identity when attachment is
 restricted. The default invokes perf directly.
 `loadtest.sh` keeps its binary capture below `.scratch/load-*/`; its
 label is display text, not a filename.
+
+Load commands set `-max-body=0` so large replies do not fill capture files or
+the generator heap. Vegeta still drains each response before timing it as
+complete. Its `bytes_in` counts retained body bytes, so zero here does not
+mean zero wire traffic. These scripts measure status and timing; validate
+response contents separately before load.
 
 `plot_perf.py --input <capture>/summary.json --output-dir <capture>/plots` reads
 trial records containing `backend`, `workload`, `repetition`, `requested_rate`,

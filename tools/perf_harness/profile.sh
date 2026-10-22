@@ -29,7 +29,7 @@ wait_ready "$SERVER_PID" "$PORT" klippy
 
 printf 'GET http://127.0.0.1:%s%s\n' "$PORT" "$ENDPOINT" > "$PERF_RUN/targets.txt"
 LOAD_INDEX=${#PERF_CHILDREN[@]}
-start_child vegeta attack -targets="$PERF_RUN/targets.txt" -rate="$RATE" -duration="$((SECONDS_TO_SAMPLE + 4))s" -keepalive=true -workers=8 -max-workers=64 > "$PERF_RUN/vegeta.bin" 2> "$PERF_RUN/vegeta.log"
+start_child vegeta attack -targets="$PERF_RUN/targets.txt" -rate="$RATE" -duration="$((SECONDS_TO_SAMPLE + 4))s" -max-body=0 -keepalive=true -workers=8 -max-workers=64 > "$PERF_RUN/vegeta.bin" 2> "$PERF_RUN/vegeta.log"
 LOAD_PID=$PERF_CHILD_PID
 sleep 2
 

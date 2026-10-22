@@ -1,6 +1,7 @@
 //! Io bootstrap: a thin listener over `std.Io.net` running on the
 //! `std.Io.Threaded` backend. Owns the accept loop and per-connection task
-//! spawning. No raw socket syscalls — everything goes through `std.Io`.
+//! spawning. Socket I/O uses `std.Io`; TCP_NODELAY uses typed libc because
+//! `std.Io.net` has no socket-option setter.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,6 +16,12 @@ pub const CtxHandler = *const fn (ctx: *anyopaque, io: Io, stream: net.Stream) v
 /// the loop does not spin while connections close and free resources.
 const accept_retry_delay: Io.Duration = .fromSeconds(1);
 
+fn tcpNoDelay(socket: net.Socket) error{SocketOptionFailed}!void {
+    const enabled: c_int = 1;
+    if (std.c.setsockopt(socket.handle, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &enabled, @sizeOf(c_int)) != 0)
+        return error.SocketOptionFailed;
+}
+
 pub const Listener = struct {
     server: net.Server,
 
@@ -22,7 +29,10 @@ pub const Listener = struct {
     /// ephemeral port (read back later via `port()`).
     pub fn bind(io: Io, host: []const u8, bind_port: u16) !Listener {
         var addr = try net.IpAddress.parse(host, bind_port);
-        const server = try addr.listen(io, .{ .reuse_address = true });
+        var server = try addr.listen(io, .{ .reuse_address = true });
+        errdefer server.deinit(io);
+        // Linux inherits this flag on accept, including after WebSocket upgrade.
+        try tcpNoDelay(server.socket);
         return .{ .server = server };
     }
 
@@ -89,6 +99,45 @@ pub const Listener = struct {
 };
 
 // --- tests ---------------------------------------------------------------
+
+test "accepted TCP sockets inherit NODELAY on both IP families" {
+    const io = std.testing.io;
+    for ([_][]const u8{ "127.0.0.1", "::1" }) |host| {
+        var listener = try Listener.bind(io, host, 0);
+        defer listener.deinit(io);
+        const client = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        const accepted = try listener.server.accept(io);
+        defer accepted.close(io);
+        var enabled: c_int = 0;
+        var len: std.c.socklen_t = @sizeOf(c_int);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.getsockopt(accepted.socket.handle, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &enabled, &len));
+        try std.testing.expectEqual(@as(c_int, 1), enabled);
+    }
+    try std.testing.expectError(error.SocketOptionFailed, tcpNoDelay(.{ .handle = -1, .address = try net.IpAddress.parse("127.0.0.1", 0) }));
+}
+
+test "fuzz TCP listeners preserve NODELAY across repeated accepts" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            const io = std.testing.io;
+            const host = if (smith.value(bool)) "127.0.0.1" else "::1";
+            var listener = try Listener.bind(io, host, 0);
+            defer listener.deinit(io);
+            const count = smith.valueRangeAtMostWithHash(u8, 1, 4, 1);
+            for (0..count) |_| {
+                const client = try listener.server.socket.address.connect(io, .{ .mode = .stream });
+                defer client.close(io);
+                const accepted = try listener.server.accept(io);
+                defer accepted.close(io);
+                var enabled: c_int = 0;
+                var len: std.c.socklen_t = @sizeOf(c_int);
+                try std.testing.expectEqual(@as(c_int, 0), std.c.getsockopt(accepted.socket.handle, std.c.IPPROTO.TCP, std.c.TCP.NODELAY, &enabled, &len));
+                try std.testing.expectEqual(@as(c_int, 1), enabled);
+            }
+        }
+    }.run, .{});
+}
 
 fn sendLine(io: Io, address: net.IpAddress, payload: []const u8, out: *[256]u8) ![]const u8 {
     const cs = try address.connect(io, .{ .mode = .stream });
