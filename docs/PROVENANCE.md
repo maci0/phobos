@@ -2214,3 +2214,70 @@ No daemon behavior, package version, release, deployment or printer state was
 changed. No new runtime flag or WASM integration is claimed. Native Zig suites,
 physical-printer workflows and third-party integrations were not rerun for
 this tooling/documentation change.
+
+## 2026-10-24: Native Forge-X compatibility
+
+Requested: implement the missing Forge-X features identified by the separate
+source/API comparison. Reference: Forge-X `1.4.2`,
+`f2c3f272d6e27400818a514d9d31d754eeb1b5e3`, with the upstream vendor pin and both
+API baselines unchanged.
+
+Added the validated startup profile `--compat moonraker|forge-x`, CLI schema/help
+and API-dump identity. The Forge-X profile selects packaged G-code conversion,
+stock print macros, object-query scope, updater service verification and
+automatic-refresh skip markers. Standard `moonraker.asvc` loading is shared.
+Native timelapse loads from configuration, with bounded HTTP capture, persisted
+settings, quiet macro acknowledgements, print-session/final-frame handling,
+generation cancellation, ZIP export and FFmpeg video/preview output. Feather
+status refresh and active-token progress/failure forwarding are implemented.
+See `docs/api/FORGE_X.md`, `docs/TIMELAPSE.md` and `docs/FILE_MANAGEMENT.md` for
+behavior and limits.
+
+Upload tests exposed a write-only atomic staging descriptor being reused as a
+reader. Conversion now reopens the checked temporary name and verifies its inode;
+ordinary uploads retain single-file staging when their destination is unchanged.
+Truncated forms cannot publish. Update-progress temporary JSON now uses a scoped
+arena; service allowlist parsing preserves state on invalid/allocation-failed
+replacement. Capture/output publication checks its generation, and parked
+acknowledgements cannot release a later generation. Git conflict paths are
+bounded, deduplicated and UTF-8 safe.
+
+Verification: `scripts/test.sh Debug`, `ReleaseSafe` and `ReleaseFast` each
+completed with 1,803 passed, one physical-Klippy skip and zero failures, including
+342 bounded fuzz tests. Native FFmpeg encoded and decoded an MP4 and generated a
+rotated JPEG preview. Loopback HTTP tests exercised snapshot size limits and
+multipart fields arriving after a 3MF archive. Service tests used injected
+runners; Git refresh/update fixtures used owned local repositories. All four
+build-policy tests and their two fuzz tests passed. All 114 Python tooling tests,
+the focused Ruff syntax/undefined-name check, Zig formatting and whitespace
+checks passed.
+
+Both source scans have no API drift. Runtime dumps retain upstream coverage of
+123/123 paths, 130/130 RPC names and 27/27 notifications, and now cover Forge-X
+121/121 paths, 129/129 RPC names and 28/28 notifications. The generated table was
+updated from the verified dump and its check passes. These are name counts,
+not a claim of complete behavioral equivalence. CI has separate coverage gates
+and installs FFmpeg for native encoding fixtures; hosted CI was not run here.
+
+Static ARM32 Cortex-A7 ReleaseSafe/ReleaseSmall and AArch64 Cortex-A53
+ReleaseSmall builds succeeded. An isolated ARM ReleaseSmall probe inside the
+printer chroot on `127.0.0.1:7126` returned ready state, live print/heater status
+and filesystem-capacity/directory results. It used a private data directory and
+only read-only requests. The first copy exhausted the printer's small temporary
+filesystem; only this attempt's files were removed before using the smaller
+binary. Probe configuration preserved Forge-X's required
+`file_system_observer: none` on its kernel without inotify and trusted only
+loopback. The probe was stopped, port 7126 checked clear and its files removed.
+Production on 7125 remained ready, with the print complete and both heater
+targets zero. No production binary/config/database was replaced or directly
+opened, and no motion, heater, update, reboot or shutdown action was requested.
+The native Debug host binary was restored after cross builds.
+
+Real camera optics, parked motion, macro/UI dialogs, service updates and
+third-party integrations remain hardware/integration checks, not fixture-proven
+claims. The package version is unchanged; no release or production deployment
+was performed. Python-version identity, API 1.5.0, missing-CAN empty results,
+optional components and existing safety no-ops remain deliberate. Full Python
+component loading, Jinja2, LDAP, Apprise and a WASM extension host were not added.
+`graphify-out/graph.json` exists, but `graphify` is not installed, so its update
+was skipped and no graph artifact was changed.

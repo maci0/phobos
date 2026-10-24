@@ -16,7 +16,7 @@
 //!
 //! States follow job_queue.py: start or an automatic transition after a
 //! completed print moves "ready"/"paused" to "loading"; the dispatch worker
-//! runs the transition gcode, enters "starting", sends SDCARD_PRINT_FILE,
+//! runs the transition gcode, enters "starting", sends the profile's print macro,
 //! removes the loaded job, emits "job_loaded" and settles on "ready"
 //! (more jobs, automatic transition) or "paused". Any failure pauses the
 //! queue. `load_on_startup` loads a queued job one second after Klippy is ready;
@@ -56,6 +56,7 @@ const DispatchReason = enum { immediate, transition, startup };
 const startup_delay: std.Io.Duration = .fromSeconds(1);
 
 pub const JobQueueCtx = struct {
+    print_config: @import("printer.zig").PrintConfig = .{},
     clock_io: std.Io,
     store: DataStore,
     bus: *NotifyBus,
@@ -308,9 +309,7 @@ pub const JobQueueCtx = struct {
 
         self.setQueueState("starting");
         // klippy_apis.py start_print: drop a leading '/', escape double quotes.
-        const name = if (std.mem.startsWith(u8, front.filename, "/")) front.filename[1..] else front.filename;
-        const escaped = try std.mem.replaceOwned(u8, a, name, "\"", "\\\"");
-        try self.runScript(a, try std.fmt.allocPrint(a, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped}));
+        try self.runScript(a, try self.print_config.script(a, front.filename));
 
         {
             self.lockJobs();
@@ -2003,6 +2002,17 @@ test "dispatchNextJob: start_print strips a leading slash and escapes quotes" {
     ctx.queue_state = "loading";
     ctx.dispatchNextJob(false);
     try testing.expectEqualStrings("SDCARD_PRINT_FILE FILENAME=\"a \\\"b\\\".gcode\"", Script.buf[0..Script.len]);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "mod_data", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "printer.cfg", .data = "[include mod/stock.cfg]\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "mod_data/variables.cfg", .data = "[Variables]\nprint_leveling = 1\n" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", a);
+    ctx.print_config = .{ .profile = .forge_x, .io = testing.io, .root = root };
+    try ctx.jobs.append(ctx.gpa, .{ .filename = try a.dupe(u8, "part.gcode"), .job_id = try a.dupe(u8, "J2"), .time_added = 2.0 });
+    ctx.queue_state = "loading";
+    ctx.dispatchNextJob(false);
+    try testing.expectEqualStrings("LEVELING_PRINT_FILE FILENAME=\"part.gcode\"", Script.buf[0..Script.len]);
 }
 
 test "handleStart: dispatches next job when wired and queued" {

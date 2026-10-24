@@ -5,6 +5,7 @@
 const std = @import("std");
 const build_options = @import("build_options");
 pub const clock = @import("util/clock.zig");
+pub const compat = @import("compat.zig");
 
 pub const datastore = @import("store/datastore.zig");
 pub const file_store = @import("store/file_store.zig");
@@ -29,6 +30,7 @@ pub const ws_client = @import("components/ws_client.zig");
 pub const sensor_template = @import("components/sensor_template.zig");
 pub const paneldue = @import("components/paneldue.zig");
 pub const feather_updates = @import("components/feather_updates.zig");
+pub const gcode_3mf = @import("components/gcode_3mf.zig");
 pub const announcements = @import("components/announcements.zig");
 pub const testutil_server = @import("testutil/server.zig");
 pub const testutil_ws_client = @import("testutil/ws_client.zig");
@@ -47,6 +49,7 @@ const usage_text =
     \\  -d, --data-path <path>   Data directory. With no -c, loads <path>/config/moonraker.conf
     \\                           and opens <path>/database/moonraker-sql.db
     \\      --dump-api           Print the API surface as JSON to stdout and exit
+    \\      --compat PROFILE     moonraker (default) or forge-x
     \\      schema [command]     Print the CLI Spec document and exit
     \\      --version            Print version and exit
     \\  -o, --output FMT         auto, text, or json. auto stays text on a pipe
@@ -124,7 +127,7 @@ fn renderSchema(alloc: std.mem.Allocator, filter: []const u8) ![]u8 {
     errdefer list.deinit(alloc);
     try list.appendSlice(alloc, "{\"clispec\":\"0.3\",\"name\":\"phobos\",\"version\":\"");
     try list.appendSlice(alloc, build_options.phobos_version);
-    try list.appendSlice(alloc, "\",\"description\":\"Moonraker-compatible print server.\",\"output\":{\"tty\":\"text\",\"piped\":\"text\"},\"global_args\":[{\"name\":\"--output\",\"short\":\"-o\",\"type\":\"string\",\"required\":false,\"description\":\"auto, text, or json. auto stays text when piped.\",\"default\":\"auto\",\"enum\":[\"auto\",\"text\",\"json\"]}],\"commands\":[");
+    try list.appendSlice(alloc, "\",\"description\":\"Moonraker-compatible print server.\",\"output\":{\"tty\":\"text\",\"piped\":\"text\"},\"global_args\":[{\"name\":\"--output\",\"short\":\"-o\",\"type\":\"string\",\"required\":false,\"description\":\"auto, text, or json. auto stays text when piped.\",\"default\":\"auto\",\"enum\":[\"auto\",\"text\",\"json\"]},{\"name\":\"--compat\",\"type\":\"string\",\"required\":false,\"description\":\"Select Moonraker or Forge-X behavior.\",\"default\":\"moonraker\",\"enum\":[\"moonraker\",\"forge-x\"]}],\"commands\":[");
     var count: usize = 0;
     for (specCmds()) |cmd| {
         if (!schemaSelected(cmd.name, filter)) continue;
@@ -189,6 +192,7 @@ fn run(init: std.process.Init) !void {
     var config_path: ?[]const u8 = null;
     var data_path: ?[]const u8 = null;
     var dump_api = false;
+    var compatibility: compat.Profile = .moonraker;
     var schema = false;
     var filter_buf: [96]u8 = undefined;
     var filter_len: usize = 0;
@@ -213,6 +217,12 @@ fn run(init: std.process.Init) !void {
             filter_len += n;
         } else if (std.mem.eql(u8, a, "--dump-api")) {
             dump_api = true;
+        } else if (std.mem.eql(u8, a, "--compat")) {
+            i += 1;
+            if (i >= args.len) return usageError(a, " requires a profile");
+            compatibility = compat.Profile.parse(args[i]) catch return usageError(a, " requires moonraker or forge-x");
+        } else if (std.mem.startsWith(u8, a, "--compat=")) {
+            compatibility = compat.Profile.parse(a["--compat=".len..]) catch return usageError(a, " requires moonraker or forge-x");
         } else if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) {
             try writeStdout(aio, usage_text);
             return;
@@ -255,14 +265,14 @@ fn run(init: std.process.Init) !void {
         return;
     }
 
-    if (dump_api) return dumpApi(alloc, aio, data_path);
+    if (dump_api) return dumpApi(alloc, aio, data_path, compatibility);
 
     var startup = try StartupConfig.load(alloc, aio, config_path, data_path);
     defer startup.deinit();
     std.debug.print("phobos: bind host='{s}' port={d}\n", .{ startup.host, startup.port });
     std.debug.print("phobos: datastore backend = {s}{s}\n", .{ @tagName(startup.backend), startup.db_path orelse "" });
     if (data_path) |dp| std.debug.print("phobos: data path = {s}\n", .{dp});
-    var server_app = try startup.createApp(aio, data_path, init.environ_map.get("HOME"));
+    var server_app = try startup.createApp(aio, data_path, init.environ_map.get("HOME"), compatibility);
     defer server_app.deinit(aio);
     try server_app.update_ctx.setGitEnvironment(init.environ_map);
 
@@ -347,9 +357,10 @@ const StartupConfig = struct {
         self.* = .{ .alloc = self.alloc };
     }
 
-    fn createApp(self: *StartupConfig, aio: std.Io, data_path: ?[]const u8, home_directory: ?[]const u8) !app.App {
+    fn createApp(self: *StartupConfig, aio: std.Io, data_path: ?[]const u8, home_directory: ?[]const u8, profile: compat.Profile) !app.App {
         var result = try app.App.initWithStore(self.alloc, self.backend, aio, self.db_path, data_path);
         errdefer result.deinit(aio);
+        result.setCompatibility(profile);
         try result.mqtt_ctx.setHomeDirectory(home_directory);
         if (self.cfg) |cfg| {
             self.cfg = null;
@@ -390,8 +401,8 @@ pub fn extractBindAddr(cfg: *const config.ConfigParser, default_host: []const u8
 ///
 /// All arrays are sorted. Does not bind sockets; the database is in memory.
 /// An explicit datadir persists; the default temporary datadir is removed.
-pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8) !void {
-    const out = try buildDumpApiJson(alloc, aio, data_path);
+pub fn dumpApi(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8, profile: compat.Profile) !void {
+    const out = try buildDumpApiJson(alloc, aio, data_path, profile);
     defer alloc.free(out);
     try writeStdout(aio, out);
     try writeStdout(aio, "\n");
@@ -436,9 +447,10 @@ test "fuzz CLI output chunks preserve their full regular file bytes" {
 
 /// Build the --dump-api JSON without touching stdout (testable). `data_path`
 /// is as for `App.initWithStore`.
-pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8) ![]u8 {
+pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]const u8, profile: compat.Profile) ![]u8 {
     var server_app = try app.App.init(alloc, aio, data_path);
     defer server_app.deinit(aio);
+    server_app.setCompatibility(profile);
 
     // Collect endpoints from the registry, grouped by path.
     var path_map = std.StringHashMap(EndpointEntry).init(alloc);
@@ -491,6 +503,9 @@ pub fn buildDumpApiJson(alloc: std.mem.Allocator, aio: std.Io, data_path: ?[]con
     var w: std.json.Stringify = .{ .writer = &aw.writer };
 
     try w.beginObject();
+
+    try w.objectField("compatibility");
+    try w.write(profile.name());
 
     // endpoints
     try w.objectField("endpoints");
@@ -596,6 +611,7 @@ test "renderSchema is clispec 0.3 and filters" {
     defer std.testing.allocator.free(doc);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"clispec\":\"0.3\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, doc, "\"name\":\"dump-api\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, doc, "\"name\":\"--compat\"") != null);
     const one = try renderSchema(std.testing.allocator, "serve");
     defer std.testing.allocator.free(one);
     try std.testing.expect(std.mem.indexOf(u8, one, "\"name\":\"serve\"") != null);
@@ -612,7 +628,7 @@ test "dumpApi: output contains server.info and server.config" {
     defer tmp.cleanup();
     const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
     defer alloc.free(data_path);
-    const out = try buildDumpApiJson(alloc, aio, data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path, .moonraker);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"server.info\"") != null);
@@ -629,14 +645,14 @@ test "dumpApi: output contains WS-only methods" {
     defer tmp.cleanup();
     const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
     defer alloc.free(data_path);
-    const out = try buildDumpApiJson(alloc, aio, data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path, .moonraker);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"server.connection.identify\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"server.websocket.id\"") != null);
 }
 
-test "dumpApi: output contains 27 notifications" {
+test "dumpApi: output contains upstream and timelapse notifications" {
     const alloc = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .stack_size = io.Listener.handler_stack_size });
     defer threaded.deinit();
@@ -646,14 +662,14 @@ test "dumpApi: output contains 27 notifications" {
     defer tmp.cleanup();
     const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
     defer alloc.free(data_path);
-    const out = try buildDumpApiJson(alloc, aio, data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path, .moonraker);
     defer alloc.free(out);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out, .{});
     defer parsed.deinit();
 
     const notifs = parsed.value.object.get("notifications").?.array;
-    try std.testing.expectEqual(@as(usize, 27), notifs.items.len);
+    try std.testing.expectEqual(@as(usize, 28), notifs.items.len);
 }
 
 test "dumpApi: output contains all four router routes" {
@@ -666,7 +682,7 @@ test "dumpApi: output contains all four router routes" {
     defer tmp.cleanup();
     const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
     defer alloc.free(data_path);
-    const out = try buildDumpApiJson(alloc, aio, data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path, .moonraker);
     defer alloc.free(out);
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"/server/jsonrpc\"") != null);
@@ -690,7 +706,7 @@ test "dumpApi: output is valid JSON with all required top-level keys" {
     defer tmp.cleanup();
     const data_path = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
     defer alloc.free(data_path);
-    const out = try buildDumpApiJson(alloc, aio, data_path);
+    const out = try buildDumpApiJson(alloc, aio, data_path, .moonraker);
     defer alloc.free(out);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, alloc, out, .{});
@@ -719,7 +735,7 @@ test "fuzz_dumpApi: output is always valid JSON" {
             defer tmp.cleanup();
             const data_path = try tmp.dir.realPathFileAlloc(io2, ".", std.heap.smp_allocator);
             defer std.heap.smp_allocator.free(data_path);
-            const out = try buildDumpApiJson(std.heap.smp_allocator, io2, data_path);
+            const out = try buildDumpApiJson(std.heap.smp_allocator, io2, data_path, .moonraker);
             defer std.heap.smp_allocator.free(out);
 
             const parsed = std.json.parseFromSlice(
@@ -824,7 +840,7 @@ test "startup uses one config snapshot for bind, storage and components" {
     try std.testing.expectEqualStrings(":memory:", startup.db_path.?);
     const parsed = startup.cfg.?;
     try tmp.dir.deleteFile(aio, "config/moonraker.conf");
-    var server_app = try startup.createApp(aio, base, "/startup-home");
+    var server_app = try startup.createApp(aio, base, "/startup-home", .moonraker);
     defer server_app.deinit(aio);
     try std.testing.expectEqual(parsed, server_app.cfg.?);
     try std.testing.expect(startup.cfg == null);

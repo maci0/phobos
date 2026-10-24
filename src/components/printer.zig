@@ -43,6 +43,92 @@ const confighelper = @import("../config/confighelper.zig");
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
 const KlippyCtx = @import("klippy_connection.zig").KlippyCtx;
+const Profile = @import("../compat.zig").Profile;
+const max_printer_config_bytes = 4 * 1024 * 1024;
+const max_variables_config_bytes = 1024 * 1024;
+
+pub const PrintConfig = struct {
+    profile: Profile = .moonraker,
+    io: ?std.Io = null,
+    root: []const u8 = "",
+
+    pub fn script(self: PrintConfig, alloc: std.mem.Allocator, filename: []const u8) ![]u8 {
+        if (std.mem.indexOfAny(u8, filename, "\r\n\x00") != null) return error.InvalidParams;
+        const escaped = try sanitizePrintFilename(alloc, filename);
+        defer alloc.free(escaped);
+        var command: []const u8 = "SDCARD_PRINT_FILE";
+        if (self.profile == .forge_x) {
+            const io = self.io orelse return error.NotReady;
+            var dir = try std.Io.Dir.cwd().openDir(io, self.root, .{});
+            defer dir.close(io);
+            const config = try dir.readFileAlloc(io, "printer.cfg", alloc, .limited(max_printer_config_bytes));
+            defer alloc.free(config);
+            var lines = std.mem.splitScalar(u8, config, '\n');
+            var stock = false;
+            while (lines.next()) |line| {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (std.mem.startsWith(u8, trimmed, "[include ")) {
+                    const end = std.mem.indexOfScalar(u8, trimmed, ']') orelse continue;
+                    if (std.mem.endsWith(u8, trimmed[0 .. end + 1], "stock.cfg]")) stock = true;
+                }
+            }
+            if (stock) {
+                const vars = try dir.readFileAlloc(io, "mod_data/variables.cfg", alloc, .limited(max_variables_config_bytes));
+                defer alloc.free(vars);
+                var variables = std.mem.splitScalar(u8, vars, '\n');
+                var leveling = false;
+                while (variables.next()) |line| {
+                    const at = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+                    if (std.mem.eql(u8, std.mem.trim(u8, line[0..at], " \t"), "print_leveling")) {
+                        var values = std.mem.tokenizeAny(u8, line[at + 1 ..], " \t\r#;");
+                        leveling = std.mem.eql(u8, values.next() orelse "", "1");
+                    }
+                }
+                command = if (leveling) "LEVELING_PRINT_FILE" else "NOLEVELING_PRINT_FILE";
+            }
+        }
+        return std.fmt.allocPrint(alloc, "{s} FILENAME=\"{s}\"", .{ command, escaped });
+    }
+};
+
+test "print profile uses stock leveling macros and rereads the configuration" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "mod_data", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "printer.cfg", .data = "[include mod/stock.cfg] # stock mode\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "mod_data/variables.cfg", .data = "[Variables]\nprint_leveling = 1 # enabled\n" });
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const config: PrintConfig = .{ .profile = .forge_x, .io = io, .root = path[0..try tmp.dir.realPath(io, &path)] };
+    const leveling = try config.script(alloc, "/part.gcode");
+    defer alloc.free(leveling);
+    try std.testing.expectEqualStrings("LEVELING_PRINT_FILE FILENAME=\"part.gcode\"", leveling);
+    try tmp.dir.writeFile(io, .{ .sub_path = "mod_data/variables.cfg", .data = "print_leveling = 0\n" });
+    const plain = try config.script(alloc, "part.gcode");
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("NOLEVELING_PRINT_FILE FILENAME=\"part.gcode\"", plain);
+    try tmp.dir.writeFile(io, .{ .sub_path = "printer.cfg", .data = "# [include stock.cfg]\n[include mod/native.cfg]\n" });
+    const native = try config.script(alloc, "part.gcode");
+    defer alloc.free(native);
+    try std.testing.expectEqualStrings("SDCARD_PRINT_FILE FILENAME=\"part.gcode\"", native);
+    const upstream = try (PrintConfig{}).script(alloc, "part.gcode");
+    defer alloc.free(upstream);
+    try std.testing.expectEqualStrings(native, upstream);
+}
+
+test "fuzz print scripts retain filename escaping" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var bytes: [64]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            const value = (PrintConfig{}).script(std.testing.allocator, &bytes) catch return;
+            defer std.testing.allocator.free(value);
+            try std.testing.expect(std.mem.startsWith(u8, value, "SDCARD_PRINT_FILE FILENAME=\""));
+            try std.testing.expect(std.mem.indexOfAny(u8, value, "\r\n\x00") == null);
+        }
+    }.run, .{});
+}
 
 /// The exact message Moonraker raises when a printer.* request is made while
 /// Klippy is not connected. Surfaced verbatim by both transports.
@@ -51,6 +137,7 @@ pub const klippy_disconnected_message = "Klippy Host not connected";
 /// Holds an optional pointer to the Klippy connection; handlers proxy to Klippy
 /// when connected, else short-circuit with the disconnected error.
 pub const PrinterCtx = struct {
+    print_config: PrintConfig = .{},
     /// Optional pointer to the Klippy connection; set by App after init.
     /// When non-null and Klippy is connected, handlers proxy to Klippy.
     klippy: ?*KlippyCtx = null,
@@ -68,6 +155,10 @@ pub const PrinterCtx = struct {
         if (self.hidden_owned) confighelper.freeLines(alloc, self.hidden_objects);
         self.hidden_objects = owned;
         self.hidden_owned = true;
+    }
+
+    fn queryResult(self: *const PrinterCtx, alloc: std.mem.Allocator, value: std.json.Value) !std.json.Value {
+        return if (self.print_config.profile == .forge_x) value else filterHiddenQuery(alloc, value, self.hidden_objects);
     }
 
     pub fn deinit(self: *PrinterCtx, alloc: std.mem.Allocator) void {
@@ -195,7 +286,7 @@ pub const ProxyEndpoint = struct {
             var wrapped = try std.json.ObjectMap.init(alloc, &.{}, &.{});
             try wrapped.put(alloc, "objects", .{ .object = objects });
             const wrapped_result = try self.proxyReq(k, .{ .object = wrapped }, alloc);
-            return filterHiddenQuery(alloc, wrapped_result, self.parent.hidden_objects);
+            return self.parent.queryResult(alloc, wrapped_result);
         }
 
         // Forward params as-is. Strip the transport-injected `_method` marker so
@@ -215,7 +306,7 @@ pub const ProxyEndpoint = struct {
         if (std.mem.eql(u8, self.endpoint, "objects/list")) {
             return filterObjectList(alloc, result, self.parent.hidden_objects);
         }
-        if (wraps_objects) return filterHiddenQuery(alloc, result, self.parent.hidden_objects);
+        if (wraps_objects) return self.parent.queryResult(alloc, result);
         return result;
     }
 };
@@ -265,18 +356,15 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
             ""
     else
         "";
-    return startPrint(k, filename, alloc);
+    return startPrint(k, filename, alloc, self.print_config);
 }
 
-/// klippy_apis.start_print: `SDCARD_PRINT_FILE` for `filename` with a
-/// leading `/` stripped and quotes escaped. Core held.
-pub fn startPrint(k: *KlippyCtx, filename: []const u8, alloc: std.mem.Allocator) anyerror!std.json.Value {
+/// Profile-selected print macro with a leading slash stripped and quotes escaped.
+/// Core held; the Klippy request releases it while waiting.
+pub fn startPrint(k: *KlippyCtx, filename: []const u8, alloc: std.mem.Allocator, config: PrintConfig) anyerror!std.json.Value {
     if (!k.isConnected()) return error.KlippyDisconnected;
     if (filename.len == 0) return error.InvalidParams;
-    const escaped = try sanitizePrintFilename(alloc, filename);
-
-    // Build on the arena (no fixed cap) — a long filename must not be truncated.
-    const script = try std.fmt.allocPrint(alloc, "SDCARD_PRINT_FILE FILENAME=\"{s}\"", .{escaped});
+    const script = try config.script(alloc, filename);
 
     // Build params: {"script": "<script>"}
     var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
@@ -442,6 +530,24 @@ test "filterHiddenQuery drops hidden names from status and keeps eventtime" {
     try testing.expect(status.get("output_pin level_h1") == null);
     try testing.expect(status.get("heater_bed") != null);
     try testing.expect(filtered.object.get("eventtime") != null);
+}
+
+test "Forge-X filters object lists while preserving queried hidden objects" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var ctx: PrinterCtx = .{};
+    defer ctx.deinit(testing.allocator);
+    try ctx.setHiddenObjects(testing.allocator, "output_pin private");
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"status\":{\"output_pin private\":{\"value\":1},\"heater_bed\":{}},\"eventtime\":123}", .{});
+    const upstream = try ctx.queryResult(a, value);
+    try testing.expect(!upstream.object.get("status").?.object.contains("output_pin private"));
+    ctx.print_config.profile = .forge_x;
+    const forge = try ctx.queryResult(a, value);
+    try testing.expect(forge.object.get("status").?.object.contains("output_pin private"));
+    const list = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"objects\":[\"output_pin private\",\"heater_bed\"]}", .{});
+    const filtered = try filterObjectList(a, list, ctx.hidden_objects);
+    try testing.expectEqual(@as(usize, 1), filtered.object.get("objects").?.array.items.len);
 }
 
 test "every printer handler returns KlippyDisconnected" {

@@ -32,6 +32,12 @@ Web/ZIP updates can replace configured installations. Host reboot and shutdown
 remain no-ops; package execution requires an injected runner. Full Jinja2, LDAP
 and Apprise are out of scope.
 
+Use `--compat forge-x` to enable Forge-X upload conversion, stock print macros
+and update behavior. Native [timelapse](docs/TIMELAPSE.md) and Feather support
+load from their configuration sections. The separate [Forge-X tracker](docs/api/FORGE_X.md)
+records implemented behavior and hardware checks still needed. The default
+profile remains `moonraker`; existing installations are not switched automatically.
+
 [Memory measurements](docs/MEMORY.md) and [load-test results](docs/PERFORMANCE.md)
 compare v0.2.3 with Moonraker in fresh Forge-X
 printer probes and an isolated KVM guest, with metric directions, trial ranges

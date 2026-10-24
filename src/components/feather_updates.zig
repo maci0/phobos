@@ -10,6 +10,9 @@
 
 const std = @import("std");
 const update_manager = @import("update_manager.zig");
+const max_progress_bytes = 160;
+const max_failure_bytes = 32768;
+const max_conflict_paths = 64;
 
 pub const CmdFn = *const fn (*anyopaque, std.mem.Allocator, []const []const u8) anyerror!void;
 pub const KlippySendFn = *const fn (*anyopaque, std.mem.Allocator, []const u8, std.json.Value) anyerror!void;
@@ -22,6 +25,8 @@ pub const remote_methods = [_][]const u8{
 };
 
 pub const FeatherCtx = struct {
+    operation_mutex: std.Io.Mutex = .init,
+    active_token: ?i64 = null,
     update_key: []const u8 = "forge-x",
     enabled: bool = false,
     updates: ?*update_manager.UpdateCtx = null,
@@ -42,7 +47,40 @@ pub const FeatherCtx = struct {
         const ctx = self.idle_ctx orelse return false;
         return pred(ctx);
     }
+
+    pub fn progress(self: *FeatherCtx, alloc: std.mem.Allocator, value: std.json.Value) !void {
+        const updates = self.updates orelse return;
+        self.operation_mutex.lockUncancelable(updates.clock_io);
+        const token = self.active_token;
+        self.operation_mutex.unlock(updates.clock_io);
+        if (token == null or value != .object) return;
+        if (!std.mem.eql(u8, jsonStr(value.object, "application"), self.update_key)) return;
+        if (value.object.get("complete")) |complete| if (complete == .bool and complete.bool) return;
+        const raw = jsonStr(value.object, "message");
+        if (raw.len == 0) return;
+        var buffer: [max_progress_bytes]u8 = undefined;
+        const message = progressText(&buffer, raw);
+        const restarting = std.mem.indexOf(u8, message, "Restarting service forge-x") != null or std.mem.indexOf(u8, message, "restarting service forge-x") != null;
+        sendProgress(self, alloc, try progressState(alloc, token.?, if (restarting) "restarting" else "progress", if (restarting) "RESTARTING PRINTER..." else message));
+    }
 };
+
+fn progressText(buffer: []u8, raw: []const u8) []const u8 {
+    var tokens = std.mem.tokenizeAny(u8, raw, " \r\n\t");
+    var length: usize = 0;
+    while (tokens.next()) |word| {
+        if (length == buffer.len) break;
+        if (length != 0) {
+            buffer[length] = ' ';
+            length += 1;
+        }
+        const count = @min(word.len, buffer.len - length);
+        @memcpy(buffer[length..][0..count], word[0..count]);
+        length += count;
+    }
+    while (length != 0 and !std.unicode.utf8ValidateSlice(buffer[0..length])) length -= 1;
+    return buffer[0..length];
+}
 
 fn versionOf(value: std.json.Value) ?[]const u8 {
     if (value != .string) return null;
@@ -173,11 +211,26 @@ pub fn updateResponse(self: *FeatherCtx, alloc: std.mem.Allocator, expected_vers
     if (!offer_ok) return failState(alloc, token, "Available update changed; check again");
     if (!self.printerIdle()) return failState(alloc, token, "Printer is not safely idle");
 
+    const updates = self.updates orelse return failState(alloc, token, "Moonraker update status is unavailable");
+    self.operation_mutex.lockUncancelable(updates.clock_io);
+    if (self.active_token != null) {
+        self.operation_mutex.unlock(updates.clock_io);
+        return failState(alloc, token, "Another update is already in progress");
+    }
+    self.active_token = token;
+    self.operation_mutex.unlock(updates.clock_io);
+    defer {
+        self.operation_mutex.lockUncancelable(updates.clock_io);
+        self.active_token = null;
+        self.operation_mutex.unlock(updates.clock_io);
+    }
     const accepted = try progressState(alloc, token, "accepted", "PREPARING FORGE-X UPDATE...");
     sendProgress(self, alloc, accepted);
     runCmd(self, alloc, &.{ "machine.update.client", self.update_key }) catch |cmd_err| {
         const msg: []const u8 = if (cmd_err == error.UpdateFailed) "machine.update.client failed" else "Cannot update, no command runner";
-        return failState(alloc, token, msg);
+        const detail = try updates.copyGitFailure(alloc);
+        defer if (detail) |bytes| alloc.free(bytes);
+        return failureState(alloc, token, detail orelse msg);
     };
     return progressState(alloc, token, "complete", "UPDATE COMPLETE. RESTARTING PRINTER...");
 }
@@ -232,7 +285,7 @@ pub fn onKlippyMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const
     const obj = if (params == .object) params.object else null;
     const token = if (obj) |o| (if (o.get("token")) |t| jsonInt(t) orelse 0 else 0) else 0;
     if (std.mem.eql(u8, method, "feather_request_forge_x_update_status")) {
-        const payload = try statusResponse(self, a, token);
+        const payload = try freshStatus(self, a, token);
         const send = self.klippy_send orelse return;
         const sctx = self.klippy_send_ctx orelse return;
         try send(sctx, a, "feather/update_status", payload);
@@ -250,6 +303,126 @@ pub fn onKlippyMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const
         sendProgress(self, a, payload);
         return;
     }
+}
+
+pub fn freshStatus(self: *FeatherCtx, alloc: std.mem.Allocator, token: i64) !std.json.Value {
+    const updates = self.updates orelse return statusResponse(self, alloc, token);
+    var params: std.json.ObjectMap = .empty;
+    try params.put(alloc, "name", .{ .string = self.update_key });
+    _ = update_manager.handleRefresh(updates, .{ .object = params }, alloc) catch |err| {
+        var response: std.json.ObjectMap = .empty;
+        try response.put(alloc, "token", .{ .integer = token });
+        try response.put(alloc, "error", .{ .string = @errorName(err) });
+        return .{ .object = response };
+    };
+    return statusResponse(self, alloc, token);
+}
+
+fn failureState(alloc: std.mem.Allocator, token: i64, message: []const u8) !std.json.Value {
+    var scratch = std.heap.ArenaAllocator.init(alloc);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    var buffer: [max_progress_bytes]u8 = undefined;
+    var result = try failState(alloc, token, try alloc.dupe(u8, progressText(&buffer, message)));
+    var conflicts: std.json.Array = .init(alloc);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var kind: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, message[0..@min(message.len, max_failure_bytes)], '\n');
+    while (lines.next()) |line| {
+        const value = std.mem.trim(u8, line, " \t\r");
+        if (std.mem.indexOf(u8, value, "The following untracked working tree files would be overwritten by merge:") != null) {
+            kind = "UNTRACKED";
+            continue;
+        }
+        if (std.mem.indexOf(u8, value, "Your local changes to the following files would be overwritten by merge:") != null) {
+            kind = "MODIFIED";
+            continue;
+        }
+        if (value.len == 0 or std.mem.startsWith(u8, value, "Please ") or std.mem.eql(u8, value, "Aborting") or std.mem.startsWith(u8, value, "error:")) {
+            kind = null;
+            continue;
+        }
+        const label = kind orelse continue;
+        var length = @min(value.len, max_progress_bytes);
+        while (length != 0 and !std.unicode.utf8ValidateSlice(value[0..length])) length -= 1;
+        if (length == 0) continue;
+        const path = try std.fmt.allocPrint(a, "{s}: {s}", .{ label, value[0..length] });
+        const entry = try seen.getOrPut(a, path);
+        if (!entry.found_existing and conflicts.items.len < max_conflict_paths) try conflicts.append(.{ .string = try alloc.dupe(u8, path) });
+    }
+    try result.object.put(alloc, "recovery_required", .{ .bool = seen.count() != 0 });
+    try result.object.put(alloc, "conflicting_files", .{ .array = conflicts });
+    try result.object.put(alloc, "conflicts_total", .{ .integer = @intCast(seen.count()) });
+    return result;
+}
+
+test "Feather failure reports bounded deduplicated conflict paths" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const value = try failureState(
+        arena_state.allocator(),
+        42,
+        "Your local changes to the following files would be overwritten by merge:\n" ++
+            "  printer.cfg\n  printer.cfg\nPlease commit your changes\nAborting\n",
+    );
+    try std.testing.expect(value.object.get("recovery_required").?.bool);
+    try std.testing.expectEqual(@as(i64, 1), value.object.get("conflicts_total").?.integer);
+    try std.testing.expectEqualStrings("MODIFIED: printer.cfg", value.object.get("conflicting_files").?.array.items[0].string);
+    try std.testing.expectEqual(@as(i64, 42), value.object.get("token").?.integer);
+}
+
+test "Feather forwards intermediate progress only for the active source and token" {
+    const ProgressRecorder = struct {
+        count: usize = 0,
+        fn send(raw: *anyopaque, _: std.mem.Allocator, method: []const u8, value: std.json.Value) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("feather/update_progress", method);
+            try std.testing.expectEqual(@as(i64, 7), value.object.get("token").?.integer);
+            try std.testing.expectEqualStrings("restarting", value.object.get("state").?.string);
+            try std.testing.expectEqualStrings("RESTARTING PRINTER...", value.object.get("message").?.string);
+            self.count += 1;
+        }
+    };
+    var updates: update_manager.UpdateCtx = .{ .gpa = std.testing.allocator, .clock_io = std.testing.io, .bus = null, .sources = &.{.{ .name = "forge-x", .type = .git_repo }} };
+    defer updates.deinit();
+    var recorder: ProgressRecorder = .{};
+    var self: FeatherCtx = .{ .updates = &updates, .active_token = 7, .klippy_send = ProgressRecorder.send, .klippy_send_ctx = &recorder };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"application\":\"forge-x\",\"message\":\"Restarting service forge-x\",\"complete\":false}", .{});
+    try self.progress(a, value);
+    self.active_token = null;
+    try self.progress(a, value);
+    try std.testing.expectEqual(@as(usize, 1), recorder.count);
+    self.active_token = 7;
+    const busy = struct {
+        fn yes(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    updates.printing_check = busy.yes;
+    updates.printing_ctx = &recorder;
+    const failed = try freshStatus(&self, a, 8);
+    try std.testing.expectEqualStrings("UpdateBusy", failed.object.get("error").?.string);
+}
+
+test "fuzz Feather failure text remains bounded" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var bytes: [512]u8 = undefined;
+            smith.bytesWithHash(&bytes, 0);
+            var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena_state.deinit();
+            const value = try failureState(arena_state.allocator(), 1, &bytes);
+            try std.testing.expect(value.object.get("message").?.string.len <= 160);
+            try std.testing.expect(value.object.get("conflicting_files").?.array.items.len <= 64);
+            const input = try std.fmt.allocPrint(arena_state.allocator(), "Your local changes to the following files would be overwritten by merge:\n{s}\n", .{bytes});
+            const paths = try failureState(arena_state.allocator(), 2, input);
+            for (paths.object.get("conflicting_files").?.array.items) |path|
+                try std.testing.expect(std.unicode.utf8ValidateSlice(path.string));
+        }
+    }.run, .{});
 }
 
 test "forgeXUpdateSnapshot: available only when versions and revisions differ" {

@@ -4,6 +4,22 @@ File operations open registered roots through `Resolved` checked directory
 handles. Root escapes, including symlinked thumbnail directories, are rejected.
 Uploads and generated files use atomic replacement after syncing the data.
 
+With `--compat forge-x`, uploads to `gcodes` ending in `.gcode.3mf` extract
+`Metadata/plate_N.gcode` to a `.gcode` destination. A multi-plate archive requires
+the multipart `plateindex` field. Stored and deflated entries are supported;
+selection, CRC32 and optional MD5 are validated before replacement. An MD5
+sidecar adds the Forge-X `; MD5:` header. Linked/special entries, duplicate
+selected plates, malformed archives and invalid MD5 are rejected. The archive
+and selected G-code are limited to 2 GiB and the directory to 4,096 entries.
+
+Multipart fields may follow the file. Staging remains private until the full
+form is valid; truncated bodies and failed conversions preserve the existing
+destination. Ordinary uploads keep the single-file staging path when the final
+destination is unchanged. Metadata, file events and optional print/queue handling
+use the existing upload flow. Extraction/processing/start/error prompts are
+sanitized and best effort, without command history. Preparation closes its prompt
+before handing control to print macros. See [Forge-X compatibility](api/FORGE_X.md).
+
 Embedded `thumbnail begin` PNG blocks are decoded into
 `<gcode directory>/.thumbs/<gcode stem>-<width>x<height>.png`. Metadata returns
 `width`, `height`, decoded `size` and `relative_path`; `server.files.thumbnails`

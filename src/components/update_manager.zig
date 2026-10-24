@@ -312,6 +312,7 @@ test "source persistent files retain relative names and reject reserved paths" {
 // ---------------------------------------------------------------------------
 
 pub const UpdateCtx = struct {
+    compatibility: @import("../compat.zig").Profile = .moonraker,
     clock_io: std.Io,
     gpa: std.mem.Allocator,
     /// Configured sources. Borrowed; owned by the App (or a test).
@@ -341,7 +342,13 @@ pub const UpdateCtx = struct {
     shell: ?ShellFn = null,
     shell_ctx: ?*anyopaque = null,
     restart_service: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void = null,
+    verify_service: ?*const fn (*anyopaque, std.mem.Allocator, []const u8) anyerror!void = null,
     service_ctx: ?*anyopaque = null,
+    response_handler: ?*const fn (*anyopaque, std.mem.Allocator, std.json.Value) anyerror!void = null,
+    response_ctx: ?*anyopaque = null,
+    git_failure: ?[]u8 = null,
+    failure_mutex: std.Io.Mutex = .init,
+    operation_proc_id: i64 = 0,
     github_api_base: []const u8 = "https://api.github.com",
     /// `[update_manager] enable_auto_refresh`. False does not start a timer
     /// and `tickAutoRefresh` does not refresh. The printer sets this false.
@@ -424,6 +431,8 @@ pub const UpdateCtx = struct {
 
     pub fn deinit(self: *UpdateCtx) void {
         self.stopAutoRefresh();
+        if (self.git_failure) |bytes| self.gpa.free(bytes);
+        self.git_failure = null;
         if (self.git_environment) |*environment| environment.deinit();
         self.git_environment = null;
     }
@@ -431,6 +440,16 @@ pub const UpdateCtx = struct {
     pub fn beginMutation(self: *UpdateCtx) !void {
         if (self.isPrinting()) return error.UpdateRefusedPrinting;
         if (self.busy.swap(true, .acq_rel)) return error.UpdateBusy;
+        self.failure_mutex.lockUncancelable(self.clock_io);
+        defer self.failure_mutex.unlock(self.clock_io);
+        if (self.git_failure) |bytes| self.gpa.free(bytes);
+        self.git_failure = null;
+    }
+
+    pub fn copyGitFailure(self: *UpdateCtx, alloc: std.mem.Allocator) !?[]u8 {
+        self.failure_mutex.lockUncancelable(self.clock_io);
+        defer self.failure_mutex.unlock(self.clock_io);
+        return if (self.git_failure) |bytes| try alloc.dupe(u8, bytes) else null;
     }
 
     /// True if a print is currently in progress (via the wired callback).
@@ -463,7 +482,8 @@ fn autoRefreshThread(ctx: *UpdateCtx) void {
         if (!bus.core.run(io, UpdateCtx.tickAutoRefresh, .{ ctx, hour })) continue;
         var request_arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
         defer request_arena.deinit();
-        _ = handleRefresh(@ptrCast(ctx), .null, request_arena.allocator()) catch {};
+        _ = refreshSources(ctx, .null, request_arena.allocator(), true) catch |err|
+            std.debug.print("phobos: automatic update refresh failed: {}\n", .{err});
     }
 }
 
@@ -906,6 +926,10 @@ fn emitResponse(
     alloc: std.mem.Allocator,
     notification: std.json.Value,
 ) void {
+    if (ctx.response_handler) |handler| if (ctx.response_ctx) |raw| {
+        handler(raw, alloc, notification) catch |err|
+            std.debug.print("phobos: update progress forwarding failed: {}\n", .{err});
+    };
     const bus = ctx.bus orelse return;
     const io = ctx.io orelse return;
     var arr: std.json.Array = .init(alloc);
@@ -964,6 +988,65 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
 /// (unit tests) or repo_path is empty (dev workstation).
 pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const ctx: *UpdateCtx = @ptrCast(@alignCast(ctx_ptr));
+    return refreshSources(ctx, params, alloc, false);
+}
+
+fn skipAutomaticRefresh(ctx: *const UpdateCtx, alloc: std.mem.Allocator, name: []const u8) !bool {
+    if (ctx.compatibility != .forge_x) return false;
+    const store = ctx.store orelse return false;
+    const namespace = try store.getNamespace(alloc, "update_manager");
+    if (namespace != .object) return false;
+    const cached = namespace.object.get(name) orelse return false;
+    if (cached != .object) return false;
+    const marker = cached.object.get("last_cfg_hash") orelse return false;
+    return marker == .string and std.mem.eql(u8, marker.string, "***skip***");
+}
+
+test "Forge-X skip markers affect automatic refresh only" {
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
+    defer db.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var marker: std.json.ObjectMap = .empty;
+    try marker.put(a, "last_cfg_hash", .{ .string = "***skip***" });
+    try db.dataStore().insertItem(a, "update_manager", "moonraker", .{ .object = marker });
+    var ctx = testCtx();
+    defer ctx.deinit();
+    ctx.store = db.dataStore();
+    try testing.expect(!try skipAutomaticRefresh(&ctx, a, "moonraker"));
+    ctx.compatibility = .forge_x;
+    try testing.expect(try skipAutomaticRefresh(&ctx, a, "moonraker"));
+    try testing.expect(!try skipAutomaticRefresh(&ctx, a, "klipper"));
+    _ = try handleRefresh(&ctx, .null, a);
+}
+
+test "Forge-X failed service verification prevents Git commands" {
+    const Verify = struct {
+        calls: usize = 0,
+        fn run(raw: *anyopaque, _: std.mem.Allocator, name: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            try testing.expectEqualStrings("forge-x", name);
+            return error.PreflightRejected;
+        }
+    };
+    var verify: Verify = .{};
+    const sources = [_]Source{.{ .name = "forge-x", .type = .git_repo, .repo_path = "does-not-exist", .managed_services = &.{"forge-x"} }};
+    var ctx = testCtx();
+    defer ctx.deinit();
+    ctx.compatibility = .forge_x;
+    ctx.sources = &sources;
+    ctx.verify_service = Verify.run;
+    ctx.service_ctx = &verify;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    try testing.expectError(error.PreflightRejected, runUpdate(&ctx, arena_state.allocator(), "forge-x"));
+    try testing.expectEqual(@as(usize, 1), verify.calls);
+    try testing.expect(!ctx.busy.load(.acquire));
+}
+
+fn refreshSources(ctx: *UpdateCtx, params: std.json.Value, alloc: std.mem.Allocator, automatic: bool) !std.json.Value {
     const name = (try webreq.optional([]const u8, params, "name"));
     if (name) |n| {
         if (ctx.findSource(n) == null) return error.InvalidParams;
@@ -975,6 +1058,7 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
         if (ctx.busy.load(.acquire) or ctx.isPrinting()) return error.UpdateBusy;
         for (ctx.sources) |src| {
             if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
+            if (automatic and try skipAutomaticRefresh(ctx, alloc, src.name)) continue;
             if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
             if (src.type == .web or src.type == .zip) try refreshNet(ctx, alloc, src);
         }
@@ -992,8 +1076,12 @@ pub fn handleRefresh(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem
 /// Send one `notify_update_response` line. Allocation failure drops the line;
 /// the handler's own result still reaches the client.
 fn notifyLine(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8, proc_id: i64, complete: bool, comptime fmt: []const u8, args: anytype) void {
-    const msg = std.fmt.allocPrint(alloc, fmt, args) catch return;
-    emitResponse(ctx, alloc, buildResponseNotification(alloc, app, proc_id, msg, complete) catch return);
+    var scratch = std.heap.ArenaAllocator.init(alloc);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    if (proc_id != 0) ctx.operation_proc_id = proc_id;
+    const msg = std.fmt.allocPrint(a, fmt, args) catch return;
+    emitResponse(ctx, a, buildResponseNotification(a, app, ctx.operation_proc_id, msg, complete) catch return);
 }
 
 /// Run a single-target update for `app`. With io and a repo_path, a git_repo
@@ -1021,6 +1109,13 @@ fn runUpdate(ctx: *UpdateCtx, alloc: std.mem.Allocator, app: []const u8) anyerro
 
 /// The commands of one single-target update (see `runUpdate`).
 fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
+    if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
+    if (ctx.compatibility == .forge_x and src.type == .git_repo and src.repo_path.len > 0 and src.managed_services.len > 0) {
+        const verify = ctx.verify_service orelse return error.ServiceUnavailable;
+        notifyLine(ctx, alloc, src.name, 0, false, "Verifying service {s}...", .{src.managed_services[0]});
+        try verify(ctx.service_ctx orelse return error.ServiceUnavailable, alloc, src.managed_services[0]);
+        notifyLine(ctx, alloc, src.name, 0, false, "Verification step passed.", .{});
+    }
     var changed = false;
     {
         try ctx.commands.lock(ctx.clock_io);
@@ -1032,10 +1127,11 @@ fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
                 defer alloc.free(previous);
                 const dirty = gitOutput(io, alloc, src.repo_path, &.{ "status", "--porcelain" }, ctx.gitEnvironment());
                 defer if (dirty) |bytes| alloc.free(bytes);
-                if (!gitFetch(io, alloc, src.repo_path, ctx.gitEnvironment())) return error.GitFailed;
+                notifyLine(ctx, alloc, src.name, 0, false, "Fetching {s}...", .{src.name});
+                try updateGit(ctx, alloc, src.repo_path, &.{ "fetch", "origin", "--prune" });
                 const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
                 defer alloc.free(ref);
-                if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
+                try updateGit(ctx, alloc, src.repo_path, &.{ "reset", "--hard", ref });
                 const current = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()) orelse return error.GitFailed;
                 defer alloc.free(current);
                 changed = !std.mem.eql(u8, previous, current) or (dirty != null and dirty.?.len > 0);
@@ -1123,7 +1219,24 @@ fn restartServices(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void
     if (src.managed_services.len == 0) return;
     const restart = ctx.restart_service orelse return error.ServiceUnavailable;
     const service_ctx = ctx.service_ctx orelse return error.ServiceUnavailable;
-    for (src.managed_services) |service| try restart(service_ctx, alloc, service);
+    for (src.managed_services) |service| {
+        notifyLine(ctx, alloc, src.name, 0, false, "Restarting service {s}", .{service});
+        try restart(service_ctx, alloc, service);
+    }
+}
+
+fn updateGit(ctx: *UpdateCtx, alloc: std.mem.Allocator, path: []const u8, argv: []const []const u8) !void {
+    const result = try gitRun(ctx.io orelse return error.IoUnavailable, alloc, path, argv, git_fetch_timeout_s, ctx.gitEnvironment());
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (result.term == .exited and result.term.exited == 0) return;
+    const detail = if (result.stderr.len != 0) result.stderr else result.stdout;
+    const copy = try ctx.gpa.dupe(u8, detail[0..@min(detail.len, 32768)]);
+    ctx.failure_mutex.lockUncancelable(ctx.clock_io);
+    defer ctx.failure_mutex.unlock(ctx.clock_io);
+    if (ctx.git_failure) |old| ctx.gpa.free(old);
+    ctx.git_failure = copy;
+    return error.GitFailed;
 }
 
 /// apt-get for the system source, then pip for a source with `requirements`.
@@ -2110,6 +2223,28 @@ test "handleRefresh: fetches sources from a local repository" {
     try testing.expect(gitCheck(io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
 }
 
+test "Feather status refreshes its local source while automatic skip markers suppress fetching" {
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(testing.io, ":memory:");
+    defer db.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const marker = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"last_cfg_hash\":\"***skip***\"}", .{});
+    try db.dataStore().insertItem(a, "update_manager", "forge-x", marker);
+    const sources = [_]Source{.{ .name = "forge-x", .type = .git_repo, .repo_path = repo.path, .branch = "main" }};
+    var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &sources, .bus = null, .io = testing.io, .store = db.dataStore(), .compatibility = .forge_x };
+    defer ctx.deinit();
+    _ = try refreshSources(&ctx, .null, a, true);
+    try testing.expect(!gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
+    const feather = @import("feather_updates.zig");
+    var adapter: feather.FeatherCtx = .{ .updates = &ctx };
+    const response = try feather.freshStatus(&adapter, a, 77);
+    try testing.expectEqual(@as(i64, 77), response.object.get("token").?.integer);
+    try testing.expect(gitCheck(testing.io, testing.allocator, repo.path, &.{ "show-ref", "--verify", "refs/remotes/origin/main" }, null));
+}
+
 test "handleStatus: refresh=true fetches before building payload" {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
@@ -2213,8 +2348,14 @@ test "full update applies the Git source in a local fixture" {
     const Restart = struct {
         ctx: *UpdateCtx,
         calls: usize = 0,
+        verified: bool = false,
+        fn verify(raw: *anyopaque, _: std.mem.Allocator, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.verified = true;
+        }
         fn run(raw: *anyopaque, _: std.mem.Allocator, service: []const u8) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expect(self.verified);
             try testing.expectEqualStrings("klipper", service);
             try testing.expect(self.ctx.commands.tryLock());
             self.ctx.commands.unlock(testing.io);
@@ -2230,8 +2371,11 @@ test "full update applies the Git source in a local fixture" {
     try repo.tmp.dir.writeFile(testing.io, .{ .sub_path = "tracked", .data = "modified" });
     const sources = [_]Source{.{ .name = "fixture", .type = .git_repo, .repo_path = repo.path, .branch = "main", .managed_services = &.{"klipper"} }};
     var ctx: UpdateCtx = .{ .clock_io = testing.io, .gpa = testing.allocator, .sources = &sources, .bus = null, .io = testing.io };
+    defer ctx.deinit();
+    ctx.compatibility = .forge_x;
     var restarted: Restart = .{ .ctx = &ctx };
     ctx.restart_service = Restart.run;
+    ctx.verify_service = Restart.verify;
     ctx.service_ctx = &restarted;
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

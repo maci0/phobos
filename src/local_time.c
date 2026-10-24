@@ -29,3 +29,12 @@ size_t phobos_local_ctime(int64_t seconds, char *buffer, size_t capacity) {
                           (int64_t)local.tm_year + 1900);
     return length < 0 || (size_t)length >= capacity ? 0 : (size_t)length;
 }
+
+size_t phobos_local_strftime(int64_t seconds, char *buffer, size_t capacity,
+                            const char *format) {
+    time_t timestamp = (time_t)seconds;
+    struct tm local;
+    if ((int64_t)timestamp != seconds || localtime_r(&timestamp, &local) == NULL)
+        return 0;
+    return strftime(buffer, capacity, format, &local);
+}

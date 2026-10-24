@@ -203,6 +203,7 @@ pub const MachineCtx = struct {
     services: std.StringArrayHashMapUnmanaged(ServiceEntry) = .empty,
     /// Set once service discovery has run (it runs at most once, like Moonraker).
     services_discovered: bool = false,
+    allowed_services: ?[][]const u8 = null,
     /// When true, setIo will NOT spawn a proc_stat timer thread. Set by test
     /// harnesses before calling httpServer to avoid background-thread + thread-
     /// pool interactions that can deadlock tests.
@@ -269,6 +270,57 @@ pub const MachineCtx = struct {
         self.supervisord_config_path = copy;
     }
 
+    pub fn serviceAllowed(self: *const MachineCtx, name: []const u8) bool {
+        if (!validServiceName(name)) return false;
+        if (std.mem.startsWith(u8, name, "moonraker") or std.mem.startsWith(u8, name, "klipper")) return true;
+        return self.listedService(name);
+    }
+
+    fn listedService(self: *const MachineCtx, name: []const u8) bool {
+        if (self.allowed_services) |services| {
+            for (services) |service| if (std.mem.eql(u8, service, name)) return true;
+            return false;
+        }
+        return allowed_services_set.has(name);
+    }
+
+    pub fn loadAllowedServices(self: *MachineCtx, io: std.Io, datadir: []const u8) !void {
+        const path = try std.fs.path.join(self.gpa, &.{ datadir, "moonraker.asvc" });
+        defer self.gpa.free(path);
+        const contents = std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(max_service_list_bytes)) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer self.gpa.free(contents);
+        try self.setAllowedServices(contents);
+    }
+
+    pub fn setAllowedServices(self: *MachineCtx, contents: []const u8) !void {
+        var names: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (names.items) |name| self.gpa.free(name);
+            names.deinit(self.gpa);
+        }
+        var lines = std.mem.splitScalar(u8, contents, '\n');
+        while (lines.next()) |line| {
+            var name = std.mem.trim(u8, line, " \t\r");
+            if (name.len == 0) continue;
+            name = std.mem.cutSuffix(u8, name, ".service") orelse name;
+            if (!validServiceName(name) or names.items.len >= max_allowed_services) return error.InvalidServiceName;
+            const copy = try self.gpa.dupe(u8, name);
+            names.append(self.gpa, copy) catch |err| {
+                self.gpa.free(copy);
+                return err;
+            };
+        }
+        const owned = try names.toOwnedSlice(self.gpa);
+        if (self.allowed_services) |old| {
+            for (old) |name| self.gpa.free(name);
+            self.gpa.free(old);
+        }
+        self.allowed_services = owned;
+    }
+
     pub fn setIo(self: *MachineCtx, io: std.Io) void {
         self.io = io;
         // Start the periodic proc_stat emission if a bus is wired.
@@ -297,9 +349,22 @@ pub const MachineCtx = struct {
         try performServiceAction(self, name, alloc, action);
     }
 
+    /// Forge-X updater preflight. This action is never exposed as a public verb.
+    pub fn verifyService(self: *MachineCtx, alloc: std.mem.Allocator, name: []const u8) !void {
+        if (self.core) |core| core.lock(self.clock_io);
+        defer if (self.core) |core| core.unlock(self.clock_io);
+        self.lockServices();
+        defer self.service_mutex.unlock(self.clock_io);
+        if (!self.serviceAllowed(name) or !self.listedService(name)) return error.ServiceNotAllowed;
+        if (providerKind(self.provider_name) != .simple or self.script_path.len == 0) return error.ServiceUnavailable;
+        const path = try std.fs.path.join(alloc, &.{ self.script_path, name });
+        defer alloc.free(path);
+        try runDiscardingOutput(self, alloc, &.{ path, "verify" }, self.script_timeout_s);
+    }
+
     /// Read-only power binding validation, called outside Core.
     pub fn validateBoundService(self: *MachineCtx, alloc: std.mem.Allocator, name: []const u8) !void {
-        if (!isServiceAllowed(name) or std.mem.eql(u8, name, self.unit_name)) return error.ServiceNotAllowed;
+        if (!self.serviceAllowed(name) or std.mem.eql(u8, name, self.unit_name)) return error.ServiceNotAllowed;
         if (self.core) |core| core.lock(self.clock_io);
         defer if (self.core) |core| core.unlock(self.clock_io);
         self.lockServices();
@@ -408,6 +473,10 @@ pub const MachineCtx = struct {
         if (self.provider_owned) self.gpa.free(self.provider_name);
         if (self.script_path_owned) self.gpa.free(self.script_path);
         if (self.supervisord_config_path) |path| self.gpa.free(path);
+        if (self.allowed_services) |services| {
+            for (services) |name| self.gpa.free(name);
+            self.gpa.free(services);
+        }
         self.sudo_password = null;
         for (self.services.keys()) |key| self.gpa.free(key);
         self.services.deinit(self.gpa);
@@ -1196,7 +1265,7 @@ fn discoverServices(ctx: *MachineCtx, alloc: std.mem.Allocator) !void {
         var tokens = std.mem.tokenizeAny(u8, line, " \t\r");
         const unit = tokens.next() orelse continue;
         const name = if (kind == .systemd) std.mem.cutSuffix(u8, unit, ".service") orelse continue else unit;
-        if (!isServiceAllowed(name) or ctx.services.contains(name)) continue;
+        if (!ctx.serviceAllowed(name) or ctx.services.contains(name)) continue;
         const key = try ctx.gpa.dupe(u8, name);
         errdefer ctx.gpa.free(key);
         try ctx.services.put(ctx.gpa, key, .active("unknown", "unknown"));
@@ -1604,11 +1673,96 @@ const allowed_services_set = std.StaticStringMap(void).initComptime(blk: {
     for (default_allowed_services, 0..) |s, i| kvs[i] = .{s};
     break :blk kvs;
 });
+const max_service_list_bytes = 64 * 1024;
+const max_allowed_services = 256;
+const max_service_name_bytes = 255;
 
 pub fn isServiceAllowed(name: []const u8) bool {
-    return std.unicode.utf8ValidateSlice(name) and std.mem.indexOfAny(u8, name, "/\\\x00") == null and (allowed_services_set.has(name) or
+    return validServiceName(name) and (allowed_services_set.has(name) or
         std.mem.startsWith(u8, name, "moonraker") or
         std.mem.startsWith(u8, name, "klipper"));
+}
+
+fn validServiceName(name: []const u8) bool {
+    if (name.len == 0 or name.len > max_service_name_bytes or name[0] == '.' or name[0] == '-') return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, "_-.@", c) == null) return false;
+    return true;
+}
+
+test "service allowlist loads custom names and preserves them on invalid replacement" {
+    var ctx: MachineCtx = .{ .gpa = std.testing.allocator, .clock_io = std.testing.io };
+    defer ctx.deinit();
+    try std.testing.expect(!ctx.serviceAllowed("forge-x"));
+    try ctx.setAllowedServices("forge-x\nguppyscreen.service\n\r\n");
+    try std.testing.expect(ctx.serviceAllowed("forge-x"));
+    try std.testing.expect(ctx.serviceAllowed("guppyscreen"));
+    try std.testing.expect(ctx.serviceAllowed("moonraker-2"));
+    try std.testing.expect(!ctx.serviceAllowed("sshd"));
+    for ([_][]const u8{ "../forge-x", "forge-x;reboot", "-forge-x", "forge-x/sh", "forge-x\x00x" }) |bad| {
+        try std.testing.expectError(error.InvalidServiceName, ctx.setAllowedServices(bad));
+        try std.testing.expect(ctx.serviceAllowed("forge-x"));
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "moonraker.asvc", .data = "fixture.service\n" });
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    try ctx.loadAllowedServices(std.testing.io, buf[0..try tmp.dir.realPath(std.testing.io, &buf)]);
+    try std.testing.expect(ctx.serviceAllowed("fixture"));
+    try std.testing.expect(!ctx.serviceAllowed("forge-x"));
+}
+
+test "Forge-X service verification is private, allowlisted and uses the simple runner" {
+    const VerifyRunner = struct {
+        calls: usize = 0,
+        fail: bool = false,
+        fn run(raw: *anyopaque, _: std.mem.Allocator, argv: []const []const u8) !MachineCtx.RunCmdResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try testing.expectEqual(@as(usize, 2), argv.len);
+            try testing.expectEqualStrings("/fixture/forge-x", argv[0]);
+            try testing.expectEqualStrings("verify", argv[1]);
+            self.calls += 1;
+            if (self.fail) return error.ServiceCommandFailed;
+            return .{ .stdout = &.{}, .stderr = &.{} };
+        }
+    };
+    var recorder: VerifyRunner = .{};
+    var ctx: MachineCtx = .{ .gpa = testing.allocator, .clock_io = testing.io, .provider_name = "simple", .script_path = "/fixture" };
+    defer ctx.deinit();
+    ctx.setRunCmdFn(VerifyRunner.run, &recorder);
+    try ctx.setAllowedServices("forge-x\n");
+    try ctx.verifyService(testing.allocator, "forge-x");
+    recorder.fail = true;
+    try testing.expectError(error.ServiceCommandFailed, ctx.verifyService(testing.allocator, "forge-x"));
+    try testing.expectError(error.ServiceNotAllowed, ctx.verifyService(testing.allocator, "../forge-x"));
+    ctx.provider_name = "none";
+    try testing.expectError(error.ServiceUnavailable, ctx.verifyService(testing.allocator, "forge-x"));
+    try testing.expectEqual(@as(usize, 2), recorder.calls);
+}
+
+test "service allowlist allocation failures retain the previous policy" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(alloc: std.mem.Allocator) !void {
+            var ctx: MachineCtx = .{ .gpa = alloc, .clock_io = std.testing.io };
+            defer ctx.deinit();
+            try ctx.setAllowedServices("forge-x\nguppyscreen\n");
+            try std.testing.expect(ctx.serviceAllowed("forge-x"));
+            try ctx.setAllowedServices("replacement\n");
+            try std.testing.expect(!ctx.serviceAllowed("forge-x"));
+        }
+    }.run, .{});
+}
+
+test "fuzz service allowlist rejects unsafe names" {
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) !void {
+            var data: [128]u8 = undefined;
+            smith.bytesWithHash(&data, 0);
+            var ctx: MachineCtx = .{ .gpa = std.testing.allocator, .clock_io = std.testing.io };
+            defer ctx.deinit();
+            ctx.setAllowedServices(&data) catch return;
+            for (ctx.allowed_services.?) |name| try std.testing.expect(validServiceName(name));
+        }
+    }.run, .{});
 }
 
 /// Optimistic post-action state for a service when the manager can't be queried
@@ -1658,12 +1812,12 @@ fn doServiceAction(ctx: *MachineCtx, params: std.json.Value, alloc: std.mem.Allo
 fn performServiceAction(ctx: *MachineCtx, name: []const u8, alloc: std.mem.Allocator, action: ServiceAction) !void {
     ctx.lockServices();
     defer ctx.service_mutex.unlock(ctx.clock_io);
-    if (!isServiceAllowed(name)) return error.ServiceNotAllowed;
+    if (!ctx.serviceAllowed(name)) return error.ServiceNotAllowed;
     const provider = providerKind(ctx.provider_name);
     if ((provider == .systemd or provider == .supervisord) and (ctx.io != null or ctx.run_cmd_fn != null)) {
         try discoverServices(ctx, alloc);
         if (!ctx.services.contains(name)) return if (allowed_services_set.has(name)) error.ServiceNotInstalled else error.ServiceNotAllowed;
-    } else if (!allowed_services_set.has(name) and !std.mem.eql(u8, name, "moonraker")) {
+    } else if (!ctx.listedService(name) and !std.mem.eql(u8, name, "moonraker")) {
         return error.ServiceNotAllowed;
     }
     // This action changes service_state, so the cached system_info is now stale —

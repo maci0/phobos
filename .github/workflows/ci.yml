@@ -34,7 +34,7 @@ jobs:
       - name: Install shell-check dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ripgrep shellcheck
+          sudo apt-get install --no-install-recommends -y ripgrep shellcheck ffmpeg
       - run: shellcheck scripts/build-release.sh scripts/setup-ci-zig.sh scripts/test.sh tools/perf_harness/*.sh tools/perf_harness/tests/*.sh
       - run: zig fmt --check build.zig build.zig.zon src tests/fixtures/float_abi_probe.zig
       - run: zig test -target native-native-musl build.zig
@@ -52,6 +52,8 @@ jobs:
           zig build -Doptimize=Debug -j2
           zig-out/bin/phobos -d "$PWD/.scratch/ci-api-data" --dump-api > .scratch/ci-api.json
           uv run --locked python -m api_scanner coverage --baseline api/api_surface.json --phobos .scratch/ci-api.json
+          zig-out/bin/phobos --compat forge-x -d "$PWD/.scratch/ci-forge-x-data" --dump-api > .scratch/ci-forge-x.json
+          uv run --locked python -m api_scanner coverage --baseline api/forge_x_surface.json --phobos .scratch/ci-forge-x.json
           uv run --locked python -m api_scanner table --phobos .scratch/ci-api.json --check
       - name: Require matching annotated release tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -93,7 +95,7 @@ jobs:
       - name: Install TLS test peers
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y openssl socat
+          sudo apt-get install --no-install-recommends -y openssl socat ffmpeg
       - run: scripts/test.sh "$TEST_MODE" 2>&1 | tee .scratch/tests.log
         env:
           TEST_MODE: ${{ matrix.mode }}

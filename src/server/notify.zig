@@ -49,8 +49,7 @@ const Connections = connections.Connections;
 const Connection = connections.Connection;
 const jv = @import("../json/value.zig");
 
-/// The 27 known Moonraker notification method names (authoritative list from
-/// `api_scanner scan --source vendor/moonraker/moonraker` → `notifications[]`).
+/// Moonraker notification names from the vendor scan, plus Forge-X timelapse.
 /// Components emit by symbol so the wire name lives in exactly one place.
 pub const names = struct {
     pub const active_spool_set = "notify_active_spool_set";
@@ -80,6 +79,7 @@ pub const names = struct {
     pub const user_deleted = "notify_user_deleted";
     pub const user_logged_out = "notify_user_logged_out";
     pub const webcams_changed = "notify_webcams_changed";
+    pub const timelapse_event = "notify_timelapse_event";
 };
 
 /// Flat list of every notification name, for validation / iteration.
@@ -97,7 +97,7 @@ pub const all_names = [_][]const u8{
     names.sudo_alert,              names.update_refreshed,
     names.update_response,         names.user_created,
     names.user_deleted,            names.user_logged_out,
-    names.webcams_changed,
+    names.webcams_changed,         names.timelapse_event,
 };
 
 /// Build the JSON-RPC notification wire bytes for `method` + `params`.
@@ -272,7 +272,7 @@ test "buildFrame: empty array params omits the params key (falsy data)" {
 }
 
 test "all_names has 27 entries" {
-    try std.testing.expectEqual(@as(usize, 27), all_names.len);
+    try std.testing.expectEqual(@as(usize, 28), all_names.len);
     // Every symbol begins with the notify_ prefix.
     for (all_names) |n| try std.testing.expect(std.mem.startsWith(u8, n, "notify_"));
 }

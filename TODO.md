@@ -76,6 +76,7 @@ code and fixture coverage, not a new physical-printer conformance run.
 | Analysis | Manual estimate, post-process and config-dump operations through an injected runner, with private snapshots and joined deadlines. See [analysis](docs/ANALYSIS.md). |
 | Files | Thumbnail files, atomic ZIP creation, external-change observation and upload/OctoPrint print queueing. See [file management](docs/FILE_MANAGEMENT.md). |
 | Startup and webcams | One parsed configuration transferred to App; routed public-address URL resolution and local-listener conversion in [`main.zig`](src/main.zig), [`app.zig`](src/app.zig) and [`webcam.zig`](src/components/webcam.zig). |
+| Forge-X compatibility | Explicit startup profile, native timelapse and 3MF uploads, service allowlists/preflight and Feather progress. See [tracker](docs/api/FORGE_X.md) and [timelapse](docs/TIMELAPSE.md) for fixture coverage and hardware limits. |
 
 ## Remaining behavior limits
 

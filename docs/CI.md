@@ -12,9 +12,12 @@ printer credentials and does not deploy to a printer.
 - Formatting, build-policy tests, SQLite source hashes, Python tests and API
   registration/table checks must pass. Python lint/format/type checks cover the
   maintained performance and release helpers; scanner behavior is tested.
+- Upstream and Forge-X API baselines have separate coverage gates. The generated
+  upstream table identifies Forge-X extensions without changing the vendor pin.
 - The complete standalone daemon suite runs in Debug, ReleaseSafe and ReleaseFast
   on x86-64, and ReleaseSafe and ReleaseFast on native AArch64. The physical-Klippy
-  fixture may skip. OpenSSL and socat are installed so MQTT/WebSocket TLS fixtures run.
+  fixture may skip. OpenSSL, socat and FFmpeg are installed for TLS and native
+  timelapse encoding/decoding fixtures.
   Logs are retained as artifacts. No test uses a live printer database.
 - All seven [Linux profiles](BUILDS.md) build independently. The build helper
   checks ELF class/machine, static linkage, ARM ABI/FPU attributes and checksums.

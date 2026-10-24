@@ -142,6 +142,9 @@ pub const FileCtx = struct {
     /// Klippy readiness for the loaded-file lock. Borrowed; set by the App.
     server_info: ?*ServerInfo = null,
     queue_gcode_uploads: bool = false,
+    print_config: @import("printer.zig").PrintConfig = .{},
+    upload_prompt: ?*const fn (*anyopaque, std.mem.Allocator, []const u8, []const u8, []const u8) anyerror!void = null,
+    upload_prompt_ctx: ?*anyopaque = null,
     /// Borrowed upload/select-to-print dependencies, wired by the App.
     job_queue: ?*job_queue_component.JobQueueCtx = null,
     klippy: ?*KlippyCtx = null,
@@ -369,6 +372,12 @@ pub const FileCtx = struct {
 
     pub const PrintResult = struct { started: bool = false, queued: bool = false };
 
+    pub fn promptUpload(self: *const FileCtx, alloc: std.mem.Allocator, stage: []const u8, filename: []const u8, detail: []const u8) void {
+        const send = self.upload_prompt orelse return;
+        send(self.upload_prompt_ctx orelse return, alloc, stage, filename, detail) catch |err|
+            std.debug.print("phobos: upload prompt failed: {}\n", .{err});
+    }
+
     /// Upload and OctoPrint select share Moonraker's start-or-queue behavior.
     /// Call under Core; Klippy request releases Core while awaiting its reply.
     pub fn startOrQueue(self: *const FileCtx, filename: []const u8, can_start: bool, alloc: std.mem.Allocator) !PrintResult {
@@ -381,7 +390,7 @@ pub const FileCtx = struct {
         }
         const active = if (self.job_state) |state| state.isActive() else false;
         if (can_start and ready and !active) if (self.klippy) |klippy| {
-            if (@import("printer.zig").startPrint(klippy, filename, alloc)) |_| {
+            if (@import("printer.zig").startPrint(klippy, filename, alloc, self.print_config)) |_| {
                 return .{ .started = true };
             } else |err| switch (err) {
                 error.OutOfMemory, error.Canceled => return err,
@@ -969,6 +978,14 @@ fn diskUsage(alloc: std.mem.Allocator, dir: Dir) !std.json.Value {
 /// Returns 0, or the fstatvfs errno with the outputs unchanged.
 extern "c" fn phobos_disk_usage(fd: c_int, total: *u64, used: *u64, available: *u64) c_int;
 
+pub fn availableBytes(dir: Dir) !u64 {
+    var total: u64 = undefined;
+    var used: u64 = undefined;
+    var available: u64 = undefined;
+    if (phobos_disk_usage(dir.handle, &total, &used, &available) != 0) return error.DiskUsageUnavailable;
+    return available;
+}
+
 // ---------------------------------------------------------------------------
 // POST /server/files/directory (mkdir)
 // ---------------------------------------------------------------------------
@@ -1537,6 +1554,62 @@ pub fn buildUploadResult(ctx: *FileCtx, alloc: std.mem.Allocator, resolved: Reso
     try out.put(alloc, "print_started", .{ .bool = printing.started });
     try out.put(alloc, "print_queued", .{ .bool = printing.queued });
     return .{ .object = out };
+}
+
+/// Called off Core after the complete form has arrived. The source stays private.
+pub fn finishUpload(ctx: *FileCtx, alloc: std.mem.Allocator, staged: *std.Io.File.Atomic, initial: Resolved, root: []const u8, path: []const u8, filename: []const u8, plate_index: ?[]const u8) !Resolved {
+    const io = try ctx.requireIo();
+    const packaged = ctx.print_config.profile == .forge_x and std.mem.eql(u8, root, "gcodes") and @import("gcode_3mf.zig").isPackaged(filename);
+    const requested = try std.fs.path.join(alloc, &.{ root, path, filename });
+    const destination = try resolveRequestPath(ctx, alloc, requested);
+    if (!packaged and std.mem.eql(u8, initial.abs, destination.abs)) {
+        if (ctx.bus) |bus| try bus.core.run(io, publishUpload, .{ ctx, alloc, staged, destination }) else try publishUpload(ctx, alloc, staged, destination);
+        return destination;
+    }
+    // Atomic's named staging descriptor may be write-only on ARM Linux.
+    const source = try staged.dir.openFile(io, &std.fmt.hex(staged.file_basename_hex), .{ .follow_symlinks = false, .allow_directory = false });
+    defer source.close(io);
+    if ((try source.stat(io)).inode != (try staged.file.stat(io)).inode) return error.UploadChanged;
+    return prepareUpload(ctx, alloc, source, root, path, filename, plate_index);
+}
+
+/// Extracts or relocates the private source into a checked destination.
+pub fn prepareUpload(ctx: *FileCtx, alloc: std.mem.Allocator, source: std.Io.File, root: []const u8, path: []const u8, filename: []const u8, plate_index: ?[]const u8) !Resolved {
+    const io = try ctx.requireIo();
+    const packaged = ctx.print_config.profile == .forge_x and std.mem.eql(u8, root, "gcodes") and @import("gcode_3mf.zig").isPackaged(filename);
+    const name = if (packaged) filename[0 .. filename.len - 4] else filename;
+    const requested = try std.fs.path.join(alloc, &.{ root, path, name });
+    const resolved = try resolveRequestPath(ctx, alloc, requested);
+    if (!resolved.root.full_access or resolved.rel.len == 0) return error.Forbidden;
+    if (packaged) ctx.promptUpload(alloc, "stage", filename, "Extracting G-code from archive...");
+    errdefer if (packaged) ctx.promptUpload(alloc, "failed", filename, "Unable to prepare the file.");
+    var parent = try resolved.parent(io, alloc, .{ .make_path = true });
+    defer parent.close(io);
+    var output = try parent.dir.createFileAtomic(io, parent.name, .{ .replace = true });
+    defer output.deinit(io);
+    if (packaged) {
+        try @import("gcode_3mf.zig").extract(io, source, output.file, plate_index);
+        ctx.promptUpload(alloc, "stage", filename, "Processing G-code...");
+    } else {
+        var input_buffer: [32768]u8 = undefined;
+        var output_buffer: [32768]u8 = undefined;
+        var reader = source.reader(io, &input_buffer);
+        var writer = output.file.writer(io, &output_buffer);
+        _ = try reader.interface.streamRemaining(&writer.interface);
+        try writer.end();
+        try output.file.sync(io);
+    }
+    if (ctx.bus) |bus| try bus.core.run(io, publishUpload, .{ ctx, alloc, &output, resolved }) else try publishUpload(ctx, alloc, &output, resolved);
+    return resolved;
+}
+
+fn publishUpload(ctx: *FileCtx, alloc: std.mem.Allocator, output: *std.Io.File.Atomic, resolved: Resolved) !void {
+    try ctx.replaceUpload(output, resolved);
+    if (std.mem.eql(u8, resolved.root.name, "gcodes") and isGcodeExt(resolved.rel)) {
+        var params: std.json.ObjectMap = .empty;
+        try params.put(alloc, "filename", .{ .string = resolved.rel });
+        _ = try handleMetadata(ctx, .{ .object = params }, alloc);
+    }
 }
 
 // ---------------------------------------------------------------------------

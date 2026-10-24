@@ -227,6 +227,10 @@ Forge-X uses a separate [`api/forge_x_surface.json`](api/forge_x_surface.json)
 baseline and [behavior tracker](docs/api/FORGE_X.md). Pass that baseline
 explicitly for Forge-X checks. Do not replace the upstream baseline or infer
 behavioral parity from endpoint-name coverage.
+The selected `--compat` profile appears in the API dump. Native Forge-X
+timelapse configuration and its resource limits are in [TIMELAPSE.md](docs/TIMELAPSE.md).
+CI installs FFmpeg to exercise the encoding/decoding fixture as well as the
+injected-runner and loopback tests.
 
 ## 7. Definition of done
 

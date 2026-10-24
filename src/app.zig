@@ -47,16 +47,40 @@ const octoprint_component = @import("components/octoprint_compat.zig");
 const zeroconf_component = @import("components/zeroconf.zig");
 const paneldue_component = @import("components/paneldue.zig");
 const feather_updates_component = @import("components/feather_updates.zig");
+const timelapse_component = @import("components/timelapse.zig");
 const ds = @import("store/datastore.zig");
 const config_helper = @import("config/confighelper.zig");
 const json_value = @import("json/value.zig");
 const clock = @import("util/clock.zig");
 
 const feather_component_name = [_][]const u8{"feather_updates"};
+const timelapse_component_name = [_][]const u8{"timelapse"};
+const forge_components = feather_component_name ++ timelapse_component_name;
+
+fn timelapseRpc(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) !std.json.Value {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    return app.klippy_ctx.requestQuiet(method, params, alloc);
+}
+
+fn timelapseQueue(ctx: *anyopaque, method: []const u8) !void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const aio = app.timelapse_ctx.io;
+    const request = (try remoteMethodRequest(app.alloc, method, .{ .object = .empty })) orelse return error.InvalidParams;
+    const queued = app.remote_calls.put(aio, &.{request}, 0) catch 0;
+    if (queued == 0) {
+        app.alloc.free(request);
+        return error.QueueFull;
+    }
+}
 
 fn restartUpdatedService(ctx: *anyopaque, alloc: std.mem.Allocator, service: []const u8) !void {
     const machine: *MachineCtx = @ptrCast(@alignCast(ctx));
     try machine.serviceAction(alloc, .restart, service);
+}
+
+fn verifyUpdatedService(ctx: *anyopaque, alloc: std.mem.Allocator, service: []const u8) !void {
+    const machine: *MachineCtx = @ptrCast(@alignCast(ctx));
+    try machine.verifyService(alloc, service);
 }
 
 fn featherPrinterIdle(ctx: *anyopaque) bool {
@@ -147,14 +171,27 @@ fn featherKlippySend(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const 
     app.klippy_ctx.postMethod(method, params, alloc) catch {};
 }
 
+fn uploadPrompt(ctx: *anyopaque, alloc: std.mem.Allocator, stage: []const u8, filename: []const u8, detail: []const u8) !void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    const script = try @import("components/upload_prompt.zig").script(alloc, stage, filename, detail);
+    defer alloc.free(script);
+    var params: std.json.ObjectMap = .empty;
+    try params.put(alloc, "script", .{ .string = script });
+    try app.klippy_ctx.postMethod("gcode/script", .{ .object = params }, alloc);
+}
+
+fn featherProgress(ctx: *anyopaque, alloc: std.mem.Allocator, value: std.json.Value) !void {
+    const app: *App = @ptrCast(@alignCast(ctx));
+    try app.feather.progress(alloc, value);
+}
+
 /// Pending Klipper remote-method calls; further calls are dropped with a warning.
 const remote_call_queue_len = 16;
 /// Bound active remote calls independently of the pending reader queue.
 const max_concurrent_remote_calls = 16;
 
-/// Remote methods registered with Klippy: Feather's, plus the component
-/// methods Moonraker registers (power, WLED, Spoolman, MQTT and notifiers).
-const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]const u8{
+/// Klippy remote methods for Feather, timelapse and the core components.
+const klippy_remote_methods = feather_updates_component.remote_methods ++ timelapse_component.remote_methods ++ [_][]const u8{
     "set_device_power",
     "set_wled_state",
     "set_wled",
@@ -168,6 +205,10 @@ const klippy_remote_methods = feather_updates_component.remote_methods ++ [_][]c
 /// call for `remoteWorker`.
 fn onKlippyRemoteMethod(ctx: *anyopaque, alloc: std.mem.Allocator, method: []const u8, params: std.json.Value) anyerror!void {
     const app: *App = @ptrCast(@alignCast(ctx));
+    if (app.timelapse_ctx.enabled and std.mem.eql(u8, method, "timelapse_cancel_render")) {
+        app.timelapse_ctx.cancelOperation();
+        return;
+    }
     if (try app.extensions_ctx.forwardRemote(method, params, alloc)) return;
     const io = app.klippy_ctx.io orelse return;
     const req = (try remoteMethodRequest(app.alloc, method, params)) orelse return;
@@ -187,7 +228,11 @@ fn onKlippyState(ctx: *anyopaque, aio: std.Io, state: klippy_connection_componen
     app.paneldue.onState(state);
     app.power_ctx.onKlippyState(@tagName(state), clock.monotonicSeconds(aio));
     switch (state) {
-        .ready => app.job_queue_ctx.onKlippyReady(),
+        .ready => {
+            app.job_queue_ctx.onKlippyReady();
+            if (app.timelapse_ctx.enabled) timelapseQueue(app, "_timelapse_setup") catch |err|
+                std.debug.print("phobos: timelapse setup queue: {}\n", .{err});
+        },
         .shutdown, .disconnected, .@"error" => app.job_queue_ctx.onKlippyShutdown(),
         .startup => {},
     }
@@ -204,6 +249,7 @@ fn onKlippyStatus(ctx: *anyopaque, _: std.Io, status: std.json.Value, eventtime:
     app.spoolman_ctx.onKlippyStatusLocked(status, eventtime) catch |err|
         std.debug.print("phobos: warning: Spoolman Klippy status: {}\n", .{err});
     app.paneldue.statusUpdate(status);
+    app.timelapse_ctx.statusUpdate(status);
 }
 
 fn onKlippyGcode(ctx: *anyopaque, _: std.Io, params: std.json.Value) void {
@@ -213,9 +259,15 @@ fn onKlippyGcode(ctx: *anyopaque, _: std.Io, params: std.json.Value) void {
         else => params,
     };
     switch (response) {
-        .string => app.paneldue.handleGcodeResponse(response.string),
+        .string => {
+            app.paneldue.handleGcodeResponse(response.string);
+            app.timelapse_ctx.gcodeResponse(response.string);
+        },
         .array => |values| for (values.items) |value| {
-            if (value == .string) app.paneldue.handleGcodeResponse(value.string);
+            if (value == .string) {
+                app.paneldue.handleGcodeResponse(value.string);
+                app.timelapse_ctx.gcodeResponse(value.string);
+            }
         },
         else => {},
     }
@@ -277,7 +329,7 @@ fn remoteMethodRequest(alloc: std.mem.Allocator, method: []const u8, params: std
     }
     const target: []const u8 = if (std.mem.eql(u8, method, "publish_mqtt_topic"))
         "server.mqtt.publish_mqtt_topic"
-    else for (klippy_remote_methods) |name| {
+    else for (klippy_remote_methods ++ timelapse_component.internal_methods) |name| {
         if (std.mem.eql(u8, method, name)) break name;
     } else return null;
     return try std.json.Stringify.valueAlloc(alloc, .{ .jsonrpc = "2.0", .method = target, .params = kwargs, .id = 0 }, .{});
@@ -340,6 +392,13 @@ fn runRemoteCall(app: *App, _: std.Io, req: []u8) void {
     // `remoteMethodRequest` built `req`, so its shape is known.
     const root = std.json.parseFromSliceLeaky(std.json.Value, a, req, .{}) catch return;
     const method = root.object.get("method").?.string;
+    for (timelapse_component.remote_methods ++ timelapse_component.internal_methods) |name| {
+        if (std.mem.eql(u8, method, name)) {
+            app.timelapse_ctx.remote(a, method, root.object.get("params").?) catch |err|
+                std.debug.print("phobos: timelapse method {s}: {}\n", .{ method, err });
+            return;
+        }
+    }
     if (featherMethod(method)) {
         feather_updates_component.onKlippyMethod(&app.feather, app.alloc, method, root.object.get("params").?) catch |err|
             std.debug.print("phobos: warning: Klipper remote method {s} failed: {}\n", .{ method, err });
@@ -428,6 +487,7 @@ const StoreHolder = union(StoreBackend) {
 /// owned by this struct; call `deinit` to release them.
 pub const App = struct {
     alloc: std.mem.Allocator,
+    compatibility: @import("compat.zig").Profile = .moonraker,
 
     core: *Core,
     dispatcher: *Dispatcher,
@@ -437,6 +497,7 @@ pub const App = struct {
     bus: *NotifyBus,
     db_ctx: *DbCtx,
     history_ctx: *HistoryCtx,
+    timelapse_ctx: *timelapse_component.Timelapse,
     job_queue_ctx: *JobQueueCtx,
     job_state_ctx: *JobStateCtx,
     announcements_ctx: *AnnouncementsCtx,
@@ -698,6 +759,11 @@ pub const App = struct {
         errdefer alloc.destroy(analysis_ctx);
         analysis_ctx.* = .{ .data_path = datadir, .io = aio };
 
+        const timelapse_ctx = try alloc.create(timelapse_component.Timelapse);
+        errdefer alloc.destroy(timelapse_ctx);
+        timelapse_ctx.* = .{ .gpa = alloc, .io = aio, .store = db_ctx.store, .bus = bus };
+        errdefer timelapse_ctx.deinit();
+
         // --- File manager context (server.files.*) ---
         const root_specs = [_]struct { name: []const u8, full: bool }{
             .{ .name = "config", .full = true },
@@ -735,7 +801,8 @@ pub const App = struct {
             .conns = conns,
             .usb_ids = try @import("components/usb_ids.zig").Ctx.init(alloc, aio, datadir, db_ctx.store),
         };
-        errdefer machine_ctx.usb_ids.?.deinit();
+        errdefer machine_ctx.deinit();
+        try machine_ctx.loadAllowedServices(aio, datadir);
         webcam_ctx.machine_ctx = machine_ctx;
 
         // --- Update manager context (machine.update.*) ---
@@ -754,6 +821,7 @@ pub const App = struct {
             .printing_check = JobStateCtx.isActiveErased,
             .printing_ctx = job_state_ctx,
             .restart_service = restartUpdatedService,
+            .verify_service = verifyUpdatedService,
             .service_ctx = machine_ctx,
         };
 
@@ -847,6 +915,7 @@ pub const App = struct {
             .bus = bus,
             .db_ctx = db_ctx,
             .history_ctx = history_ctx,
+            .timelapse_ctx = timelapse_ctx,
             .job_queue_ctx = job_queue_ctx,
             .job_state_ctx = job_state_ctx,
             .announcements_ctx = announcements_ctx,
@@ -880,6 +949,16 @@ pub const App = struct {
         app.syncRegisteredDirectories();
         try app.registerAll();
         return app;
+    }
+
+    pub fn setCompatibility(self: *App, profile: @import("compat.zig").Profile) void {
+        std.debug.assert(self.cfg == null);
+        self.compatibility = profile;
+        self.update_ctx.compatibility = profile;
+        const print_config: printer_component.PrintConfig = .{ .profile = profile, .io = self.machine_ctx.clock_io, .root = self.file_roots[0].path };
+        self.printer_ctx.print_config = print_config;
+        self.file_ctx.print_config = print_config;
+        self.job_queue_ctx.print_config = print_config;
     }
 
     /// Copy file-root names into `server.info` `registered_directories`.
@@ -1280,6 +1359,13 @@ pub const App = struct {
             }
         } else |_| {}
 
+        if (cfg.hasSection("timelapse")) {
+            self.timelapse_ctx.webcams = self.webcam_ctx;
+            try self.timelapse_ctx.configure(cfg, self.datadir, self.mqtt_ctx.home_directory orelse self.datadir);
+            try self.addTimelapseRoots();
+            self.info.extra_components = if (self.feather.enabled) &forge_components else &timelapse_component_name;
+        }
+
         // Register history auxiliary fields from [history_field <name>] sections.
         if (cfg.sectionNames(self.alloc)) |names| {
             defer self.alloc.free(names);
@@ -1343,6 +1429,8 @@ pub const App = struct {
         self.job_queue_ctx.cancelDelayTimer();
         // MQTT dispatch and sensor delivery borrow components torn down below.
         self.mqtt_ctx.deinit();
+        self.timelapse_ctx.deinit();
+        self.alloc.destroy(self.timelapse_ctx);
         self.paneldue.deinit();
         self.update_ctx.deinit();
         self.analysis_ctx.deinit(self.alloc);
@@ -1442,6 +1530,7 @@ pub const App = struct {
 
         // History component: server.history.* endpoints.
         try history_component.registerHistory(self.reg, self.history_ctx);
+        try timelapse_component.register(self.reg, self.timelapse_ctx);
 
         // Job queue component: server.job_queue.* endpoints.
         try job_queue_component.registerJobQueue(self.reg, self.job_queue_ctx);
@@ -1576,6 +1665,14 @@ pub const App = struct {
 
     /// Bind App pointers only after init returned it to its final address.
     fn bindFeather(self: *App) void {
+        self.timelapse_ctx.rpc = timelapseRpc;
+        self.timelapse_ctx.rpc_ctx = self;
+        self.timelapse_ctx.queue = timelapseQueue;
+        self.timelapse_ctx.queue_ctx = self;
+        self.update_ctx.response_handler = featherProgress;
+        self.update_ctx.response_ctx = self;
+        self.file_ctx.upload_prompt = uploadPrompt;
+        self.file_ctx.upload_prompt_ctx = self;
         self.feather.updates = self.update_ctx;
         self.feather.idle = featherPrinterIdle;
         self.feather.idle_ctx = self;
@@ -1648,6 +1745,19 @@ pub const App = struct {
         self.file_roots = grown;
         self.file_ctx.roots = grown;
         self.file_ctx.observeRoot(name);
+        self.syncRegisteredDirectories();
+    }
+
+    fn addTimelapseRoots(self: *App) !void {
+        const output = try self.alloc.dupe(u8, self.timelapse_ctx.output_path);
+        errdefer self.alloc.free(output);
+        const frames = try self.alloc.dupe(u8, self.timelapse_ctx.frame_path);
+        errdefer self.alloc.free(frames);
+        const grown = try self.alloc.realloc(self.file_roots, self.file_roots.len + 2);
+        grown[grown.len - 2] = .{ .name = "timelapse", .path = output, .full_access = true };
+        grown[grown.len - 1] = .{ .name = "timelapse_frames", .path = frames, .full_access = false };
+        self.file_roots = grown;
+        self.file_ctx.roots = grown;
         self.syncRegisteredDirectories();
     }
 
@@ -1833,6 +1943,8 @@ pub const App = struct {
         self.webcam_ctx.setIo(io);
         // Wire io into the klippy connection so it can connect and handshake.
         self.klippy_ctx.setIo(io);
+        if (self.timelapse_ctx.enabled) self.klippy_ctx.addSubscriptionObject("gcode_macro _START_PRINT") catch |err|
+            std.debug.print("phobos: timelapse subscription: {}\n", .{err});
         self.paneldue.bind(io, self.alloc, self.core, self.klippy_ctx, self.file_ctx);
         self.paneldue.start() catch |err| std.debug.print("phobos: PanelDue startup: {}\n", .{err});
         // Wire io into MQTT and, when a broker is configured, connect to it in
@@ -3285,6 +3397,11 @@ test "App.init: dispatcher has exactly the expected methods" {
         "server.files.delete_file",
         // Machine (machine.* + machine.proc_stats)
         "machine.system_info",
+        "machine.timelapse.render",
+        "machine.timelapse.saveframes",
+        "machine.timelapse.get_settings",
+        "machine.timelapse.post_settings",
+        "machine.timelapse.lastframeinfo",
         "machine.proc_stats",
         "machine.reboot",
         "machine.shutdown",
@@ -3355,6 +3472,31 @@ test "App.init: dispatcher has exactly the expected methods" {
     for (expected) |m| {
         try std.testing.expect(app.dispatcher.methods.get(m) != null);
     }
+}
+
+test "Forge-X startup config registers native timelapse roots and behavior" {
+    const alloc = std.testing.allocator;
+    const aio = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(aio, ".", alloc);
+    defer alloc.free(root);
+    try tmp.dir.writeFile(aio, .{ .sub_path = "moonraker.conf", .data = "[timelapse]\nframe_path: frames\noutput_path: timelapse\n[feather_updates]\n" });
+    var instance = try App.init(alloc, aio, root);
+    defer instance.deinit(aio);
+    instance.setCompatibility(.forge_x);
+    const cfg_path = try std.fs.path.join(alloc, &.{ root, "moonraker.conf" });
+    defer alloc.free(cfg_path);
+    try instance.setConfig(aio, cfg_path);
+    try std.testing.expect(instance.timelapse_ctx.enabled);
+    try std.testing.expectEqual(@as(usize, 5), instance.file_ctx.roots.len);
+    try std.testing.expectEqualStrings("timelapse_frames", instance.file_ctx.roots[4].name);
+    try std.testing.expect(!instance.file_ctx.roots[4].full_access);
+    try std.testing.expect(instance.file_ctx.roots[3].full_access);
+    try std.testing.expectEqual(@as(usize, 2), instance.info.extra_components.len);
+    try std.testing.expectEqual(.forge_x, instance.printer_ctx.print_config.profile);
+    try std.testing.expectEqual(.forge_x, instance.file_ctx.print_config.profile);
+    try std.testing.expectEqual(.forge_x, instance.job_queue_ctx.print_config.profile);
 }
 
 test "App.init idempotency: double init+deinit does not corrupt allocator" {

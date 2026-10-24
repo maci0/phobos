@@ -873,8 +873,7 @@ fn streamUntilSeparator(r: *std.Io.Reader, out: ?*std.Io.Writer, sep: []const u8
 
 /// Stream a multipart/form-data upload straight from the socket to disk, so a
 /// large gcode upload runs in constant memory instead of buffering the whole body
-/// in the request arena. Relies on the small form fields (root/path) preceding
-/// the file part — true for every Moonraker client (Mainsail, Fluidd, curl -F).
+/// in the request arena. Form fields may precede or follow the staged file.
 /// Responds to `req` directly. Auth matches the non-streaming path (unchanged).
 fn handleUploadStreaming(
     srv: *Server,
@@ -920,7 +919,13 @@ fn handleUploadStreaming(
     var root_field: ?[]const u8 = null;
     var path_field: ?[]const u8 = null;
     var print_requested = false;
-    var resolved: ?file_manager.Resolved = null;
+    var file_name: ?[]const u8 = null;
+    var plate_index: ?[]const u8 = null;
+    var upload_parent: ?file_manager.Resolved.Parent = null;
+    var staged_destination: ?file_manager.Resolved = null;
+    defer if (upload_parent) |*parent| parent.close(io);
+    var staged: ?std.Io.File.Atomic = null;
+    defer if (staged) |*file| file.deinit(io);
 
     parts: while (true) {
         // Part headers: lines until a blank line.
@@ -934,6 +939,8 @@ fn handleUploadStreaming(
         const cd = disp orelse return bad(req, alloc, headers, "Invalid upload form");
 
         if (extractDispositionField(cd, "filename")) |filename| {
+            if (file_name != null) return bad(req, alloc, headers, "Only one upload file is permitted");
+            file_name = try alloc.dupe(u8, filename);
             // File part: resolve the destination from the fields seen so far and
             // stream its content straight to disk.
             const root_name = root_field orelse "gcodes";
@@ -943,31 +950,18 @@ fn handleUploadStreaming(
                 try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_name, filename });
             const res = file_manager.resolveRequestPath(fctx, alloc, req_path) catch
                 return bad(req, alloc, headers, "Invalid upload path");
+            staged_destination = res;
             if (!res.root.full_access or res.rel.len == 0) return bad(req, alloc, headers, "Invalid upload path");
-            srv.core.run(io, file_manager.FileCtx.checkInUse, .{ fctx, res, false }) catch {
-                const b = try errorBody(alloc, 403, "File currently in use");
-                return req.respond(b, .{ .status = .forbidden, .extra_headers = headers });
-            };
-            var parent = res.parent(io, alloc, .{ .make_path = true }) catch return bad(req, alloc, headers, "Invalid upload path");
-            defer parent.close(io);
-            var output = parent.dir.createFileAtomic(io, parent.name, .{ .replace = true }) catch return bad(req, alloc, headers, "Write error");
-            defer output.deinit(io);
+            upload_parent = res.parent(io, alloc, .{ .make_path = true }) catch return bad(req, alloc, headers, "Invalid upload path");
+            staged = upload_parent.?.dir.createFileAtomic(io, upload_parent.?.name, .{ .replace = true, .permissions = .fromMode(0o600) }) catch return bad(req, alloc, headers, "Write error");
             var wbuf2: [32 * 1024]u8 = undefined;
-            var fw = output.file.writer(io, &wbuf2);
+            var fw = staged.?.file.writer(io, &wbuf2);
             streamUntilSeparator(r, &fw.interface, part_sep, max_upload_bytes) catch |err| {
                 if (err == error.UploadTooLarge) return tooLarge(req, alloc, headers);
                 return bad(req, alloc, headers, "Invalid upload form");
             };
             fw.interface.flush() catch return bad(req, alloc, headers, "Write error");
-            output.file.sync(io) catch return bad(req, alloc, headers, "Write error");
-            srv.core.run(io, file_manager.FileCtx.replaceUpload, .{ fctx, &output, res }) catch |err| {
-                if (err == error.FileInUse) {
-                    const b = try errorBody(alloc, 403, "File currently in use");
-                    return req.respond(b, .{ .status = .forbidden, .extra_headers = headers });
-                }
-                return bad(req, alloc, headers, "Write error");
-            };
-            resolved = res;
+            staged.?.file.sync(io) catch return bad(req, alloc, headers, "Write error");
         } else if (extractDispositionField(cd, "name")) |n| {
             // Small field value. Print/select fields may follow the file part.
             var vb: std.Io.Writer.Allocating = .init(alloc);
@@ -979,6 +973,8 @@ fn handleUploadStreaming(
                 root_field = vb.written();
             } else if (std.mem.eql(u8, n, "path")) {
                 path_field = vb.written();
+            } else if (std.mem.eql(u8, n, "plateindex")) {
+                plate_index = vb.written();
             } else if (std.mem.eql(u8, n, "print")) {
                 var params: std.json.ObjectMap = .empty;
                 try params.put(alloc, "print", .{ .string = vb.written() });
@@ -994,15 +990,30 @@ fn handleUploadStreaming(
         }
 
         // After the separator: "--" terminates the body; otherwise "\r\n" then the next part.
-        const lead = r.peek(2) catch break :parts;
+        const lead = r.peek(2) catch return bad(req, alloc, headers, "Invalid upload form");
         if (lead[0] == '-' and lead[1] == '-') break :parts;
+        if (!std.mem.eql(u8, lead, "\r\n")) return bad(req, alloc, headers, "Invalid upload form");
         r.toss(2);
     }
 
-    const res = resolved orelse return bad(req, alloc, headers, "No file name specified in upload form");
+    const filename = file_name orelse return bad(req, alloc, headers, "No file name specified in upload form");
+    const res = file_manager.finishUpload(fctx, alloc, &staged.?, staged_destination.?, root_field orelse "gcodes", path_field orelse "", filename, plate_index) catch |err| {
+        if (err == error.FileInUse or err == error.Forbidden) {
+            const b = try errorBody(alloc, 403, if (err == error.FileInUse) "File currently in use" else "Path forbidden");
+            return req.respond(b, .{ .status = .forbidden, .extra_headers = headers });
+        }
+        return bad(req, alloc, headers, @errorName(err));
+    };
+    const packaged = fctx.print_config.profile == .forge_x and std.mem.eql(u8, root_field orelse "gcodes", "gcodes") and @import("components/gcode_3mf.zig").isPackaged(filename);
+    if (packaged) {
+        if (print_requested) fctx.promptUpload(alloc, "stage", filename, "Starting print...");
+        fctx.promptUpload(alloc, "close", filename, "");
+    }
     // notify_filelist_changed + result build run under Core (emitLocked assumes it).
     const result = srv.core.run(io, file_manager.buildUploadResult, .{ fctx, alloc, res, print_requested }) catch
         return bad(req, alloc, headers, "Write error");
+    if (packaged and print_requested and !result.object.get("print_started").?.bool and !result.object.get("print_queued").?.bool)
+        fctx.promptUpload(alloc, "failed", filename, "Print did not start. The file was saved.");
     if (octoprint) {
         // OctoPrint upload response (wrap_result=false): slicers ("Upload to
         // OctoPrint") expect { files: { local: { name, path, origin } }, done }.

@@ -69,7 +69,7 @@ remote methods are:
 - `timelapse_render`
 - `timelapse_cancel_render`
 
-Phobos implements the three Feather names; the four timelapse names are absent.
+Phobos implements all seven Feather and timelapse names.
 The existing coverage command does not score Klippy remote-method coverage.
 
 The Forge-X snapshot lacks the four `/server/analysis/*` routes, two
@@ -78,31 +78,32 @@ upstream baseline. Their absence is version/component drift. Keep those
 Phobos implementations; a Forge-X profile must not delete them to reduce its
 API surface.
 
-The v0.2.3 dump covers 117/121 Forge-X endpoint paths, 124/129 RPC names and
-27/28 notifications. The missing names are exactly the four timelapse paths,
-five timelapse RPC names and its notification. All four literal router paths
-match; the fifth router registration has a dynamic path and is not scored.
-These counts are registered-name coverage, not behavioral completeness.
+The current dump covers 121/121 Forge-X endpoint paths, 129/129 RPC names and
+28/28 notifications. Upstream coverage remains 123/123 paths, 130/130 RPC names
+and 27/27 notifications. All four literal router paths match; the fifth router
+registration has a dynamic path and is not scored. These counts measure names,
+not behavioral completeness. CI checks the two baselines separately.
 
 ## Behavior tracker
 
-Source links below refer to the pinned Forge-X tree. Status describes source
-inspection, not a new live-printer conformance run.
+Source links refer to the pinned Forge-X tree. Implementation checks use native,
+loopback, temporary-filesystem and injected-service fixtures. New print macros,
+camera captures and service/update actions have not been exercised on hardware.
 
 | Area | Forge-X behavior | Phobos status and acceptance work |
 | --- | --- | --- |
-| Timelapse | [`timelapse.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/timelapse.py) limits frames/disk use, restores frames, handles parked-frame acknowledgements, final frames, rendering/export cancellation and printer transitions. | Missing component. Test the complete capture/finalization lifecycle, not just the API names. Keep camera and FFmpeg work bounded and off Core. |
-| Packaged G-code | [`gcode_3mf.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/file_manager/gcode_3mf.py) accepts `.gcode.3mf`, selects `Metadata/plate_N.gcode` using `plateindex`, checks optional MD5 and publishes through a temporary destination file. | Missing upload conversion. Test one/multiple/missing plates, invalid indices/ZIP/MD5, bounded extraction, destination preservation, metadata, file events and queued-print results through the normal upload path. |
-| Upload dialogs | [`GCode3MFUploadPrompt`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/file_manager/file_manager.py#L66) reports extraction, processing and failures through Klippy prompts, without command history. Prompt failure must not fail the upload. | Missing. Test prompt ordering, cancellation, sanitization and ownership when a print opens another prompt. |
-| Stock-mode print start | [`klippy_apis.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/klippy_apis.py) checks the stock-config include and `print_leveling`, selecting `LEVELING_PRINT_FILE` or `NOLEVELING_PRINT_FILE`; otherwise `SDCARD_PRINT_FILE`. | Phobos always uses `SDCARD_PRINT_FILE`. A profile-specific command builder needs fixture coverage for all three cases and every print-start caller, including uploaded/queued files. Do not send print commands during source comparison. |
-| Hidden objects | Forge-X filters configured objects from `objects/list`. Its query/subscription paths remain Klippy proxies. | Phobos also filters query/initial-subscription responses in `printer.zig`. Record and test the intended scope before choosing profile behavior; do not silently change the existing deployment. |
-| Excluded files | Forge-X filters configured `root/relative` entries from directory and recursive listings. | Implemented through `[file_manager] excludes`; Phobos additionally treats descendants as excluded. Test direct traversal into an excluded directory separately from recursive listing. |
-| Service permissions | [`moonraker.asvc`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker.asvc) grants `forge-x` and `guppyscreen`; Moonraker loads the data-path allowlist. | Phobos has a fixed default allowlist and rejects these names. Loading the standard `moonraker.asvc` mechanism belongs in shared behavior, with validated names and injected service tests. Avoid a Forge-X-only hardcoded exemption. |
-| Simple service provider | Forge-X invokes `<script_path>/<service> <action>` with a configurable timeout. | Phobos supports `simple`, but the allowlist gap blocks the configured Forge-X services. Test argument construction and errors through an injected runner. Never invoke the board-rebooting `.root/forge-x restart` in these tests. |
-| Update preflight | Forge-X [`git_deploy.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/update_manager/git_deploy.py) calls `verify` on the first managed service before pulling; failure aborts the update. | No equivalent preflight found in Phobos. This is an internal provider operation, not permission to expose arbitrary actions through the public restart API. Test failure before repository mutation. |
-| Update refresh cache | `base_deploy.py` recognizes a stored `last_cfg_hash` of `***skip***` and suppresses refresh. | No equivalent marker found. Determine which Forge-X sources rely on it; test copied database fixtures and local repositories only. Keep remote refresh explicit. |
-| Feather status | [`feather_updates.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/feather_updates.py) refreshes the configured source before answering a status request. | Phobos uses the existing update status. Test fresh versus cached status, busy-state errors, offer revisions and response tokens. |
-| Feather progress | Forge-X forwards intermediate `update_manager:update_response` events, failure/conflict details and the restart message to Feather. | Phobos sends accepted/completion/failure states but lacks that event-forwarding flow. Test intermediate ordering, terminal failure and stale-token handling with injected updates. |
+| Timelapse | [`timelapse.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/timelapse.py) limits frames/disk use, restores frames, handles parked-frame acknowledgements, final frames, rendering/export cancellation and printer transitions. | Native implementation in `timelapse.zig`. Fixtures cover capture, finalization, generation cancellation, macro acknowledgements, ZIP export, settings persistence and output collisions. A real FFmpeg test encodes and decodes a video and produces a transformed preview. See [timelapse](../TIMELAPSE.md). |
+| Packaged G-code | [`gcode_3mf.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/file_manager/gcode_3mf.py) accepts `.gcode.3mf`, selects `Metadata/plate_N.gcode` using `plateindex`, checks optional MD5 and publishes through a temporary destination file. | Implemented for `--compat forge-x`. Streaming stored/deflated extraction validates CRC, MD5 and plate selection before replacement. HTTP fixtures cover fields after the archive, metadata, malformed uploads and preservation. See [file management](../FILE_MANAGEMENT.md). |
+| Upload dialogs | [`GCode3MFUploadPrompt`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/file_manager/file_manager.py#L66) reports extraction, processing and failures through Klippy prompts, without command history. Prompt failure must not fail the upload. | Extraction/processing/start/error dialogs use sanitized quiet scripts. Preparation closes its prompt before starting a print. Errors are dismissible; unavailable prompts do not fail the upload. Physical prompt rendering remains unverified. |
+| Stock-mode print start | [`klippy_apis.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/klippy_apis.py) checks the stock-config include and `print_leveling`, selecting `LEVELING_PRINT_FILE` or `NOLEVELING_PRINT_FILE`; otherwise `SDCARD_PRINT_FILE`. | The Forge-X profile shares one builder across printer, upload/OctoPrint and queue starts. It rereads the config root's `printer.cfg` and `mod_data/variables.cfg`. Builder and queue fixtures cover macro selection and escaping. PanelDue retains its reference protocol translation. No real print command was sent. |
+| Hidden objects | Forge-X filters configured objects from `objects/list`. Its query/subscription paths remain Klippy proxies. | Paired profile tests preserve the existing query filtering in the default profile and return queried hidden objects in the Forge-X profile. Lists remain filtered. WebSocket subscriptions continue their existing proxy behavior. |
+| Excluded files | Forge-X filters configured `root/relative` entries from directory and recursive listings. | Existing `[file_manager] excludes` behavior and list/ZIP/ownership tests are retained. Phobos also filters descendants. Excludes are listing rules; root/path checks remain separate. |
+| Service permissions | [`moonraker.asvc`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker.asvc) grants `forge-x` and `guppyscreen`; Moonraker loads the data-path allowlist. | Both profiles load `<data>/moonraker.asvc`, normalize `.service` suffixes and validate bounded names. Missing files retain defaults. Invalid replacements preserve the previous list; allocation-failure and fuzz tests cover ownership. |
+| Simple service provider | Forge-X invokes `<script_path>/<service> <action>` with a configurable timeout. | Configured allowed services use the existing bounded simple runner. Internal `verify` is separate from public start/stop/restart verbs. Tests inject commands; no board restart script was executed. |
+| Update preflight | Forge-X [`git_deploy.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/update_manager/git_deploy.py) calls `verify` on the first managed service before pulling; failure aborts the update. | The Forge-X profile verifies the first managed service before Git mutation. Tests cover rejection before Git and successful verification/restart ordering in an owned local repository. |
+| Update refresh cache | `base_deploy.py` recognizes a stored `last_cfg_hash` of `***skip***` and suppresses refresh. | The Forge-X profile honors the marker on automatic refresh. Explicit refresh remains available. SQLite fixtures cover profile selection and missing markers. |
+| Feather status | [`feather_updates.py`](https://github.com/DrA1ex/ff5m/blob/f2c3f272d6e27400818a514d9d31d754eeb1b5e3/.root/moonraker/components/feather_updates.py) refreshes the configured source before answering a status request. | Remote status requests now refresh that source, preserve tokens and report refresh/admission errors. Existing version/revision and idle guards remain. |
+| Feather progress | Forge-X forwards intermediate `update_manager:update_response` events, failure/conflict details and the restart message to Feather. | Active source/token progress is forwarded, including the restart message. Bounded Git failure details deduplicate conflict paths. Fixtures cover tokens, busy errors, terminal failures and progress filtering. |
 | History `exists` | Forge-X checks filename presence without comparing stored metadata mtime. | Phobos currently also checks presence. Upstream's mtime-sensitive behavior remains a separate compatibility difference for imported jobs containing metadata. |
 | ZIP installation | Forge-X validates nonempty ZIP/CRC before removing the current installation. | Phobos already extracts/validates into a separate stage before replacing an install. Retain that stronger preservation behavior; fixture tests cover archives and failures in `update_net.zig`. |
 | Serial components | PanelDue and WLED differ substantially from the dated reference; Forge-X substitutes older serial/HTTP plumbing and removes `utils/async_serial.py`. | Source differences alone do not establish wire incompatibility. Compare externally visible commands/errors before adding profile branches. Physical accessory tests remain outstanding. |
@@ -113,31 +114,20 @@ tests. A compatibility profile cannot load Python components. A future WASM
 host can provide extension hooks, but does not automatically port Obico,
 OctoEverywhere, Telegram Bot or other integrations.
 
-## Proposed startup profile
+## Startup profile
 
-Not implemented. Use one validated selection, proposed spelling
-`--compat moonraker|forge-x`, with `moonraker` as the default. Parse it once and
-pass an immutable enum into App/component initialization. Do not infer the
-profile from hostname, CPU architecture, a version string or an update source's
-name, and do not scatter global string checks through request handlers.
+Use `--compat forge-x` for packaged G-code conversion, stock print macros,
+query-filter scope, update preflight and automatic-refresh skip markers.
+`--compat moonraker` is the default. The API dump reports the selected profile.
+Timelapse and Feather load from explicit `[timelapse]` and `[feather_updates]`
+configuration in either profile. Standard `moonraker.asvc` loading is shared.
+Preserve Forge-X's `[file_manager] file_system_observer: none` on printer kernels
+without inotify; profile selection does not override explicit component config.
 
-The profile should select verified conflicting behavior, such as print-start
-macro selection and history existence semantics. Missing shared Moonraker
-behavior, such as loading `moonraker.asvc`, should be fixed for both profiles.
-Configured additions such as timelapse and Feather should load explicitly,
-whether implemented natively or through a future WASM extension host. Preserve
-existing explicit configuration during any migration to profile selection.
-
-A profile is not a security-policy switch. It must not weaken path checks,
-archive limits, authorization, input validation or idle/update guards, enable
-real reboot/shutdown, or copy an older implementation's incidental failures.
-Keep Phobos software identity, its documented Python-version stub, and the
-intentional missing-CAN empty result. API version 1.5.0 stays unchanged.
-
-Before shipping a profile, add paired tests for each changed request, result,
-event and side effect. Make the API dump identify the selected profile and
-keep separate upstream and Forge-X checks. Do not ship an empty flag that
-implies the missing timelapse/upload/update behavior is present.
+Path checks, archive limits, authorization and idle/update guards remain active.
+Host reboot/shutdown remain no-ops. Software identity stays `phobos`, API version
+1.5.0 and the documented Python-version stub. Unavailable CAN still returns an
+empty list. These choices and optional components are not Forge-X bugs.
 
 ## Rechecking
 
@@ -149,12 +139,10 @@ import Moonraker nor contact a printer:
 PYTHONPATH=tools uv run --locked python -m api_scanner diff \
   --source "$FORGE_X_SOURCE" --baseline api/forge_x_surface.json
 mkdir -p .scratch
-zig-out/bin/phobos -d "$PWD/.scratch/forge-x-api-data" --dump-api > .scratch/forge-x-api.json
+zig-out/bin/phobos --compat forge-x -d "$PWD/.scratch/forge-x-api-data" --dump-api > .scratch/forge-x-api.json
 PYTHONPATH=tools uv run --locked python -m api_scanner coverage \
   --baseline api/forge_x_surface.json --phobos .scratch/forge-x-api.json
 ```
 
-`diff` returns 0 for the pinned source's API declarations. `coverage` currently
-returns 1 for the ten missing timelapse names above. Keep this visible rather
-than weakening the upstream gate or marking incomplete Forge-X coverage green.
-Review behavior and provenance before accepting a new Forge-X baseline.
+`diff` returns 0 for the pinned source's declarations. Both coverage gates
+return 0. Review behavior and provenance before accepting a new baseline.

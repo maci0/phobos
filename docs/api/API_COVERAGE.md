@@ -312,6 +312,11 @@ Calls phobos registers that the static baseline lists don't enumerate. Most are 
 
 | JSON-RPC method | Classification |
 |---|---|
+| `machine.timelapse.get_settings` | Forge-X timelapse extension |
+| `machine.timelapse.lastframeinfo` | Forge-X timelapse extension |
+| `machine.timelapse.post_settings` | Forge-X timelapse extension |
+| `machine.timelapse.render` | Forge-X timelapse extension |
+| `machine.timelapse.saveframes` | Forge-X timelapse extension |
 | `notify` | Klipper remote method (also exposed as JSON-RPC) |
 | `paneldue_beep` | Klipper remote method (also exposed as JSON-RPC) |
 | `pause_job_queue` | Klipper remote method (also exposed as JSON-RPC) |
@@ -329,6 +334,10 @@ Calls phobos registers that the static baseline lists don't enumerate. Most are 
 | `set_wled_state` | Klipper remote method (also exposed as JSON-RPC) |
 | `spoolman_set_active_spool` | Klipper remote method (also exposed as JSON-RPC) |
 | `start_job_queue` | Klipper remote method (also exposed as JSON-RPC) |
+
+| Notification | Classification |
+|---|---|
+| `notify_timelapse_event` | Forge-X timelapse extension |
 
 ## Klipper→Moonraker remote methods
 

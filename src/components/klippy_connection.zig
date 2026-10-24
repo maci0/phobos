@@ -912,6 +912,13 @@ pub const KlippyCtx = struct {
         return self.call(method, params_json, null, .none, alloc);
     }
 
+    /// Internal off-Core requests do not add housekeeping scripts to command history.
+    pub fn requestQuiet(self: *KlippyCtx, method: []const u8, params: std.json.Value, alloc: std.mem.Allocator) !std.json.Value {
+        const encoded = try serializeParams(alloc, params);
+        defer if (encoded.len != 0) alloc.free(encoded);
+        return self.call(method, encoded, null, .{ .duration = .{ .raw = .fromSeconds(20), .clock = .awake } }, alloc);
+    }
+
     /// Store a non-empty `gcode/script` script as a gcode store command
     /// (klippy_connection.py `gcode_received`). Core held: the store is read
     /// under Core.

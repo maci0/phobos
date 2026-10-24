@@ -207,6 +207,8 @@ DELTAS: dict[str, tuple[str, str]] = {
 
 def classify_extra(name: str, remote_names: set[str]) -> str:
     """Classify a phobos JSON-RPC method that isn't in the static baseline list."""
+    if name.startswith("machine.timelapse."):
+        return "Forge-X timelapse extension"
     last = name.rsplit(".", 1)[-1]
     if name in remote_names or last in remote_names:
         return "Klipper remote method (also exposed as JSON-RPC)"
@@ -396,7 +398,17 @@ def generate(baseline: dict[str, Any], phobos: dict[str, Any]) -> str:
             lines.append(
                 _table(
                     ["Notification", "Classification"],
-                    [[f"`{n}`", "phobos-internal"] for n in extra_notifs],
+                    [
+                        [
+                            f"`{n}`",
+                            (
+                                "Forge-X timelapse extension"
+                                if n == "notify_timelapse_event"
+                                else "phobos-internal"
+                            ),
+                        ]
+                        for n in extra_notifs
+                    ],
                 )
             )
             lines.append("")

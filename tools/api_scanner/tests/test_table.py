@@ -75,6 +75,15 @@ def test_extension_classification():
     assert "is_remote" in classify_extra("printer.info", set())
     # anything else is a genuine phobos shim.
     assert "shim" in classify_extra("server.weird_internal", set())
+    assert "Forge-X" in classify_extra("machine.timelapse.render", set())
+
+
+def test_forge_x_extensions_are_not_classified_as_internal():
+    dump = {**PHOBOS, "notifications": ["notify_timelapse_event"],
+            "jsonrpc_methods": ["machine.timelapse.render"]}
+    md = generate(BASELINE, dump)
+    assert "| `notify_timelapse_event` | Forge-X timelapse extension |" in md
+    assert "| `machine.timelapse.render` | Forge-X timelapse extension |" in md
 
 
 def test_extensions_section_lists_extras():
