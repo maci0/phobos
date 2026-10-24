@@ -2281,3 +2281,21 @@ optional components and existing safety no-ops remain deliberate. Full Python
 component loading, Jinja2, LDAP, Apprise and a WASM extension host were not added.
 `graphify-out/graph.json` exists, but `graphify` is not installed, so its update
 was skipped and no graph artifact was changed.
+
+## 2026-10-24: Prepare v0.3.0
+
+Requested: a new minor release, deployment to the existing Forge-X printer and
+README instructions for running it. Bumped the package from 0.2.3 to 0.3.0 and
+added release notes for the native Forge-X implementation and separate API
+tracker. The README now documents the Cortex-A7 asset, checksum verification,
+persistent storage, chroot/config/database paths, explicit compatibility profile,
+launcher, safe stopped-database backups and rollback. Existing v0.2.3 benchmark
+results keep their measured version. Publication and deployment results follow
+after verification; no deployment success is claimed by this preparation entry.
+
+Preparation checks pass: native package identity reports 0.3.0; upstream and
+Forge-X registration coverage remain 100%, and the generated API table passes
+its freshness check. All 114 Python tooling tests, four build-policy tests,
+Python lint/format/type checks, measurement smoke tests, Zig formatting,
+SQLite source hashes and whitespace checks pass. Complete daemon suites and
+the seven-profile release matrix are running before tag publication.

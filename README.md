@@ -43,7 +43,7 @@ compare v0.2.3 with Moonraker in fresh Forge-X
 printer probes and an isolated KVM guest, with metric directions, trial ranges
 and measured scheduling limits. Published-release captures remain archived.
 The latest release is
-[v0.2.3](docs/releases/v0.2.3.md).
+[v0.3.0](docs/releases/v0.3.0.md).
 
 ## Architecture
 
@@ -113,6 +113,75 @@ Some hosts, the deploy target included, cannot link their system glibc with Zig 
 the build targets musl. Do not run a glibc `zig build`.
 The [build guide](docs/BUILDS.md) lists ARMv6, ARMv7 floating-point variants,
 Cortex-A7, AArch64 and x86-64 assets, their CPU requirements and verification scope.
+
+## Run on a Forge-X printer
+
+For the FlashForge Adventurer 5M/5M Pro running Forge-X, use the Cortex-A7
+asset `phobos-v0.3.0-arm-linux-musleabihf`. Other Klipper hosts should select
+their architecture from the [build guide](docs/BUILDS.md). The binary includes
+SQLite and needs no Zig compiler or Python runtime on the printer. Native
+timelapse rendering needs an installed FFmpeg; see [timelapse](docs/TIMELAPSE.md).
+
+Download and verify the release on your computer, then copy it to persistent
+printer storage. Replace the example SSH address with your printer's address.
+Avoid `/tmp`, which is a small RAM filesystem on Forge-X.
+
+```sh
+mkdir -p .scratch/install-v0.3.0
+cd .scratch/install-v0.3.0
+curl -fLO https://github.com/maci0/phobos/releases/download/v0.3.0/phobos-v0.3.0-arm-linux-musleabihf
+curl -fLO https://github.com/maci0/phobos/releases/download/v0.3.0/SHA256SUMS
+grep '  phobos-v0.3.0-arm-linux-musleabihf$' SHA256SUMS | sha256sum --check -
+cat phobos-v0.3.0-arm-linux-musleabihf | ssh root@192.168.0.150 \
+  'test ! -e /data/phobos-v0.3.0 && cat > /data/phobos-v0.3.0.new && chmod 755 /data/phobos-v0.3.0.new && mv /data/phobos-v0.3.0.new /data/phobos-v0.3.0'
+```
+
+Wait until printing and calibration finish and heater targets are zero. Stop
+the existing API daemon before using port 7125 or its database. On an unmodified
+Forge-X installation, stop only Moonraker with
+`chroot /data/.mod/.forge-x /opt/config/mod/.root/S65moonraker stop`.
+For an existing phobos installation, stop its supervisor or send SIGTERM to its
+verified daemon PID and wait for it to exit. Confirm the old listener has stopped.
+Never use `.root/forge-x restart`: it reboots the board.
+
+With the API daemon stopped, preserve its executable and launcher, and copy
+`moonraker-sql.db` plus any `-wal` and `-shm` files from
+`/root/printer_data/database/` inside the chroot to a new backup directory on
+persistent storage. Keep the configuration backup private because it may
+contain credentials. Do not run two daemons against this database.
+
+Run phobos from an SSH session on the printer:
+
+```sh
+chroot /data/.mod/.forge-x /data/phobos-v0.3.0 \
+  --compat forge-x -d /root/printer_data
+```
+
+This loads `/root/printer_data/config/moonraker.conf`, follows its includes,
+opens `/root/printer_data/database/moonraker-sql.db` and uses the configured
+host and port. Preserve Forge-X's `[file_manager] file_system_observer: none`:
+its kernel lacks inotify. Keep the existing authorization settings. Fluidd
+continues to use `http://<printer-address>:7125`.
+
+For the existing `/data/phobos-run.sh` installation, its launcher body is:
+
+```sh
+#!/bin/sh
+exec /data/phobos-v0.3.0 --compat forge-x -d /root/printer_data >> /data/logFiles/phobos.log 2>&1
+```
+
+Run that launcher with
+`nohup chroot /data/.mod/.forge-x /data/phobos-run.sh </dev/null >/data/phobos-start.log 2>&1 &`
+after stopping the foreground instance. Keep your existing boot supervisor
+pointed at the launcher; this command alone does not install a boot service.
+Check `/server/info` for `klippy_state: "ready"`, no failed components and no
+warnings, then check Fluidd's temperatures, files and console. Logs are in
+`/data/logFiles/phobos.log`; `-o json --version` reports the package version.
+
+To roll back, stop phobos, restore the saved launcher/executable and restart
+the previous API daemon. If database rollback is needed, first preserve the
+failed installation's database files, then restore the stopped backup and its
+matching WAL/SHM files together. Never restore a database while a daemon uses it.
 
 ## Tracking Moonraker
 
