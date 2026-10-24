@@ -223,6 +223,11 @@ uv run --with pytest --with tree-sitter --with tree-sitter-python python -m pyte
 When upstream Moonraker adds or changes endpoints, `diff` lists what moved:
 implement the delta, regenerate the baseline, and confirm coverage is back to 100%.
 
+Forge-X uses a separate [`api/forge_x_surface.json`](api/forge_x_surface.json)
+baseline and [behavior tracker](docs/api/FORGE_X.md). Pass that baseline
+explicitly for Forge-X checks. Do not replace the upstream baseline or infer
+behavioral parity from endpoint-name coverage.
+
 ## 7. Definition of done
 
 Append the change, requester, source evidence and verification to

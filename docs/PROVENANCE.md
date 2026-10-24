@@ -2170,3 +2170,47 @@ job records showing completed/success and successful public publication.
 Independent downloads and checksum/byte comparisons complete without
 fabricating a workflow conclusion. The actual aggregate and job states are
 retained in the publication JSON.
+
+## 2026-10-24: track Forge-X API and behavior separately
+
+Requested: compare upstream and Forge-X Moonraker and assess a startup flag for
+selecting compatibility behavior. Added `api/forge_x_surface.json` and
+`docs/api/FORGE_X.md`, with the source revisions, registered API differences,
+behavior gaps, current Phobos evidence and an explicitly unimplemented startup
+profile proposal. Updated the scanner guide and development guide; corrected
+the scanner guide's stale statement that no CI workflow existed.
+
+Compared Phobos's unchanged Moonraker pin
+`9008485843740c93e0154ccbdac1fc2b02b03aaa` with Forge-X's `1.4.2` branch at
+`f2c3f272d6e27400818a514d9d31d754eeb1b5e3`, downloaded by full revision. Forge-X
+`main` is a different release line. Neither the local beta checkout at
+`95d1771d8161df5e93eacdf3ec501861e607e202` nor the vendor checkout was changed.
+The archive hashes are recorded in the tracker. Ignoring caches, bytecode and
+generated version files, 55 source paths differ. A dated upstream reference,
+`d4d2074466c834532b46c965beb233f6341e493a`, reduces that inventory to 19 paths;
+it is not asserted to be Forge-X's exact fork point. Version drift is kept
+separate from custom behavior. Full source/API diff captures and the comparison
+script are private scratch artifacts under `.scratch/forgex-compat-20261024/`.
+
+The comparison reproduced two tooling bugs: legacy string-list request verbs
+became dynamic names, and literal remote registrations were compared using
+their unmounted paths. Added three tests and confirmed they failed for those
+reasons before fixing the shared extractor and coverage path normalization.
+Unknown list elements remain dynamic. The pinned upstream scan and generated
+coverage table remain unchanged.
+
+Verification: all 113 Python tooling tests passed, including 75 API-scanner
+tests and its bounded fuzz cases. The focused undefined-name/syntax Ruff check
+and `git diff --check` passed. The Forge-X snapshot has no API drift against
+its new baseline. The v0.2.3 native dump retains upstream coverage of 123/123
+paths, 130/130 RPC names and 27/27 notifications. Separate Forge-X coverage is
+117/121 paths, 124/129 RPC names and 27/28 notifications; its expected nonzero
+result records the missing timelapse implementation. Four additional timelapse
+Klippy remote methods are missing outside that coverage score. The tracker
+also records existing-route differences, including print-start macros, upload
+dialogs, service preflight, Feather events and object-filtering scope.
+
+No daemon behavior, package version, release, deployment or printer state was
+changed. No new runtime flag or WASM integration is claimed. Native Zig suites,
+physical-printer workflows and third-party integrations were not rerun for
+this tooling/documentation change.

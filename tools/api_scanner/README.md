@@ -5,6 +5,9 @@ a deterministic, diffable JSON artifact. phobos targets Moonraker's API; the
 scanner records declared surface changes when the vendored source changes.
 `api/api_surface.json` is the authoritative call list, alongside the hand-written
 [`API_SURFACE.md`](../../docs/api/API_SURFACE.md) inventory.
+Forge-X is tracked separately in [`api/forge_x_surface.json`](../../api/forge_x_surface.json).
+Its source revisions, missing calls, behavior differences and proposed startup
+profile are in [the Forge-X tracker](../../docs/api/FORGE_X.md).
 
 Parsing uses tree-sitter (`tree-sitter-python`): no regexes, no importing
 Moonraker. [`tools/client_api_scanner`](../client_api_scanner/README.md) uses the
@@ -18,6 +21,9 @@ From every `.py` under a Moonraker source root:
   `RequestType.GET|POST|DELETE` flags, `transports`, `wrap_result`, `content_type`,
   `auth_required`/`auth`, and `is_remote`. Non-literal arguments are recorded as
   the sentinel `"<dynamic>"` instead of failing.
+  Legacy string lists such as `['GET', 'POST']` are supported, including
+  case normalization and duplicate removal. Coverage mounts literal remote
+  registrations such as `objects/list` under `/printer/`.
 - **JSON-RPC methods**: derived from each endpoint's path by Moonraker's rule
   (`common.py::APIDefinition.create`): drop the leading `/`, replace `/` with `.`;
   for multi-verb endpoints the last segment is prefixed `get_`/`post_`/`delete_`
@@ -118,8 +124,9 @@ target ABI correctness, runtime behavior or benchmark results. See the
 [build matrix](../../docs/BUILDS.md) for target-specific evidence and the
 [coverage limits](../../docs/api/COVERAGE_HEATMAP.md) for what this gate proves.
 
-There is no CI workflow in the repo; `diff`, `coverage`, and `table --check` all
-exit non-zero on failure and can serve as gates.
+[CI](../../.github/workflows/ci.yml) runs scanner tests, upstream coverage and
+`table --check`. Forge-X coverage is a separate incomplete target; its missing
+timelapse calls are recorded rather than added to the upstream pass requirement.
 
 ## Tests
 

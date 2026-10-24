@@ -59,6 +59,29 @@ def test_multi_verb_endpoint_prefixes_methods():
         "server.history.get_job", "server.history.delete_job"]
 
 
+def test_legacy_string_list_verbs_match_moonraker_flags():
+    e = _one_endpoint(
+        "self.server.register_endpoint('/machine/timelapse/settings', "
+        "['post', 'GET', 'GET'], cb)\n"
+    )
+    assert e.request_types == ["POST", "GET"]
+    assert e.multi_verb is True
+    assert e.jsonrpc_methods == [
+        "machine.timelapse.get_settings", "machine.timelapse.post_settings"]
+    single = _one_endpoint(
+        "self.server.register_endpoint('/machine/timelapse/render', ['POST'], cb)\n"
+    )
+    assert single.request_types == ["POST"]
+    assert single.jsonrpc_methods == ["machine.timelapse.render"]
+
+
+def test_legacy_string_list_keeps_unknown_verbs_dynamic():
+    e = _one_endpoint(
+        "self.server.register_endpoint('/server/x', ['GET', verb, f'{name}'], cb)\n"
+    )
+    assert e.request_types == ["GET", DYNAMIC]
+
+
 def test_http_only_endpoint_has_no_rpc_method():
     src = (
         "self.server.register_endpoint(\n"

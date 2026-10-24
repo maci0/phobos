@@ -232,7 +232,7 @@ def _fstring_suffix(node: ts.Node) -> Any:
 
 
 def _flag_names(node: ts.Node) -> list[str]:
-    """Collect the leaf attribute names of an OR-chain of ``X.NAME`` accesses.
+    """Collect enum flags or Moonraker's legacy list of string flag names.
 
     ``RequestType.GET | RequestType.POST`` yields ``["GET", "POST"]``.
     Unknown / dynamic operands are recorded as DYNAMIC.
@@ -253,6 +253,12 @@ def _flag_names(node: ts.Node) -> list[str]:
             attr = n.child_by_field_name("attribute")
             # X.NAME -> NAME (X is not verified, to tolerate import aliases)
             names.append(_text(attr) if attr is not None else DYNAMIC)
+        elif n.type == "list":
+            for child in n.named_children:
+                if child.type == "comment":
+                    continue
+                value = _decode_string(child) if child.type == "string" else None
+                names.append(value.upper() if value else DYNAMIC)
         elif n.type == "parenthesized_expression":
             inner = [c for c in n.named_children]
             if len(inner) == 1:
@@ -273,7 +279,7 @@ def _flag_names(node: ts.Node) -> list[str]:
             names.append(DYNAMIC)
 
     visit(node)
-    return names
+    return list(dict.fromkeys(names))
 
 
 def _bool_value(node: ts.Node | None) -> Any:

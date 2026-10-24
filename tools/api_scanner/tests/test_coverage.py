@@ -73,6 +73,22 @@ PHOBOS_FULL_FIXTURE = {
 # Unit tests for compute_coverage
 # ---------------------------------------------------------------------------
 
+def test_remote_registration_uses_its_mounted_printer_path():
+    for path in ("objects/list", "/objects/list/"):
+        baseline = {
+            "endpoints": [
+                {"path": path, "is_remote": True},
+                {"path": "<dynamic>", "is_remote": True},
+            ],
+        }
+        report = compute_coverage(baseline, {
+            "endpoints": [{"path": "/printer/objects/list"}],
+        })
+        assert report["endpoints"] == {
+            "total": 1, "covered": 1, "missing": [],
+        }
+
+
 def test_partial_coverage_counts():
     report = compute_coverage(BASELINE_FIXTURE, PHOBOS_PARTIAL_FIXTURE)
 

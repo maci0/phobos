@@ -15,7 +15,8 @@ def _baseline_endpoint_paths(baseline: Dict[str, Any]) -> Set[str]:
     # Skip <dynamic> entries: runtime-registered variable paths (Klippy-proxied)
     # that cannot be matched statically; they are not part of the achievable surface.
     return {
-        _norm_path(e["path"])
+        _norm_path("/printer/" + e["path"].strip("/")
+                   if e.get("is_remote") else e["path"])
         for e in baseline.get("endpoints", [])
         if not _norm_path(e["path"]).startswith("<")
     }

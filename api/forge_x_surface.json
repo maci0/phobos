@@ -1,0 +1,4085 @@
+{
+  "endpoints": [
+    {
+      "auth_required": true,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.get_api_key",
+        "access.post_api_key"
+      ],
+      "multi_verb": true,
+      "path": "/access/api_key",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/authorization.py:257",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": false,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.info"
+      ],
+      "multi_verb": false,
+      "path": "/access/info",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/authorization.py:266",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": false,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.login"
+      ],
+      "multi_verb": false,
+      "path": "/access/login",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/authorization.py:231",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.logout"
+      ],
+      "multi_verb": false,
+      "path": "/access/logout",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/authorization.py:236",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.oneshot_token"
+      ],
+      "multi_verb": false,
+      "path": "/access/oneshot_token",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/authorization.py:262",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": false,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.refresh_jwt"
+      ],
+      "multi_verb": false,
+      "path": "/access/refresh_jwt",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/authorization.py:240",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.get_user",
+        "access.post_user",
+        "access.delete_user"
+      ],
+      "multi_verb": true,
+      "path": "/access/user",
+      "request_types": [
+        "GET",
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/authorization.py:245",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.user.password"
+      ],
+      "multi_verb": false,
+      "path": "/access/user/password",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/authorization.py:253",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "authorization",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "access.users.list"
+      ],
+      "multi_verb": false,
+      "path": "/access/users/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/authorization.py:249",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/currentuser",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:83",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/files/moonraker/(?P<relative_path>.+)",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/octoprint_compat.py:122",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/job",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:97",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/login",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/octoprint_compat.py:79",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/printer",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:104",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/printer/command",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/octoprint_compat.py:107",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/printerprofiles",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:114",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/server",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:73",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/settings",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:87",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "octoprint_compat",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/api/version",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/octoprint_compat.py:69",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "extensions",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "connection.register_remote_method"
+      ],
+      "multi_verb": false,
+      "path": "/connection/register_remote_method",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/extensions.py:37",
+      "transports": [
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "extensions",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "connection.send_event"
+      ],
+      "multi_verb": false,
+      "path": "/connection/send_event",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/extensions.py:42",
+      "transports": [
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": true,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "debug.database.get_item",
+        "debug.database.post_item",
+        "debug.database.delete_item"
+      ],
+      "multi_verb": true,
+      "path": "/debug/database/item",
+      "request_types": [
+        "GET",
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/database.py:263",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": true,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "debug.database.list"
+      ],
+      "multi_verb": false,
+      "path": "/debug/database/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/database.py:260",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": true,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "debug.database.table"
+      ],
+      "multi_verb": false,
+      "path": "/debug/database/table",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/database.py:266",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "notifier",
+      "content_type": null,
+      "debug_only": true,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "debug.notifiers.test"
+      ],
+      "multi_verb": false,
+      "path": "/debug/notifiers/test",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/notifier.py:81",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "power",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.device_power.get_device",
+        "machine.device_power.post_device"
+      ],
+      "multi_verb": true,
+      "path": "/machine/device_power/device",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/power.py:96",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "power",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.device_power.devices"
+      ],
+      "multi_verb": false,
+      "path": "/machine/device_power/devices",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/power.py:81",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "power",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.device_power.off"
+      ],
+      "multi_verb": false,
+      "path": "/machine/device_power/off",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/power.py:92",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "power",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.device_power.on"
+      ],
+      "multi_verb": false,
+      "path": "/machine/device_power/on",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/power.py:88",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "power",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.device_power.status"
+      ],
+      "multi_verb": false,
+      "path": "/machine/device_power/status",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/power.py:84",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.peripherals.canbus"
+      ],
+      "multi_verb": false,
+      "path": "/machine/peripherals/canbus",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/machine.py:157",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.peripherals.serial"
+      ],
+      "multi_verb": false,
+      "path": "/machine/peripherals/serial",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/machine.py:151",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.peripherals.usb"
+      ],
+      "multi_verb": false,
+      "path": "/machine/peripherals/usb",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/machine.py:154",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.peripherals.video"
+      ],
+      "multi_verb": false,
+      "path": "/machine/peripherals/video",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/machine.py:160",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "proc_stats",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.proc_stats"
+      ],
+      "multi_verb": false,
+      "path": "/machine/proc_stats",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/proc_stats.py:82",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.reboot"
+      ],
+      "multi_verb": false,
+      "path": "/machine/reboot",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/machine.py:127",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.services.restart"
+      ],
+      "multi_verb": false,
+      "path": "/machine/services/restart",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/machine.py:133",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.services.start"
+      ],
+      "multi_verb": false,
+      "path": "/machine/services/start",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/machine.py:139",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.services.stop"
+      ],
+      "multi_verb": false,
+      "path": "/machine/services/stop",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/machine.py:136",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.shutdown"
+      ],
+      "multi_verb": false,
+      "path": "/machine/shutdown",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/machine.py:130",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.sudo.info"
+      ],
+      "multi_verb": false,
+      "path": "/machine/sudo/info",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/machine.py:145",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.sudo.password"
+      ],
+      "multi_verb": false,
+      "path": "/machine/sudo/password",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/machine.py:148",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "machine",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.system_info"
+      ],
+      "multi_verb": false,
+      "path": "/machine/system_info",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/machine.py:142",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "timelapse",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.timelapse.lastframeinfo"
+      ],
+      "multi_verb": false,
+      "path": "/machine/timelapse/lastframeinfo",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/timelapse.py:197",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "timelapse",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.timelapse.render"
+      ],
+      "multi_verb": false,
+      "path": "/machine/timelapse/render",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/timelapse.py:190",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "timelapse",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.timelapse.saveframes"
+      ],
+      "multi_verb": false,
+      "path": "/machine/timelapse/saveframes",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/timelapse.py:192",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "timelapse",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.timelapse.get_settings",
+        "machine.timelapse.post_settings"
+      ],
+      "multi_verb": true,
+      "path": "/machine/timelapse/settings",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/timelapse.py:194",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.client"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/client",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:158",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.full"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/full",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:161",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.klipper"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/klipper",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:152",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.moonraker"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/moonraker",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:149",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.recover"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/recover",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:170",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.refresh"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/refresh",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:167",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.rollback"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/rollback",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:173",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.status"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/status",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/update_manager/update_manager.py:164",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "update_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.update.system"
+      ],
+      "multi_verb": false,
+      "path": "/machine/update/system",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/update_manager/update_manager.py:155",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "wled",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.wled.off"
+      ],
+      "multi_verb": false,
+      "path": "/machine/wled/off",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/wled.py:400",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "wled",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.wled.on"
+      ],
+      "multi_verb": false,
+      "path": "/machine/wled/on",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/wled.py:397",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "wled",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.wled.status"
+      ],
+      "multi_verb": false,
+      "path": "/machine/wled/status",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/wled.py:394",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "wled",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.wled.get_strip",
+        "machine.wled.post_strip"
+      ],
+      "multi_verb": true,
+      "path": "/machine/wled/strip",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/wled.py:406",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "wled",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.wled.strips"
+      ],
+      "multi_verb": false,
+      "path": "/machine/wled/strips",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/wled.py:391",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "wled",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "machine.wled.toggle"
+      ],
+      "multi_verb": false,
+      "path": "/machine/wled/toggle",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/wled.py:403",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "printer.firmware_restart"
+      ],
+      "multi_verb": false,
+      "path": "/printer/firmware_restart",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:75",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "printer.print.cancel"
+      ],
+      "multi_verb": false,
+      "path": "/printer/print/cancel",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:66",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "printer.print.pause"
+      ],
+      "multi_verb": false,
+      "path": "/printer/print/pause",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:60",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "printer.print.resume"
+      ],
+      "multi_verb": false,
+      "path": "/printer/print/resume",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:63",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "printer.print.start"
+      ],
+      "multi_verb": false,
+      "path": "/printer/print/start",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:69",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "printer.restart"
+      ],
+      "multi_verb": false,
+      "path": "/printer/restart",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:72",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "announcements",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.announcements.dismiss"
+      ],
+      "multi_verb": false,
+      "path": "/server/announcements/dismiss",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/announcements.py:64",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "announcements",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.announcements.post_feed",
+        "server.announcements.delete_feed"
+      ],
+      "multi_verb": true,
+      "path": "/server/announcements/feed",
+      "request_types": [
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/announcements.py:72",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "announcements",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.announcements.feeds"
+      ],
+      "multi_verb": false,
+      "path": "/server/announcements/feeds",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/announcements.py:76",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "announcements",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.announcements.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/announcements/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/announcements.py:60",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "announcements",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.announcements.update"
+      ],
+      "multi_verb": false,
+      "path": "/server/announcements/update",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/announcements.py:68",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "server",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.config"
+      ],
+      "multi_verb": false,
+      "path": "/server/config",
+      "request_types": [
+        "GET"
+      ],
+      "source": "server.py:121",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": false,
+      "component": "websockets",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.connection.identify"
+      ],
+      "multi_verb": false,
+      "path": "/server/connection/identify",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/websockets.py:61",
+      "transports": [
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.database.post_backup",
+        "server.database.delete_backup"
+      ],
+      "multi_verb": true,
+      "path": "/server/database/backup",
+      "request_types": [
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/database.py:250",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.database.compact"
+      ],
+      "multi_verb": false,
+      "path": "/server/database/compact",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/database.py:257",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.database.get_item",
+        "server.database.post_item",
+        "server.database.delete_item"
+      ],
+      "multi_verb": true,
+      "path": "/server/database/item",
+      "request_types": [
+        "GET",
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/database.py:247",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.database.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/database/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/database.py:244",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "database",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.database.restore"
+      ],
+      "multi_verb": false,
+      "path": "/server/database/restore",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/database.py:254",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "extensions",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.extensions.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/extensions/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/extensions.py:46",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "extensions",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.extensions.request"
+      ],
+      "multi_verb": false,
+      "path": "/server/extensions/request",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/extensions.py:49",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.copy"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/copy",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/file_manager/file_manager.py:212",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.delete_file"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/delete_file",
+      "request_types": [
+        "DELETE"
+      ],
+      "source": "components/file_manager/file_manager.py:218",
+      "transports": [
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.get_directory",
+        "server.files.post_directory",
+        "server.files.delete_directory"
+      ],
+      "multi_verb": true,
+      "path": "/server/files/directory",
+      "request_types": [
+        "GET",
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/file_manager/file_manager.py:205",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/file_manager/file_manager.py:190",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.metadata"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/metadata",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/file_manager/file_manager.py:193",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.metascan"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/metascan",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/file_manager/file_manager.py:196",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.move"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/move",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/file_manager/file_manager.py:209",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.roots"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/roots",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/file_manager/file_manager.py:202",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.thumbnails"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/thumbnails",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/file_manager/file_manager.py:199",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "file_manager",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.files.zip"
+      ],
+      "multi_verb": false,
+      "path": "/server/files/zip",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/file_manager/file_manager.py:215",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "data_store",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.gcode_store"
+      ],
+      "multi_verb": false,
+      "path": "/server/gcode_store",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/data_store.py:66",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "history",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.history.get_job",
+        "server.history.delete_job"
+      ],
+      "multi_verb": true,
+      "path": "/server/history/job",
+      "request_types": [
+        "GET",
+        "DELETE"
+      ],
+      "source": "components/history.py:214",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "history",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.history.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/history/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/history.py:218",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "history",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.history.reset_totals"
+      ],
+      "multi_verb": false,
+      "path": "/server/history/reset_totals",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/history.py:224",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "history",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.history.totals"
+      ],
+      "multi_verb": false,
+      "path": "/server/history/totals",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/history.py:221",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "server",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.info"
+      ],
+      "multi_verb": false,
+      "path": "/server/info",
+      "request_types": [
+        "GET"
+      ],
+      "source": "server.py:118",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "job_queue",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.job_queue.post_job",
+        "server.job_queue.delete_job"
+      ],
+      "multi_verb": true,
+      "path": "/server/job_queue/job",
+      "request_types": [
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/job_queue.py:59",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "job_queue",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.job_queue.jump"
+      ],
+      "multi_verb": false,
+      "path": "/server/job_queue/jump",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/job_queue.py:72",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "job_queue",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.job_queue.pause"
+      ],
+      "multi_verb": false,
+      "path": "/server/job_queue/pause",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/job_queue.py:63",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "job_queue",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.job_queue.start"
+      ],
+      "multi_verb": false,
+      "path": "/server/job_queue/start",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/job_queue.py:66",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "job_queue",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.job_queue.status"
+      ],
+      "multi_verb": false,
+      "path": "/server/job_queue/status",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/job_queue.py:69",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "loghelper",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.logs.rollover"
+      ],
+      "multi_verb": false,
+      "path": "/server/logs/rollover",
+      "request_types": [
+        "POST"
+      ],
+      "source": "loghelper.py:118",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "mqtt",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.mqtt.publish"
+      ],
+      "multi_verb": false,
+      "path": "/server/mqtt/publish",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/mqtt.py:379",
+      "transports": [
+        "<dynamic>"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "mqtt",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.mqtt.subscribe"
+      ],
+      "multi_verb": false,
+      "path": "/server/mqtt/subscribe",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/mqtt.py:383",
+      "transports": [
+        "<dynamic>"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "notifier",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.notifiers.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/notifiers/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/notifier.py:78",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "server",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.restart"
+      ],
+      "multi_verb": false,
+      "path": "/server/restart",
+      "request_types": [
+        "POST"
+      ],
+      "source": "server.py:124",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "sensor",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.sensors.info"
+      ],
+      "multi_verb": false,
+      "path": "/server/sensors/info",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/sensor.py:237",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "sensor",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.sensors.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/sensors/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/sensor.py:232",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "sensor",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.sensors.measurements"
+      ],
+      "multi_verb": false,
+      "path": "/server/sensors/measurements",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/sensor.py:242",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "spoolman",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.spoolman.proxy"
+      ],
+      "multi_verb": false,
+      "path": "/server/spoolman/proxy",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/spoolman.py:102",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "spoolman",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.spoolman.get_spool_id",
+        "server.spoolman.post_spool_id"
+      ],
+      "multi_verb": true,
+      "path": "/server/spoolman/spool_id",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/spoolman.py:97",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "spoolman",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.spoolman.status"
+      ],
+      "multi_verb": false,
+      "path": "/server/spoolman/status",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/spoolman.py:107",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "data_store",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.temperature_store"
+      ],
+      "multi_verb": false,
+      "path": "/server/temperature_store",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/data_store.py:62",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "webcam",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.webcams.get_item",
+        "server.webcams.post_item",
+        "server.webcams.delete_item"
+      ],
+      "multi_verb": true,
+      "path": "/server/webcams/item",
+      "request_types": [
+        "GET",
+        "POST",
+        "DELETE"
+      ],
+      "source": "components/webcam.py:56",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "webcam",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.webcams.list"
+      ],
+      "multi_verb": false,
+      "path": "/server/webcams/list",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/webcam.py:53",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "webcam",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.webcams.test"
+      ],
+      "multi_verb": false,
+      "path": "/server/webcams/test",
+      "request_types": [
+        "POST"
+      ],
+      "source": "components/webcam.py:60",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "websockets",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "server.websocket.id"
+      ],
+      "multi_verb": false,
+      "path": "/server/websocket/id",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/websockets.py:57",
+      "transports": [
+        "WEBSOCKET"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": false,
+      "component": "zeroconf",
+      "content_type": "application/xml",
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [],
+      "multi_verb": false,
+      "path": "/server/zeroconf/ssdp",
+      "request_types": [
+        "GET"
+      ],
+      "source": "components/zeroconf.py:211",
+      "transports": [
+        "HTTP"
+      ],
+      "wrap_result": false
+    },
+    {
+      "auth_required": true,
+      "component": "application",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": false,
+      "jsonrpc_methods": [
+        "<dynamic>"
+      ],
+      "multi_verb": false,
+      "path": "<dynamic>",
+      "request_types": [
+        "<dynamic>"
+      ],
+      "source": "components/application.py:434",
+      "transports": [
+        "<dynamic>"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_connection",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": true,
+      "jsonrpc_methods": [
+        "<dynamic>"
+      ],
+      "multi_verb": false,
+      "path": "<dynamic>",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/klippy_connection.py:396",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    },
+    {
+      "auth_required": true,
+      "component": "klippy_apis",
+      "content_type": null,
+      "debug_only": false,
+      "is_remote": true,
+      "jsonrpc_methods": [
+        "printer.objects.list"
+      ],
+      "multi_verb": false,
+      "path": "objects/list",
+      "request_types": [
+        "GET",
+        "POST"
+      ],
+      "source": "components/klippy_apis.py:78",
+      "transports": [
+        "HTTP",
+        "WEBSOCKET",
+        "INTERNAL"
+      ],
+      "wrap_result": true
+    }
+  ],
+  "jsonrpc_methods": [
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.delete_user",
+      "path": "/access/user",
+      "source": "components/authorization.py:245"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.get_api_key",
+      "path": "/access/api_key",
+      "source": "components/authorization.py:257"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.get_user",
+      "path": "/access/user",
+      "source": "components/authorization.py:245"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.info",
+      "path": "/access/info",
+      "source": "components/authorization.py:266"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.login",
+      "path": "/access/login",
+      "source": "components/authorization.py:231"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.logout",
+      "path": "/access/logout",
+      "source": "components/authorization.py:236"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.oneshot_token",
+      "path": "/access/oneshot_token",
+      "source": "components/authorization.py:262"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.post_api_key",
+      "path": "/access/api_key",
+      "source": "components/authorization.py:257"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.post_user",
+      "path": "/access/user",
+      "source": "components/authorization.py:245"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.refresh_jwt",
+      "path": "/access/refresh_jwt",
+      "source": "components/authorization.py:240"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.user.password",
+      "path": "/access/user/password",
+      "source": "components/authorization.py:253"
+    },
+    {
+      "component": "authorization",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "access.users.list",
+      "path": "/access/users/list",
+      "source": "components/authorization.py:249"
+    },
+    {
+      "component": "extensions",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "connection.register_remote_method",
+      "path": "/connection/register_remote_method",
+      "source": "components/extensions.py:37"
+    },
+    {
+      "component": "extensions",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "connection.send_event",
+      "path": "/connection/send_event",
+      "source": "components/extensions.py:42"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.delete_item",
+      "path": "/debug/database/item",
+      "source": "components/database.py:263"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.get_item",
+      "path": "/debug/database/item",
+      "source": "components/database.py:263"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.list",
+      "path": "/debug/database/list",
+      "source": "components/database.py:260"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.post_item",
+      "path": "/debug/database/item",
+      "source": "components/database.py:263"
+    },
+    {
+      "component": "database",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.database.table",
+      "path": "/debug/database/table",
+      "source": "components/database.py:266"
+    },
+    {
+      "component": "notifier",
+      "debug_only": true,
+      "is_remote": false,
+      "method": "debug.notifiers.test",
+      "path": "/debug/notifiers/test",
+      "source": "components/notifier.py:81"
+    },
+    {
+      "component": "power",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.device_power.devices",
+      "path": "/machine/device_power/devices",
+      "source": "components/power.py:81"
+    },
+    {
+      "component": "power",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.device_power.get_device",
+      "path": "/machine/device_power/device",
+      "source": "components/power.py:96"
+    },
+    {
+      "component": "power",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.device_power.off",
+      "path": "/machine/device_power/off",
+      "source": "components/power.py:92"
+    },
+    {
+      "component": "power",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.device_power.on",
+      "path": "/machine/device_power/on",
+      "source": "components/power.py:88"
+    },
+    {
+      "component": "power",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.device_power.post_device",
+      "path": "/machine/device_power/device",
+      "source": "components/power.py:96"
+    },
+    {
+      "component": "power",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.device_power.status",
+      "path": "/machine/device_power/status",
+      "source": "components/power.py:84"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.peripherals.canbus",
+      "path": "/machine/peripherals/canbus",
+      "source": "components/machine.py:157"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.peripherals.serial",
+      "path": "/machine/peripherals/serial",
+      "source": "components/machine.py:151"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.peripherals.usb",
+      "path": "/machine/peripherals/usb",
+      "source": "components/machine.py:154"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.peripherals.video",
+      "path": "/machine/peripherals/video",
+      "source": "components/machine.py:160"
+    },
+    {
+      "component": "proc_stats",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.proc_stats",
+      "path": "/machine/proc_stats",
+      "source": "components/proc_stats.py:82"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.reboot",
+      "path": "/machine/reboot",
+      "source": "components/machine.py:127"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.services.restart",
+      "path": "/machine/services/restart",
+      "source": "components/machine.py:133"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.services.start",
+      "path": "/machine/services/start",
+      "source": "components/machine.py:139"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.services.stop",
+      "path": "/machine/services/stop",
+      "source": "components/machine.py:136"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.shutdown",
+      "path": "/machine/shutdown",
+      "source": "components/machine.py:130"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.sudo.info",
+      "path": "/machine/sudo/info",
+      "source": "components/machine.py:145"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.sudo.password",
+      "path": "/machine/sudo/password",
+      "source": "components/machine.py:148"
+    },
+    {
+      "component": "machine",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.system_info",
+      "path": "/machine/system_info",
+      "source": "components/machine.py:142"
+    },
+    {
+      "component": "timelapse",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.timelapse.get_settings",
+      "path": "/machine/timelapse/settings",
+      "source": "components/timelapse.py:194"
+    },
+    {
+      "component": "timelapse",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.timelapse.lastframeinfo",
+      "path": "/machine/timelapse/lastframeinfo",
+      "source": "components/timelapse.py:197"
+    },
+    {
+      "component": "timelapse",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.timelapse.post_settings",
+      "path": "/machine/timelapse/settings",
+      "source": "components/timelapse.py:194"
+    },
+    {
+      "component": "timelapse",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.timelapse.render",
+      "path": "/machine/timelapse/render",
+      "source": "components/timelapse.py:190"
+    },
+    {
+      "component": "timelapse",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.timelapse.saveframes",
+      "path": "/machine/timelapse/saveframes",
+      "source": "components/timelapse.py:192"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.client",
+      "path": "/machine/update/client",
+      "source": "components/update_manager/update_manager.py:158"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.full",
+      "path": "/machine/update/full",
+      "source": "components/update_manager/update_manager.py:161"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.klipper",
+      "path": "/machine/update/klipper",
+      "source": "components/update_manager/update_manager.py:152"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.moonraker",
+      "path": "/machine/update/moonraker",
+      "source": "components/update_manager/update_manager.py:149"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.recover",
+      "path": "/machine/update/recover",
+      "source": "components/update_manager/update_manager.py:170"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.refresh",
+      "path": "/machine/update/refresh",
+      "source": "components/update_manager/update_manager.py:167"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.rollback",
+      "path": "/machine/update/rollback",
+      "source": "components/update_manager/update_manager.py:173"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.status",
+      "path": "/machine/update/status",
+      "source": "components/update_manager/update_manager.py:164"
+    },
+    {
+      "component": "update_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.update.system",
+      "path": "/machine/update/system",
+      "source": "components/update_manager/update_manager.py:155"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.get_strip",
+      "path": "/machine/wled/strip",
+      "source": "components/wled.py:406"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.off",
+      "path": "/machine/wled/off",
+      "source": "components/wled.py:400"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.on",
+      "path": "/machine/wled/on",
+      "source": "components/wled.py:397"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.post_strip",
+      "path": "/machine/wled/strip",
+      "source": "components/wled.py:406"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.status",
+      "path": "/machine/wled/status",
+      "source": "components/wled.py:394"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.strips",
+      "path": "/machine/wled/strips",
+      "source": "components/wled.py:391"
+    },
+    {
+      "component": "wled",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "machine.wled.toggle",
+      "path": "/machine/wled/toggle",
+      "source": "components/wled.py:403"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "printer.firmware_restart",
+      "path": "/printer/firmware_restart",
+      "source": "components/klippy_apis.py:75"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": true,
+      "method": "printer.objects.list",
+      "path": "objects/list",
+      "source": "components/klippy_apis.py:78"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "printer.print.cancel",
+      "path": "/printer/print/cancel",
+      "source": "components/klippy_apis.py:66"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "printer.print.pause",
+      "path": "/printer/print/pause",
+      "source": "components/klippy_apis.py:60"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "printer.print.resume",
+      "path": "/printer/print/resume",
+      "source": "components/klippy_apis.py:63"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "printer.print.start",
+      "path": "/printer/print/start",
+      "source": "components/klippy_apis.py:69"
+    },
+    {
+      "component": "klippy_apis",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "printer.restart",
+      "path": "/printer/restart",
+      "source": "components/klippy_apis.py:72"
+    },
+    {
+      "component": "announcements",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.announcements.delete_feed",
+      "path": "/server/announcements/feed",
+      "source": "components/announcements.py:72"
+    },
+    {
+      "component": "announcements",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.announcements.dismiss",
+      "path": "/server/announcements/dismiss",
+      "source": "components/announcements.py:64"
+    },
+    {
+      "component": "announcements",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.announcements.feeds",
+      "path": "/server/announcements/feeds",
+      "source": "components/announcements.py:76"
+    },
+    {
+      "component": "announcements",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.announcements.list",
+      "path": "/server/announcements/list",
+      "source": "components/announcements.py:60"
+    },
+    {
+      "component": "announcements",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.announcements.post_feed",
+      "path": "/server/announcements/feed",
+      "source": "components/announcements.py:72"
+    },
+    {
+      "component": "announcements",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.announcements.update",
+      "path": "/server/announcements/update",
+      "source": "components/announcements.py:68"
+    },
+    {
+      "component": "server",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.config",
+      "path": "/server/config",
+      "source": "server.py:121"
+    },
+    {
+      "component": "websockets",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.connection.identify",
+      "path": "/server/connection/identify",
+      "source": "components/websockets.py:61"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.compact",
+      "path": "/server/database/compact",
+      "source": "components/database.py:257"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.delete_backup",
+      "path": "/server/database/backup",
+      "source": "components/database.py:250"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.delete_item",
+      "path": "/server/database/item",
+      "source": "components/database.py:247"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.get_item",
+      "path": "/server/database/item",
+      "source": "components/database.py:247"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.list",
+      "path": "/server/database/list",
+      "source": "components/database.py:244"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.post_backup",
+      "path": "/server/database/backup",
+      "source": "components/database.py:250"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.post_item",
+      "path": "/server/database/item",
+      "source": "components/database.py:247"
+    },
+    {
+      "component": "database",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.database.restore",
+      "path": "/server/database/restore",
+      "source": "components/database.py:254"
+    },
+    {
+      "component": "extensions",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.extensions.list",
+      "path": "/server/extensions/list",
+      "source": "components/extensions.py:46"
+    },
+    {
+      "component": "extensions",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.extensions.request",
+      "path": "/server/extensions/request",
+      "source": "components/extensions.py:49"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.copy",
+      "path": "/server/files/copy",
+      "source": "components/file_manager/file_manager.py:212"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.delete_directory",
+      "path": "/server/files/directory",
+      "source": "components/file_manager/file_manager.py:205"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.delete_file",
+      "path": "/server/files/delete_file",
+      "source": "components/file_manager/file_manager.py:218"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.get_directory",
+      "path": "/server/files/directory",
+      "source": "components/file_manager/file_manager.py:205"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.list",
+      "path": "/server/files/list",
+      "source": "components/file_manager/file_manager.py:190"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.metadata",
+      "path": "/server/files/metadata",
+      "source": "components/file_manager/file_manager.py:193"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.metascan",
+      "path": "/server/files/metascan",
+      "source": "components/file_manager/file_manager.py:196"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.move",
+      "path": "/server/files/move",
+      "source": "components/file_manager/file_manager.py:209"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.post_directory",
+      "path": "/server/files/directory",
+      "source": "components/file_manager/file_manager.py:205"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.roots",
+      "path": "/server/files/roots",
+      "source": "components/file_manager/file_manager.py:202"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.thumbnails",
+      "path": "/server/files/thumbnails",
+      "source": "components/file_manager/file_manager.py:199"
+    },
+    {
+      "component": "file_manager",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.files.zip",
+      "path": "/server/files/zip",
+      "source": "components/file_manager/file_manager.py:215"
+    },
+    {
+      "component": "data_store",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.gcode_store",
+      "path": "/server/gcode_store",
+      "source": "components/data_store.py:66"
+    },
+    {
+      "component": "history",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.history.delete_job",
+      "path": "/server/history/job",
+      "source": "components/history.py:214"
+    },
+    {
+      "component": "history",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.history.get_job",
+      "path": "/server/history/job",
+      "source": "components/history.py:214"
+    },
+    {
+      "component": "history",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.history.list",
+      "path": "/server/history/list",
+      "source": "components/history.py:218"
+    },
+    {
+      "component": "history",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.history.reset_totals",
+      "path": "/server/history/reset_totals",
+      "source": "components/history.py:224"
+    },
+    {
+      "component": "history",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.history.totals",
+      "path": "/server/history/totals",
+      "source": "components/history.py:221"
+    },
+    {
+      "component": "server",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.info",
+      "path": "/server/info",
+      "source": "server.py:118"
+    },
+    {
+      "component": "job_queue",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.job_queue.delete_job",
+      "path": "/server/job_queue/job",
+      "source": "components/job_queue.py:59"
+    },
+    {
+      "component": "job_queue",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.job_queue.jump",
+      "path": "/server/job_queue/jump",
+      "source": "components/job_queue.py:72"
+    },
+    {
+      "component": "job_queue",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.job_queue.pause",
+      "path": "/server/job_queue/pause",
+      "source": "components/job_queue.py:63"
+    },
+    {
+      "component": "job_queue",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.job_queue.post_job",
+      "path": "/server/job_queue/job",
+      "source": "components/job_queue.py:59"
+    },
+    {
+      "component": "job_queue",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.job_queue.start",
+      "path": "/server/job_queue/start",
+      "source": "components/job_queue.py:66"
+    },
+    {
+      "component": "job_queue",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.job_queue.status",
+      "path": "/server/job_queue/status",
+      "source": "components/job_queue.py:69"
+    },
+    {
+      "component": "loghelper",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.logs.rollover",
+      "path": "/server/logs/rollover",
+      "source": "loghelper.py:118"
+    },
+    {
+      "component": "mqtt",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.mqtt.publish",
+      "path": "/server/mqtt/publish",
+      "source": "components/mqtt.py:379"
+    },
+    {
+      "component": "mqtt",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.mqtt.subscribe",
+      "path": "/server/mqtt/subscribe",
+      "source": "components/mqtt.py:383"
+    },
+    {
+      "component": "notifier",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.notifiers.list",
+      "path": "/server/notifiers/list",
+      "source": "components/notifier.py:78"
+    },
+    {
+      "component": "server",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.restart",
+      "path": "/server/restart",
+      "source": "server.py:124"
+    },
+    {
+      "component": "sensor",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.sensors.info",
+      "path": "/server/sensors/info",
+      "source": "components/sensor.py:237"
+    },
+    {
+      "component": "sensor",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.sensors.list",
+      "path": "/server/sensors/list",
+      "source": "components/sensor.py:232"
+    },
+    {
+      "component": "sensor",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.sensors.measurements",
+      "path": "/server/sensors/measurements",
+      "source": "components/sensor.py:242"
+    },
+    {
+      "component": "spoolman",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.spoolman.get_spool_id",
+      "path": "/server/spoolman/spool_id",
+      "source": "components/spoolman.py:97"
+    },
+    {
+      "component": "spoolman",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.spoolman.post_spool_id",
+      "path": "/server/spoolman/spool_id",
+      "source": "components/spoolman.py:97"
+    },
+    {
+      "component": "spoolman",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.spoolman.proxy",
+      "path": "/server/spoolman/proxy",
+      "source": "components/spoolman.py:102"
+    },
+    {
+      "component": "spoolman",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.spoolman.status",
+      "path": "/server/spoolman/status",
+      "source": "components/spoolman.py:107"
+    },
+    {
+      "component": "data_store",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.temperature_store",
+      "path": "/server/temperature_store",
+      "source": "components/data_store.py:62"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.delete_item",
+      "path": "/server/webcams/item",
+      "source": "components/webcam.py:56"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.get_item",
+      "path": "/server/webcams/item",
+      "source": "components/webcam.py:56"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.list",
+      "path": "/server/webcams/list",
+      "source": "components/webcam.py:53"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.post_item",
+      "path": "/server/webcams/item",
+      "source": "components/webcam.py:56"
+    },
+    {
+      "component": "webcam",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.webcams.test",
+      "path": "/server/webcams/test",
+      "source": "components/webcam.py:60"
+    },
+    {
+      "component": "websockets",
+      "debug_only": false,
+      "is_remote": false,
+      "method": "server.websocket.id",
+      "path": "/server/websocket/id",
+      "source": "components/websockets.py:57"
+    }
+  ],
+  "notifications": [
+    {
+      "component": "spoolman",
+      "event_name": "spoolman:active_spool_set",
+      "name": "notify_active_spool_set",
+      "source": "components/spoolman.py:88"
+    },
+    {
+      "component": "extensions",
+      "event_name": null,
+      "name": "notify_agent_event",
+      "source": "components/extensions.py:70"
+    },
+    {
+      "component": "announcements",
+      "event_name": "announcements:dismissed",
+      "name": "notify_announcement_dismissed",
+      "source": "components/announcements.py:80"
+    },
+    {
+      "component": "announcements",
+      "event_name": "announcements:entries_updated",
+      "name": "notify_announcement_update",
+      "source": "components/announcements.py:83"
+    },
+    {
+      "component": "announcements",
+      "event_name": "announcements:dismiss_wake",
+      "name": "notify_announcement_wake",
+      "source": "components/announcements.py:86"
+    },
+    {
+      "component": "button",
+      "event_name": "button:button_event",
+      "name": "notify_button_event",
+      "source": "components/button.py:37"
+    },
+    {
+      "component": "proc_stats",
+      "event_name": "proc_stats:cpu_throttled",
+      "name": "notify_cpu_throttled",
+      "source": "components/proc_stats.py:73"
+    },
+    {
+      "component": "file_manager",
+      "event_name": "file_manager:filelist_changed",
+      "name": "notify_filelist_changed",
+      "source": "components/file_manager/file_manager.py:223"
+    },
+    {
+      "component": "server",
+      "event_name": "server:gcode_response",
+      "name": "notify_gcode_response",
+      "source": "server.py:131"
+    },
+    {
+      "component": "history",
+      "event_name": "history:history_changed",
+      "name": "notify_history_changed",
+      "source": "components/history.py:212"
+    },
+    {
+      "component": "job_queue",
+      "event_name": "job_queue:job_queue_changed",
+      "name": "notify_job_queue_changed",
+      "source": "components/job_queue.py:55"
+    },
+    {
+      "component": "server",
+      "event_name": "server:klippy_disconnect",
+      "name": "notify_klippy_disconnected",
+      "source": "server.py:129"
+    },
+    {
+      "component": "server",
+      "event_name": "server:klippy_ready",
+      "name": "notify_klippy_ready",
+      "source": "server.py:127"
+    },
+    {
+      "component": "server",
+      "event_name": "server:klippy_shutdown",
+      "name": "notify_klippy_shutdown",
+      "source": "server.py:128"
+    },
+    {
+      "component": "power",
+      "event_name": "power:power_changed",
+      "name": "notify_power_changed",
+      "source": "components/power.py:106"
+    },
+    {
+      "component": "proc_stats",
+      "event_name": "proc_stats:proc_stat_update",
+      "name": "notify_proc_stat_update",
+      "source": "components/proc_stats.py:88"
+    },
+    {
+      "component": "sensor",
+      "event_name": "sensors:sensor_update",
+      "name": "notify_sensor_update",
+      "source": "components/sensor.py:249"
+    },
+    {
+      "component": "machine",
+      "event_name": "machine:service_state_changed",
+      "name": "notify_service_state_changed",
+      "source": "components/machine.py:164"
+    },
+    {
+      "component": "spoolman",
+      "event_name": "spoolman:spoolman_status_changed",
+      "name": "notify_spoolman_status_changed",
+      "source": "components/spoolman.py:89"
+    },
+    {
+      "component": "common",
+      "event_name": null,
+      "name": "notify_status_update",
+      "source": "common.py:472"
+    },
+    {
+      "component": "machine",
+      "event_name": "machine:sudo_alert",
+      "name": "notify_sudo_alert",
+      "source": "components/machine.py:165"
+    },
+    {
+      "component": "timelapse",
+      "event_name": "timelapse:timelapse_event",
+      "name": "notify_timelapse_event",
+      "source": "components/timelapse.py:175"
+    },
+    {
+      "component": "update_manager",
+      "event_name": "update_manager:update_refreshed",
+      "name": "notify_update_refreshed",
+      "source": "components/update_manager/update_manager.py:177"
+    },
+    {
+      "component": "update_manager",
+      "event_name": "update_manager:update_response",
+      "name": "notify_update_response",
+      "source": "components/update_manager/update_manager.py:176"
+    },
+    {
+      "component": "authorization",
+      "event_name": "authorization:user_created",
+      "name": "notify_user_created",
+      "source": "components/authorization.py:272"
+    },
+    {
+      "component": "authorization",
+      "event_name": "authorization:user_deleted",
+      "name": "notify_user_deleted",
+      "source": "components/authorization.py:273"
+    },
+    {
+      "component": "authorization",
+      "event_name": "authorization:user_logged_out",
+      "name": "notify_user_logged_out",
+      "source": "components/authorization.py:276"
+    },
+    {
+      "component": "webcam",
+      "event_name": "webcam:webcams_changed",
+      "name": "notify_webcams_changed",
+      "source": "components/webcam.py:63"
+    }
+  ],
+  "provenance": {
+    "archive_sha256": "9816949151eac0b7ae69843a8000dc3ea73950337bde6e7d58747fdaf828f75a",
+    "ref": "1.4.2",
+    "repository": "https://github.com/DrA1ex/ff5m",
+    "revision": "f2c3f272d6e27400818a514d9d31d754eeb1b5e3",
+    "source_path": ".root/moonraker"
+  },
+  "remote_methods": [
+    {
+      "component": "server",
+      "name": "<dynamic>",
+      "source": "server.py:420"
+    },
+    {
+      "component": "feather_updates",
+      "name": "feather_request_forge_x_update_status",
+      "source": "components/feather_updates.py:170"
+    },
+    {
+      "component": "feather_updates",
+      "name": "feather_reset_forge_x_update",
+      "source": "components/feather_updates.py:176"
+    },
+    {
+      "component": "feather_updates",
+      "name": "feather_start_forge_x_update",
+      "source": "components/feather_updates.py:173"
+    },
+    {
+      "component": "notifier",
+      "name": "notify",
+      "source": "components/notifier.py:59"
+    },
+    {
+      "component": "paneldue",
+      "name": "paneldue_beep",
+      "source": "components/paneldue.py:233"
+    },
+    {
+      "component": "job_queue",
+      "name": "pause_job_queue",
+      "source": "components/job_queue.py:56"
+    },
+    {
+      "component": "klippy_connection",
+      "name": "process_gcode_response",
+      "source": "components/klippy_connection.py:103"
+    },
+    {
+      "component": "klippy_connection",
+      "name": "process_status_update",
+      "source": "components/klippy_connection.py:106"
+    },
+    {
+      "component": "mqtt",
+      "name": "publish_mqtt_topic",
+      "source": "components/mqtt.py:428"
+    },
+    {
+      "component": "machine",
+      "name": "reboot_machine",
+      "source": "components/machine.py:170"
+    },
+    {
+      "component": "power",
+      "name": "set_device_power",
+      "source": "components/power.py:100"
+    },
+    {
+      "component": "wled",
+      "name": "set_wled",
+      "source": "components/wled.py:386"
+    },
+    {
+      "component": "wled",
+      "name": "set_wled_state",
+      "source": "components/wled.py:384"
+    },
+    {
+      "component": "machine",
+      "name": "shutdown_machine",
+      "source": "components/machine.py:168"
+    },
+    {
+      "component": "spoolman",
+      "name": "spoolman_set_active_spool",
+      "source": "components/spoolman.py:70"
+    },
+    {
+      "component": "job_queue",
+      "name": "start_job_queue",
+      "source": "components/job_queue.py:57"
+    },
+    {
+      "component": "timelapse",
+      "name": "timelapse_cancel_render",
+      "source": "components/timelapse.py:188"
+    },
+    {
+      "component": "timelapse",
+      "name": "timelapse_newframe",
+      "source": "components/timelapse.py:182"
+    },
+    {
+      "component": "timelapse",
+      "name": "timelapse_render",
+      "source": "components/timelapse.py:186"
+    },
+    {
+      "component": "timelapse",
+      "name": "timelapse_saveFrames",
+      "source": "components/timelapse.py:184"
+    }
+  ],
+  "router_routes": [
+    {
+      "component": "application",
+      "handler": "RPCHandler",
+      "kind": "router_route",
+      "path": "/server/jsonrpc",
+      "source": "components/application.py:240"
+    },
+    {
+      "component": "application",
+      "handler": "RedirectHandler",
+      "kind": "router_route",
+      "path": "/server/redirect",
+      "source": "components/application.py:240"
+    },
+    {
+      "component": "application",
+      "handler": "WelcomeHandler",
+      "kind": "router_route",
+      "path": "<dynamic>",
+      "source": "components/application.py:240"
+    },
+    {
+      "component": "websockets",
+      "handler": "BridgeSocket",
+      "kind": "websocket_route",
+      "path": "/klippysocket",
+      "source": "components/websockets.py:56"
+    },
+    {
+      "component": "websockets",
+      "handler": "WebSocket",
+      "kind": "websocket_route",
+      "path": "/websocket",
+      "source": "components/websockets.py:55"
+    }
+  ],
+  "static_handlers": [
+    {
+      "component": "file_manager",
+      "kind": "static",
+      "pattern": "<dynamic>",
+      "source": "components/file_manager/file_manager.py:392"
+    },
+    {
+      "component": "application",
+      "kind": "static",
+      "pattern": "klippy.log",
+      "source": "components/application.py:247"
+    },
+    {
+      "component": "file_manager",
+      "kind": "static",
+      "pattern": "klippy.log",
+      "source": "components/file_manager/file_manager.py:289"
+    },
+    {
+      "component": "application",
+      "kind": "static",
+      "pattern": "moonraker.log",
+      "source": "components/application.py:245"
+    },
+    {
+      "component": "octoprint_compat",
+      "kind": "upload",
+      "pattern": "/api/files/local",
+      "source": "components/octoprint_compat.py:120"
+    },
+    {
+      "component": "application",
+      "kind": "upload",
+      "pattern": "/server/files/upload",
+      "source": "components/application.py:249"
+    }
+  ],
+  "summary": {
+    "endpoint_count": 123,
+    "http_endpoint_count": 115,
+    "jsonrpc_method_count": 129,
+    "moonraker_commit": "f2c3f272d6e27400818a514d9d31d754eeb1b5e3",
+    "moonraker_version": null,
+    "notification_count": 28,
+    "remote_method_count": 21,
+    "router_route_count": 5,
+    "static_handler_count": 6
+  }
+}
