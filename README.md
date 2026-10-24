@@ -127,6 +127,7 @@ printer storage. Replace the example SSH address with your printer's address.
 Avoid `/tmp`, which is a small RAM filesystem on Forge-X.
 
 ```sh
+set -eu
 mkdir -p .scratch/install-v0.3.0
 cd .scratch/install-v0.3.0
 curl -fLO https://github.com/maci0/phobos/releases/download/v0.3.0/phobos-v0.3.0-arm-linux-musleabihf

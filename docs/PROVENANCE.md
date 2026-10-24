@@ -2299,3 +2299,9 @@ its freshness check. All 114 Python tooling tests, four build-policy tests,
 Python lint/format/type checks, measurement smoke tests, Zig formatting,
 SQLite source hashes and whitespace checks pass. Complete daemon suites and
 the seven-profile release matrix are running before tag publication.
+
+The new-version Debug suite passes 1,803 tests with one skip and 342 fuzz tests.
+The README download block stops on any failed download or checksum before
+copying an executable. The read-only production baseline is ready with all
+26 components healthy, all 262 requested subscription objects present, valid
+directory capacity and both heater targets zero. Production is still v0.2.3.
