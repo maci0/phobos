@@ -8,8 +8,10 @@ proves matching request validation, responses, side effects or event ordering.
 
 ## Compared revisions
 
-Comparison date: 2026-10-24. Phobos source and API dump: v0.2.3,
+Initial comparison date: 2026-10-24. Phobos source and API dump: v0.2.3,
 `0f21ca77c7c1e8375c97cc5872a451b68b6a23c6`.
+The implementation and runtime coverage below ship in v0.3.0; profile-specific
+behavior requires `--compat forge-x` where noted.
 
 | Source | Revision | Scope |
 | --- | --- | --- |

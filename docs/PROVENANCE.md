@@ -2305,3 +2305,63 @@ The README download block stops on any failed download or checksum before
 copying an executable. The read-only production baseline is ready with all
 26 components healthy, all 262 requested subscription objects present, valid
 directory capacity and both heater targets zero. Production is still v0.2.3.
+
+## 2026-10-24: v0.3.0 publication and deployment
+
+Annotated tag `v0.3.0` points to
+`b6f56018c9ae789f031125c5cd1d1eb1123a3f12`. Commits and tag were pushed
+normally to origin; no force push or verification bypass was used.
+[Main CI](https://github.com/maci0/phobos/actions/runs/40071654973) and
+[tag CI](https://github.com/maci0/phobos/actions/runs/40072436851) completed
+successfully. The publication job verified its uploaded files before publishing
+the [release](https://github.com/maci0/phobos/releases/tag/v0.3.0).
+
+Fresh local Debug, ReleaseSafe and ReleaseFast suites each pass 1,803 tests,
+with one gated real-Klippy skip, zero failures and 342 fuzz tests. All seven
+local static ReleaseFast profiles build and pass ELF/ABI/checksum validation.
+Every local release checksum and profile entry matches the green main-CI bundle
+and the subsequently downloaded public release. The earlier preparation checks
+also cover 114 Python tooling tests, four build-policy tests, both 100% API
+registration gates, generated-table freshness, formatting/lint/type checks,
+measurement smoke tests and SQLite source hashes. The native Debug host binary
+was restored and reports package version 0.3.0. No new performance comparison
+is claimed; v0.2.3 measurements retain their original labels.
+
+Deployment used the Cortex-A7 asset from the green main-CI bundle while tag CI
+ran. It matches the published binary byte for byte, SHA256
+`0069056fcff9baf8c1edc612869180e863883eba2808b7805a88b1a84a2f30ef`.
+Before stopping the exact verified v0.2.3 PID, a fresh check confirmed print
+complete, idle, ready and both heater targets zero. Preserved the running old
+executable, launcher and configuration in the private backup directory
+`/data/phobos-backups/v0.3.0-20261024T070206Z/`. After phobos stopped, copied
+its database and any WAL/SHM files there. No external database tool opened the
+live database. The saved database SHA256 is
+`d6bca7b80e685f0048eee93f4767f73ab9e8073ce3f06c2c9bf3b092f2b26b15`.
+The replacement was staged on persistent storage and the launcher replaced
+atomically, with automatic rollback available on failed health checks.
+
+Production PID 16706 runs `/data/phobos-v0.3.0 --compat forge-x -d
+/root/printer_data` inside `/data/.mod/.forge-x`, serving 7125. Its package
+identity and executable hash match the release. The final check reports Klippy
+ready, no failed components or warnings, all 26 production components and
+262/262 requested subscription objects. All 273 history jobs remain. Directory
+capacity is valid. The four temperature stores advance from two samples after
+startup to 659 each at final capture. Fluidd subscription parameters, an
+existing saved settings array-key read and HTTP 200 page retrieval pass without
+writing settings or issuing hardware commands. A missing nested settings key
+returns the expected not-found response, not invalid params. The empty console
+store is readable; visible console event delivery was not newly exercised.
+The C/Zig floating-point probe also passed on the physical Cortex-A7.
+
+The printer remains idle with both heater targets zero. Board boot ID
+`6213a6c1-a3b6-4b38-b637-5aa9a116a117` is unchanged. No board/firmware/Klipper
+restart, motion, heating, real update or system power action was requested.
+No probe listens on 7126. Owned deployment-check files were removed; the
+rollback backup and installed executable remain. Existing boot integration was
+left unchanged, and no reboot was used to test startup persistence.
+
+The session had no available browser, so Fluidd was checked through HTTP and
+WebSocket requests rather than visually. Real camera/parking/print-macro and
+managed-update workflows retain their documented hardware/integration limits.
+API/software/Python identity, missing-CAN results and safety no-ops remain
+deliberate. `graphify` remains unavailable, so no graph refresh was performed.
