@@ -2400,3 +2400,40 @@ The proposed edit selects the installed binary, keeps logging and compatibility
 arguments, and preserves the existing Forge-X setup and stop/PID-file handling.
 It does not require a board reboot. Startup on a subsequent reboot remains
 unverified and will still select Moonraker until that service change is applied.
+
+## 2026-10-24: Apply the approved Forge-X startup fix
+
+The user explicitly approved the startup change to
+`/opt/config/mod/.root/S65moonraker`. Rechecked the installed v0.3.0 binary
+checksum, exact service-file checksum, current phobos PID 2326, ready/idle state
+and zero heater targets. Saved the original service, launcher, configuration
+and, after stopping phobos, the database and any WAL/SHM files under the private
+backup `/data/phobos-backups/startup-v0.3.0-20261024T102504Z/`.
+
+Replaced only the service's daemon launch line, using a staged file and atomic
+rename. It now launches `/data/phobos-v0.3.0 --compat forge-x -d
+/root/printer_data` directly, with the existing PID file, append logging and
+`-o` for successful repeated starts. All surrounding Forge-X configuration setup
+and stop/PID handling are unchanged. The installed script matches the prepared
+file byte for byte, SHA256
+`b5651f981ae7e1ed76ebb2cd6a6855ee8376c806b5a190aa12203518288a08e7`.
+Both saved configuration files remain byte-identical after service startup.
+
+Verified the actual service through an API-only stop/start and then another
+start. PID 2467 runs the published binary, and the second start retains that
+PID and reports success. Klippy is ready with no failures/warnings, 26 healthy
+components, 262/262 requested subscription objects and all 273 history jobs.
+The four temperature stores each contain 84 samples at final capture. Directory
+capacity is valid; the printer is idle with both heater targets zero. Port 7126
+is clear. The board boot ID remains
+`68cde3ec-7565-4002-8cf5-74df2701d63f`; no additional board or Klipper restart,
+motion, heating or real update was requested.
+
+The approved boot-service change is applied, replacing the pending state above.
+Actual boot after this edit was not exercised. A Forge-X update may restore
+the vendor script, and future phobos upgrades must update both versioned launch
+paths as documented in the README. No daemon source or release asset changed;
+the existing v0.3.0 suites and release CI remain the binary verification. Shell
+syntax, shell lint, live service checks and whitespace validation cover this
+deployment change. Temporary owned verification files were removed after the
+checks; the private rollback backup remains.
