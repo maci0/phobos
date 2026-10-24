@@ -19,6 +19,7 @@ particular printer can run it.
 | `cortex-a7-hardfp` | `arm-linux-musleabihf` | `cortex_a7` | Cortex-A7 CPU features, including NEON and VFPv4; current Forge-X build profile |
 | `aarch64` | `aarch64-linux-musl` | `baseline` | Baseline AArch64 with floating point and Advanced SIMD |
 | `x86_64` | `x86_64-linux-musl` | `baseline` | Baseline x86-64, including SSE2 |
+| `ad5x-mipsel` | `mipsel-linux-musleabihf` | `mips32r5+fp64+nan2008` | Little-endian MIPS32r5, o32 hard float, 64-bit FPU registers and NaN2008; experimental AD5X profile |
 
 The generic ARMv7 profiles select the ISA (`has_v7`) and Application profile
 (`aclass`) separately. Zig 0.17's `v7a` feature adds NEON and VFPv3-D32 as
@@ -106,7 +107,7 @@ By default, outputs live below `.scratch/release-v<version>/`, with separate
 install prefixes and build logs under `profiles/<profile>/`. `--output DIR`
 accepts another location below this checkout's ignored `.scratch/` directory.
 The helper checks ELF32/ELF64, machine type, static linkage, ARM float argument
-ABI, and the declared ARM FPU requirements. It writes ELF reports,
+ABI and FPU requirements, and the AD5X MIPS ISA/float ABI. It writes ELF reports,
 `profiles.tsv`, and `SHA256SUMS`, then checks every selected checksum.
 `--verify-only` repeats those checks without compiling or executing artifacts,
 preserving the recorded manifest. Building a selected subset replaces the
@@ -168,6 +169,46 @@ build host.
 The build step never runs the target executable. Normal application builds do
 not build or install this probe.
 
+## AD5X MIPS
+
+The `ad5x-mipsel` profile matches the ELF ABI attributes of the BusyBox binary
+inside the official [Z-Mod 1.7.4 AD5X archive](https://github.com/ghzserg/zmod/releases/tag/1.7.4).
+It requires MIPS32r5, little-endian o32, NaN2008 and FP64 hard float, with no
+MSA or other ISA extension. The shipped executable is static musl and does not
+use the archive's `/lib/ld-linux-mipsn8.so.1` loader. A generic MIPS32r2 or
+legacy-NaN build is not the selected AD5X profile.
+`file` and the ELF header label this ISA family MIPS32r2; `readelf -A` reports
+the stricter MIPS32r5 requirement in the MIPS ABI attributes.
+
+```sh
+scripts/build-release.sh --output .scratch/ad5x-build ad5x-mipsel
+scripts/build-release.sh --verify-only --output .scratch/ad5x-build ad5x-mipsel
+```
+
+Its asset suffix is `mipsel-linux-musleabihf`. This profile was added after
+v0.3.0; that published release has no MIPS asset. A source build still derives
+its filename version from `build.zig.zon`. The direct build is:
+
+```sh
+zig build -Dtarget=mipsel-linux-musleabihf -Dcpu=mips32r5+fp64+nan2008 \
+  -Doptimize=ReleaseFast --prefix .scratch/ad5x-mips
+```
+
+The helper validates the actual ELF's byte order, o32/NaN2008 flags, MIPS32r5
+ISA, FP64 hard-float attributes, lack of ISA extensions, static linkage and
+checksum. Regression tests build real ELF fixtures with incorrect byte order,
+NaN mode, float ABI, ISA or MSA requirements and require rejection. The shared
+serial adapter uses Linux's baud bits rather than speed fields absent from
+MIPS `termios`.
+
+These are build and ABI checks, not an AD5X hardware certification. The C/Zig
+floating-point probe can be built with the same target and CPU arguments, but
+must be run on matching hardware before claiming runtime ABI verification.
+Z-Mod's print macros and integration gaps remain as described in the
+[README](../README.md#try-on-a-z-mod-ad5m-printer); a MIPS binary does not add a
+Z-Mod compatibility profile. No AD5X installation or production switch is
+claimed by these commands.
+
 ## Board examples
 
 These examples map processor families to candidate profiles. They are not a
@@ -181,6 +222,7 @@ per-printer compatibility list or an installation recommendation.
 | Pi 4 and Pi 5 (Cortex-A72 and Cortex-A76) | `aarch64` with a 64-bit kernel |
 | BIGTREETECH CB1 / CB1 eMMC (Allwinner H616, Cortex-A53) | `aarch64` with a 64-bit kernel; check the installed kernel and board image |
 | x86-64 Linux hosts | `x86_64` |
+| FlashForge AD5X with Z-Mod | `ad5x-mipsel`; experimental build, hardware/kernel execution and firmware integration unverified |
 
 Processor mappings come from the [Raspberry Pi processor documentation](https://www.raspberrypi.com/documentation/computers/processors.html)
 and [BIGTREETECH's CB1 specifications](https://github.com/bigtreetech/docs/blob/master/docs/CB1.md).

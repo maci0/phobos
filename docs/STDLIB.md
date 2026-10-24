@@ -72,7 +72,7 @@ API becomes available and passes both host and ARM checks.
 
 | Adapter | Reason |
 | --- | --- |
-| Serial configuration in `serial.zig` | `std.Io` has no termios configuration operation. Use `std.posix.tcgetattr` and `tcsetattr`, including Linux baud bits. |
+| Serial configuration in `serial.zig` | `std.Io` has no termios configuration operation. Use `std.posix.tcgetattr` and `tcsetattr`, including Linux baud bits. Do not assume `ispeed`/`ospeed` fields exist on MIPS. |
 | System identity in `machine.zig` | No higher-level uname or effective-UID operation. `process.getUserInfo` resolves names to IDs, not IDs to names. |
 | V4L2 layouts in `machine.zig` and `video_modes.zig` | No standard V4L2 declarations. Typed local structures cover capabilities, formats and frame sizes; device control uses `std.Io.operate(.device_io_control)`. |
 | SocketCAN setup in `canbus.zig` | No CAN address variant or socket constructor in `std.Io.net`. Typed libc socket/bind calls create the handle; transfers, deadlines and close use `std.Io`. |

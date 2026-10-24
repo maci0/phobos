@@ -33,10 +33,11 @@ def test_assemble_copies_every_asset_and_combines_manifests(tmp_path: Path) -> N
     root, source = fixture_artifacts(tmp_path)
     output = tmp_path / "output"
     prepare.assemble(root, source, output, "maci0/phobos")
-    assert len((output / "SHA256SUMS").read_text().splitlines()) == 7
-    assert len((output / "profiles.tsv").read_text().splitlines()) == 8
+    assert len((output / "SHA256SUMS").read_text().splitlines()) == 8
+    assert len((output / "profiles.tsv").read_text().splitlines()) == 9
     version = prepare.package_version(root)
     assert (output / f"phobos-v{version}-armv7-soft").read_bytes() == b"armv7-soft\n"
+    assert (output / f"phobos-v{version}-ad5x-mipsel").read_bytes() == b"ad5x-mipsel\n"
     assert (
         f"https://github.com/maci0/phobos/blob/v{version}/"
         in (output / "release-notes.md").read_text()

@@ -2483,3 +2483,50 @@ API baseline or release asset changed, so complete suites were not repeated.
 Archives and extracted inspection files remain ignored scratch data; no image
 was mounted or modified, no VM was started and no printer was contacted or
 changed for this documentation task.
+
+## 2026-10-25: AD5X MIPS build profile
+
+Added `ad5x-mipsel` to the shared release-profile list, which also drives the CI
+build matrix and release-bundle validation. It selects
+`mipsel-linux-musleabihf`, `mips32r5+fp64+nan2008`, ReleaseFast and full LTO.
+The CPU and ABI requirements come from the packaged BusyBox ELF in the official
+Z-Mod 1.7.4 AD5X archive identified in the preceding entry. Its MIPS ABI
+attributes require MIPS32r5, o32, NaN2008 and hard float with 64-bit FPU
+registers. The ELF header's MIPS32r2 family label alone is insufficient.
+The release helper now checks these requirements, rejects ISA extensions and
+retains static-link and checksum checks. README, build and CI docs describe
+the experimental profile and distinguish source builds from the unchanged
+published v0.3.0 assets.
+
+The first daemon cross-build exposed unconditional `termios.ispeed` and
+`ospeed` writes in the shared serial adapter. MIPS's typed Linux structure has
+neither field. Removed those redundant writes: Linux `tcsetattr` uses the baud
+bits already set in `cflag`, as does musl's speed setter. Extended the real
+pseudo-terminal test to exercise 9600, 57600, 115200 and 230400 baud, raw 8N1
+and bounded silent reads. TD-1, WLED and PanelDue retain the same shared path.
+
+The standard helper built and independently reverified
+`.scratch/ad5x-build/phobos-v0.3.0-mipsel-linux-musleabihf`, 6,633,348 bytes,
+SHA256 `093991b5ae2e140286898abb9d66adccef4bbb432ae816ae597703870b444672`.
+The actual daemon has ELF32 little-endian/o32/NaN2008 flags, MIPS32r5 and FP64
+hard-float ABI attributes, no ISA extensions, no interpreter and no dynamic
+dependencies. The C/Zig floating-point probe also cross-builds with the same
+target, CPU and LTO policy and reports matching ELF attributes. Neither MIPS
+executable was run on this host or on a printer.
+
+Verification: native Debug and ReleaseFast suites each report 1803 passed,
+one existing real-Klippy skip, zero failures and 342 bounded fuzz tests.
+All 120 Python tool tests pass, including
+six real MIPS ELF fixtures that accept the intended profile and reject wrong
+byte order, legacy NaNs, software float, MIPS32r2 and MSA. Release assembly
+checks include all eight profiles. Four build-policy tests pass. Ruff, Black,
+mypy, ShellCheck, Zig formatting and whitespace checks pass. Upstream and
+Forge-X API coverage remain 100%; the generated API coverage table is current.
+The native Debug daemon was rebuilt under `zig-out/bin/`.
+
+No AD5X hardware or kernel execution is certified. Z-Mod print macros and
+third-party integrations remain separate compatibility work; no Z-Mod profile
+or production-install claim was added. No printer was contacted, no VM or
+foreign executable was started, and no image or live database was opened or
+changed. Existing releases were not retagged or overwritten. Graphify is absent
+from PATH, so the optional graph update was skipped.

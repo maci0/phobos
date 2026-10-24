@@ -19,11 +19,11 @@ printer credentials and does not deploy to a printer.
   fixture may skip. OpenSSL, socat and FFmpeg are installed for TLS and native
   timelapse encoding/decoding fixtures.
   Logs are retained as artifacts. No test uses a live printer database.
-- All seven [Linux profiles](BUILDS.md) build independently. The build helper
-  checks ELF class/machine, static linkage, ARM ABI/FPU attributes and checksums.
+- All eight [Linux profiles](BUILDS.md) build independently. The build helper
+  checks ELF class/machine, static linkage, ARM and MIPS ABI/FPU attributes and checksums.
 - The exact x86-64 and AArch64 release assets execute natively, check their
   C/Zig floating-point ABI probes and dump the API for the coverage gate.
-  ARM32 execution remains a separate hardware check; CI does not use QEMU.
+  ARM32 and MIPS execution remain separate hardware checks; CI does not use QEMU.
 - Per-profile artifacts are assembled into one `release-bundle`, checked again
   for all required profiles and checksums. Missing, corrupt, duplicated or
   wrong-version assets fail preparation. Relative release-note links become
@@ -51,7 +51,7 @@ notes. Only a tag push can publish. Main, pull-request and manual runs produce
 the verified bundle without publishing anything.
 
 After all tests, builds, native smoke checks and packaging pass, CI creates a
-draft GitHub release containing the seven binaries, `SHA256SUMS` and
+draft GitHub release containing the eight binaries, `SHA256SUMS` and
 `profiles.tsv`. It downloads those uploaded files, repeats ELF/checksum checks
 and compares both manifests before publishing the draft. An upload/verification
 failure leaves the release unpublished. An existing release causes creation to

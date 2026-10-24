@@ -37,8 +37,6 @@ pub const Serial = struct {
         t.cflag = .{ .CSIZE = .CS8, .CREAD = true, .CLOCAL = true };
         // Linux tcsetattr reads the baud bits in cflag, including with musl.
         t.cflag = @bitCast(@as(u32, @bitCast(t.cflag)) | @as(u32, @backingInt(spd)));
-        t.ispeed = spd;
-        t.ospeed = spd;
         t.cc[@backingInt(std.posix.V.MIN)] = 0;
         t.cc[@backingInt(std.posix.V.TIME)] = read_timeout_ds;
         std.posix.tcsetattr(handle, .NOW, t) catch {};
@@ -272,22 +270,24 @@ test "Serial.open configures baud and raw 8N1 on a pseudo-terminal" {
         .arg = &number,
     } })).device_io_control);
     var path: [64]u8 = undefined;
-    var serial = try Serial.open(io, try std.fmt.bufPrint(&path, "/dev/pts/{d}", .{number}), 115200);
-    defer serial.close();
-    const attrs = try std.posix.tcgetattr(serial.file.handle);
     const baud_mask = comptime blk: {
         var mask: u32 = 0;
         for (std.meta.tags(std.posix.speed_t)) |speed| mask |= @backingInt(speed);
         break :blk mask;
     };
-    try testing.expectEqual(@as(u32, @backingInt(std.posix.speed_t.B115200)), @as(u32, @bitCast(attrs.cflag)) & baud_mask);
-    try testing.expectEqual(.CS8, attrs.cflag.CSIZE);
-    try testing.expect(!attrs.cflag.PARENB and !attrs.cflag.CSTOPB and !attrs.cflag.CRTSCTS);
-    try testing.expectEqual(@as(u8, 0), attrs.cc[@backingInt(std.posix.V.MIN)]);
-    try testing.expectEqual(read_timeout_ds, attrs.cc[@backingInt(std.posix.V.TIME)]);
-    // A silent device returns 0 after the read timeout instead of blocking.
-    var bytes: [8]u8 = undefined;
-    try testing.expectEqual(@as(usize, 0), try serial.readSome(&bytes));
+    for ([_]u32{ 9600, 57600, 115200, 230400 }) |baud| {
+        var serial = try Serial.open(io, try std.fmt.bufPrint(&path, "/dev/pts/{d}", .{number}), baud);
+        defer serial.close();
+        const attrs = try std.posix.tcgetattr(serial.file.handle);
+        try testing.expectEqual(@as(u32, @backingInt(try Serial.baudToSpeed(baud))), @as(u32, @bitCast(attrs.cflag)) & baud_mask);
+        try testing.expectEqual(.CS8, attrs.cflag.CSIZE);
+        try testing.expect(!attrs.cflag.PARENB and !attrs.cflag.CSTOPB and !attrs.cflag.CRTSCTS);
+        try testing.expectEqual(@as(u8, 0), attrs.cc[@backingInt(std.posix.V.MIN)]);
+        try testing.expectEqual(read_timeout_ds, attrs.cc[@backingInt(std.posix.V.TIME)]);
+        // A silent device returns 0 after the read timeout instead of blocking.
+        var bytes: [8]u8 = undefined;
+        try testing.expectEqual(@as(usize, 0), try serial.readSome(&bytes));
+    }
 }
 
 test "fuzz Serial.readSome preserves bytes across bounded read sizes" {

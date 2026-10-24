@@ -10,7 +10,7 @@ while [[ ! -f "$BUILD_ROOT/build.zig.zon" ]]; do
 done
 cd -- "$BUILD_ROOT"
 
-PROFILES=(armv6-hardfp armv7-soft armv7-softfp-c armv7-hardfp cortex-a7-hardfp aarch64 x86_64)
+PROFILES=(armv6-hardfp armv7-soft armv7-softfp-c armv7-hardfp cortex-a7-hardfp aarch64 x86_64 ad5x-mipsel)
 ZIG=${ZIG:-zig}
 BUILD_JOBS=${BUILD_JOBS:-2}
 BUILD_TIMEOUT_SECONDS=${BUILD_TIMEOUT_SECONDS:-600}
@@ -25,7 +25,7 @@ usage() {
 Usage: scripts/build-release.sh [--output DIR] [--verify-only] [PROFILE ...]
 Build every profile in ReleaseFast by default, or select profiles from:
   armv6-hardfp armv7-soft armv7-softfp-c armv7-hardfp
-  cortex-a7-hardfp aarch64 x86_64
+  cortex-a7-hardfp aarch64 x86_64 ad5x-mipsel
 
 Outputs must stay below the checkout's ignored .scratch directory.
 --verify-only checks existing artifacts without compiling or executing them.
@@ -62,6 +62,9 @@ profile() {
         x86_64)
             TARGET=x86_64-linux-musl; CPU=baseline; ELF_CLASS=ELF64; MACHINE=X86-64; FLOAT_ABI=none
             ASSET="phobos-v$VERSION-x86_64-linux-musl" ;;
+        ad5x-mipsel)
+            TARGET=mipsel-linux-musleabihf; CPU=mips32r5+fp64+nan2008; MACHINE=MIPS
+            ASSET="phobos-v$VERSION-mipsel-linux-musleabihf" ;;
         *) fail "unknown profile: $name" ;;
     esac
 }
@@ -93,6 +96,12 @@ verify() {
         if [[ $name == armv7-* ]]; then
             [[ $attributes != *Tag_Advanced_SIMD_arch:* ]] || fail "$name: generic profile unexpectedly requires NEON"
         fi
+    elif [[ $MACHINE == MIPS ]]; then
+        [[ $header == *nan2008* && $header == *o32* ]] || fail "$name: expected NaN2008 and o32 ABI"
+        attributes=$(readelf -AW -- "$binary")
+        [[ $attributes == *'ISA: MIPS32r5'* ]] || fail "$name: expected MIPS32r5"
+        [[ $attributes == *'FP ABI: Hard float (32-bit CPU, 64-bit FPU)'* ]] || fail "$name: expected FP64 hard float"
+        [[ $attributes == *'ISA Extension: None'* && $attributes =~ ASEs:[[:space:]]+None([[:space:]]|$) ]] || fail "$name: unexpected MIPS ISA extension"
     fi
 }
 

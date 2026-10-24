@@ -112,7 +112,7 @@ scripts/build-release.sh
 Some hosts, the deploy target included, cannot link their system glibc with Zig 0.17, so
 the build targets musl. Do not run a glibc `zig build`.
 The [build guide](docs/BUILDS.md) lists ARMv6, ARMv7 floating-point variants,
-Cortex-A7, AArch64 and x86-64 assets, their CPU requirements and verification scope.
+Cortex-A7, AArch64, x86-64 and AD5X MIPS assets, their CPU requirements and verification scope.
 
 ## Printer installation
 
@@ -123,7 +123,7 @@ Choose the guide for your firmware and model:
 | --- | --- | --- |
 | Forge-X, AD5M / AD5M Pro | Production deployment and API service startup checked on a real AD5M | [Install and select phobos at boot](#run-on-a-forge-x-printer) |
 | Z-Mod, AD5M / AD5M Pro | Experimental read-only trial; production compatibility incomplete | [Isolated Z-Mod trial](#try-on-a-z-mod-ad5m-printer) |
-| Z-Mod, AD5X | Unsupported by current binaries: its MIPS executable format is outside the release matrix | No installation command |
+| Z-Mod, AD5X | Experimental MIPS build; hardware and production compatibility unverified | [Build the AD5X binary](#build-for-a-z-mod-ad5x) |
 
 Other models need their CPU/kernel and firmware integration checked separately.
 Native camera/parking/print-macro workflows retain the limits in the
@@ -313,6 +313,28 @@ work differ, including SQLite setup. Z-Mod's [configuration guidance](https://wi
 also warns that edits to vendor/plugin files can break updates. Keep its boot
 service and live database untouched until the missing compatibility work is
 implemented and verified.
+
+### Build for a Z-Mod AD5X
+
+The `ad5x-mipsel` profile targets little-endian MIPS32r5 with the o32 hard-float
+ABI, 64-bit FPU registers and NaN2008. These requirements match the ELF ABI
+attributes of Z-Mod 1.7.4's AD5X executables. Build from the current source with
+Zig 0.17.0:
+
+```sh
+scripts/build-release.sh --output .scratch/ad5x-build ad5x-mipsel
+scripts/build-release.sh --verify-only --output .scratch/ad5x-build ad5x-mipsel
+```
+
+The output is `.scratch/ad5x-build/phobos-v0.3.0-mipsel-linux-musleabihf`, with
+`SHA256SUMS` and `profiles.tsv`. CI includes this profile; the published v0.3.0
+release predates it and has no MIPS asset. See the [build guide](docs/BUILDS.md#ad5x-mips)
+for a direct Zig command and verification limits.
+
+No AD5X hardware run has been performed. The Z-Mod print-macro and integration
+gaps above still apply. Its chroot is `/usr/data/.mod/.zmod`, so the AD5M trial
+paths and ARM download commands do not apply. Keep its production Moonraker,
+boot service and live database unchanged until an isolated hardware trial passes.
 
 ## Tracking Moonraker
 
