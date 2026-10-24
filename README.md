@@ -114,17 +114,32 @@ the build targets musl. Do not run a glibc `zig build`.
 The [build guide](docs/BUILDS.md) lists ARMv6, ARMv7 floating-point variants,
 Cortex-A7, AArch64 and x86-64 assets, their CPU requirements and verification scope.
 
-## Run on a Forge-X printer
+## Printer installation
 
-For the FlashForge Adventurer 5M/5M Pro running Forge-X, use the Cortex-A7
+Start with an existing firmware installation and keep its Klipper and web UI.
+Choose the guide for your firmware and model:
+
+| Firmware and printer | Status | Guide |
+| --- | --- | --- |
+| Forge-X, AD5M / AD5M Pro | Production deployment and API service startup checked on a real AD5M | [Install and select phobos at boot](#run-on-a-forge-x-printer) |
+| Z-Mod, AD5M / AD5M Pro | Experimental read-only trial; production compatibility incomplete | [Isolated Z-Mod trial](#try-on-a-z-mod-ad5m-printer) |
+| Z-Mod, AD5X | Unsupported by current binaries: its MIPS executable format is outside the release matrix | No installation command |
+
+Other models need their CPU/kernel and firmware integration checked separately.
+Native camera/parking/print-macro workflows retain the limits in the
+[Forge-X tracker](docs/api/FORGE_X.md).
+
+### Download the AD5M binary
+
+For the FlashForge Adventurer 5M/5M Pro in either guide, use the Cortex-A7
 asset `phobos-v0.3.0-arm-linux-musleabihf`. Other Klipper hosts should select
 their architecture from the [build guide](docs/BUILDS.md). The binary includes
 SQLite and needs no Zig compiler or Python runtime on the printer. Native
 timelapse rendering needs an installed FFmpeg; see [timelapse](docs/TIMELAPSE.md).
 
-Download and verify the release on your computer, then copy it to persistent
-printer storage. Replace the example SSH address with your printer's address.
-Avoid `/tmp`, which is a small RAM filesystem on Forge-X.
+Download and verify the release on your computer, then follow your firmware's
+transfer instructions below. Keep files on persistent storage; `/tmp` is a
+small RAM filesystem on these printers.
 
 ```sh
 set -eu
@@ -133,6 +148,15 @@ cd .scratch/install-v0.3.0
 curl -fLO https://github.com/maci0/phobos/releases/download/v0.3.0/phobos-v0.3.0-arm-linux-musleabihf
 curl -fLO https://github.com/maci0/phobos/releases/download/v0.3.0/SHA256SUMS
 grep '  phobos-v0.3.0-arm-linux-musleabihf$' SHA256SUMS | sha256sum --check -
+```
+
+### Run on a Forge-X printer
+
+From the directory containing the [verified download](#download-the-ad5m-binary),
+copy it to the printer. Replace the example SSH address with your printer's
+address.
+
+```sh
 cat phobos-v0.3.0-arm-linux-musleabihf | ssh root@192.168.0.150 \
   'test ! -e /data/phobos-v0.3.0 && cat > /data/phobos-v0.3.0.new && chmod 755 /data/phobos-v0.3.0.new && mv /data/phobos-v0.3.0.new /data/phobos-v0.3.0'
 ```
@@ -203,6 +227,92 @@ To roll back, stop phobos, restore the saved launcher/executable and restart
 the previous API daemon. If database rollback is needed, first preserve the
 failed installation's database files, then restore the stopped backup and its
 matching WAL/SHM files together. Never restore a database while a daemon uses it.
+
+### Try on a Z-Mod AD5M printer
+
+This is an isolated read-only installation for **AD5M / AD5M Pro**, based on
+inspection of [Z-Mod 1.7.4](https://github.com/ghzserg/zmod/releases/tag/1.7.4).
+It has not been run on Z-Mod hardware. The [official chroot instructions](https://wiki.zmod.link/Plugin/#example-installing-led_effect)
+use `/data/.mod/.zmod` on AD5M, rather than Forge-X's `.forge-x` directory.
+AD5X uses a different path and MIPS binaries; do not install an ARM asset there.
+
+Production replacement is not supported yet. Z-Mod selects `_PRINT_FILE` or
+`_ZSDCARD_PRINT_FILE` according to its screen mode; phobos v0.3.0 has different
+print-start selection. `--compat forge-x` does not implement Z-Mod behavior,
+and there is no `--compat zmod` profile. Its plugin, timelapse, update and
+service integrations also need separate validation. Existing in-process
+Moonraker Python components cannot be loaded by phobos.
+
+Wait for printing/calibration to finish and heater targets to reach zero. Keep
+Z-Mod's Moonraker running on 7125. The trial uses loopback 7126 and a new private
+database; do not point it at `/root/printer_data` or the live database. Do not
+start a print, move axes, heat, update firmware or use printer power actions
+through the trial.
+
+Complete the shared [download and checksum step](#download-the-ad5m-binary).
+From the directory containing that verified file, use this Z-Mod transfer
+command:
+
+```sh
+cat phobos-v0.3.0-arm-linux-musleabihf | ssh root@192.168.0.150 '
+  set -eu
+  case "$(uname -m)" in armv7l) ;; *) echo "AD5M ARMv7 required" >&2; exit 1 ;; esac
+  trial=/data/.mod/.zmod/root/phobos-trial-v0.3.0
+  test -x /data/.mod/.zmod/bin/sh
+  test ! -e "$trial"
+  mkdir -m 700 "$trial"
+  cat > "$trial/phobos"
+  chmod 700 "$trial/phobos"
+'
+```
+
+Replace the SSH address with your printer's address. Check free disk space
+first; this uses persistent chroot storage rather than the printer's small
+`/tmp` RAM filesystem. In an SSH session on the printer, create the private
+configuration and run the trial in the foreground:
+
+```sh
+set -eu
+zmod_root=/data/.mod/.zmod
+trial=/root/phobos-trial-v0.3.0
+cat > "$zmod_root$trial/probe.cfg" <<'CFG'
+[server]
+host: 127.0.0.1
+port: 7126
+klippy_uds_address: /tmp/uds
+
+[file_manager]
+file_system_observer: none
+
+[authorization]
+trusted_clients: 127.0.0.1
+
+[database]
+path: /root/phobos-trial-v0.3.0/database/moonraker-sql.db
+CFG
+chroot "$zmod_root" "$trial/phobos" --compat moonraker \
+  -c "$trial/probe.cfg" -d "$trial"
+```
+
+From a second terminal on your computer, make read-only requests through SSH
+(the printer needs `wget`):
+
+```sh
+ssh root@192.168.0.150 'wget -q -T 5 -O - http://127.0.0.1:7126/server/info'
+ssh root@192.168.0.150 'wget -q -T 5 -O - "http://127.0.0.1:7126/printer/objects/query?print_stats=state&extruder=target&heater_bed=target"'
+```
+
+Check that Klippy is ready, the status matches the production UI, and there are
+no failed components or warnings. Stop with Ctrl+C in the foreground session
+and wait for phobos to exit. Confirm 7126 no longer responds and production
+Moonraker still works on 7125. The private trial directory can then be removed;
+no production configuration or database restore is needed.
+
+Do not copy the Forge-X boot-service edit to Z-Mod. Its service path and startup
+work differ, including SQLite setup. Z-Mod's [configuration guidance](https://wiki.zmod.link/FAQ/#configuration-storage)
+also warns that edits to vendor/plugin files can break updates. Keep its boot
+service and live database untouched until the missing compatibility work is
+implemented and verified.
 
 ## Tracking Moonraker
 

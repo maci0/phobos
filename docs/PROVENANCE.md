@@ -2437,3 +2437,49 @@ the existing v0.3.0 suites and release CI remain the binary verification. Shell
 syntax, shell lint, live service checks and whitespace validation cover this
 deployment change. Temporary owned verification files were removed after the
 checks; the private rollback backup remains.
+
+## 2026-10-25: Document Forge-X and Z-Mod installation scope
+
+Requested: README installation instructions for both Forge-X and Z-Mod.
+Grouped the existing verified Forge-X procedure under printer installation,
+with shared AD5M asset download/checksum steps and explicit model/status links.
+Preserved its chroot execution, stopped-database backup, boot-service selection,
+configuration and rollback guidance. Existing Forge-X section anchors remain
+unchanged.
+
+Added a source-inspected, experimental AD5M/AD5M Pro Z-Mod trial. It checks
+ARMv7 before copying, uses `/data/.mod/.zmod`, keeps its binary/config/database
+in a new private directory, binds only loopback 7126 and leaves production
+Moonraker on 7125. The guide includes read-only SSH queries, foreground shutdown
+and cleanup. It does not install a Z-Mod boot override or open the live database.
+It explicitly records the missing Z-Mod print-start selection, other unverified
+integrations and the lack of a Z-Mod compatibility profile. Production use is
+not claimed. AD5X is excluded because its MIPS format has no current release
+asset; other models require separate verification.
+
+Primary references: [Z-Mod 1.7.4 release](https://github.com/ghzserg/zmod/releases/tag/1.7.4),
+[chroot/plugin documentation](https://wiki.zmod.link/Plugin/),
+[configuration guidance](https://wiki.zmod.link/FAQ/#configuration-storage) and
+the published release archive contents. The inspected AD5M archive SHA256 is
+`2a61693d7f83de847805faf1e67c74e283c1aa590fe147c6d6db092e7a0aee93`;
+the inspected AD5X archive SHA256 is
+`6f230debd47343a3bec1284e009ea341f34f8d2cdd96b896588349eef4e7f565`.
+Their packaged BusyBox executables identify as ARM EABI5 and MIPS32 release 2,
+respectively. Z-Mod's packaged `components/klippy_apis.py` selects `_PRINT_FILE`
+or `_ZSDCARD_PRINT_FILE` using `display_off.cfg`; neither existing phobos profile
+selects those commands. Its packaged service also performs SQLite setup, so
+the Forge-X boot edit must not be copied across. Older public configuration
+branches have different source paths; the guide uses the released 1.7.4
+layout and documented chroot rather than guessing interchangeability.
+
+Verification: all ten README shell blocks pass `sh -n`; the three new Z-Mod
+blocks pass ShellCheck with the POSIX shell selected. The exact private INI
+template starts the native v0.3.0 daemon with no component failures or warnings
+and creates its private SQLite file. That check substitutes an ephemeral
+loopback port, an owned scratch directory and an absent private Klippy socket,
+then terminates and waits for only its own daemon. It does not establish Z-Mod
+hardware/UDS compatibility. Whitespace checks pass. No daemon source, build,
+API baseline or release asset changed, so complete suites were not repeated.
+Archives and extracted inspection files remain ignored scratch data; no image
+was mounted or modified, no VM was started and no printer was contacted or
+changed for this documentation task.
