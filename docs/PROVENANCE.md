@@ -2365,3 +2365,38 @@ WebSocket requests rather than visually. Real camera/parking/print-macro and
 managed-update workflows retain their documented hardware/integration limits.
 API/software/Python identity, missing-CAN results and safety no-ops remain
 deliberate. `graphify` remains unavailable, so no graph refresh was performed.
+
+## 2026-10-24: Check the user-initiated reboot
+
+The delayed response to the earlier connectivity question arrived after v0.3.0
+had already been deployed. The user rebooted the printer. Its new boot ID is
+`68cde3ec-7565-4002-8cf5-74df2701d63f`. The unchanged Forge-X boot service
+started Python Moonraker as PID 2078; it became ready, idle, with both heater
+targets zero and 273 history jobs. This confirms that updating the manual
+`/data/phobos-run.sh` launcher alone does not select phobos at boot.
+
+After checking the exact Python executable, command line, chroot and PID file,
+stopped only that API daemon. Saved its service script and manual launcher and,
+after it stopped, copied the database and any WAL/SHM files into the private
+backup `/data/phobos-backups/post-reboot-v0.3.0-20261024T094348Z/`. Started the
+already-published v0.3.0 through Forge-X's existing `start-stop-daemon`, with
+PID tracking in `/run/moonraker.pid`. Production PID 2326 is phobos, ready with
+26 healthy components, all 273 history jobs, idle and both heater targets zero.
+The binary checksum still matches the release. No further board or Klipper
+restart, motion, heating or update was requested.
+
+Prepared a one-line service change and updated the README's boot instructions.
+The actual BusyBox helper matches `/proc/PID/cmdline`, so its executable matcher
+must use `/data/phobos-v0.3.0` directly. A shell launcher replaces itself and
+cannot be matched afterward. Non-mutating process-match checks confirm that
+difference. The proposed direct-binary launch with `-o` passes a live repeated
+start test: the PID stays 2326, the helper returns success and the API remains
+ready. Shell syntax and whitespace checks pass. Daemon source and release
+assets did not change, so the complete suites were not repeated.
+
+The service file `/opt/config/mod/.root/S65moonraker` remains unchanged while
+approval is pending: the user's earlier restriction protects `/opt/config`.
+The proposed edit selects the installed binary, keeps logging and compatibility
+arguments, and preserves the existing Forge-X setup and stop/PID-file handling.
+It does not require a board reboot. Startup on a subsequent reboot remains
+unverified and will still select Moonraker until that service change is applied.

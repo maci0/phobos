@@ -173,11 +173,31 @@ exec /data/phobos-v0.3.0 --compat forge-x -d /root/printer_data >> /data/logFile
 
 Run that launcher with
 `nohup chroot /data/.mod/.forge-x /data/phobos-run.sh </dev/null >/data/phobos-start.log 2>&1 &`
-after stopping the foreground instance. Keep your existing boot supervisor
-pointed at the launcher; this command alone does not install a boot service.
+after stopping the foreground instance. This command starts phobos for the
+current boot; it does not install a boot service.
 Check `/server/info` for `klippy_state: "ready"`, no failed components and no
 warnings, then check Fluidd's temperatures, files and console. Logs are in
 `/data/logFiles/phobos.log`; `-o json --version` reports the package version.
+
+Forge-X's stock `/opt/config/mod/.root/S65moonraker` still launches Moonraker
+after a reboot. Updating `/data/phobos-run.sh` alone does not change that.
+To select phobos at boot, first back up `S65moonraker`, then replace its
+`start-stop-daemon` launch line inside `start()` with:
+
+```sh
+start-stop-daemon -S -o -b -m -p "$PID_FILE" -O /data/logFiles/phobos.log --exec /data/phobos-v0.3.0 -- --compat forge-x -d "$PRINTER_DATA"
+```
+
+Keep the surrounding Forge-X configuration setup and stop/PID-file handling.
+The daemon helper must match the binary directly: a shell launcher replaces
+itself with phobos, so matching the launcher path would miss a running daemon.
+`-o` makes an already-running daemon a successful no-op. After stopping any
+manually started instance, activate the service with
+`chroot /data/.mod/.forge-x /opt/config/mod/.root/S65moonraker start`.
+Update the versioned path in both the service and manual launcher on future
+upgrades. Forge-X updates may restore the stock service; check the boot selection
+after updating Forge-X. This service starts the API daemon without rebooting
+the printer board.
 
 To roll back, stop phobos, restore the saved launcher/executable and restart
 the previous API daemon. If database rollback is needed, first preserve the
