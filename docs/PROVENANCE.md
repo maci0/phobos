@@ -2530,3 +2530,18 @@ or production-install claim was added. No printer was contacted, no VM or
 foreign executable was started, and no image or live database was opened or
 changed. Existing releases were not retagged or overwritten. Graphify is absent
 from PATH, so the optional graph update was skipped.
+
+### 2026-10-29 — native ZIP release packaging
+
+Added deterministic, platform-specific Moonraker ZIP packages to the verified
+release assembler. ZIP payloads retain the source-built executable bytes and
+include executable permissions, GPLv3 licensing, version/repository metadata and
+a stable architecture-specific `asset_name` used by Phobos's own ZIP updater.
+The release manifest now covers raw binaries and ZIPs. Packaging tests check
+metadata, permissions, deterministic output and refusal to overwrite artifacts.
+
+For the v0.3.0 Forge-X package, the retained Cortex-A7 source-build output was
+checked against the existing published SHA256SUMS (binary SHA256
+`0069056fcff9baf8c1edc612869180e863883eba2808b7805a88b1a84a2f30ef`).
+The ZIP repackages that exact published payload. A redundant fresh tag rebuild
+reached the build helper's 600-second timeout; it was not used as package evidence.

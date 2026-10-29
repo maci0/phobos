@@ -1,4 +1,6 @@
 import hashlib
+import json
+import zipfile
 import subprocess
 from pathlib import Path
 
@@ -33,7 +35,7 @@ def test_assemble_copies_every_asset_and_combines_manifests(tmp_path: Path) -> N
     root, source = fixture_artifacts(tmp_path)
     output = tmp_path / "output"
     prepare.assemble(root, source, output, "maci0/phobos")
-    assert len((output / "SHA256SUMS").read_text().splitlines()) == 8
+    assert len((output / "SHA256SUMS").read_text().splitlines()) == 16
     assert len((output / "profiles.tsv").read_text().splitlines()) == 9
     version = prepare.package_version(root)
     assert (output / f"phobos-v{version}-armv7-soft").read_bytes() == b"armv7-soft\n"
@@ -112,3 +114,29 @@ def test_notes_reject_invalid_repository_and_missing_target(tmp_path: Path) -> N
     notes.write_text("[missing](../../missing.md)\n")
     with pytest.raises(ValueError, match="target is missing"):
         prepare.release_notes(tmp_path, "1.2.3", "maci0/phobos")
+
+
+def test_zip_package_is_deterministic_executable_and_moonraker_compatible(tmp_path: Path) -> None:
+    root = prepare.project_root(Path(__file__).resolve())
+    version = prepare.package_version(root)
+    binary = tmp_path / f"phobos-v{version}-arm-linux-musleabihf"
+    binary.write_bytes(b"verified source-build fixture")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    a = prepare.package_zip(root, binary, first, version, "maci0/phobos")
+    b = prepare.package_zip(root, binary, second, version, "maci0/phobos")
+    assert a.read_bytes() == b.read_bytes()
+    with zipfile.ZipFile(a) as archive:
+        assert archive.testzip() is None
+        assert set(archive.namelist()) == {"phobos", "release_info.json", ".version", "LICENSE"}
+        assert archive.read("phobos") == binary.read_bytes()
+        assert (archive.getinfo("phobos").external_attr >> 16) & 0o777 == 0o755
+        assert json.loads(archive.read("release_info.json")) == {
+            "project_owner": "maci0", "project_name": "phobos", "version": f"v{version}",
+            "asset_name": "phobos-arm-linux-musleabihf.zip"
+        }
+        assert archive.read(".version") == f"v{version}\n".encode()
+    with pytest.raises(FileExistsError):
+        prepare.package_zip(root, binary, first, version, "maci0/phobos")
