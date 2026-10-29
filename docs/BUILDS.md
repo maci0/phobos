@@ -231,3 +231,23 @@ recommends Zero 2 W and Pi 3/4/5, and advises against Pi 1, Pi 2 and original
 Zero hosts because their processing capacity can cause print stalls. Klipper
 also requires double-precision floating-point hardware on low-end hosts. A
 phobos software-float executable does not remove those Klipper requirements.
+
+## Moonraker ZIP packages
+
+`tools/release/prepare.py` also wraps each verified source-build artifact in a
+native update-manager ZIP. Its stable, platform-specific name is
+`phobos-<target-suffix>.zip` (for the Adventurer 5M/Cortex-A7:
+`phobos-arm-linux-musleabihf.zip`). The version remains in the release URL and
+`release_info.json`, not in the installed executable's filename.
+
+The flat archive contains `phobos` (0755), `release_info.json`, `.version`, and
+`LICENSE`. Metadata carries `project_owner`, `project_name`, `version`, and
+`asset_name`; that last field lets Phobos select the same architecture on its
+next update. The binary bytes are unchanged. ZIP timestamps and permissions are
+fixed, and the combined SHA256SUMS covers both raw and ZIP assets.
+
+Extract the verified ZIP into a dedicated application directory such as
+`/data/phobos`, never `/data` itself: Moonraker replaces the configured application
+directory during a ZIP update. Forge-X's optional updater entry uses that dedicated
+directory and an explicit asset name. Selecting/running Phobos as the API daemon
+is a separate operation; installing or updating the package does not switch it.

@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import json
+import stat
+import zipfile
 import re
 import shutil
 import subprocess
@@ -50,6 +53,35 @@ def release_notes(root: Path, version: str, repository: str) -> str:
     return re.sub(r"\]\(([^)]+)\)", absolute_link, notes.read_text())
 
 
+def package_zip(root: Path, binary: Path, output: Path, version: str, repository: str) -> Path:
+    """Wrap an already verified source-build artifact for Moonraker's ZIP updater."""
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise ValueError("invalid package version")
+    if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or any(part in (".", "..") for part in repository.split("/"))):
+        raise ValueError("invalid repository name")
+    if not re.fullmatch(rf"phobos-v{re.escape(version)}-[A-Za-z0-9_.+-]+", binary.name):
+        raise ValueError("invalid binary asset name")
+    owner, project = repository.split("/")
+    name = "phobos-" + binary.name.removeprefix(f"phobos-v{version}-") + ".zip"
+    metadata = {"project_owner": owner, "project_name": project, "version": "v" + version, "asset_name": name}
+    destination = output / name
+    entries = {
+        "phobos": (binary.read_bytes(), 0o755),
+        "release_info.json": ((json.dumps(metadata, indent=2) + "\n").encode(), 0o644),
+        ".version": (("v" + version + "\n").encode(), 0o644),
+        "LICENSE": ((root / "LICENSE").read_bytes(), 0o644),
+    }
+    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for name, (content, mode) in entries.items():
+            entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            entry.create_system = 3
+            entry.external_attr = (stat.S_IFREG | mode) << 16
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(entry, content)
+    return destination
+
+
 def assemble(root: Path, source: Path, output: Path, repository: str) -> None:
     if not output.resolve().is_relative_to((root / ".scratch").resolve()):
         raise ValueError("output must be inside project .scratch")
@@ -91,6 +123,10 @@ def assemble(root: Path, source: Path, output: Path, repository: str) -> None:
             raise ValueError(f"asset checksum mismatch: {profile}")
         shutil.copyfile(directory / asset, output / asset)
         checksums.append(f"{actual}  {asset}\n")
+        zipped = package_zip(root, output / asset, output, version, repository)
+        with zipped.open("rb") as stream:
+            zipped_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        checksums.append(f"{zipped_hash}  {zipped.name}\n")
         metadata.append(entry)
     (output / "SHA256SUMS").write_text("".join(checksums))
     with (output / "profiles.tsv").open("w") as stream:
