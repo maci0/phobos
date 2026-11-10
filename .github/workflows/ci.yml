@@ -217,7 +217,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" --verify-tag --draft --title "phobos $TAG" --notes-file .scratch/bundle/release-notes.md .scratch/bundle/phobos-v* .scratch/bundle/SHA256SUMS .scratch/bundle/profiles.tsv
+          gh release create "$TAG" --verify-tag --draft --title "phobos $TAG" --notes-file .scratch/bundle/release-notes.md .scratch/bundle/phobos-* .scratch/bundle/SHA256SUMS .scratch/bundle/profiles.tsv
           gh release download "$TAG" --dir .scratch/published
           scripts/build-release.sh --verify-only --output .scratch/published
           cmp .scratch/bundle/SHA256SUMS .scratch/published/SHA256SUMS

@@ -51,7 +51,7 @@ notes. Only a tag push can publish. Main, pull-request and manual runs produce
 the verified bundle without publishing anything.
 
 After all tests, builds, native smoke checks and packaging pass, CI creates a
-draft GitHub release containing the eight binaries, `SHA256SUMS` and
+draft GitHub release containing the eight binaries, their ZIP packages, `SHA256SUMS` and
 `profiles.tsv`. It downloads those uploaded files, repeats ELF/checksum checks
 and compares both manifests before publishing the draft. An upload/verification
 failure leaves the release unpublished. An existing release causes creation to
