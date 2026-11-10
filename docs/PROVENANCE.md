@@ -2545,3 +2545,49 @@ checked against the existing published SHA256SUMS (binary SHA256
 `0069056fcff9baf8c1edc612869180e863883eba2808b7805a88b1a84a2f30ef`).
 The ZIP repackages that exact published payload. A redundant fresh tag rebuild
 reached the build helper's 600-second timeout; it was not used as package evidence.
+
+## 2026-11-10: v0.4.0 release and pre-staged deployment
+
+Bumped package version from 0.3.0 to 0.4.0 in `build.zig.zon`. This minor release
+incorporates the `ad5x-mipsel` release profile for the FlashForge Adventurer 5X
+(MIPS32r5, o32 hard float, 64-bit FPU registers, NaN2008), portable serial termios
+handling, deterministic Moonraker ZIP package generation in `tools/release/prepare.py`,
+firmware-specific installation guides for Forge-X and Z-Mod in `README.md`, and
+streamlined rules.
+
+Verification:
+- Fresh local Debug, ReleaseSafe, and ReleaseFast suites each pass 1,803 tests,
+  one gated real-Klippy skip, zero failures, and 342 bounded fuzz tests.
+- All 121 Python tooling tests pass (including 16 release assembly and MIPS ELF
+  validation tests).
+- Four build-policy tests pass.
+- Ruff, Black, mypy, ShellCheck, Zig formatting, and SQLite amalgamation source
+  hashes pass cleanly.
+- Upstream and Forge-X API coverage remain 100% (123/123 endpoints, 130/130 methods,
+  27/27 notifications upstream; 121/121 endpoints, 129/129 methods, 28/28 notifications
+  Forge-X). The generated API coverage table is current.
+- The full 8-profile release matrix builds in ReleaseFast with full LTO and passes
+  ELF/ABI/checksum verification:
+  - `phobos-v0.4.0-armv6-linux-musleabihf`
+  - `phobos-v0.4.0-armv7-linux-musleabi-soft`
+  - `phobos-v0.4.0-armv7-linux-musleabi-softfp-c`
+  - `phobos-v0.4.0-armv7-linux-musleabihf`
+  - `phobos-v0.4.0-arm-linux-musleabihf`
+  - `phobos-v0.4.0-aarch64-linux-musl`
+  - `phobos-v0.4.0-x86_64-linux-musl`
+  - `phobos-v0.4.0-mipsel-linux-musleabihf`
+- Moonraker ZIP packaging generates deterministic `.zip` packages for all eight
+  profiles, verified against `profiles.tsv` and `SHA256SUMS`.
+- The native host Debug daemon was restored under `zig-out/bin/` and reports
+  package version 0.4.0.
+
+Production inspection and staging:
+- Production printer 192.168.0.150 was inspected: actively printing
+  `MitoX Case Settings_PLA_31m29s.gcode` (~47% progress, extruder target 220°C,
+  bed target 55°C, boot ID `d2cb8328-e874-4828-a032-3ea235878fe8`).
+- Per documented safety constraints, no active print or running daemon was
+  interrupted.
+- The verified Cortex-A7 release binary (`0b3d848374e413f37d0906a4873b34b6055e9c1280f554bc966dc5362d167212`)
+  was pre-staged to `/data/phobos-v0.4.0` on persistent storage and verified by
+  SHA256. Final daemon swap and backup will take place once printing completes
+  and heaters reach zero.

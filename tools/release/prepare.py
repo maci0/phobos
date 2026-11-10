@@ -6,11 +6,11 @@ import argparse
 import csv
 import hashlib
 import json
-import stat
-import zipfile
 import re
 import shutil
+import stat
 import subprocess
+import zipfile
 from pathlib import Path
 
 
@@ -53,18 +53,26 @@ def release_notes(root: Path, version: str, repository: str) -> str:
     return re.sub(r"\]\(([^)]+)\)", absolute_link, notes.read_text())
 
 
-def package_zip(root: Path, binary: Path, output: Path, version: str, repository: str) -> Path:
+def package_zip(
+    root: Path, binary: Path, output: Path, version: str, repository: str
+) -> Path:
     """Wrap an already verified source-build artifact for Moonraker's ZIP updater."""
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("invalid package version")
-    if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
-            or any(part in (".", "..") for part in repository.split("/"))):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or any(
+        part in (".", "..") for part in repository.split("/")
+    ):
         raise ValueError("invalid repository name")
     if not re.fullmatch(rf"phobos-v{re.escape(version)}-[A-Za-z0-9_.+-]+", binary.name):
         raise ValueError("invalid binary asset name")
     owner, project = repository.split("/")
     name = "phobos-" + binary.name.removeprefix(f"phobos-v{version}-") + ".zip"
-    metadata = {"project_owner": owner, "project_name": project, "version": "v" + version, "asset_name": name}
+    metadata = {
+        "project_owner": owner,
+        "project_name": project,
+        "version": "v" + version,
+        "asset_name": name,
+    }
     destination = output / name
     entries = {
         "phobos": (binary.read_bytes(), 0o755),
@@ -72,7 +80,9 @@ def package_zip(root: Path, binary: Path, output: Path, version: str, repository
         ".version": (("v" + version + "\n").encode(), 0o644),
         "LICENSE": ((root / "LICENSE").read_bytes(), 0o644),
     }
-    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with zipfile.ZipFile(
+        destination, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
         for name, (content, mode) in entries.items():
             entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             entry.create_system = 3
