@@ -831,6 +831,25 @@ fn buildCachedStatus(alloc: std.mem.Allocator, src: Source, cache: std.json.Valu
     return result;
 }
 
+/// Fields of a cached git record that the repository itself answers. Nothing
+/// rewrites the cached record after a fetch or update, so it goes stale.
+const live_git_fields = [_][]const u8{
+    "branch",   "full_version_string", "version",        "remote_version",       "current_hash", "remote_hash",
+    "is_dirty", "detached",            "commits_behind", "commits_behind_count", "pristine",
+};
+
+/// Replace `live_git_fields` in a cached status with the values from `live`
+/// (a `buildGitStatus` result of a readable repository). Versions keep the
+/// cached short form. Values are borrowed from `live`.
+fn overlayLiveGit(alloc: std.mem.Allocator, status: *std.json.ObjectMap, live: std.json.ObjectMap) !void {
+    for (live_git_fields) |field| {
+        var value = live.get(field) orelse continue;
+        if (std.mem.eql(u8, field, "version") or std.mem.eql(u8, field, "remote_version"))
+            value = .{ .string = shortGitVersion(value.string) };
+        try status.put(alloc, field, value);
+    }
+}
+
 /// Build the full status payload Moonraker returns from `_handle_status_request`
 /// and `_handle_refresh_request`:
 ///   { github_rate_limit, github_requests_remaining, github_limit_reset_time,
@@ -855,6 +874,10 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
             std.json.Value{ .object = .empty }
         else
             try buildSourceStatus(ctx.io, alloc, src, ctx.gitEnvironment());
+        if (entry != null and src.type == .git_repo) if (ctx.io) |io| {
+            if (gitCheck(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()))
+                try overlayLiveGit(alloc, &status.object, (try buildGitStatus(io, alloc, src, ctx.gitEnvironment())).object);
+        };
         if ((src.type == .web or src.type == .zip) and src.repo_path.len > 0) if (ctx.io) |io| {
             const target = net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment()) catch {
                 try status.object.put(alloc, "is_valid", .{ .bool = false });
@@ -1616,6 +1639,39 @@ test "status reads persistent git and web versions without refreshing" {
     try testing.expect(!ctx.initial_refresh_done);
 }
 
+test "status reports the live repository over a stale cached git record" {
+    var repo = try TestRepo.init();
+    defer repo.deinit();
+    const io = testing.io;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expect(gitCheck(io, a, repo.path, &.{ "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "upstream" }, null));
+    try testing.expect(gitFetch(io, a, repo.path, null));
+    try testing.expect(gitReset(io, a, repo.path, "HEAD~1", null));
+    const head = gitOutput(io, a, repo.path, &.{ "rev-parse", "HEAD" }, null).?;
+    const remote = gitOutput(io, a, repo.path, &.{ "rev-parse", "origin/main" }, null).?;
+
+    var db = try @import("../store/sqlite_store.zig").SqliteStore.open(io, ":memory:");
+    defer db.deinit();
+    const store = db.dataStore();
+    try store.insertItem(a, "update_manager", "forge-x", try objParams(a,
+        \\{"is_valid":true,"git_branch":"old","current_version":"1.0-1-g69663338","upstream_version":"1.0-1-g69663338","rollback_version":"1.0-0-g95d1771d","current_commit":"69663338","upstream_commit":"69663338","head_detached":false,"untracked_files":[],"commits_behind":[],"cbh_count":0}
+    ));
+    const sources = [_]Source{.{ .name = "forge-x", .type = .git_repo, .owner = "DrA1ex", .repo_name = "ff5m", .repo_path = repo.path, .branch = "main" }};
+    var ctx = UpdateCtx{ .clock_io = io, .gpa = testing.allocator, .sources = &sources, .store = store, .bus = null, .io = io };
+    const result = try handleStatus(&ctx, .null, a);
+    const git = result.object.get("version_info").?.object.get("forge-x").?.object;
+    try testing.expectEqualStrings(head, git.get("current_hash").?.string);
+    try testing.expectEqualStrings(remote, git.get("remote_hash").?.string);
+    try testing.expectEqualStrings("main", git.get("branch").?.string);
+    try testing.expectEqual(@as(i64, 1), git.get("commits_behind_count").?.integer);
+    try testing.expectEqual(@as(usize, 1), git.get("commits_behind").?.array.items.len);
+    try testing.expect(std.mem.startsWith(u8, head, git.get("version").?.string));
+    try testing.expect(std.mem.startsWith(u8, remote, git.get("remote_version").?.string));
+    try testing.expectEqualStrings("1.0-0", git.get("rollback_version").?.string);
+}
+
 test "cached git versions keep the tag count and full hash separately" {
     try testing.expectEqualStrings("v0.10.1-20", shortGitVersion("v0.10.1-20-g900848584374"));
     try testing.expectEqualStrings("v1.0-0", shortGitVersion("v1.0-0-gabcdef-dirty"));
@@ -1647,6 +1703,31 @@ test "fuzz cached update status: malformed fields keep their declared types" {
                 if (kind == .git_repo) try testing.expect(result.object.get("detached").? == .bool);
                 _ = try buildCachedStatus(a, src, .null);
             }
+        }
+    }.run, .{});
+}
+
+test "fuzz overlayLiveGit: live fields replace cached ones and the rest stay" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+            var buf: [64]u8 = undefined;
+            smith.bytesWithHash(&buf, 0);
+            var live: std.json.ObjectMap = .empty;
+            try live.put(a, "version", .{ .string = &buf });
+            try live.put(a, "current_hash", .{ .string = &buf });
+            try live.put(a, "rollback_version", .{ .string = "live" });
+            var status: std.json.ObjectMap = .empty;
+            try status.put(a, "current_hash", .{ .string = "cached" });
+            try status.put(a, "rollback_version", .{ .string = "cached" });
+            try status.put(a, "remote_hash", .{ .string = "cached" });
+            try overlayLiveGit(a, &status, live);
+            try testing.expectEqualStrings(&buf, status.get("current_hash").?.string);
+            try testing.expectEqualStrings(shortGitVersion(&buf), status.get("version").?.string);
+            try testing.expectEqualStrings("cached", status.get("rollback_version").?.string);
+            try testing.expectEqualStrings("cached", status.get("remote_hash").?.string);
         }
     }.run, .{});
 }

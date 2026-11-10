@@ -11,6 +11,12 @@ Successful Git or ZIP changes, recovery and rollback restart managed services th
 the machine provider after releasing the command mutex. An unchanged Git update
 does not restart services. Provider failures reach the update caller.
 
+Git status starts from Moonraker's cached `update_manager` database record when
+one exists. Phobos never rewrites that record, so for a readable repository the
+branch, versions, hashes, dirty and detached state and the commits-behind list
+come from the repository on every status request. `rollback_version` and the
+remaining fields stay as cached.
+
 Web and ZIP sources read their installed `release_info.json`. Fluidd and Mainsail
 web installs can instead use `.version` with their manifest. The configured repo
 must match the bundle identity. Refresh selects a GitHub release ZIP, respecting

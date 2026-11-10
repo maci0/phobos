@@ -2591,3 +2591,29 @@ Production inspection and staging:
   was pre-staged to `/data/phobos-v0.4.0` on persistent storage and verified by
   SHA256. Final daemon swap and backup will take place once printing completes
   and heaters reach zero.
+
+## 2026-11-10: Git update status follows the repository, not the cached record
+
+Requested: fix the stale update status seen on printer 192.168.0.150. With
+phobos v0.3.0 serving, `POST /machine/update/refresh?name=forge-x` fetched
+`origin/1.4.2` at `febe6f5d` (`.git/refs/remotes/origin/1.4.2` on the printer),
+yet the response and `/machine/update/status` still reported `remote_hash`
+`2beb3213` and `commits_behind_count` 0.
+
+Cause: `buildStatusPayload` in `src/components/update_manager.zig` returned
+Moonraker's cached `update_manager` database record for a git source whenever
+one existed, and nothing in phobos rewrites that record.
+
+Change: when the record exists and `git rev-parse HEAD` succeeds in the
+repository, `overlayLiveGit` replaces the fields in `live_git_fields` with
+`buildGitStatus` output, keeping the cached short version form.
+`rollback_version` and the other cached fields are unchanged. An unreadable
+repository keeps the cached record. `docs/UPDATES.md` describes the behavior.
+
+Verification:
+- New test `status reports the live repository over a stale cached git record`
+  failed before the change (found cached `69663338`, expected the fixture HEAD)
+  and passes after it. A fuzz test covers `overlayLiveGit`.
+- `scripts/test.sh Debug` and `scripts/test.sh ReleaseSafe`: 1,805 passed, one
+  gated real-Klippy skip, zero failed, 343 fuzz tests found.
+- Not run: ReleaseFast suite, cross-compiled build, and a check on the printer.
