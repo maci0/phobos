@@ -186,7 +186,8 @@ scripts/build-release.sh --verify-only --output .scratch/ad5x-build ad5x-mipsel
 ```
 
 Its asset suffix is `mipsel-linux-musleabihf`. This profile was added in
-v0.4.0, which ships the MIPS asset alongside the other release profiles. A source build still derives
+v0.4.0, whose release was never published. v0.4.1 is the first release that
+ships the MIPS asset alongside the other release profiles. A source build still derives
 its filename version from `build.zig.zon`. The direct build is:
 
 ```sh

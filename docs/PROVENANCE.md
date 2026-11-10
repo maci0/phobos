@@ -2617,3 +2617,27 @@ Verification:
 - `scripts/test.sh Debug` and `scripts/test.sh ReleaseSafe`: 1,805 passed, one
   gated real-Klippy skip, zero failed, 343 fuzz tests found.
 - Not run: ReleaseFast suite, cross-compiled build, and a check on the printer.
+
+## 2026-11-10: v0.4.1 patch release and release upload fix
+
+Requested: push the Git status fix and cut a patch release.
+
+The v0.4.0 tag run (GitHub Actions run 42770382191) passed every job except
+`publish`: `gh release create` uploaded `.scratch/bundle/phobos-v*`, which does
+not match the `phobos-<target>.zip` packages named in
+`tools/release/prepare.py`, so `scripts/build-release.sh --verify-only` on the
+downloaded draft reported eight unreadable files. v0.4.0 stayed a draft. The
+glob in `.github/workflows/ci.yml` is now `phobos-*`, and `docs/CI.md` lists the
+ZIP packages.
+
+Bumped `build.zig.zon` from 0.4.0 to 0.4.1, moved the README install commands to
+v0.4.1, corrected the MIPS note in `docs/BUILDS.md`, and added
+`docs/releases/v0.4.1.md`.
+
+Verification:
+- `scripts/test.sh` in Debug, ReleaseSafe and ReleaseFast: 1,805 passed, one
+  gated real-Klippy skip, zero failed, 343 fuzz tests found, on the 0.4.1 tree.
+- `uv run --locked python -m pytest tools/release/tests`: 16 passed.
+- `zig fmt --check src build.zig` exits 0.
+- Not run locally: the eight-profile release matrix and the publish step, which
+  only a tag push exercises.
