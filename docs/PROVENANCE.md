@@ -2661,8 +2661,7 @@ Verification:
 - New test `printer: a Klippy SD busy error keeps Klipper's message` checks the
   HTTP and JSON-RPC bodies. `klippy error messages follow Moonraker` checks the
   message shapes.
-- `scripts/test.sh` Debug: 1,807 passed, one gated real-Klippy skip, zero
-  failed, 343 fuzz tests found.
-- ReleaseSafe and ReleaseFast: see the commands recorded with the commit.
+- `scripts/test.sh` in Debug, ReleaseSafe and ReleaseFast: 1,807 passed, one
+  gated real-Klippy skip, zero failed, 343 fuzz tests found.
 - Not run: a slicer upload on the printer. The console line and the Orca dialog
   were reported from an AD5M running phobos.
