@@ -43,7 +43,7 @@ compare v0.2.3 with Moonraker in fresh Forge-X
 printer probes and an isolated KVM guest, with metric directions, trial ranges
 and measured scheduling limits. Published-release captures remain archived.
 The latest release is
-[v0.4.1](docs/releases/v0.4.1.md).
+[v0.4.2](docs/releases/v0.4.2.md).
 
 ## Architecture
 
@@ -132,7 +132,7 @@ Native camera/parking/print-macro workflows retain the limits in the
 ### Download the AD5M binary
 
 For the FlashForge Adventurer 5M/5M Pro in either guide, use the Cortex-A7
-asset `phobos-v0.4.1-arm-linux-musleabihf`. Other Klipper hosts should select
+asset `phobos-v0.4.2-arm-linux-musleabihf`. Other Klipper hosts should select
 their architecture from the [build guide](docs/BUILDS.md). The binary includes
 SQLite and needs no Zig compiler or Python runtime on the printer. Native
 timelapse rendering needs an installed FFmpeg; see [timelapse](docs/TIMELAPSE.md).
@@ -143,11 +143,11 @@ small RAM filesystem on these printers.
 
 ```sh
 set -eu
-mkdir -p .scratch/install-v0.4.1
-cd .scratch/install-v0.4.1
-curl -fLO https://github.com/maci0/phobos/releases/download/v0.4.1/phobos-v0.4.1-arm-linux-musleabihf
-curl -fLO https://github.com/maci0/phobos/releases/download/v0.4.1/SHA256SUMS
-grep '  phobos-v0.4.1-arm-linux-musleabihf$' SHA256SUMS | sha256sum --check -
+mkdir -p .scratch/install-v0.4.2
+cd .scratch/install-v0.4.2
+curl -fLO https://github.com/maci0/phobos/releases/download/v0.4.2/phobos-v0.4.2-arm-linux-musleabihf
+curl -fLO https://github.com/maci0/phobos/releases/download/v0.4.2/SHA256SUMS
+grep '  phobos-v0.4.2-arm-linux-musleabihf$' SHA256SUMS | sha256sum --check -
 ```
 
 ### Run on a Forge-X printer
@@ -157,8 +157,8 @@ copy it to the printer. Replace the example SSH address with your printer's
 address.
 
 ```sh
-cat phobos-v0.4.1-arm-linux-musleabihf | ssh root@192.168.0.150 \
-  'test ! -e /data/phobos-v0.4.1 && cat > /data/phobos-v0.4.1.new && chmod 755 /data/phobos-v0.4.1.new && mv /data/phobos-v0.4.1.new /data/phobos-v0.4.1'
+cat phobos-v0.4.2-arm-linux-musleabihf | ssh root@192.168.0.150 \
+  'test ! -e /data/phobos-v0.4.2 && cat > /data/phobos-v0.4.2.new && chmod 755 /data/phobos-v0.4.2.new && mv /data/phobos-v0.4.2.new /data/phobos-v0.4.2'
 ```
 
 Wait until printing and calibration finish and heater targets are zero. Stop
@@ -178,7 +178,7 @@ contain credentials. Do not run two daemons against this database.
 Run phobos from an SSH session on the printer:
 
 ```sh
-chroot /data/.mod/.forge-x /data/phobos-v0.4.1 \
+chroot /data/.mod/.forge-x /data/phobos-v0.4.2 \
   --compat forge-x -d /root/printer_data
 ```
 
@@ -192,7 +192,7 @@ For the existing `/data/phobos-run.sh` installation, its launcher body is:
 
 ```sh
 #!/bin/sh
-exec /data/phobos-v0.4.1 --compat forge-x -d /root/printer_data >> /data/logFiles/phobos.log 2>&1
+exec /data/phobos-v0.4.2 --compat forge-x -d /root/printer_data >> /data/logFiles/phobos.log 2>&1
 ```
 
 Run that launcher with
@@ -209,7 +209,7 @@ To select phobos at boot, first back up `S65moonraker`, then replace its
 `start-stop-daemon` launch line inside `start()` with:
 
 ```sh
-start-stop-daemon -S -o -b -m -p "$PID_FILE" -O /data/logFiles/phobos.log --exec /data/phobos-v0.4.1 -- --compat forge-x -d "$PRINTER_DATA"
+start-stop-daemon -S -o -b -m -p "$PID_FILE" -O /data/logFiles/phobos.log --exec /data/phobos-v0.4.2 -- --compat forge-x -d "$PRINTER_DATA"
 ```
 
 Keep the surrounding Forge-X configuration setup and stop/PID-file handling.
@@ -237,7 +237,7 @@ use `/data/.mod/.zmod` on AD5M, rather than Forge-X's `.forge-x` directory.
 AD5X uses a different path and MIPS binaries; do not install an ARM asset there.
 
 Production replacement is not supported yet. Z-Mod selects `_PRINT_FILE` or
-`_ZSDCARD_PRINT_FILE` according to its screen mode; phobos v0.4.1 has different
+`_ZSDCARD_PRINT_FILE` according to its screen mode; phobos v0.4.2 has different
 print-start selection. `--compat forge-x` does not implement Z-Mod behavior,
 and there is no `--compat zmod` profile. Its plugin, timelapse, update and
 service integrations also need separate validation. Existing in-process
@@ -254,10 +254,10 @@ From the directory containing that verified file, use this Z-Mod transfer
 command:
 
 ```sh
-cat phobos-v0.4.1-arm-linux-musleabihf | ssh root@192.168.0.150 '
+cat phobos-v0.4.2-arm-linux-musleabihf | ssh root@192.168.0.150 '
   set -eu
   case "$(uname -m)" in armv7l) ;; *) echo "AD5M ARMv7 required" >&2; exit 1 ;; esac
-  trial=/data/.mod/.zmod/root/phobos-trial-v0.4.1
+  trial=/data/.mod/.zmod/root/phobos-trial-v0.4.2
   test -x /data/.mod/.zmod/bin/sh
   test ! -e "$trial"
   mkdir -m 700 "$trial"
@@ -274,7 +274,7 @@ configuration and run the trial in the foreground:
 ```sh
 set -eu
 zmod_root=/data/.mod/.zmod
-trial=/root/phobos-trial-v0.4.1
+trial=/root/phobos-trial-v0.4.2
 cat > "$zmod_root$trial/probe.cfg" <<'CFG'
 [server]
 host: 127.0.0.1
@@ -288,7 +288,7 @@ file_system_observer: none
 trusted_clients: 127.0.0.1
 
 [database]
-path: /root/phobos-trial-v0.4.1/database/moonraker-sql.db
+path: /root/phobos-trial-v0.4.2/database/moonraker-sql.db
 CFG
 chroot "$zmod_root" "$trial/phobos" --compat moonraker \
   -c "$trial/probe.cfg" -d "$trial"
@@ -326,7 +326,7 @@ scripts/build-release.sh --output .scratch/ad5x-build ad5x-mipsel
 scripts/build-release.sh --verify-only --output .scratch/ad5x-build ad5x-mipsel
 ```
 
-The output is `.scratch/ad5x-build/phobos-v0.4.1-mipsel-linux-musleabihf`, with
+The output is `.scratch/ad5x-build/phobos-v0.4.2-mipsel-linux-musleabihf`, with
 `SHA256SUMS` and `profiles.tsv`. CI and release packaging include this profile,
 with both raw binary and Moonraker ZIP packages. See the [build guide](docs/BUILDS.md#ad5x-mips)
 for a direct Zig command and verification limits.

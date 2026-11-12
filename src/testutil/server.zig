@@ -2299,6 +2299,33 @@ test "octoprint: with Klippy sim, /api/printer/command runs gcode through Klippy
     try std.testing.expectEqual(@as(usize, 2), responses);
 }
 
+test "printer: a Klippy SD busy error keeps Klipper's message" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    try ts.startKlippyBridge();
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const body = try ts.postJson(alloc, "/printer/print/start",
+        \\{"filename":"SD_BUSY.gcode"}
+    );
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 400), err.get("code").?.integer);
+    try std.testing.expectEqualStrings("SD busy", err.get("message").?.string);
+
+    const rpc = try ts.postJson(alloc, "/server/jsonrpc",
+        \\{"jsonrpc":"2.0","method":"printer.print.start","params":{"filename":"SD_BUSY.gcode"},"id":4}
+    );
+    defer alloc.free(rpc);
+    const rpc_parsed = try std.json.parseFromSlice(std.json.Value, alloc, rpc, .{});
+    defer rpc_parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 400), rpc_parsed.value.object.get("error").?.object.get("code").?.integer);
+    try std.testing.expectEqualStrings("SD busy", rpc_parsed.value.object.get("error").?.object.get("message").?.string);
+}
+
 test "printer: with Klippy sim, print.start returns success" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

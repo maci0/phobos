@@ -21,6 +21,7 @@ const sleep = @import("../util/sleep.zig");
 const net = std.Io.net;
 const framing = @import("../util/klippy_frame.zig");
 const jv = @import("../json/value.zig");
+const jsonrpc = @import("../jsonrpc.zig");
 const notify = @import("../server/notify.zig");
 const methods = @import("../core/methods.zig");
 const server_core = @import("../server/core.zig");
@@ -41,6 +42,21 @@ const Waiter = struct {
     /// Set when the connection drops while waiting.
     failed: bool = false,
 };
+
+/// Moonraker's message for a Klippy error result (`_process_command`): the
+/// string `error`, or `error.message`, else "Malformed Klippy Response".
+pub fn klippyErrorMessage(response: std.json.Value) []const u8 {
+    const err = if (response == .object) response.object.get("error") orelse .null else .null;
+    const raw: []const u8 = switch (err) {
+        .object => if (err.object.get("message")) |message| switch (message) {
+            .string => |text| text,
+            else => "",
+        } else "",
+        .string => |text| text,
+        else => "",
+    };
+    return if (raw.len == 0) "Malformed Klippy Response" else raw;
+}
 
 // ---------------------------------------------------------------------------
 // Klippy connection state
@@ -312,6 +328,8 @@ pub const KlippyCtx = struct {
     extra_sub_objects: std.StringHashMapUnmanaged(void) = .empty,
     sub_mutex: std.Io.Mutex = std.Io.Mutex.init,
     subscribe_mutex: std.Io.Mutex = .init,
+    /// Owned text of the latest Klippy error result. `rejectClient` frees it.
+    pending_error: ?[]u8 = null,
 
     pub fn init(gpa: std.mem.Allocator, bus: *notify.NotifyBus) !KlippyCtx {
         return KlippyCtx{
@@ -326,6 +344,7 @@ pub const KlippyCtx = struct {
     }
 
     pub fn deinit(self: *KlippyCtx) void {
+        if (self.pending_error) |message| self.gpa.free(message);
         if (self.io) |io| self.stop(io);
         var agent_names = self.agent_methods.keyIterator();
         while (agent_names.next()) |name| self.gpa.free(name.*);
@@ -859,10 +878,31 @@ pub const KlippyCtx = struct {
             };
         }
         if (waiter.response) |response| {
-            if (response.value.object.contains("error")) return error.KlippyRequestFailed;
+            if (response.value.object.contains("error")) {
+                // Copy before the defer frees the frame. `rejectClient`
+                // publishes it for the handler.
+                const message = try self.gpa.dupe(u8, klippyErrorMessage(response.value));
+                if (self.pending_error) |previous| self.gpa.free(previous);
+                self.pending_error = message;
+                return error.KlippyRequestFailed;
+            }
             return jv.deepCopy(alloc, response.value.object.get("result") orelse .null);
         }
         return if (waiter.failed) error.KlippyDisconnected else error.OutOfMemory;
+    }
+
+    /// Move the message captured by the last `call` onto the client request.
+    /// Call it in the same handler that caught `KlippyRequestFailed`. The
+    /// message stays alive in the request arena.
+    pub fn rejectClient(self: *KlippyCtx, alloc: std.mem.Allocator, client_params: std.json.Value) error{ OutOfMemory, UpstreamRequestFailed } {
+        const message = self.pending_error orelse "Malformed Klippy Response";
+        self.pending_error = null;
+        jsonrpc.setErrorReply(alloc, client_params, .bad_request, message) catch |err| {
+            if (message.ptr != "Malformed Klippy Response".ptr) self.gpa.free(message);
+            return err;
+        };
+        if (message.ptr != "Malformed Klippy Response".ptr) self.gpa.free(message);
+        return error.UpstreamRequestFailed;
     }
 
     /// Send a request from a handler that holds Core and return the result.
@@ -2109,6 +2149,21 @@ test "a timed request removes its waiter when Klippy never responds" {
     defer arena.deinit();
     try std.testing.expectError(error.KlippyRequestTimedOut, ctx.call("info", "{}", null, .{ .duration = .{ .raw = .fromMilliseconds(20), .clock = .awake } }, arena.allocator()));
     try std.testing.expectEqual(@as(u32, 0), ctx.pending.count());
+}
+
+test "klippy error messages follow Moonraker" {
+    const rows = [_]struct { []const u8, []const u8 }{
+        .{ "{\"error\":{\"message\":\"SD busy\",\"code\":400}}", "SD busy" },
+        .{ "{\"error\":\"SD busy\"}", "SD busy" },
+        .{ "{\"error\":{\"code\":400}}", "Malformed Klippy Response" },
+        .{ "{\"error\":null}", "Malformed Klippy Response" },
+        .{ "{}", "Malformed Klippy Response" },
+    };
+    for (rows) |row| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, row[0], .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(row[1], klippyErrorMessage(parsed.value));
+    }
 }
 
 /// Test-local Klippy: accepts one connection, answers `info` with `state`,

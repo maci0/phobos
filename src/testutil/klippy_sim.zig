@@ -269,13 +269,28 @@ pub const KlippySim = struct {
 
             if (std.mem.eql(u8, method, "gcode/script")) {
                 const id_str: []const u8 = idStrVal(id);
+                const script = if (frame.object.get("params")) |p|
+                    if (p.object.get("script")) |s| s.string else ""
+                else
+                    "";
                 var buf: [256]u8 = undefined;
-                const resp = std.fmt.bufPrint(
-                    &buf,
-                    "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":\"ok\"}}",
-                    .{id_str},
-                ) catch continue;
+                // Klipper answers an error object; Moonraker forwards its message.
+                // The print macro embeds the filename, so match it anywhere.
+                const busy = std.mem.indexOf(u8, script, "SD_BUSY") != null;
+                const resp = if (busy)
+                    std.fmt.bufPrint(
+                        &buf,
+                        "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"error\":{{\"code\":400,\"message\":\"SD busy\"}}}}",
+                        .{id_str},
+                    ) catch continue
+                else
+                    std.fmt.bufPrint(
+                        &buf,
+                        "{{\"jsonrpc\":\"2.0\",\"id\":\"{s}\",\"result\":\"ok\"}}",
+                        .{id_str},
+                    ) catch continue;
                 self.writeFrame(io, stream, resp) catch return;
+                if (busy) continue;
 
                 resp_id += 1;
                 var gr_buf: [256]u8 = undefined;
@@ -287,10 +302,6 @@ pub const KlippySim = struct {
                 self.writeFrame(io, stream, gr) catch return;
 
                 // Real Klippy restarts its connection after RESTART / FIRMWARE_RESTART.
-                const script = if (frame.object.get("params")) |p|
-                    if (p.object.get("script")) |s| s.string else ""
-                else
-                    "";
                 if (std.mem.eql(u8, script, "RESTART") or std.mem.eql(u8, script, "FIRMWARE_RESTART")) {
                     // Let the buffered result drain before the restart closes the socket.
                     std.Io.sleep(io, .{ .nanoseconds = 50_000_000 }, .real) catch {};

@@ -157,9 +157,10 @@ pub fn errorReply(err: anyerror, params: std.json.Value, alloc: std.mem.Allocato
         error.EstimatorCommandFailed => .{ .internal_server_error, "Klipper Estimator command failed" },
         error.EstimatorInvalidOutput => .{ .internal_server_error, "Invalid Klipper Estimator output" },
         error.EstimatorFileChanged => .{ .conflict, "GCode file changed during analysis" },
-        // Klippy rejected the command (bad gcode, unknown mcu command): a
-        // client error, as in Moonraker.
-        error.KlippyRequestFailed => .{ .bad_request, "Klippy request failed" },
+        // A Klippy error result carries its message (`klippy_connection.py`
+        // `_process_command`). This fallback is only for a rejection that
+        // arrived without one.
+        error.KlippyRequestFailed => .{ .bad_request, "Malformed Klippy Response" },
         error.KlippyRequestTimedOut => .{ .internal_server_error, "Klippy request timed out" },
         error.Unauthorized => .{ .unauthorized, "Unauthorized" },
         // Moonraker klippy_connection.py: objects/subscribe needs a socket.

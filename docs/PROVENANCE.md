@@ -2641,3 +2641,28 @@ Verification:
 - `zig fmt --check src build.zig` exits 0.
 - Not run locally: the eight-profile release matrix and the publish step, which
   only a tag push exercises.
+
+## 2026-11-12: v0.4.2 keeps Klipper's error text
+
+Reported: Orca Slicer showed `HTTP 400: Klippy request failed` at the same time
+the printer console showed `!! SD busy`.
+
+Cause: `KlippyCtx.call` discarded a Klippy error result, and `errorReply`
+mapped `KlippyRequestFailed` to the fixed string `Klippy request failed`.
+Moonraker returns Klipper's `error.message` as the HTTP 400 body
+(`klippy_connection.py` `_process_command`).
+
+Change: `call` keeps that message, and the printer handlers attach it to the
+client request. HTTP and JSON-RPC then return it. A missing message stays
+`Malformed Klippy Response`. `build.zig.zon` is 0.4.2. The README install
+commands and `docs/releases/v0.4.2.md` match.
+
+Verification:
+- New test `printer: a Klippy SD busy error keeps Klipper's message` checks the
+  HTTP and JSON-RPC bodies. `klippy error messages follow Moonraker` checks the
+  message shapes.
+- `scripts/test.sh` Debug: 1,807 passed, one gated real-Klippy skip, zero
+  failed, 343 fuzz tests found.
+- ReleaseSafe and ReleaseFast: see the commands recorded with the commit.
+- Not run: a slicer upload on the printer. The console line and the Orca dialog
+  were reported from an AD5M running phobos.

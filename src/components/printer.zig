@@ -244,9 +244,12 @@ pub const ProxyEndpoint = struct {
     /// and concurrent reads run in parallel. Writes keep Core for ordering.
     off_core: bool = false,
 
-    fn proxyReq(self: *const ProxyEndpoint, k: *KlippyCtx, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
-        if (self.off_core) return k.requestOffCore(self.endpoint, params, alloc);
-        return k.request(self.endpoint, params, alloc);
+    fn proxyReq(self: *const ProxyEndpoint, k: *KlippyCtx, client: std.json.Value, sent: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+        const result = if (self.off_core) k.requestOffCore(self.endpoint, sent, alloc) else k.request(self.endpoint, sent, alloc);
+        return result catch |err| switch (err) {
+            error.KlippyRequestFailed => return k.rejectClient(alloc, client),
+            else => |e| return e,
+        };
     }
 
     /// Generic proxy handler: forward the request verbatim to Klippy and return
@@ -285,7 +288,7 @@ pub const ProxyEndpoint = struct {
             }
             var wrapped = try std.json.ObjectMap.init(alloc, &.{}, &.{});
             try wrapped.put(alloc, "objects", .{ .object = objects });
-            const wrapped_result = try self.proxyReq(k, .{ .object = wrapped }, alloc);
+            const wrapped_result = try self.proxyReq(k, params, .{ .object = wrapped }, alloc);
             return self.parent.queryResult(alloc, wrapped_result);
         }
 
@@ -302,7 +305,7 @@ pub const ProxyEndpoint = struct {
             }
             break :blk .{ .object = clone };
         } else .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) };
-        const result = try self.proxyReq(k, forwarded, alloc);
+        const result = try self.proxyReq(k, params, forwarded, alloc);
         if (std.mem.eql(u8, self.endpoint, "objects/list")) {
             return filterObjectList(alloc, result, self.parent.hidden_objects);
         }
@@ -356,7 +359,10 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
             ""
     else
         "";
-    return startPrint(k, filename, alloc, self.print_config);
+    return startPrint(k, filename, alloc, self.print_config) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 /// Profile-selected print macro with a leading slash stripped and quotes escaped.
@@ -374,60 +380,78 @@ pub fn startPrint(k: *KlippyCtx, filename: []const u8, alloc: std.mem.Allocator,
 
 /// POST /printer/print/pause → printer.print.pause
 /// Moonraker: klippy_apis.pause_print() → pause_resume/pause.
-pub fn handlePrintPause(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+pub fn handlePrintPause(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
-    return k.request("pause_resume/pause", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+    return k.request("pause_resume/pause", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 /// POST /printer/print/resume → printer.print.resume
 /// Moonraker: klippy_apis.resume_print() → pause_resume/resume.
-pub fn handlePrintResume(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+pub fn handlePrintResume(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
-    return k.request("pause_resume/resume", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+    return k.request("pause_resume/resume", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 /// POST /printer/print/cancel → printer.print.cancel
 /// Moonraker: klippy_apis.cancel_print() → pause_resume/cancel.
-pub fn handlePrintCancel(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+pub fn handlePrintCancel(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
-    return k.request("pause_resume/cancel", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+    return k.request("pause_resume/cancel", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 /// POST /printer/restart → printer.restart
 /// Moonraker: klippy_apis.do_restart("RESTART") → gcode/script RESTART.
-pub fn handleRestart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+pub fn handleRestart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
     var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
     try params_obj.put(alloc, "script", .{ .string = "RESTART" });
-    return k.request("gcode/script", .{ .object = params_obj }, alloc);
+    return k.request("gcode/script", .{ .object = params_obj }, alloc) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 /// POST /printer/firmware_restart → printer.firmware_restart
 /// Moonraker: klippy_apis.do_restart("FIRMWARE_RESTART") → gcode/script FIRMWARE_RESTART.
-pub fn handleFirmwareRestart(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+pub fn handleFirmwareRestart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
     var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
     try params_obj.put(alloc, "script", .{ .string = "FIRMWARE_RESTART" });
-    return k.request("gcode/script", .{ .object = params_obj }, alloc);
+    return k.request("gcode/script", .{ .object = params_obj }, alloc) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 /// POST /printer/emergency_stop → printer.emergency_stop
 /// Moonraker: klippy_apis.emergency_stop() → Klippy emergency_stop RPC.
-pub fn handleEmergencyStop(ctx: *anyopaque, _: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
+pub fn handleEmergencyStop(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.Allocator) anyerror!std.json.Value {
     const self: *PrinterCtx = @ptrCast(@alignCast(ctx));
     const k = self.klippy orelse return error.KlippyDisconnected;
     if (!k.isConnected()) return error.KlippyDisconnected;
-    return k.request("emergency_stop", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc);
+    return k.request("emergency_stop", .{ .object = try std.json.ObjectMap.init(alloc, &.{}, &.{}) }, alloc) catch |err| switch (err) {
+        error.KlippyRequestFailed => return k.rejectClient(alloc, params),
+        else => |e| return e,
+    };
 }
 
 // ---------------------------------------------------------------------------
