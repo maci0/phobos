@@ -2665,3 +2665,10 @@ Verification:
   gated real-Klippy skip, zero failed, 343 fuzz tests found.
 - Not run: a slicer upload on the printer. The console line and the Orca dialog
   were reported from an AD5M running phobos.
+
+The first `v0.4.2` tag, `c27dd93`, failed CI in `checks`.
+`test_assemble_copies_every_asset_and_combines_manifests` requires the packaged
+notes to contain a `blob/v0.4.2/` link, which `prepare.release_notes` only
+writes when the notes have a relative link. The notes now link
+[v0.4.1](releases/v0.4.1.md). The tag had not published a release, so it was
+moved to the commit that adds the link.
