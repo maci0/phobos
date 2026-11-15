@@ -2672,3 +2672,72 @@ notes to contain a `blob/v0.4.2/` link, which `prepare.release_notes` only
 writes when the notes have a relative link. The notes now link
 [v0.4.1](releases/v0.4.1.md). The tag had not published a release, so it was
 moved to the commit that adds the link.
+
+## 2026-11-15: v0.4.3 drops the repeat print start
+
+Reported: the console showed `!! SD busy` at the same moment `START_PRINT`
+ran for `bracket_PETG_20m39s.gcode`.
+
+The gcode store had two commands 57 ms apart. The first was
+`SDCARD_PRINT_FILE FILENAME="bracket_PETG_20m39s.gcode"`, answered by
+`File opened` and `File selected`. The second was
+`SDCARD_PRINT_FILE FILENAME="bracket_PETG_20m39s.gcode.3mf"`, answered by
+`!! SD busy`. `printer.log` rolled over at that second and records
+`Starting SD card print (position 0)` before `SD busy`. The first job
+continued into homing.
+
+Cause: the upload starts the extracted gcode, then a second client starts the
+archive name. `print_stats` is still `complete` until the virtual SD timer
+runs, so nothing treated the second name as the print already opened.
+
+Change: Forge-X mode redirects `name.gcode.3mf` to `name.gcode` when the
+extracted file exists and the archive does not. `startPrint` remembers the
+accepted filename for two seconds and returns HTTP 409 `Printer is busy` for
+that file or its archive name. A printing or paused `print_stats` state also
+refuses the start. `build.zig.zon` is 0.4.3.
+
+Verification:
+- New test `printer: a second start of an extracted 3MF is not sent to Klipper`.
+- `scripts/test.sh` in Debug, ReleaseSafe and ReleaseFast: 1,809 passed, one
+  gated real-Klippy skip, zero failed, 343 fuzz tests found. The prepare tests
+  passed, 10 of 10.
+- Not run: the printer. This session cannot SSH to it.
+
+
+## 2026-11-12: documentation accuracy and history review
+
+Documentation only. `scripts/build-release.sh` builds eight profiles.
+`machine.timelapse.*` in the client matrix is a pinned input set; native
+timelapse registers those names, and capture still needs configuration and
+Forge-X macros. Video encoding needs FFmpeg; a missing executable disables
+autorender without disabling capture. CI's Forge-X coverage gate is separate from the
+upstream gate.
+
+Uploads stay staged until the form, destination and conversion validate
+(`file_manager.zig` `finishUpload` / `prepareUpload`). `publishUpload` replaces
+the destination, then writes gcode metadata. A metadata error can fail the
+upload before `finishUpload` returns, but leaves the published file in place.
+A later print-start error also does not undo replacement.
+
+v0.2.3 memory and performance figures, and the 2026-06-01 Moonraker test-run
+notes, are historical. Release-note links run through v0.4.2. Checked against
+those sources and local links. No build, device command or benchmark was run.
+
+
+## 2026-11-13: maintained-guide and API inventory review
+
+The manual API inventory now identifies its Moonraker pin, describes upload print/queue
+handling and mixed SQLite/KV history correctly, and records GET for
+`debug.database.table`. The duplicated method list was replaced with links to
+the scanner baseline and generated per-call table; dynamic Klippy methods stay
+separate. The pinned upstream notification guide omits `notify_power_changed`,
+not `notify_button_event`. Test-scope detail now links to the dedicated upstream
+coverage map and historical run rather than repeating an incomplete list.
+
+Evidence: `api/api_surface.json`, the pinned vendor notification guide,
+`src/http_transport.zig`, `src/components/file_manager.zig` and
+`src/store/sqlite_store.zig`. Tool guidance includes router registrations, all
+eight release asset names and the project-local pytest temporary directory.
+The Forge-X comparison describes its local checkout at the recorded comparison
+date. Historical captures, release notes and generated coverage tables were
+preserved. Checks were static; no device, build or benchmark was run.

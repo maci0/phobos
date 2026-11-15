@@ -330,6 +330,12 @@ pub const KlippyCtx = struct {
     subscribe_mutex: std.Io.Mutex = .init,
     /// Owned text of the latest Klippy error result. `rejectClient` frees it.
     pending_error: ?[]u8 = null,
+    /// Filename of the latest accepted print start, and its monotonic time.
+    /// A second start of that file, or of the `.gcode.3mf` it was extracted
+    /// from, arrives before print_stats leaves its previous state.
+    recent_print: [256]u8 = undefined,
+    recent_print_len: usize = 0,
+    recent_print_at: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, bus: *notify.NotifyBus) !KlippyCtx {
         return KlippyCtx{
@@ -903,6 +909,28 @@ pub const KlippyCtx = struct {
         };
         if (message.ptr != "Malformed Klippy Response".ptr) self.gpa.free(message);
         return error.UpstreamRequestFailed;
+    }
+
+    /// True when `filename` repeats the print accepted inside the last two
+    /// seconds, including its `.gcode.3mf` archive name.
+    pub fn repeatPrint(self: *KlippyCtx, filename: []const u8) bool {
+        if (self.recent_print_at == 0 or self.io == null) return false;
+        const now = clock.monotonicNanos(self.io.?);
+        if (now -| self.recent_print_at > 2 * std.time.ns_per_s) {
+            self.recent_print_len = 0;
+            self.recent_print_at = 0;
+            return false;
+        }
+        const recent = self.recent_print[0..self.recent_print_len];
+        if (std.mem.eql(u8, recent, filename)) return true;
+        return std.ascii.endsWithIgnoreCase(filename, ".gcode.3mf") and filename.len > 4 and std.mem.eql(u8, recent, filename[0 .. filename.len - 4]);
+    }
+
+    pub fn notePrint(self: *KlippyCtx, filename: []const u8) void {
+        const n = @min(filename.len, self.recent_print.len);
+        @memcpy(self.recent_print[0..n], filename[0..n]);
+        self.recent_print_len = n;
+        self.recent_print_at = if (self.io) |io| clock.monotonicNanos(io) else 0;
     }
 
     /// Send a request from a handler that holds Core and return the result.

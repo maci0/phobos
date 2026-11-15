@@ -876,6 +876,7 @@ pub const App = struct {
         // (print.start, pause, resume, cancel, restart, firmware_restart)
         // can proxy requests through the Unix-domain socket bridge.
         printer_ctx.klippy = klippy_ctx;
+        printer_ctx.job_state = job_state_ctx;
 
         // Wire Klippy dispatch into the job queue so it can start/pause prints.
         job_queue_ctx.setKlippyDispatch(@ptrCast(klippy_ctx), &jobQueueKlippyDispatch);
@@ -955,7 +956,10 @@ pub const App = struct {
         std.debug.assert(self.cfg == null);
         self.compatibility = profile;
         self.update_ctx.compatibility = profile;
-        const print_config: printer_component.PrintConfig = .{ .profile = profile, .io = self.machine_ctx.clock_io, .root = self.file_roots[0].path };
+        const gcodes = for (self.file_roots) |root| {
+            if (std.mem.eql(u8, root.name, "gcodes")) break root.path;
+        } else "";
+        const print_config: printer_component.PrintConfig = .{ .profile = profile, .io = self.machine_ctx.clock_io, .root = self.file_roots[0].path, .gcodes = gcodes };
         self.printer_ctx.print_config = print_config;
         self.file_ctx.print_config = print_config;
         self.job_queue_ctx.print_config = print_config;

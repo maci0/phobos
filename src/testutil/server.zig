@@ -2326,6 +2326,36 @@ test "printer: a Klippy SD busy error keeps Klipper's message" {
     try std.testing.expectEqualStrings("SD busy", rpc_parsed.value.object.get("error").?.object.get("message").?.string);
 }
 
+test "printer: a second start of an extracted 3MF is not sent to Klipper" {
+    const alloc = std.testing.allocator;
+    const ts = try TestServer.init(alloc);
+    defer ts.stop();
+    ts.app.printer_ctx.print_config.gcodes = ts.app.file_ctx.findRoot("gcodes").?.path;
+    var gcodes = try std.Io.Dir.cwd().openDir(ts.io, ts.app.printer_ctx.print_config.gcodes, .{});
+    defer gcodes.close(ts.io);
+    try gcodes.writeFile(ts.io, .{ .sub_path = "bracket.gcode", .data = "; extracted\n" });
+    try ts.startKlippyBridge();
+    try std.testing.expect(waitKlippyConnected(ts));
+
+    const first = try ts.postJson(alloc, "/printer/print/start",
+        \\{"filename":"bracket.gcode"}
+    );
+    defer alloc.free(first);
+    const first_parsed = try std.json.parseFromSlice(std.json.Value, alloc, first, .{});
+    defer first_parsed.deinit();
+    try std.testing.expect(first_parsed.value.object.get("error") == null);
+
+    const repeat = try ts.postJson(alloc, "/printer/print/start",
+        \\{"filename":"bracket.gcode.3mf"}
+    );
+    defer alloc.free(repeat);
+    const repeat_parsed = try std.json.parseFromSlice(std.json.Value, alloc, repeat, .{});
+    defer repeat_parsed.deinit();
+    const err = repeat_parsed.value.object.get("error").?.object;
+    try std.testing.expectEqual(@as(i64, 409), err.get("code").?.integer);
+    try std.testing.expectEqualStrings("Printer is busy", err.get("message").?.string);
+}
+
 test "printer: with Klippy sim, print.start returns success" {
     const alloc = std.testing.allocator;
     const ts = try TestServer.init(alloc);

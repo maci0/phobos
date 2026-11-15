@@ -43,6 +43,7 @@ const confighelper = @import("../config/confighelper.zig");
 const Registry = registry.Registry;
 const RequestType = registry.RequestType;
 const KlippyCtx = @import("klippy_connection.zig").KlippyCtx;
+const JobStateCtx = @import("job_state.zig").JobStateCtx;
 const Profile = @import("../compat.zig").Profile;
 const max_printer_config_bytes = 4 * 1024 * 1024;
 const max_variables_config_bytes = 1024 * 1024;
@@ -51,6 +52,32 @@ pub const PrintConfig = struct {
     profile: Profile = .moonraker,
     io: ?std.Io = null,
     root: []const u8 = "",
+    /// Forge-X gcodes directory. A `.gcode.3mf` start prints the extracted
+    /// sibling when the archive is not itself a printable file.
+    gcodes: []const u8 = "",
+
+    /// The file Klipper should load. Forge-X extracts `name.gcode.3mf` to
+    /// `name.gcode` and does not keep the archive, so a client that repeats
+    /// the upload name is aimed at that extracted file.
+    pub fn printFilename(self: PrintConfig, alloc: std.mem.Allocator, filename: []const u8) ![]const u8 {
+        if (self.profile != .forge_x or !@import("gcode_3mf.zig").isPackaged(filename)) return filename;
+        if (self.io == null or self.gcodes.len == 0) return filename;
+        const stripped = if (std.mem.startsWith(u8, filename, "/")) filename[1..] else filename;
+        if (try self.gcodeFile(stripped)) return filename;
+        const extracted = stripped[0 .. stripped.len - 4];
+        if (try self.gcodeFile(extracted)) return try alloc.dupe(u8, extracted);
+        return filename;
+    }
+
+    fn gcodeFile(self: PrintConfig, rel: []const u8) !bool {
+        if (rel.len == 0 or std.mem.indexOf(u8, rel, "..") != null or std.mem.indexOfScalar(u8, rel, '/') != null) return false;
+        const io = self.io orelse return false;
+        var dir = std.Io.Dir.cwd().openDir(io, self.gcodes, .{}) catch return false;
+        defer dir.close(io);
+        const file = dir.openFile(io, rel, .{ .follow_symlinks = false, .allow_directory = false }) catch return false;
+        defer file.close(io);
+        return true;
+    }
 
     pub fn script(self: PrintConfig, alloc: std.mem.Allocator, filename: []const u8) ![]u8 {
         if (std.mem.indexOfAny(u8, filename, "\r\n\x00") != null) return error.InvalidParams;
@@ -117,6 +144,25 @@ test "print profile uses stock leveling macros and rereads the configuration" {
     try std.testing.expectEqualStrings(native, upstream);
 }
 
+test "a packaged Forge-X start prints the extracted gcode" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bracket.gcode", .data = "; extracted\n" });
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const config: PrintConfig = .{ .profile = .forge_x, .io = io, .gcodes = path[0..try tmp.dir.realPath(io, &path)] };
+    const extracted = try config.printFilename(alloc, "bracket.gcode.3mf");
+    defer if (extracted.ptr != "bracket.gcode.3mf".ptr) alloc.free(extracted);
+    try std.testing.expectEqualStrings("bracket.gcode", extracted);
+    const plain = try config.printFilename(alloc, "bracket.gcode");
+    try std.testing.expectEqualStrings("bracket.gcode", plain);
+    const missing = try config.printFilename(alloc, "other.gcode.3mf");
+    try std.testing.expectEqualStrings("other.gcode.3mf", missing);
+    const stock = try (PrintConfig{}).printFilename(alloc, "bracket.gcode.3mf");
+    try std.testing.expectEqualStrings("bracket.gcode.3mf", stock);
+}
+
 test "fuzz print scripts retain filename escaping" {
     try std.testing.fuzz({}, struct {
         fn run(_: void, smith: *std.testing.Smith) !void {
@@ -138,6 +184,8 @@ pub const klippy_disconnected_message = "Klippy Host not connected";
 /// when connected, else short-circuit with the disconnected error.
 pub const PrinterCtx = struct {
     print_config: PrintConfig = .{},
+    /// Latest print_stats. A start is refused while this is printing or paused.
+    job_state: ?*JobStateCtx = null,
     /// Optional pointer to the Klippy connection; set by App after init.
     /// When non-null and Klippy is connected, handlers proxy to Klippy.
     klippy: ?*KlippyCtx = null,
@@ -359,7 +407,10 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
             ""
     else
         "";
-    return startPrint(k, filename, alloc, self.print_config) catch |err| switch (err) {
+    if (self.job_state) |state| if (state.isActive()) return error.PrinterBusy;
+    const printable = try self.print_config.printFilename(alloc, filename);
+    defer if (printable.ptr != filename.ptr) alloc.free(printable);
+    return startPrint(k, printable, alloc, self.print_config) catch |err| switch (err) {
         error.KlippyRequestFailed => return k.rejectClient(alloc, params),
         else => |e| return e,
     };
@@ -370,12 +421,18 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
 pub fn startPrint(k: *KlippyCtx, filename: []const u8, alloc: std.mem.Allocator, config: PrintConfig) anyerror!std.json.Value {
     if (!k.isConnected()) return error.KlippyDisconnected;
     if (filename.len == 0) return error.InvalidParams;
+    // The upload and a following printer.print.start both arrive here. The
+    // second one is the archive name or the extracted name of a start that
+    // just opened the virtual SD card.
+    if (k.repeatPrint(filename)) return error.PrinterBusy;
     const script = try config.script(alloc, filename);
 
     // Build params: {"script": "<script>"}
     var params_obj = try std.json.ObjectMap.init(alloc, &.{}, &.{});
     try params_obj.put(alloc, "script", .{ .string = script });
-    return k.request("gcode/script", .{ .object = params_obj }, alloc);
+    const result = try k.request("gcode/script", .{ .object = params_obj }, alloc);
+    k.notePrint(filename);
+    return result;
 }
 
 /// POST /printer/print/pause → printer.print.pause
