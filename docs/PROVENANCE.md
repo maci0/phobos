@@ -2725,6 +2725,11 @@ Verification:
 - Installed on the idle AD5M. Status then reported the three clients valid:
   Fluidd v1.38.0, Mainsail v2.19.0, Guppy Screen 0.1.0. Klippy was ready.
 
+The first `v0.4.4` tag, `451385a`, failed CI. The new test used `/root/www/fluidd`,
+which exists and is unreadable on the Ubuntu runner, so the lookup returned
+`AccessDenied` before the chroot fallback. The test now uses `/phobos-missing`,
+which is absent. The tag had not published a release, so it moves to this commit.
+
 
 ## 2026-11-12: documentation accuracy and history review
 

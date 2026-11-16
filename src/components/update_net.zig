@@ -965,17 +965,19 @@ test "installed releases validate identity and persistent copies reject symlinks
 test "a missing host path resolves inside the Forge-X chroot" {
     var temp = testing.tmpDir(.{});
     defer temp.cleanup();
-    try temp.dir.createDirPath(testing.io, "chroot/root/www/fluidd");
-    try temp.dir.writeFile(testing.io, .{ .sub_path = "chroot/root/www/fluidd/release_info.json", .data = fixture_v1 });
+    // The configured path must be absent on the runner. /root exists on CI.
+    try temp.dir.createDirPath(testing.io, "chroot/phobos-missing/www/fluidd");
+    try temp.dir.writeFile(testing.io, .{ .sub_path = "chroot/phobos-missing/www/fluidd/release_info.json", .data = fixture_v1 });
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     const root = try temp.dir.realPathFileAlloc(testing.io, "chroot", alloc);
-    const resolved = try hostPath(alloc, testing.io, "/root/www/fluidd", root);
-    try testing.expect(std.mem.endsWith(u8, resolved, "/chroot/root/www/fluidd"));
+    const configured = "/phobos-missing/www/fluidd";
+    const resolved = try hostPath(alloc, testing.io, configured, root);
+    try testing.expect(std.mem.endsWith(u8, resolved, "/chroot/phobos-missing/www/fluidd"));
     const present = try hostPath(alloc, testing.io, root, "/missing");
     try testing.expectEqualStrings(root, present);
-    try testing.expectError(error.FileNotFound, hostPath(alloc, testing.io, "/root/www/missing", root));
+    try testing.expectError(error.FileNotFound, hostPath(alloc, testing.io, "/phobos-missing/www/absent", root));
 }
 
 test "web manifest fallback and configured home symlinks resolve to a checked target" {
