@@ -407,9 +407,12 @@ pub fn handlePrintStart(ctx: *anyopaque, params: std.json.Value, alloc: std.mem.
             ""
     else
         "";
-    if (self.job_state) |state| if (state.isActive()) return error.PrinterBusy;
     const printable = try self.print_config.printFilename(alloc, filename);
     defer if (printable.ptr != filename.ptr) alloc.free(printable);
+    // The upload already started this file. Orca sends the name again and
+    // treats any error as a failed upload, so the repeat is a success.
+    if (k.repeatPrint(printable)) return .{ .string = "ok" };
+    if (self.job_state) |state| if (state.isActive()) return error.PrinterBusy;
     return startPrint(k, printable, alloc, self.print_config) catch |err| switch (err) {
         error.KlippyRequestFailed => return k.rejectClient(alloc, params),
         else => |e| return e,
@@ -423,8 +426,8 @@ pub fn startPrint(k: *KlippyCtx, filename: []const u8, alloc: std.mem.Allocator,
     if (filename.len == 0) return error.InvalidParams;
     // The upload and a following printer.print.start both arrive here. The
     // second one is the archive name or the extracted name of a start that
-    // just opened the virtual SD card.
-    if (k.repeatPrint(filename)) return error.PrinterBusy;
+    // just opened the virtual SD card. It is already printing.
+    if (k.repeatPrint(filename)) return .{ .string = "ok" };
     const script = try config.script(alloc, filename);
 
     // Build params: {"script": "<script>"}

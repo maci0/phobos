@@ -911,9 +911,16 @@ pub const KlippyCtx = struct {
         return error.UpstreamRequestFailed;
     }
 
-    /// True when `filename` repeats the print accepted inside the last two
-    /// seconds, including its `.gcode.3mf` archive name.
+    /// True when `filename` is the print already accepted. That stays true while
+    /// the job is printing or paused, and for two seconds before print_stats
+    /// moves. The `.gcode.3mf` archive name matches the extracted gcode.
     pub fn repeatPrint(self: *KlippyCtx, filename: []const u8) bool {
+        const recent = self.recent_print[0..self.recent_print_len];
+        if (recent.len == 0) return false;
+        const same = std.mem.eql(u8, recent, filename) or
+            (std.ascii.endsWithIgnoreCase(filename, ".gcode.3mf") and filename.len > 4 and std.mem.eql(u8, recent, filename[0 .. filename.len - 4]));
+        if (!same) return false;
+        if (self.job_state) |state| if (state.isActive()) return true;
         if (self.recent_print_at == 0 or self.io == null) return false;
         const now = clock.monotonicNanos(self.io.?);
         if (now -| self.recent_print_at > 2 * std.time.ns_per_s) {
@@ -921,9 +928,7 @@ pub const KlippyCtx = struct {
             self.recent_print_at = 0;
             return false;
         }
-        const recent = self.recent_print[0..self.recent_print_len];
-        if (std.mem.eql(u8, recent, filename)) return true;
-        return std.ascii.endsWithIgnoreCase(filename, ".gcode.3mf") and filename.len > 4 and std.mem.eql(u8, recent, filename[0 .. filename.len - 4]);
+        return true;
     }
 
     pub fn notePrint(self: *KlippyCtx, filename: []const u8) void {

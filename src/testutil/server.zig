@@ -2351,9 +2351,8 @@ test "printer: a second start of an extracted 3MF is not sent to Klipper" {
     defer alloc.free(repeat);
     const repeat_parsed = try std.json.parseFromSlice(std.json.Value, alloc, repeat, .{});
     defer repeat_parsed.deinit();
-    const err = repeat_parsed.value.object.get("error").?.object;
-    try std.testing.expectEqual(@as(i64, 409), err.get("code").?.integer);
-    try std.testing.expectEqualStrings("Printer is busy", err.get("message").?.string);
+    try std.testing.expect(repeat_parsed.value.object.get("error") == null);
+    try std.testing.expectEqualStrings("ok", repeat_parsed.value.object.get("result").?.string);
 }
 
 test "printer: with Klippy sim, print.start returns success" {

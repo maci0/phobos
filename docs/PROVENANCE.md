@@ -2725,6 +2725,28 @@ Verification:
 - Installed on the idle AD5M. Status then reported the three clients valid:
   Fluidd v1.38.0, Mainsail v2.19.0, Guppy Screen 0.1.0. Klippy was ready.
 
+## 2026-11-16: a repeated print start of the running file succeeds
+
+Orca showed HTTP 409 `Printer is busy` after sending `back_PLA_1h51m`. The
+gcode store has one `SDCARD_PRINT_FILE` for `back_PLA_1h51m.gcode`, answered
+by `File opened` and `START_PRINT`. `print_stats` is `printing`. The 409 is
+`repeatPrint`: the upload starts the extracted file, then Orca starts the
+same name again. v0.4.3 returned a conflict so Klipper would not see a second
+`SDCARD_PRINT_FILE`. Orca treats that conflict as a failed upload.
+
+Change: a start of the file accepted in the last two seconds, or of the file
+that is already printing or paused, returns `ok` and sends nothing to Klipper.
+A different file while a job is active is still HTTP 409.
+
+The printer was printing when this was written, so the daemon was not restarted.
+`build.zig.zon` is 0.4.5.
+
+Verification:
+- `printer: a second start of an extracted 3MF is not sent to Klipper` expects
+  `ok` from the second start.
+- `scripts/test.sh` in Debug, ReleaseSafe and ReleaseFast: 1,810 passed, one
+  gated real-Klippy skip, zero failed, 343 fuzz tests found.
+
 The first `v0.4.4` tag, `451385a`, failed CI. The new test used `/root/www/fluidd`,
 which exists and is unreadable on the Ubuntu runner, so the lookup returned
 `AccessDenied` before the chroot fallback. The test now uses `/phobos-missing`,
