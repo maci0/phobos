@@ -2703,6 +2703,28 @@ Verification:
   passed, 10 of 10.
 - Not run: the printer. This session cannot SSH to it.
 
+## 2026-11-16: v0.4.4 sees Forge-X clients inside the chroot
+
+Reported: the update screen marked Fluidd, Mainsail and Guppy Screen invalid.
+Forge-X, Klipper and Moonraker were up to date.
+
+`/machine/update/status` returned `is_valid: false` for the three clients, with
+their cached versions. Their `release_info.json` files exist inside the
+Forge-X chroot. Phobos PID 22440 runs on the host, where `/root/www/fluidd`,
+`/root/www/mainsail` and `/root/guppyscreen` do not exist. The config uses the
+chroot paths because Moonraker runs there.
+
+Change: `hostPath` uses an absolute configured path when it exists and
+otherwise the same path under `/data/.mod/.forge-x`. Git commands and web or
+ZIP targets use it. `build.zig.zon` is 0.4.4.
+
+Verification:
+- New test `a missing host path resolves inside the Forge-X chroot`.
+- `scripts/test.sh` in Debug, ReleaseSafe and ReleaseFast: 1,810 passed, one
+  gated real-Klippy skip, zero failed, 343 fuzz tests found.
+- Installed on the idle AD5M. Status then reported the three clients valid:
+  Fluidd v1.38.0, Mainsail v2.19.0, Guppy Screen 0.1.0. Klippy was ready.
+
 
 ## 2026-11-12: documentation accuracy and history review
 

@@ -17,6 +17,11 @@ branch, versions, hashes, dirty and detached state and the commits-behind list
 come from the repository on every status request. `rollback_version` and the
 remaining fields stay as cached.
 
+An absolute path that is missing on the host is read from the same path under
+`/data/.mod/.forge-x`. Forge-X names `/root/www` and `/root/guppyscreen` from
+inside that chroot, and a host-started daemon does not see them. A path that
+exists on the host is unchanged.
+
 Web and ZIP sources read their installed `release_info.json`. Fluidd and Mainsail
 web installs can instead use `.version` with their manifest. The configured repo
 must match the bundle identity. Refresh selects a GitHub release ZIP, respecting

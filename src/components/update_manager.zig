@@ -506,7 +506,9 @@ const git_output_limit = 512 * 1024;
 /// stdout and stderr capped at `git_output_limit` (error.StreamTooLong).
 /// Caller owns the result's stdout and stderr.
 pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64, environment: ?*const std.process.Environ.Map) !std.process.RunResult {
-    const args = try std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", repo_path }, argv });
+    const path = net_update.hostPath(alloc, io, repo_path, net_update.forge_x_chroot) catch repo_path;
+    defer if (path.ptr != repo_path.ptr) alloc.free(path);
+    const args = try std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", path }, argv });
     defer alloc.free(args);
     const empty_environment = std.process.Environ.Map.init(alloc);
     return process.run(alloc, io, .{

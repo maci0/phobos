@@ -68,6 +68,23 @@ pub fn validRelative(path: []const u8) bool {
     return true;
 }
 
+/// Forge-X runs Moonraker inside this chroot. A host-started phobos sees the
+/// same config, whose `/root/www` paths exist only under the chroot.
+pub const forge_x_chroot = "/data/.mod/.forge-x";
+
+/// The configured path when it exists, otherwise `fallback`. A path that exists
+/// in both keeps the configured one.
+pub fn hostPath(alloc: Allocator, io: Io, path: []const u8, fallback: []const u8) ![]u8 {
+    const resolved = Dir.cwd().realPathFileAlloc(io, path, alloc) catch |err| blk: {
+        if (fallback.len == 0 or !std.fs.path.isAbsolute(path) or std.mem.eql(u8, path, "/")) return err;
+        const joined = try std.fs.path.join(alloc, &.{ fallback, path });
+        defer alloc.free(joined);
+        break :blk Dir.cwd().realPathFileAlloc(io, joined, alloc) catch return err;
+    };
+    defer alloc.free(resolved);
+    return alloc.dupe(u8, resolved);
+}
+
 pub const Target = struct {
     parent: Dir,
     name: []const u8,
@@ -75,7 +92,7 @@ pub const Target = struct {
 
     pub fn open(alloc: Allocator, io: Io, path: []const u8, environment: ?*const std.process.Environ.Map) !Target {
         const expanded = if (std.mem.startsWith(u8, path, "~/")) try std.fs.path.join(alloc, &.{ if (environment) |env| env.get("HOME") orelse return error.InvalidPath else return error.InvalidPath, path[2..] }) else path;
-        const resolved = try Dir.cwd().realPathFileAlloc(io, expanded, alloc);
+        const resolved = hostPath(alloc, io, expanded, forge_x_chroot) catch try Dir.cwd().realPathFileAlloc(io, expanded, alloc);
         const name = std.fs.path.basename(resolved);
         const parent_path = std.fs.path.dirname(resolved) orelse return error.InvalidPath;
         if (!validRelative(name) or std.mem.eql(u8, resolved, "/")) return error.InvalidPath;
@@ -943,6 +960,22 @@ test "installed releases validate identity and persistent copies reject symlinks
     try testing.expectEqualStrings(fixture_v1, try readText(alloc, testing.io, output, "release_info.json"));
     try client.createDir(testing.io, ".git", .default_dir);
     try testing.expectError(error.GitDirectory, installed(alloc, testing.io, client, fixture_source));
+}
+
+test "a missing host path resolves inside the Forge-X chroot" {
+    var temp = testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(testing.io, "chroot/root/www/fluidd");
+    try temp.dir.writeFile(testing.io, .{ .sub_path = "chroot/root/www/fluidd/release_info.json", .data = fixture_v1 });
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const root = try temp.dir.realPathFileAlloc(testing.io, "chroot", alloc);
+    const resolved = try hostPath(alloc, testing.io, "/root/www/fluidd", root);
+    try testing.expect(std.mem.endsWith(u8, resolved, "/chroot/root/www/fluidd"));
+    const present = try hostPath(alloc, testing.io, root, "/missing");
+    try testing.expectEqualStrings(root, present);
+    try testing.expectError(error.FileNotFound, hostPath(alloc, testing.io, "/root/www/missing", root));
 }
 
 test "web manifest fallback and configured home symlinks resolve to a checked target" {
