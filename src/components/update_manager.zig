@@ -502,31 +502,46 @@ pub const git_fetch_timeout_s = 60;
 /// Cap on the stdout and on the stderr bytes one git command may buffer.
 const git_output_limit = 512 * 1024;
 
-/// Run `git -C <repo_path> <args...>` killed after `timeout_s` seconds, with
-/// stdout and stderr capped at `git_output_limit` (error.StreamTooLong).
+/// Run Git on the host, falling back to Forge-X's Git when the host has none.
+/// Both attempts share the deadline and output limits.
 /// Caller owns the result's stdout and stderr.
-pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64, environment: ?*const std.process.Environ.Map) !std.process.RunResult {
+pub fn gitRun(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, timeout_s: i64, ctx: ?*const UpdateCtx) !std.process.RunResult {
     const path = net_update.hostPath(alloc, io, repo_path, net_update.forge_x_chroot) catch repo_path;
     defer if (path.ptr != repo_path.ptr) alloc.free(path);
     const args = try std.mem.concat(alloc, []const u8, &.{ &.{ "git", "-C", path }, argv });
     defer alloc.free(args);
     const empty_environment = std.process.Environ.Map.init(alloc);
-    return process.run(alloc, io, .{
+    var options: std.process.RunOptions = .{
         .argv = args,
-        .environ_map = environment orelse &empty_environment,
+        .environ_map = (if (ctx) |updates| updates.gitEnvironment() else null) orelse &empty_environment,
         .stdout_limit = .limited(git_output_limit),
         .stderr_limit = .limited(git_output_limit),
         .timeout = .{ .deadline = .fromNow(io, .{ .raw = .fromSeconds(timeout_s), .clock = .awake }) },
-    });
+    };
+    return process.run(alloc, io, options) catch |err| {
+        if (err != error.FileNotFound or (ctx orelse return err).compatibility != .forge_x) return err;
+
+        // Forge-X packages Git, its HTTPS helper, and the CA bundle in the chroot.
+        const root = net_update.forge_x_chroot;
+        const configured_path = if (std.fs.path.isAbsolute(repo_path)) repo_path else path;
+        const inner_path = if (std.mem.startsWith(u8, configured_path, root ++ "/"))
+            configured_path[root.len..]
+        else
+            configured_path;
+        const chroot_args = try std.mem.concat(alloc, []const u8, &.{ &.{ "chroot", root, "/usr/bin/git", "-C", inner_path }, argv });
+        defer alloc.free(chroot_args);
+        options.argv = chroot_args;
+        return process.run(alloc, io, options);
+    };
 }
 
 /// Run `git -C <repo_path> <args...>` and return stdout (trimmed, caller owns).
 /// Returns null on any error (spawn failure, timeout, oversized output,
 /// non-zero exit, empty stdout).
-fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, environment: ?*const std.process.Environ.Map) ?[]const u8 {
+fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, ctx: ?*const UpdateCtx) ?[]const u8 {
     if (repo_path.len == 0) return null;
 
-    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s, environment) catch return null;
+    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s, ctx) catch return null;
     defer alloc.free(result.stderr);
 
     if (result.term != .exited or result.term.exited != 0) {
@@ -555,9 +570,9 @@ fn gitOutput(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: 
 }
 
 /// Run `git -C <repo_path> <args...>` and return true on exit 0, false otherwise.
-fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, environment: ?*const std.process.Environ.Map) bool {
+fn gitCheck(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, argv: []const []const u8, ctx: ?*const UpdateCtx) bool {
     if (repo_path.len == 0) return false;
-    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s, environment) catch return false;
+    const result = gitRun(io, alloc, repo_path, argv, git_local_timeout_s, ctx) catch return false;
     return exitedZero(alloc, result);
 }
 
@@ -572,18 +587,18 @@ fn exitedZero(alloc: std.mem.Allocator, result: std.process.RunResult) bool {
 /// killed after `git_fetch_timeout_s`. Fetch never modifies the working tree or
 /// local branches. Returns true on success, false when a repo_path is empty,
 /// io is unavailable, or fetch fails (non-zero exit, spawn failure, timeout).
-fn gitFetch(io: ?std.Io, alloc: std.mem.Allocator, repo_path: []const u8, environment: ?*const std.process.Environ.Map) bool {
+fn gitFetch(io: ?std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ctx: ?*const UpdateCtx) bool {
     const live_io = io orelse return false;
     if (repo_path.len == 0) return false;
-    const result = gitRun(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" }, git_fetch_timeout_s, environment) catch return false;
+    const result = gitRun(live_io, alloc, repo_path, &.{ "fetch", "origin", "--prune" }, git_fetch_timeout_s, ctx) catch return false;
     return exitedZero(alloc, result);
 }
 
 /// Run `git reset --hard <ref>` in a repo. Destructive: overwrites local
 /// changes. Returns true on success, false on failure.
-fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []const u8, environment: ?*const std.process.Environ.Map) bool {
+fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []const u8, ctx: ?*const UpdateCtx) bool {
     if (repo_path.len == 0) return false;
-    return gitCheck(io, alloc, repo_path, &.{ "reset", "--hard", ref }, environment);
+    return gitCheck(io, alloc, repo_path, &.{ "reset", "--hard", ref }, ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +610,7 @@ fn gitReset(io: std.Io, alloc: std.mem.Allocator, repo_path: []const u8, ref: []
 /// io is available and src.repo_path is non-empty, runs real git commands to
 /// populate version, hash, branch, and dirty/detached state. Falls back to
 /// honest "?" defaults when the repo is absent (unit tests, dev workstation).
-fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environment: ?*const std.process.Environ.Map) !std.json.Value {
+fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, ctx: ?*const UpdateCtx) !std.json.Value {
     var obj: std.json.ObjectMap = .empty;
 
     // --- AppDeploy.get_update_status base keys ---
@@ -633,12 +648,12 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environmen
     if (io) |live_io| {
         if (src.repo_path.len > 0) {
             // branch: git rev-parse --abbrev-ref HEAD
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "--abbrev-ref", "HEAD" }, environment)) |b| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "--abbrev-ref", "HEAD" }, ctx)) |b| {
                 if (!std.mem.eql(u8, b, "HEAD")) branch = b;
             }
 
             // version: git describe --tags --always --long --dirty
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", "--always", "--long", "--dirty" }, environment)) |v| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", "--always", "--long", "--dirty" }, ctx)) |v| {
                 version = v;
             }
 
@@ -648,23 +663,23 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environmen
 
             // remote_version: git describe --tags origin/<branch> --always
             const remote_ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{branch});
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", remote_ref, "--always" }, environment)) |rv| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "describe", "--tags", remote_ref, "--always" }, ctx)) |rv| {
                 remote_version = rv;
             }
 
             // current_hash: git rev-parse HEAD
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, environment)) |ch| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx)) |ch| {
                 current_hash = ch;
             }
 
             // remote_hash: git rev-parse origin/<branch>
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", remote_ref }, environment)) |rh| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "rev-parse", remote_ref }, ctx)) |rh| {
                 remote_hash = rh;
             }
 
             // is_dirty: git status --porcelain has any output. Output past
             // the cap is output too, so a large change set stays dirty.
-            if (gitRun(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" }, git_local_timeout_s, environment)) |porcelain| {
+            if (gitRun(live_io, alloc, src.repo_path, &.{ "status", "--porcelain" }, git_local_timeout_s, ctx)) |porcelain| {
                 defer alloc.free(porcelain.stdout);
                 defer alloc.free(porcelain.stderr);
                 is_dirty = porcelain.term == .exited and porcelain.term.exited == 0 and porcelain.stdout.len > 0;
@@ -673,14 +688,14 @@ fn buildGitStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environmen
             }
 
             // detached: git symbolic-ref -q HEAD fails
-            detached = !gitCheck(live_io, alloc, src.repo_path, &.{ "symbolic-ref", "-q", "HEAD" }, environment);
+            detached = !gitCheck(live_io, alloc, src.repo_path, &.{ "symbolic-ref", "-q", "HEAD" }, ctx);
 
             // commits_behind: git log HEAD..origin/<branch> with Moonraker's
             // format (unit separator \x1D between fields, record separator
             // \x1E between commits). Max 100 entries to match Moonraker.
             const behind_range = try std.fmt.allocPrint(alloc, "HEAD..{s}", .{remote_ref});
             const log_fmt_arg = try std.fmt.allocPrint(alloc, "--format=sha:%H\x1Dauthor:%an\x1Ddate:%ct\x1Dsubject:%s\x1Dmessage:%b\x1E", .{});
-            if (gitOutput(live_io, alloc, src.repo_path, &.{ "log", behind_range, log_fmt_arg, "--max-count=100" }, environment)) |behind| {
+            if (gitOutput(live_io, alloc, src.repo_path, &.{ "log", behind_range, log_fmt_arg, "--max-count=100" }, ctx)) |behind| {
                 if (behind.len > 0) {
                     var records = std.mem.splitSequence(u8, behind, "\x1E");
                     while (records.next()) |record| {
@@ -777,9 +792,9 @@ fn buildWebStatus(alloc: std.mem.Allocator, src: Source) !std.json.Value {
     return .{ .object = obj };
 }
 
-fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, environment: ?*const std.process.Environ.Map) !std.json.Value {
+fn buildSourceStatus(io: ?std.Io, alloc: std.mem.Allocator, src: Source, ctx: ?*const UpdateCtx) !std.json.Value {
     return switch (src.type) {
-        .git_repo => buildGitStatus(io, alloc, src, environment),
+        .git_repo => buildGitStatus(io, alloc, src, ctx),
         .system => buildSystemStatus(alloc, src),
         .web, .zip => buildWebStatus(alloc, src),
     };
@@ -875,10 +890,10 @@ fn buildStatusPayload(ctx: *UpdateCtx, alloc: std.mem.Allocator) !std.json.Value
         else if (ctx.store != null and src.type == .git_repo and src.repo_path.len == 0)
             std.json.Value{ .object = .empty }
         else
-            try buildSourceStatus(ctx.io, alloc, src, ctx.gitEnvironment());
+            try buildSourceStatus(ctx.io, alloc, src, ctx);
         if (entry != null and src.type == .git_repo) if (ctx.io) |io| {
-            if (gitCheck(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()))
-                try overlayLiveGit(alloc, &status.object, (try buildGitStatus(io, alloc, src, ctx.gitEnvironment())).object);
+            if (gitCheck(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx))
+                try overlayLiveGit(alloc, &status.object, (try buildGitStatus(io, alloc, src, ctx)).object);
         };
         if ((src.type == .web or src.type == .zip) and src.repo_path.len > 0) if (ctx.io) |io| {
             const target = net_update.Target.open(alloc, io, src.repo_path, ctx.gitEnvironment()) catch {
@@ -990,7 +1005,7 @@ pub fn handleStatus(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.mem.
         if (refresh) {
             for (ctx.sources) |src| {
                 if (src.type == .git_repo and src.repo_path.len > 0) {
-                    _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
+                    _ = gitFetch(ctx.io, alloc, src.repo_path, ctx);
                 } else if (src.type == .web or src.type == .zip) try refreshNet(ctx, alloc, src);
             }
             ctx.last_status_refresh = .now(ctx.clock_io, .awake);
@@ -1084,7 +1099,7 @@ fn refreshSources(ctx: *UpdateCtx, params: std.json.Value, alloc: std.mem.Alloca
         for (ctx.sources) |src| {
             if (name) |n| if (!std.mem.eql(u8, src.name, n)) continue;
             if (automatic and try skipAutomaticRefresh(ctx, alloc, src.name)) continue;
-            if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path, ctx.gitEnvironment());
+            if (src.type == .git_repo) _ = gitFetch(ctx.io, alloc, src.repo_path, ctx);
             if (src.type == .web or src.type == .zip) try refreshNet(ctx, alloc, src);
         }
         ctx.last_status_refresh = .now(ctx.clock_io, .awake);
@@ -1148,16 +1163,16 @@ fn updateSource(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void {
         if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
         if (src.type == .git_repo and src.repo_path.len > 0) {
             if (ctx.io) |io| {
-                const previous = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()) orelse return error.GitFailed;
+                const previous = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx) orelse return error.GitFailed;
                 defer alloc.free(previous);
-                const dirty = gitOutput(io, alloc, src.repo_path, &.{ "status", "--porcelain" }, ctx.gitEnvironment());
+                const dirty = gitOutput(io, alloc, src.repo_path, &.{ "status", "--porcelain" }, ctx);
                 defer if (dirty) |bytes| alloc.free(bytes);
                 notifyLine(ctx, alloc, src.name, 0, false, "Fetching {s}...", .{src.name});
                 try updateGit(ctx, alloc, src.repo_path, &.{ "fetch", "origin", "--prune" });
                 const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
                 defer alloc.free(ref);
                 try updateGit(ctx, alloc, src.repo_path, &.{ "reset", "--hard", ref });
-                const current = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx.gitEnvironment()) orelse return error.GitFailed;
+                const current = gitOutput(io, alloc, src.repo_path, &.{ "rev-parse", "HEAD" }, ctx) orelse return error.GitFailed;
                 defer alloc.free(current);
                 changed = !std.mem.eql(u8, previous, current) or (dirty != null and dirty.?.len > 0);
             }
@@ -1251,7 +1266,7 @@ fn restartServices(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source) !void
 }
 
 fn updateGit(ctx: *UpdateCtx, alloc: std.mem.Allocator, path: []const u8, argv: []const []const u8) !void {
-    const result = try gitRun(ctx.io orelse return error.IoUnavailable, alloc, path, argv, git_fetch_timeout_s, ctx.gitEnvironment());
+    const result = try gitRun(ctx.io orelse return error.IoUnavailable, alloc, path, argv, git_fetch_timeout_s, ctx);
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
     if (result.term == .exited and result.term.exited == 0) return;
@@ -1394,13 +1409,13 @@ fn recoverRepo(ctx: *UpdateCtx, alloc: std.mem.Allocator, src: Source, hard: boo
         defer ctx.commands.unlock(ctx.clock_io);
         if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
         if (hard) {
-            if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" }, ctx.gitEnvironment())) return error.GitFailed;
-            if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" }, ctx.gitEnvironment())) return error.GitFailed;
+            if (!gitCheck(io, alloc, src.repo_path, &.{ "reset", "--hard", "HEAD" }, ctx)) return error.GitFailed;
+            if (!gitCheck(io, alloc, src.repo_path, &.{ "clean", "-fd" }, ctx)) return error.GitFailed;
         } else {
             const ref = try std.fmt.allocPrint(alloc, "origin/{s}", .{src.branch});
             defer alloc.free(ref);
-            if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch }, ctx.gitEnvironment())) return error.GitFailed;
-            if (!gitReset(io, alloc, src.repo_path, ref, ctx.gitEnvironment())) return error.GitFailed;
+            if (!gitCheck(io, alloc, src.repo_path, &.{ "checkout", src.branch }, ctx)) return error.GitFailed;
+            if (!gitReset(io, alloc, src.repo_path, ref, ctx)) return error.GitFailed;
         }
     }
     try restartServices(ctx, alloc, src);
@@ -1444,7 +1459,7 @@ pub fn handleRollback(ctx_ptr: *anyopaque, params: std.json.Value, alloc: std.me
             try ctx.commands.lock(ctx.clock_io);
             defer ctx.commands.unlock(ctx.clock_io);
             if (ctx.isPrinting()) return error.UpdateRefusedPrinting;
-            break :blk src.repo_path.len == 0 or gitReset(io, alloc, src.repo_path, src.rollback_ref, ctx.gitEnvironment());
+            break :blk src.repo_path.len == 0 or gitReset(io, alloc, src.repo_path, src.rollback_ref, ctx);
         };
         if (!reset) {
             notifyLine(ctx, alloc, app, proc_id, false, "Error Rolling Back {s}", .{app});
@@ -2235,7 +2250,7 @@ test "Git ignores inherited repository overrides and preserves connection enviro
     try testing.expectEqualStrings("http://proxy.invalid:8080", sanitized.get("HTTPS_PROXY").?);
     try testing.expectEqualStrings("/nonexistent/fixture-agent", sanitized.get("SSH_AUTH_SOCK").?);
     for (sanitized.keys()) |key| try testing.expect(!std.mem.startsWith(u8, key, "GIT_"));
-    const configured_output = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "--show-toplevel" }, sanitized) orelse return error.MissingGitOutput;
+    const configured_output = gitOutput(io, testing.allocator, repo.path, &.{ "rev-parse", "--show-toplevel" }, &ctx) orelse return error.MissingGitOutput;
     defer testing.allocator.free(configured_output);
     try testing.expectEqualStrings(repo.path, configured_output);
 
@@ -2248,6 +2263,56 @@ test "Git ignores inherited repository overrides and preserves connection enviro
             try testing.expectEqualStrings(original.get("HOME").?, updates.gitEnvironment().?.get("HOME").?);
         }
     }.check, .{&environment});
+}
+
+test "Forge-X falls back to chroot Git when host Git is missing" {
+    const alloc = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "chroot",
+        .data = "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+    const path = try tmp.dir.realPathFileAlloc(testing.io, ".", alloc);
+    defer alloc.free(path);
+    var environment = std.process.Environ.Map.init(alloc);
+    defer environment.deinit();
+    try environment.put("PATH", path);
+    const block = try environment.createPosixBlock(alloc, .{});
+    defer block.deinit(alloc);
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .environ = .{ .block = block } });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var ctx = testCtx();
+    defer ctx.deinit();
+    ctx.clock_io = io;
+    const root = net_update.forge_x_chroot;
+    const repo = "/root/printer_data/config/mod";
+
+    try testing.expectError(error.FileNotFound, gitRun(io, alloc, repo, &.{"status"}, git_local_timeout_s, &ctx));
+    ctx.compatibility = .forge_x;
+    try testing.fuzz(&ctx, struct {
+        fn check(updates: *UpdateCtx, smith: *testing.Smith) !void {
+            var arg: [16]u8 = undefined;
+            smith.bytes(&arg);
+            for (&arg) |*byte| byte.* = 'a' + byte.* % 26;
+            const prefix = root ++ "\n/usr/bin/git\n-C\n" ++ repo ++ "\nlog\n";
+            for ([_][]const u8{ repo, root ++ repo }) |repo_path| {
+                const output = gitOutput(updates.clock_io, alloc, repo_path, &.{ "log", &arg }, updates) orelse return error.MissingGitOutput;
+                defer alloc.free(output);
+                try testing.expect(std.mem.startsWith(u8, output, prefix));
+                try testing.expectEqualStrings(&arg, output[prefix.len..]);
+            }
+        }
+    }.check, .{});
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "git",
+        .data = "#!/bin/sh\nexit 1\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+    try testing.expect(!gitCheck(io, alloc, repo, &.{"status"}, &ctx));
 }
 
 test "fuzz Git environment filtering preserves owned ordinary entries" {

@@ -135,7 +135,7 @@ fn daemonFeatherRun(app: *App, alloc: std.mem.Allocator, argv: []const []const u
             return;
         }
         const io = app.update_ctx.io orelse return error.NoCommandRunner;
-        const result = update_manager_component.gitRun(io, alloc, src.repo_path, argv[1..], update_manager_component.git_fetch_timeout_s, app.update_ctx.gitEnvironment()) catch return error.GitFailed;
+        const result = update_manager_component.gitRun(io, alloc, src.repo_path, argv[1..], update_manager_component.git_fetch_timeout_s, app.update_ctx) catch return error.GitFailed;
         defer alloc.free(result.stdout);
         defer alloc.free(result.stderr);
         if (!(result.term == .exited and result.term.exited == 0)) return error.GitFailed;
