@@ -52,7 +52,7 @@ zig test -target x86_64-linux-musl src/config/confighelper.zig
 zig build -Dtarget=arm-linux-musleabihf -Dcpu=cortex_a7 -Doptimize=ReleaseFast
 file zig-out/bin/phobos   # -> ELF 32-bit ARM, statically linked
 
-# Seven static Linux release profiles, with isolated prefixes and ELF/ABI checks:
+# Eight static Linux release profiles, with isolated prefixes and ELF/ABI checks:
 scripts/build-release.sh
 scripts/build-release.sh --verify-only
 ```

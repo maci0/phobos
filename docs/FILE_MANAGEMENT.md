@@ -31,6 +31,9 @@ Metadata parsing and image decoding use a per-file scratch arena backed by the
 stable file-manager allocator. Only result fields reach the request arena and
 metadata cache. Thumbnail bytes stay on disk rather than in cached JSON.
 
+Print-time metadata reads standalone estimate comments in the G-code header or
+footer. This skips unresolved estimates in OrcaSlicer's embedded settings.
+
 `server.files.zip` writes an atomic ZIP32 archive, with DEFLATE by default and
 stored entries when `store_only` is true. Entries retain the root prefix, CRC32
 and ordinary Unix permissions. Selected directories include their immediate

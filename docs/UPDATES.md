@@ -22,6 +22,29 @@ An absolute path that is missing on the host is read from the same path under
 inside that chroot, and a host-started daemon does not see them. A path that
 exists on the host is unchanged.
 
+## Forge-X service verification
+
+In v0.5.0, Git commands in Forge-X compatibility mode fall back to the
+chroot's Git when Phobos cannot find Git on the host. Forge-X's separate
+service scripts still run in the daemon's environment. Run Phobos inside the
+Forge-X chroot for the complete update workflow. The `forge-x` service
+uses Git and curl to verify OTA compatibility before the updater changes
+the checkout. Its restart action reboots the printer after a successful update.
+
+If the UI stops at **Verifying service forge-x...**, check
+`/machine/update/status`. If `busy` is `false` and commits are still pending,
+there is no active update. Run the version check from the printer's host shell
+to see its output.
+
+```sh
+chroot /data/.mod/.forge-x /opt/config/mod/.root/forge-x verify
+```
+
+If this succeeds and Phobos was started on the host, switch to the chroot
+launcher before retrying the update. See the [Forge-X installation guide](../README.md#run-on-a-forge-x-printer).
+
+## Web and ZIP packages
+
 Web and ZIP sources read their installed `release_info.json`. Fluidd and Mainsail
 web installs can instead use `.version` with their manifest. The configured repo
 must match the bundle identity. Refresh selects a GitHub release ZIP, respecting
@@ -49,12 +72,12 @@ This is a directory replacement with a brief rename gap, not a filesystem
 transaction across power loss. An unrecoverable rename failure retains the
 private staging directory for repair rather than deleting an original copy.
 
-All download, extraction, install, rollback and service tests use loopback HTTP,
-owned temporary directories, temporary Git repositories, or injected callbacks.
+Automated download, extraction, install, rollback and service tests use loopback
+HTTP, owned temporary directories, temporary Git repositories, or injected callbacks.
 
 The daemon installs no package runner. Apt and pip commands require an injected
 runner and are never executed by default. Machine reboot and shutdown remain
-deliberate no-ops.
+deliberate no-ops. Managed services can perform their own restart actions.
 
 Automatic refresh windows use the host's local timezone, including DST rules
 beyond the final TZif transition. The C `localtime_r` adapter owns the platform

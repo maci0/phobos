@@ -152,9 +152,14 @@ grep '  phobos-v0.5.0-arm-linux-musleabihf$' SHA256SUMS | sha256sum --check -
 
 ### Run on a Forge-X printer
 
+Run Phobos inside the Forge-X chroot with `--compat forge-x`. The updater's
+service scripts use the chroot's Git and curl for verification. A Forge-X
+update restarts the printer to apply the new checkout.
+
 From the directory containing the [verified download](#download-the-ad5m-binary),
 copy it to the printer. Replace the example SSH address with your printer's
-address.
+address. If you installed the release ZIP in `/data/phobos`, use
+`/data/phobos/phobos` as the executable in the commands below.
 
 ```sh
 cat phobos-v0.5.0-arm-linux-musleabihf | ssh root@192.168.0.150 \
@@ -167,7 +172,7 @@ Forge-X installation, stop only Moonraker with
 `chroot /data/.mod/.forge-x /opt/config/mod/.root/S65moonraker stop`.
 For an existing phobos installation, stop its supervisor or send SIGTERM to its
 verified daemon PID and wait for it to exit. Confirm the old listener has stopped.
-Never use `.root/forge-x restart`: it reboots the board.
+The `.root/forge-x restart` action reboots the printer.
 
 With the API daemon stopped, preserve its executable and launcher, and copy
 `moonraker-sql.db` plus any `-wal` and `-shm` files from
@@ -197,36 +202,62 @@ exec /data/phobos-v0.5.0 --compat forge-x -d /root/printer_data >> /data/logFile
 
 Run that launcher with
 `nohup chroot /data/.mod/.forge-x /data/phobos-run.sh </dev/null >/data/phobos-start.log 2>&1 &`
-after stopping the foreground instance. This command starts phobos for the
-current boot; it does not install a boot service.
+after stopping the foreground instance. This starts Phobos for the current boot.
 Check `/server/info` for `klippy_state: "ready"`, no failed components and no
 warnings, then check Fluidd's temperatures, files and console. Logs are in
 `/data/logFiles/phobos.log`; `-o json --version` reports the package version.
 
-Forge-X's stock `/opt/config/mod/.root/S65moonraker` still launches Moonraker
-after a reboot. Updating `/data/phobos-run.sh` alone does not change that.
-To select phobos at boot, first back up `S65moonraker`, then replace its
-`start-stop-daemon` launch line inside `start()` with:
+#### Start Phobos at boot
+
+Turn on **Disable Moonraker** in Forge-X settings before enabling the Phobos
+boot service. The setting takes effect on reboot. Forge-X runs executable
+`S*` scripts in the chroot's `/etc/init.d` when it starts. Save this script as
+`/data/.mod/.forge-x/etc/init.d/S90phobos` from the printer's host shell.
+Create the directory if needed. Back up any existing service script and set
+`DAEMON` to your installed executable.
 
 ```sh
-start-stop-daemon -S -o -b -m -p "$PID_FILE" -O /data/logFiles/phobos.log --exec /data/phobos-v0.5.0 -- --compat forge-x -d "$PRINTER_DATA"
+#!/bin/sh
+PID_FILE=/run/phobos.pid
+DAEMON=/data/phobos-v0.5.0
+
+case "$1" in
+  start)
+    /usr/sbin/start-stop-daemon -S -o -b -m -p "$PID_FILE" -x "$DAEMON" \
+      -O /data/logFiles/phobos.log -- --compat forge-x -d /root/printer_data
+    ;;
+  stop)
+    /usr/sbin/start-stop-daemon -K -o -p "$PID_FILE" -x "$DAEMON" || exit 1
+    rm -f "$PID_FILE"
+    ;;
+  *) exit 1 ;;
+esac
 ```
 
-Keep the surrounding Forge-X configuration setup and stop/PID-file handling.
-The daemon helper must match the binary directly: a shell launcher replaces
-itself with phobos, so matching the launcher path would miss a running daemon.
-`-o` makes an already-running daemon a successful no-op. After stopping any
-manually started instance, activate the service with
-`chroot /data/.mod/.forge-x /opt/config/mod/.root/S65moonraker start`.
-Update the versioned path in both the service and manual launcher on future
-upgrades. Forge-X updates may restore the stock service; check the boot selection
-after updating Forge-X. This service starts the API daemon without rebooting
-the printer board.
+Make the script executable. With the existing API daemon stopped and its
+listener closed, start the service from SSH and check `/server/info` again.
 
-To roll back, stop phobos, restore the saved launcher/executable and restart
-the previous API daemon. If database rollback is needed, first preserve the
-failed installation's database files, then restore the stopped backup and its
-matching WAL/SHM files together. Never restore a database while a daemon uses it.
+```sh
+chmod 755 /data/.mod/.forge-x/etc/init.d/S90phobos
+chroot /data/.mod/.forge-x /etc/init.d/S90phobos start
+```
+
+Use the chroot for service commands. Its `start-stop-daemon` supports the
+`-O` log option. A versioned executable path needs to be updated in the
+boot script and any manual launcher on each Phobos upgrade.
+
+#### Roll back
+
+Stop the Phobos service with
+`chroot /data/.mod/.forge-x /etc/init.d/S90phobos stop`, or send SIGTERM to
+the verified PID of a manually started daemon. Wait for it to exit, restore
+the saved executable and launcher or boot script, then start the previous API
+daemon. To return to Moonraker, move `S90phobos` out of the chroot's
+`/etc/init.d` and turn off **Disable Moonraker**.
+
+If database rollback is needed, first preserve the current database files,
+then restore the backup and its matching WAL/SHM files together while both
+API daemons are stopped. See the [update troubleshooting guide](docs/UPDATES.md#forge-x-service-verification).
 
 ### Try on a Z-Mod AD5M printer
 

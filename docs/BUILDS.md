@@ -120,15 +120,16 @@ leave `zig-out/bin/phobos` unchanged.
 
 Asset suffixes follow the profile:
 
-| Profile | Asset name, using version `0.2.1` as an example |
+| Profile | Asset name (`<version>` comes from `build.zig.zon`) |
 | --- | --- |
-| `armv6-hardfp` | `phobos-v0.2.1-armv6-linux-musleabihf` |
-| `armv7-soft` | `phobos-v0.2.1-armv7-linux-musleabi-soft` |
-| `armv7-softfp-c` | `phobos-v0.2.1-armv7-linux-musleabi-softfp-c` |
-| `armv7-hardfp` | `phobos-v0.2.1-armv7-linux-musleabihf` |
-| `cortex-a7-hardfp` | `phobos-v0.2.1-arm-linux-musleabihf` (retained legacy filename) |
-| `aarch64` | `phobos-v0.2.1-aarch64-linux-musl` |
-| `x86_64` | `phobos-v0.2.1-x86_64-linux-musl` |
+| `armv6-hardfp` | `phobos-v<version>-armv6-linux-musleabihf` |
+| `armv7-soft` | `phobos-v<version>-armv7-linux-musleabi-soft` |
+| `armv7-softfp-c` | `phobos-v<version>-armv7-linux-musleabi-softfp-c` |
+| `armv7-hardfp` | `phobos-v<version>-armv7-linux-musleabihf` |
+| `cortex-a7-hardfp` | `phobos-v<version>-arm-linux-musleabihf` (retained legacy filename) |
+| `aarch64` | `phobos-v<version>-aarch64-linux-musl` |
+| `x86_64` | `phobos-v<version>-x86_64-linux-musl` |
+| `ad5x-mipsel` | `phobos-v<version>-mipsel-linux-musleabihf` |
 
 The direct Cortex-A7 build remains:
 
@@ -251,4 +252,5 @@ Extract the verified ZIP into a dedicated application directory such as
 `/data/phobos`, never `/data` itself: Moonraker replaces the configured application
 directory during a ZIP update. Forge-X's optional updater entry uses that dedicated
 directory and an explicit asset name. Selecting/running Phobos as the API daemon
-is a separate operation; installing or updating the package does not switch it.
+is a separate operation. Follow the [Forge-X installation guide](../README.md#run-on-a-forge-x-printer)
+to start the installed binary inside the chroot and enable its boot service.

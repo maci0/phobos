@@ -126,6 +126,9 @@ configuration in either profile. Standard `moonraker.asvc` loading is shared.
 Preserve Forge-X's `[file_manager] file_system_observer: none` on printer kernels
 without inotify; profile selection does not override explicit component config.
 
+Run Phobos inside the Forge-X chroot for updates that use Forge-X's service
+verification and restart scripts. See [service verification](../UPDATES.md#forge-x-service-verification).
+
 Path checks, archive limits, authorization and idle/update guards remain active.
 Host reboot/shutdown remain no-ops. Software identity stays `phobos`, API version
 1.5.0 and the documented Python-version stub. Unavailable CAN still returns an
